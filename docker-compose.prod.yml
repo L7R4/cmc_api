@@ -1,0 +1,44 @@
+version: '3.8'
+
+services:
+  fastapi:
+    container_name: fastapi-app-prod
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
+    ports:
+      - "8000:8000"
+    depends_on:
+      - mysql
+    environment:
+      - MYSQL_USER=root
+      - MYSQL_PASS=secret
+      - MYSQL_HOST=mysql
+      - MYSQL_DB=cmcdb
+      - CORS_ORIGINS=https://tudominio.com
+
+  mysql:
+    container_name: mysql-db-prod
+    image: mysql:5.7
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: secret
+      MYSQL_DATABASE: cmcdb
+    volumes:
+      - mysql_data_prod:/var/lib/mysql
+    ports:
+      - "3306:3306"
+
+  phpmyadmin:
+    container_name: phpmyadmin-prod
+    image: phpmyadmin/phpmyadmin
+    restart: always
+    ports:
+      - "8080:80"
+    environment:
+      PMA_HOST: mysql
+      PMA_USER: root
+      PMA_PASSWORD: secret
+
+volumes:
+  mysql_data_prod:

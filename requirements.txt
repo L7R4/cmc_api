@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+sqlalchemy
+pydantic
+aiomysql
+python-dotenv
+alembic
+pydantic-settings
+pymysql
+python-dateutil

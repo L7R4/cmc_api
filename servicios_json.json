@@ -1,0 +1,296 @@
+[
+    {
+        "id": 100,
+        "nombre": "Contribucion s/honarios",
+        "precio": 0,
+        "porcentaje": 7
+    },
+    {
+        "id": 101,
+        "nombre": "Contribucion s/gastos",
+        "precio": 0,
+        "porcentaje": 3
+    },
+    {
+        "id": 102,
+        "nombre": "Imp. Ley 25413",
+        "precio": 0,
+        "porcentaje": 0.18
+    },
+    {
+        "id": 110,
+        "nombre": "Juzgado",
+        "precio": 0,
+        "porcentaje": 0
+    },
+    {
+        "id": 200,
+        "nombre": "D.G.R (Inp.Ing.Brutos)",
+        "precio": 0,
+        "porcentaje": 2
+    },
+    {
+        "id": 300,
+        "nombre": "AFIP (Imp.Ganancias)",
+        "precio": 0,
+        "porcentaje": 0
+    },
+    {
+        "id": 400,
+        "nombre": "Cuota societaria",
+        "precio": 7000,
+        "porcentaje": 0
+    },
+    {
+        "id": 402,
+        "nombre": "Aporte Ob. Soc. IOSCor",
+        "precio": 0,
+        "porcentaje": 0
+    },
+    {
+        "id": 507,
+        "nombre": "Seg. Mala Praxis B",
+        "precio": 0,
+        "porcentaje": 0
+    },
+    {
+        "id": 509,
+        "nombre": "Seg. Mala Praxis A",
+        "precio": 16000,
+        "porcentaje": 0
+    },
+    {
+        "id": 510,
+        "nombre": "FDO. SOLID. COMED. DIVINA PROVIDE",
+        "precio": 0,
+        "porcentaje": 0
+    },
+    {
+        "id": 512,
+        "nombre": "FDO. ESPEC. M. PRAXIS (507)",
+        "precio": 0,
+        "porcentaje": 0
+    },
+    {
+        "id": 513,
+        "nombre": "FDO. ESPEC. M. PRAXIS (509)",
+        "precio": 0,
+        "porcentaje": 0
+    },
+    {
+        "id": 514,
+        "nombre": "FDO. ESPEC. M. PRAXIS (511)",
+        "precio": 0,
+        "porcentaje": 0
+    },
+    {
+        "id": 515,
+        "nombre": "FDO. ESPEC. M. PRAXIS C",
+        "precio": 0,
+        "porcentaje": 0
+    },
+    {
+        "id": 516,
+        "nombre": "FDO. ESP. MALA PRAXIS (515)",
+        "precio": 0,
+        "porcentaje": 0
+    },
+    {
+        "id": 519,
+        "nombre": "SEG. MALA PRAXIS",
+        "precio": 23000,
+        "porcentaje": 0
+    },
+    {
+        "id": 520,
+        "nombre": "FDO. ESPEC. SEG. M. PRAXIS (519)",
+        "precio": 0,
+        "porcentaje": 0
+    },
+    {
+        "id": 602,
+        "nombre": "C.QUINTA (Usos d/la Instalacion)",
+        "precio": 0,
+        "porcentaje": 0
+    },
+    {
+        "id": 607,
+        "nombre": "ROTURA DE SILLA EN CASA QUINTA",
+        "precio": 14000,
+        "porcentaje": 0
+    },
+    {
+        "id": 609,
+        "nombre": "ANTIC. CJRO. AUTOMATICO",
+        "precio": 14000,
+        "porcentaje": 0
+    },
+    {
+        "id": 612,
+        "nombre": "ERROR BANCO PAGO DOBLE 4277",
+        "precio": 0,
+        "porcentaje": 0
+    },
+    {
+        "id": 640,
+        "nombre": "Contrib. Cena Dia Medico",
+        "precio": 2000,
+        "porcentaje": 0
+    },
+    {
+        "id": 1200,
+        "nombre": "Contribucion imprenta",
+        "precio": 3000,
+        "porcentaje": 0
+    },
+    {
+        "id": 1300,
+        "nombre": "Subsidiio por enfermedad",
+        "precio": 1000,
+        "porcentaje": 0
+    },
+    {
+        "id": 1400,
+        "nombre": "C. Soc de Ortopedia y Traumat.",
+        "precio": 500,
+        "porcentaje": 0
+    },
+    {
+        "id": 1703,
+        "nombre": "Cancha de futbol.",
+        "precio": 500,
+        "porcentaje": 0
+    },
+    {
+        "id": 1800,
+        "nombre": "C. Soc. de Pedriatria (Titulares)",
+        "precio": 4000,
+        "porcentaje": 0
+    },
+    {
+        "id": 1801,
+        "nombre": "Soc. Pediatria (adherentes)",
+        "precio": 4000,
+        "porcentaje": 0
+    },
+    {
+        "id": 1901,
+        "nombre": "Neurologia y Nerutocirugia",
+        "precio": 10000,
+        "porcentaje": 0
+    },
+    {
+        "id": 2200,
+        "nombre": "Cuota de sociedad de Cardiología",
+        "precio": 1200,
+        "porcentaje": 0
+    },
+    {
+        "id": 2500,
+        "nombre": "Cuota COMECOR Salud",
+        "precio": 0,
+        "porcentaje": 0
+    },
+    {
+        "id": 2800,
+        "nombre": "Sociedad de Gastroenterologia",
+        "precio": 3500,
+        "porcentaje": 0
+    },
+    {
+        "id": 2910,
+        "nombre": "Soc. Oncologica de Ctes",
+        "precio": 50,
+        "porcentaje": 0
+    },
+    {
+        "id": 3200,
+        "nombre": "Cuota Asoc. de Cirugia",
+        "precio": 2000,
+        "porcentaje": 0
+    },
+    {
+        "id": 3400,
+        "nombre": "Contribucion pileta",
+        "precio": 0,
+        "porcentaje": 0
+    },
+    {
+        "id": 3401,
+        "nombre": "Pileta(invitados)",
+        "precio": 0,
+        "porcentaje": 0
+    },
+    {
+        "id": 3500,
+        "nombre": "Ginecologia",
+        "precio": 7500,
+        "porcentaje": 0
+    },
+    {
+        "id": 3501,
+        "nombre": "Ginecologia adherentes",
+        "precio": 7500,
+        "porcentaje": 0
+    },
+    {
+        "id": 4100,
+        "nombre": "Soc. de Anat. Patolog. y Citolog.",
+        "precio": 60,
+        "porcentaje": 0
+    },
+    {
+        "id": 4200,
+        "nombre": "ASPROSAC (ASOC.S.PROF.S.CTES)",
+        "precio": 0,
+        "porcentaje": 0
+    },
+    {
+        "id": 5004,
+        "nombre": "AMMECO",
+        "precio": 967,
+        "porcentaje": 0
+    },
+    {
+        "id": 5005,
+        "nombre": "Cuota Inscripcion",
+        "precio": 0,
+        "porcentaje": 0
+    },
+    {
+        "id": 5008,
+        "nombre": "AMMECO compras varias",
+        "precio": 0,
+        "porcentaje": 0
+    },
+    {
+        "id": 9005,
+        "nombre": "Aportes Jubilatorios",
+        "precio": 9750,
+        "porcentaje": 0
+    },
+    {
+        "id": 9006,
+        "nombre": "Aportes Jubilatorios",
+        "precio": 8125,
+        "porcentaje": 0
+    },
+    {
+        "id": 9007,
+        "nombre": "Aportes Jubilatorios",
+        "precio": 6500,
+        "porcentaje": 0
+    },
+    {
+        "id": 9008,
+        "nombre": "Aportes Jubilatorios",
+        "precio": 4875,
+        "porcentaje": 0
+    },
+    {
+        "id": 9009,
+        "nombre": "Aportes Jubilatorios",
+        "precio": 3250,
+        "porcentaje": 0
+    }
+]

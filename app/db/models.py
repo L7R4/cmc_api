@@ -58,15 +58,19 @@ class Medico(Base):
     prestaciones  = relationship("Prestacion", back_populates="medico")
 
 
-class ConceptoDescuento(Base):
-    __tablename__ = "lista_concepto_descuento"
-    id   = Column(Integer, primary_key=True, autoincrement=True)
-    cod_ref     = Column(String(50), unique=True, nullable=False)
-    nombre      = Column(String(100), nullable=False)
-    precio      = Column(Numeric(10,2), nullable=False)
-    porcentaje  = Column(Numeric(5,2), nullable=False)
+class Concepto(Base):
+    __tablename__ = "conceptos"
+    created = Column(DateTime, nullable=False)
+    modified = Column(DateTime, nullable=False)
+    id = Column(Integer, primary_key=True)
+    descripcion = Column(Text, nullable=False)
+    codigo = Column(Integer)
+    es_deduccion = Column(Integer, nullable=False, default=0)
 
-    debitos     = relationship("Descuento", back_populates="concepto")  # si quieres navegar
+    # Si luego quieres relacionarlo con deducciones o detalles:
+    deducciones = relationship("Deduccion", back_populates="concepto")
+    liquidacion_detalles = relationship("LiquidacionDetalle", back_populates="concepto")
+    liquidacion_obra_detalles = relationship("LiquidacionObraDetalle", back_populates="concepto")
 
 
 class ObraSocial(Base):

@@ -1,18 +1,6 @@
 from sqlalchemy import Column, Integer, String, Date
 from .database import Base
-from sqlalchemy import (
-    Column,
-    BigInteger,
-    SmallInteger,
-    Integer,
-    TIMESTAMP,
-    String,
-    CHAR,
-    Date,
-    Numeric,
-    ForeignKey,
-    func
-)
+from sqlalchemy import (Column,BigInteger,JSON,Integer,TIMESTAMP,String,Date,Numeric,ForeignKey,Float,Text,DateTime,func)
 from sqlalchemy.orm import relationship
 
 class Medico(Base):
@@ -80,104 +68,371 @@ class ConceptoDescuento(Base):
 
     debitos     = relationship("Descuento", back_populates="concepto")  # si quieres navegar
 
-class ObraSocial(Base):
-    __tablename__ = "obras_sociales"
-    id     = Column(Integer, primary_key=True, autoincrement=True)
-    nombre = Column(String(100), unique=True, nullable=False)
 
-    debitos   = relationship("Debito", back_populates="obra_social")
-    prestaciones = relationship("Prestacion", back_populates="obra_social")
+class ObraSocial(Base):
+    __tablename__ = 'obra_sociales'
+
+    created = Column(DateTime, nullable=True)
+    modified = Column(DateTime, nullable=True)
+    deleted = Column(DateTime, nullable=True)
+    id = Column(Integer, primary_key=True)
+    codigo = Column(Integer, nullable=True)
+    nombre = Column(String(300), nullable=True)
+    estado_id = Column(Integer, nullable=True)
+    carga_nro_orden = Column(String(45), nullable=True)
+    relacion_obra_social_id = Column(Integer, nullable=True)
+    sin_restriccion_especialidad = Column(Integer, nullable=True)
+    galeno_id = Column(Integer, nullable=True)
+
+    debitos = relationship("Debito", back_populates="obra_social")
+    facturaciones = relationship("Facturacion", back_populates="obra_social")
+    liquidacion_obras = relationship("LiquidacionObra", back_populates="obra_social")
+
 
 class Periodo(Base):
-    __tablename__ = "periodos"
-    id             = Column(Integer, primary_key=True, autoincrement=True)
-    periodo        = Column(String(7),unique=True,nullable=False,comment="PK natural en formato YYYYMM")
-    version        = Column(
-                      Integer,
-                      nullable=False,
-                      default=1,
-                      comment="Versión del período; se incrementa al reabrir"
-                    )
-    status         = Column(String(20), nullable=False, default="en_curso")  # en_curso, finalizado
-    total_bruto    = Column(Numeric(14,2), nullable=False, default=0)
-    total_debitado = Column(Numeric(14,2), nullable=False, default=0)
-    total_descontado= Column(Numeric(14,2), nullable=False, default=0)
-    total_neto     = Column(Numeric(14,2), nullable=False, default=0)
-    created_at     = Column(TIMESTAMP, nullable=False, server_default=func.current_timestamp())
-    updated_at     = Column(
-                      TIMESTAMP,
-                      nullable=False,
-                      server_default=func.current_timestamp(),
-                      onupdate=func.current_timestamp()
-                    )
+    __tablename__ = 'periodos'
 
-    debitos = relationship("Debito",back_populates="periodo_rel",foreign_keys="[Debito.periodo]")
-    descuentos = relationship("Descuento", back_populates="periodo")
-    prestaciones = relationship("Prestacion", back_populates="periodo")
+    created = Column(DateTime, nullable=True)
+    modified = Column(DateTime, nullable=True)
+    id = Column(Integer, primary_key=True)
+    mes = Column(Integer, nullable=True)
+    anio = Column(String(45), nullable=True)
+    liquidado = Column(Integer, nullable=False, default=0)
 
-class Prestacion(Base):
-    __tablename__ = "prestaciones"
-    id                 = Column("id_prestacion", BigInteger, primary_key=True, autoincrement=True)
-    periodo            = Column(String(7),ForeignKey("periodos.periodo"),nullable=False,comment="YYYYMM, FK a periodos.periodo")
-    id_med             = Column(Integer, ForeignKey("listado_medico.ID"), nullable=False)
-    id_os              = Column(Integer, ForeignKey("obras_sociales.id"), nullable=False)
-    id_nomenclador     = Column(Integer, nullable=False)
-    cantidad           = Column(Integer, nullable=False)
-    honorarios         = Column(Numeric(10,2), nullable=False)
-    gastos             = Column(Numeric(10,2), nullable=False)
-    ayudante           = Column(Numeric(10,2), nullable=False)
-    importe_total      = Column(Numeric(14,2), nullable=False)
-    created_at         = Column(TIMESTAMP, nullable=False, server_default=func.current_timestamp())
+    facturaciones = relationship("Facturacion", back_populates="periodo")
 
-    medico      = relationship("Medico", back_populates="prestaciones")
-    obra_social = relationship("ObraSocial", back_populates="prestaciones")
-    periodo_rel = relationship("Periodo",back_populates="prestaciones",foreign_keys=[periodo],viewonly=True)
-    debitos     = relationship("Debito", back_populates="prestacion")
+
+class Facturacion(Base):
+    __tablename__ = 'facturaciones'
+
+    created = Column(DateTime, nullable=False)
+    modified = Column(DateTime, nullable=False)
+    deleted = Column(DateTime, nullable=True)
+    id = Column(Integer, primary_key=True)
+    periodo_id = Column(Integer, ForeignKey('periodos.id'), nullable=False)
+    obra_social_id = Column(Integer, ForeignKey('obra_sociales.id'), nullable=False)
+    estado_id = Column(Integer, nullable=False, default=1)
+    total = Column(Numeric(12, 2), nullable=False, default=0.00)
+    fact_hon_consultas = Column(Numeric(12, 2), nullable=False, default=0.00)
+    fact_hon_practicas = Column(Numeric(12, 2), nullable=False, default=0.00)
+    fact_gastos = Column(Numeric(12, 2), nullable=False, default=0.00)
+    fact_total = Column(Numeric(12, 2), nullable=False, default=0.00)
+    liquidacion_id = Column(Integer, nullable=True)
+    doble = Column(Integer, nullable=False, default=0)
+
+    periodo = relationship("Periodo", back_populates="facturaciones")
+    obra_social = relationship("ObraSocial", back_populates="facturaciones")
+    detalles = relationship("FacturacionDetalle", back_populates="facturacion")
+    debitos = relationship("Debito", back_populates="facturacion")
+    debito_detalles = relationship("DebitoDetalle", back_populates="facturacion")
+
+
+class FacturacionDetalle(Base):
+    __tablename__ = 'facturacion_detalles'
+
+    created = Column(DateTime, nullable=False)
+    modified = Column(DateTime, nullable=False)
+    deleted = Column(DateTime, nullable=True)
+    id = Column(Integer, primary_key=True)
+    periodo_id = Column(Integer, nullable=False)
+    facturacion_id = Column(Integer, ForeignKey('facturaciones.id'), nullable=False)
+    socio_id = Column(Integer, nullable=False)
+    socio_modelo = Column(String(100), nullable=False)
+    categoria = Column(String(1), nullable=False)
+    nro_orden = Column(String(100), nullable=True)
+    nomenclador_codigo = Column(String(10), nullable=False)
+    nomenclador_practica_id = Column(Integer, nullable=True)
+    opcion_pago = Column(String(3), nullable=False)
+    sesion = Column(Integer, nullable=False)
+    cantidad = Column(Integer, nullable=False)
+    afiliado_id = Column(Integer, nullable=True)
+    nro_afiliado = Column(String(20), nullable=True)
+    apellido_nombre = Column(String(150), nullable=True)
+    tipo_servicio = Column(String(1), nullable=False)
+    clinica_id = Column(Integer, nullable=True)
+    fecha_practica = Column(Date, nullable=True)
+    tipo_orden = Column(String(1), nullable=False)
+    porcentaje = Column(Float, nullable=False)
+    honorarios = Column(Numeric(12, 2), nullable=False)
+    gastos = Column(Numeric(12, 2), nullable=False)
+    ayudantes = Column(Numeric(12, 2), nullable=False)
+    valor_unitario = Column(Numeric(12, 2), nullable=False, default=0.00)
+    total = Column(Numeric(12, 2), nullable=False)
+    recalculo_total = Column(Numeric(12, 2), nullable=False)
+    diferencia_total = Column(Numeric(12, 2), nullable=False)
+    tipo_calculo = Column(String(1), nullable=False)
+    matricula_profesional = Column(String(12), nullable=True)
+    cie10_codigo = Column(String(10), nullable=True)
+    diagnostico = Column(String(100), nullable=True)
+    nro_vias = Column(Integer, nullable=True)
+    fin_semana = Column(Integer, nullable=True)
+    nocturno = Column(Integer, nullable=True)
+    feriado = Column(Integer, nullable=True)
+    urgencias = Column(Integer, nullable=True)
+    nomenclador = Column(String(2), nullable=False)
+    tipo_via = Column(String(1), nullable=False, default='T')
+    estado_id = Column(Integer, nullable=False)
+    user_id = Column(Integer, nullable=False)
+    obra_social_socio_relacion = Column(Integer, nullable=False, default=1)
+    old_detalle_id = Column(Integer, nullable=False)
+
+    facturacion = relationship("Facturacion", back_populates="detalles")
+    debito_detalles = relationship("DebitoDetalle", back_populates="facturacion_detalle")
+
 
 class Debito(Base):
-    __tablename__ = "debitos"
-    id               = Column(Integer, primary_key=True, autoincrement=True)
-    id_med           = Column(Integer, ForeignKey("listado_medico.ID"), nullable=False)
-    id_os            = Column(Integer, ForeignKey("obras_sociales.id"), nullable=False)
-    periodo          = Column(String(7),ForeignKey("periodos.periodo"),nullable=False,comment="En formato YYYYMM, FK a periodos.periodo")
-    id_prestacion    = Column(BigInteger, ForeignKey("prestaciones.id_prestacion"), nullable=False)
-    importe          = Column(Numeric(14,2), nullable=False)
-    observaciones    = Column(String(200), nullable=True)
-    created_at       = Column(TIMESTAMP, nullable=False, server_default=func.current_timestamp())
+    __tablename__ = 'debitos'
 
-    medico      = relationship("Medico", back_populates="debitos")
+    created = Column(DateTime, nullable=False)
+    modified = Column(DateTime, nullable=False)
+    deleted = Column(DateTime, nullable=True)
+    id = Column(Integer, primary_key=True)
+    facturacion_id = Column(Integer, ForeignKey('facturaciones.id'), nullable=True)
+    estado_id = Column(Integer, nullable=False, default=0)
+    obra_social_id = Column(Integer, ForeignKey('obra_sociales.id'), nullable=True)
+    mes = Column(Integer, nullable=True)
+    anio = Column(Integer, nullable=True)
+    liquidacion_id = Column(Integer, ForeignKey('liquidaciones.id'), nullable=True)
+    grupo_id = Column(Integer, nullable=False, default=1)
+    pasar = Column(Integer, nullable=False, default=0)
+    tasks = Column(Integer, nullable=False, default=0)
+    factura_punto_venta = Column(Integer, nullable=True)
+    factura_numero = Column(Integer, nullable=True)
+
+    facturacion = relationship("Facturacion", back_populates="debitos")
     obra_social = relationship("ObraSocial", back_populates="debitos")
-    prestacion  = relationship("Prestacion", back_populates="debitos")
-    periodo_rel = relationship("Periodo",back_populates="debitos",foreign_keys=[periodo],viewonly=True)
-
-class Descuento(Base):
-    __tablename__ = "descuentos"
-    id                           = Column(Integer, primary_key=True, autoincrement=True)
-    created_at                   = Column(TIMESTAMP, nullable=False, server_default=func.current_timestamp())
-    id_lista_concepto_descuento  = Column(Integer, ForeignKey("lista_concepto_descuento.id"), nullable=False)
-    id_med                       = Column(Integer, ForeignKey("listado_medico.ID"), nullable=False)
-    periodo                      = Column(String(7),ForeignKey("periodos.periodo"),nullable=False,comment="YYYYMM, FK a periodos.periodo")
-
-    concepto    = relationship("ConceptoDescuento", back_populates="debitos")
-    medico      = relationship("Medico", back_populates="descuentos")
-    periodo_rel  = relationship("Periodo",back_populates="descuentos",foreign_keys=[periodo],viewonly=True)
-
-# class Nomenclador(Base):
-#     pass
-class OtrosDescuentos(Base):
-    __tablename__ = "otros_descuentos"
-    id          = Column(Integer, primary_key=True, autoincrement=True)
-    id_med     = Column(Integer, ForeignKey("listado_medico.ID"), nullable=False)
-    concepto    = Column(String(100), nullable=False)
-    importe     = Column(Numeric(10,2), nullable=False)
-    periodo     = Column(String(7),ForeignKey("periodos.periodo"),nullable=False,comment="YYYYMM, FK a periodos.periodo")
-    observacion = Column(String(200), nullable=True)
-    created_at  = Column(TIMESTAMP, nullable=False, server_default=func.current_timestamp())
-
-    medico      = relationship("Medico")
-    periodo_rel = relationship("Periodo",back_populates="otros_descuentos",foreign_keys=[periodo],viewonly=True)
+    liquidacion = relationship("Liquidacion", back_populates="debitos")
+    detalles = relationship("DebitoDetalle", back_populates="debito")
 
 
+class DebitoDetalle(Base):
+    __tablename__ = 'debito_detalles'
+
+    created = Column(DateTime, nullable=False)
+    modified = Column(DateTime, nullable=False)
+    deleted = Column(DateTime, nullable=True)
+    id = Column(Integer, primary_key=True)
+    debito_id = Column(Integer, ForeignKey('debitos.id'), nullable=False)
+    facturacion_id = Column(Integer, ForeignKey('facturaciones.id'), nullable=True)
+    facturacion_detalle_id = Column(Integer, ForeignKey('facturacion_detalles.id'), nullable=True)
+    socio_id = Column(Integer, nullable=False)
+    socio_modelo = Column(String(10), nullable=False)
+    corr = Column(String(10), nullable=True)
+    paciente = Column(Text, nullable=False)
+    cantidad = Column(Integer, nullable=False)
+    nomenclador_codigo = Column(String(10), nullable=False)
+    nro_orden = Column(String(100), nullable=True)
+    fecha_practica = Column(Date, nullable=True)
+    honorarios = Column(Numeric(12, 2), nullable=False, default=0.00)
+    gastos = Column(Numeric(12, 2), nullable=False, default=0.00)
+    antiguedad = Column(Numeric(12, 2), nullable=False, default=0.00)
+    porcentaje = Column(Numeric(10, 2), nullable=False, default=100.00)
+    clinica_id = Column(Integer, nullable=True)
+    tipo_movimiento = Column(String(1), nullable=False)
+    tipo = Column(Integer, nullable=False, default=1)
+    grupo_id = Column(Integer, nullable=False, default=1)
+    estado_id = Column(Integer, nullable=False, default=0)
+    tiene_facturacion = Column(Integer, nullable=False, default=1)
+    linea_indice = Column(Integer, nullable=False, default=0)
+
+    debito = relationship("Debito", back_populates="detalles")
+    facturacion = relationship("Facturacion", back_populates="debito_detalles")
+    facturacion_detalle = relationship("FacturacionDetalle", back_populates="debito_detalles")
+
+
+class Concepto(Base):
+    __tablename__ = 'conceptos'
+
+    created = Column(DateTime, nullable=False)
+    modified = Column(DateTime, nullable=False)
+    id = Column(Integer, primary_key=True)
+    descripcion = Column(Text, nullable=False)
+    codigo = Column(Integer, nullable=True)
+    es_deduccion = Column(Integer, nullable=False, default=0)
+
+
+class Liquidacion(Base):
+    __tablename__ = "liquidaciones"
+    created = Column(DateTime)
+    modified = Column(DateTime)
+    id = Column(Integer, primary_key=True)
+    mes = Column(Integer)
+    anio = Column(String(45))
+    dgi_mes = Column(Integer, nullable=False, default=0)
+    dgi_anio = Column(Integer, nullable=False, default=0)
+    nro_liquidacion = Column(Integer, nullable=False, default=0)
+    estado_id = Column(Integer, nullable=False, default=1)
+    proceso_id = Column(Integer, nullable=False, default=0)
+    calculo_deducciones = Column(Integer, nullable=False, default=0)
+    fecha_calculo = Column(DateTime)
+    resumen = Column(Text)
+    proceso_cerrar_id = Column(Integer, nullable=False, default=0)
+    fecha_cierre = Column(DateTime)
+    data_socio_grupo = Column(JSON)
+    es_visible = Column(Integer, nullable=False, default=1)
+    nro_inicio_cheque = Column(Integer, nullable=False, default=0)
+    santander_nro_inicio_cheque = Column(Integer, nullable=False, default=0)
+    proceso_pagos_id = Column(Integer, nullable=False, default=0)
+
+    debitos = relationship("Debito", back_populates="liquidacion")
+    deducciones = relationship("Deduccion", back_populates="liquidacion")
+    liquidacion_detalles = relationship(
+        "LiquidacionDetalle",
+        back_populates="liquidacion"
+    )
+    liquidacion_obras = relationship(
+        "LiquidacionObra",
+        back_populates="liquidacion"
+    )
+
+
+class LiquidacionDetalle(Base):
+    __tablename__ = "liquidacion_detalles"
+    created = Column(DateTime)
+    modified = Column(DateTime)
+    id = Column(BigInteger, primary_key=True)
+    socio_id = Column(Integer)
+    socio_modelo = Column(String(10), nullable=False)
+    mes = Column(Integer, nullable=False, default=0)
+    anio = Column(Integer, nullable=False, default=0)
+    facturacion_id = Column(Integer)
+    liquidacion_obra_id = Column(Integer, nullable=False, default=0)
+    liquidacion_id = Column(Integer, ForeignKey("liquidaciones.id"))
+    concepto_id = Column(Integer, ForeignKey("conceptos.id"))
+    estado_id = Column(Integer, nullable=False, default=1)
+    liquidacion_estado_id = Column(Integer, nullable=False, default=0)
+    tipo_movimiento = Column(String(1), nullable=False)
+    fact_honorarios = Column(Numeric(12,2), nullable=False, default=0.00)
+    fact_gastos = Column(Numeric(12,2), nullable=False, default=0.00)
+    fact_antiguedad = Column(Numeric(12,2), nullable=False, default=0.00)
+    fact_total = Column(Numeric(12,2), nullable=False, default=0.00)
+    porcentaje = Column(Numeric(10,2), nullable=False, default=100.00)
+    liq_honorarios = Column(Numeric(12,2), nullable=False, default=0.00)
+    liq_gastos = Column(Numeric(10,2), nullable=False, default=0.00)
+    liq_antiguedad = Column(Numeric(12,2), nullable=False, default=0.00)
+    liq_total = Column(Numeric(12,2), nullable=False, default=0.00)
+    viene_de_id = Column(Integer, nullable=False, default=0)
+    debito_detalle_id = Column(Integer)
+    debito_id = Column(Integer)
+    obra_social_id = Column(Integer)
+    acarrea_liquidacion_id = Column(Integer)
+    reintegro_id = Column(Integer)
+    ultimo_descuento = Column(Integer, nullable=False, default=0)
+    tabla_relacionada = Column(String(50))
+    tabla_relacionada_id = Column(Integer)
+    paga_por_caja = Column(Integer, nullable=False, default=0)
+    orden = Column(Integer, nullable=False, default=0)
+    especialidad_id = Column(Integer)
+    paciente_descripcion = Column(Text)
+    clase = Column(Integer)
+    cbl_procesado = Column(Integer, nullable=False, default=0)
+    sis_viene_de = Column(String(50))
+    fecha_liq_obra = Column(DateTime)
+    orden_liq_socios = Column(Integer, nullable=False, default=0)
+
+    liquidacion = relationship("Liquidacion", back_populates="liquidacion_detalles")
+    concepto = relationship("Concepto", back_populates="liquidacion_detalles")
+
+
+class LiquidacionObra(Base):
+    __tablename__ = "liquidacion_obras"
+    created = Column(DateTime, nullable=False)
+    modified = Column(DateTime, nullable=False)
+    deleted = Column(DateTime)
+    id = Column(Integer, primary_key=True)
+    facturacion_id = Column(Integer, nullable=False, default=0)
+    obra_social_id = Column(Integer, ForeignKey("obra_sociales.id"))
+    mes = Column(Integer)
+    anio = Column(Integer)
+    estado_id = Column(Integer, nullable=False, default=1)
+    porcentaje = Column(Numeric(10,2), nullable=False, default=0.00)
+    tipo = Column(Integer, nullable=False, default=0)
+    liquidaciones = Column(Text)
+    registros_total = Column(Integer, nullable=False, default=0)
+    registros_usados = Column(Integer, nullable=False, default=0)
+    modificaciones = Column(Text)
+    cantidad_modificaciones = Column(Integer, nullable=False, default=0)
+    bruto_registros = Column(Integer, nullable=False, default=0)
+    bruto_total = Column(Numeric(12,2), nullable=False, default=0.00)
+    es_visible = Column(Integer, nullable=False, default=1)
+    calculo_totales = Column(JSON)
+    pago_doble = Column(Integer, nullable=False, default=0)
+
+    obra_social = relationship("ObraSocial", back_populates="liquidacion_obras")
+    liquidacion = relationship("Liquidacion", back_populates="liquidacion_obras")
+    detalles = relationship(
+        "LiquidacionObraDetalle",
+        back_populates="liquidacion_obra"
+    )
+
+
+class LiquidacionObraDetalle(Base):
+    __tablename__ = "liquidacion_obra_detalles"
+    created = Column(DateTime, nullable=False)
+    modified = Column(DateTime, nullable=False)
+    id = Column(Integer, primary_key=True)
+    facturacion_id = Column(Integer, nullable=False, default=0)
+    fact_honorarios = Column(Numeric(12,2), nullable=False, default=0.00)
+    fact_gastos = Column(Numeric(12,2), nullable=False, default=0.00)
+    fact_antiguedad = Column(Numeric(12,2), nullable=False, default=0.00)
+    fact_total = Column(Numeric(12,2), nullable=False, default=0.00)
+    liquidacion_obra_id = Column(Integer, ForeignKey("liquidacion_obras.id"), nullable=False)
+    concepto_id = Column(Integer, ForeignKey("conceptos.id"), nullable=False)
+    liq_honorarios = Column(Numeric(12,2), nullable=False, default=0.00)
+    liq_gastos = Column(Numeric(12,2), nullable=False, default=0.00)
+    liq_antiguedad = Column(Numeric(12,2), nullable=False, default=0.00)
+    liq_total = Column(Numeric(12,2), nullable=False, default=0.00)
+    porcentaje = Column(Numeric(10,2), nullable=False, default=100.00)
+    tipo_movimiento = Column(String(1), nullable=False)
+    estado_id = Column(Integer, nullable=False, default=0)
+
+    liquidacion_obra = relationship("LiquidacionObra", back_populates="detalles")
+    concepto = relationship("Concepto", back_populates="liquidacion_obra_detalles")
+
+
+# class Descuento(Base):
+#     __tablename__ = "descuentos"
+#     id                           = Column(Integer, primary_key=True, autoincrement=True)
+#     created_at                   = Column(TIMESTAMP, nullable=False, server_default=func.current_timestamp())
+#     id_lista_concepto_descuento  = Column(Integer, ForeignKey("lista_concepto_descuento.id"), nullable=False)
+#     id_med                       = Column(Integer, ForeignKey("listado_medico.ID"), nullable=False)
+#     periodo                      = Column(String(7),ForeignKey("periodos.periodo"),nullable=False,comment="YYYYMM, FK a periodos.periodo")
+
+#     concepto    = relationship("ConceptoDescuento", back_populates="debitos")
+#     medico      = relationship("Medico", back_populates="descuentos")
+#     periodo_rel  = relationship("Periodo",back_populates="descuentos",foreign_keys=[periodo],viewonly=True)
+
+# class OtrosDescuentos(Base):
+#     __tablename__ = "otros_descuentos"
+#     id          = Column(Integer, primary_key=True, autoincrement=True)
+#     id_med     = Column(Integer, ForeignKey("listado_medico.ID"), nullable=False)
+#     concepto    = Column(String(100), nullable=False)
+#     importe     = Column(Numeric(10,2), nullable=False)
+#     periodo     = Column(String(7),ForeignKey("periodos.periodo"),nullable=False,comment="YYYYMM, FK a periodos.periodo")
+#     observacion = Column(String(200), nullable=True)
+#     created_at  = Column(TIMESTAMP, nullable=False, server_default=func.current_timestamp())
+
+#     medico      = relationship("Medico")
+#     periodo_rel = relationship("Periodo",back_populates="otros_descuentos",foreign_keys=[periodo],viewonly=True)
+
+# class Prestacion(Base):
+#     __tablename__ = "prestaciones"
+#     id                 = Column("id_prestacion", BigInteger, primary_key=True, autoincrement=True)
+#     periodo            = Column(String(7),ForeignKey("periodos.periodo"),nullable=False,comment="YYYYMM, FK a periodos.periodo")
+#     id_med             = Column(Integer, ForeignKey("listado_medico.ID"), nullable=False)
+#     id_os              = Column(Integer, ForeignKey("obras_sociales.id"), nullable=False)
+#     id_nomenclador     = Column(Integer, nullable=False)
+#     cantidad           = Column(Integer, nullable=False)
+#     honorarios         = Column(Numeric(10,2), nullable=False)
+#     gastos             = Column(Numeric(10,2), nullable=False)
+#     ayudante           = Column(Numeric(10,2), nullable=False)
+#     importe_total      = Column(Numeric(14,2), nullable=False)
+#     created_at         = Column(TIMESTAMP, nullable=False, server_default=func.current_timestamp())
+
+#     medico      = relationship("Medico", back_populates="prestaciones")
+#     obra_social = relationship("ObraSocial", back_populates="prestaciones")
+#     periodo_rel = relationship("Periodo",back_populates="prestaciones",foreign_keys=[periodo],viewonly=True)
+#     debitos     = relationship("Debito", back_populates="prestacion")
 # class DetalleFacturacion(Base):
 #     __tablename__ = "detalle_facturacion"
 #     id_detalle_prestaciones = Column(

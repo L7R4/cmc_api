@@ -1,21 +1,19 @@
-from typing import Any
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
+from typing import List
 from sqlalchemy.ext.asyncio import AsyncSession
-
-from app.db.crud import compute_liquidacion, get_medico
-from app.api.deps import get_async_db
+from app.db.database import get_db
+from app.services.liquidaciones import generar_preview
 
 router = APIRouter()
 
-@router.get("/{medico_id}", response_model=Any)
-async def get_liquidacion(
-    medico_id: int,
-    periodo_id: int = Query(..., description="ID del periodo"),
-    db: AsyncSession = Depends(get_async_db),
-):
-    # Verifico que exista el médico
-    medico = await get_medico(db, medico_id)
-    if not medico:
-        raise HTTPException(status_code=404, detail="Médico no encontrado")
+class GenerarReq(BaseModel):
+    obra_sociales_solicitadas: List[int] = Field(..., default_factory=list)
+    periodos_solicitados: List[str] = Field(..., default_factory=list)
 
-    return await compute_liquidacion(db, medico_id, periodo_id)
+@router.post("/generar")
+async def generar(req: GenerarReq, db: AsyncSession = Depends(get_db)):
+    out = await generar_preview(db, req.obra_sociales_solicitadas, req.periodos_solicitados)
+    if out.get("status") != "ok":
+        raise HTTPException(400, out.get("message", "error"))
+    return out  # EXACTO al formato requerido

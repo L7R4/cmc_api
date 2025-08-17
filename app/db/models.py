@@ -1,481 +1,880 @@
-from sqlalchemy import Column, Integer, String, Date
-from .database import Base
-from sqlalchemy import (Column,BigInteger,JSON,Integer,TIMESTAMP,String,Date,Numeric,ForeignKey,Float,Text,DateTime,func)
-from sqlalchemy.orm import relationship
+from typing import Literal, Optional
+import datetime
+import decimal
 
-class Medico(Base):
-    __tablename__ = "listado_medico"
-    id                    = Column('ID', Integer, primary_key=True, autoincrement=True)
-    nro_especialidad      = Column('NRO_ESPECIALIDAD', Integer, nullable=False, index=True, default=0)
-    nro_especialidad2     = Column('NRO_ESPECIALIDAD2', Integer, nullable=False, index=True, default=0)
-    nro_especialidad3     = Column('NRO_ESPECIALIDAD3', Integer, nullable=False, index=True, default=0)
-    nro_especialidad4     = Column('NRO_ESPECIALIDAD4', Integer, nullable=False, index=True, default=0)
-    nro_especialidad5     = Column('NRO_ESPECIALIDAD5', Integer, nullable=False, index=True, default=0)
-    nro_socio             = Column('NRO_SOCIO', Integer, nullable=False, index=True, default=0)
-    nombre                = Column('NOMBRE', String(40), nullable=False, default="a")
-    domicilio_consulta    = Column('DOMICILIO_CONSULTA', String(100), nullable=True, default="a")
-    telefono_consulta     = Column('TELEFONO_CONSULTA', String(25), nullable=True, default="0")
-    matricula_prov        = Column('MATRICULA_PROV', Integer, nullable=False, default=0)
-    matricula_nac         = Column('MATRICULA_NAC', Integer, nullable=False, default=0)
-    fecha_recibido        = Column('FECHA_RECIBIDO', Date, nullable=True)
-    fecha_matricula       = Column('FECHA_MATRICULA', Date, nullable=True)
-    fecha_ingreso         = Column('FECHA_INGRESO', Date, nullable=True)
-    domicilio_particular  = Column('DOMICILIO_PARTICULAR', String(100), nullable=False, default="a")
-    tele_particular       = Column('TELE_PARTICULAR', String(15), nullable=False, default="0")
-    celular_particular    = Column('CELULAR_PARTICULAR', String(15), nullable=False, default="0")
-    mail_particular       = Column('MAIL_PARTICULAR', String(50), nullable=False, default="a")
-    sexo                  = Column('SEXO', String(1), nullable=False, default='M')
-    tipo_doc              = Column('TIPO_DOC', String(3), nullable=False, default='DNI')
-    documento             = Column('DOCUMENTO', String(8), nullable=False, default="0")
-    fecha_nac             = Column('FECHA_NAC', Date, nullable=True)
-    cuit                  = Column('CUIT', String(12), nullable=False, default="0")
-    anssal                = Column('ANSSAL', Integer, nullable=False, default=0)
-    vencimiento_anssal    = Column('VENCIMIENTO_ANSSAL', Date, nullable=True)
-    malapraxis            = Column('MALAPRAXIS', String(100), nullable=False, default="A")
-    vencimiento_malapraxis= Column('VENCIMIENTO_MALAPRAXIS', Date, nullable=True)
-    monotributista        = Column('MONOTRIBUTISTA', String(2), nullable=False, default="NO")
-    factura               = Column('FACTURA', String(2), nullable=False, default="NO")
-    cobertura             = Column('COBERTURA', Integer, nullable=False, default=0)
-    vencimiento_cobertura = Column('VENCIMIENTO_COBERTURA', Date, nullable=True)
-    provincia             = Column('PROVINCIA', String(25), nullable=False, default="A")
-    codigo_postal         = Column('CODIGO_POSTAL', String(15), nullable=False, default="0")
-    vitalicio             = Column('VITALICIO', String(1), nullable=False, default="N")
-    fecha_vitalicio       = Column('FECHA_VITALICIO', Date, nullable=True)
-    observacion           = Column('OBSERVACION', String(200), nullable=False, default="A")
-    categoria             = Column('CATEGORIA', String(1), nullable=False, default="A")
-    existe                = Column('EXISTE', String(1), nullable=False, default="S")
-    nro_especialidad6     = Column('NRO_ESPECIALIDAD6', Integer, nullable=False, default=0)
-    excep_desde           = Column('EXCEP_DESDE', String(6), nullable=False, default="0")
-    excep_hasta           = Column('EXCEP_HASTA', String(6), nullable=False, default="0")
-    excep_desde2          = Column('EXCEP_DESDE2', String(6), nullable=False, default="0")
-    excep_hasta2          = Column('EXCEP_HASTA2', String(6), nullable=False, default="0")
-    excep_desde3          = Column('EXCEP_DESDE3', String(6), nullable=False, default="0")
-    excep_hasta3          = Column('EXCEP_HASTA3', String(6), nullable=False, default="0")
-    ingresar              = Column('INGRESAR', String(1), nullable=False, default="D")
+from sqlalchemy import DECIMAL, Date, Enum, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
+from sqlalchemy.dialects.mysql import INTEGER, LONGTEXT, VARCHAR
+from decimal import Decimal
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
-    debitos       = relationship("Debito", back_populates="medico")
-    descuentos    = relationship("Descuento", back_populates="medico")
-    prestaciones  = relationship("Prestacion", back_populates="medico")
+class Base(DeclarativeBase):
+    pass
 
 
-class Concepto(Base):
-    __tablename__ = "conceptos"
-    created = Column(DateTime, nullable=False)
-    modified = Column(DateTime, nullable=False)
-    id = Column(Integer, primary_key=True)
-    descripcion = Column(Text, nullable=False)
-    codigo = Column(Integer)
-    es_deduccion = Column(Integer, nullable=False, default=0)
+class Avisos(Base):
+    __tablename__ = 'avisos'
+    __table_args__ = (
+        Index('FECHA', 'FECHA'),
+    )
 
-    # Si luego quieres relacionarlo con deducciones o detalles:
-    deducciones = relationship("Deduccion", back_populates="concepto")
-    liquidacion_detalles = relationship("LiquidacionDetalle", back_populates="concepto")
-    liquidacion_obra_detalles = relationship("LiquidacionObraDetalle", back_populates="concepto")
+    ID: Mapped[int] = mapped_column(INTEGER(11), primary_key=True)
+    ARCHIVO: Mapped[str] = mapped_column(String(50, 'utf8_spanish2_ci'), nullable=False, server_default=text("'#'"))
+    FECHA: Mapped[str] = mapped_column(String(10, 'utf8_spanish2_ci'), nullable=False, server_default=text("'--'"))
+    EXISTE: Mapped[str] = mapped_column(String(1, 'utf8_spanish2_ci'), nullable=False, server_default=text("'S'"))
+    AVISO: Mapped[Optional[str]] = mapped_column(LONGTEXT)
 
 
-class ObraSocial(Base):
-    __tablename__ = 'obra_sociales'
+class Clinicas(Base):
+    __tablename__ = 'clinicas'
 
-    created = Column(DateTime, nullable=True)
-    modified = Column(DateTime, nullable=True)
-    deleted = Column(DateTime, nullable=True)
-    id = Column(Integer, primary_key=True)
-    codigo = Column(Integer, nullable=True)
-    nombre = Column(String(300), nullable=True)
-    estado_id = Column(Integer, nullable=True)
-    carga_nro_orden = Column(String(45), nullable=True)
-    relacion_obra_social_id = Column(Integer, nullable=True)
-    sin_restriccion_especialidad = Column(Integer, nullable=True)
-    galeno_id = Column(Integer, nullable=True)
-
-    debitos = relationship("Debito", back_populates="obra_social")
-    facturaciones = relationship("Facturacion", back_populates="obra_social")
-    liquidacion_obras = relationship("LiquidacionObra", back_populates="obra_social")
+    ID: Mapped[int] = mapped_column(INTEGER(11), primary_key=True)
+    CLINICA: Mapped[str] = mapped_column(String(50, 'utf8_spanish2_ci'), nullable=False, server_default=text("'A'"))
 
 
-class Periodo(Base):
+class CodigoDescripcion(Base):
+    __tablename__ = 'codigo_descripcion'
+    __table_args__ = (
+        Index('CODIGO', 'CODIGO'),
+        Index('C_P_H_S', 'C_P_H_S'),
+        Index('DESCRIPCION', 'DESCRIPCION')
+    )
+
+    ID: Mapped[int] = mapped_column(INTEGER(11), primary_key=True)
+    CODIGO: Mapped[str] = mapped_column(String(8), nullable=False, server_default=text("'0'"))
+    DESCRIPCION: Mapped[str] = mapped_column(String(210), nullable=False, server_default=text("'0'"))
+    C_P_H_S: Mapped[str] = mapped_column(String(1), nullable=False, server_default=text("'C'"))
+
+
+class CodigoNomenclador(Base):
+    __tablename__ = 'codigo_nomenclador'
+    __table_args__ = (
+        Index('CODIGO', 'CODIGO'),
+        Index('NROESPECIALIDAD', 'NROESPECIALIDAD')
+    )
+
+    ID: Mapped[int] = mapped_column(INTEGER(11), primary_key=True)
+    CODIGO: Mapped[str] = mapped_column(String(10, 'utf8_spanish2_ci'), nullable=False, server_default=text("'0'"))
+    NROESPECIALIDAD: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    HONORARIOS: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"), comment='UNIDAD DE HONORARIOS, CALCULO CON VALORES NOMCLADOS')
+    GASTOS: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"), comment='UNIDAD DE GASTOS. CALCULO CON LA TABLA VALORES NOMENCLADOS')
+    CODIGOJUDICIALES: Mapped[str] = mapped_column(String(3, 'utf8_spanish2_ci'), nullable=False, server_default=text("'OTR'"))
+    OBSERVACION: Mapped[str] = mapped_column(String(50, 'utf8_spanish2_ci'), nullable=False, server_default=text("'0'"))
+    EXCEPCION: Mapped[str] = mapped_column(String(1, 'utf8_spanish2_ci'), nullable=False, server_default=text("'N'"), comment='S=SI / N=NO\r\nEXCEPCION ES CUANDO TOMO EL VALOR CARGADO POR GRACIELA')
+
+
+class Codigoprestacionswiss(Base):
+    __tablename__ = 'codigoprestacionswiss'
+    __table_args__ = (
+        Index('CODIGO', 'CODIGO'),
+        Index('C_P_H_S', 'C_P_H_S'),
+        Index('DESCRIPCION', 'DESCRIPCION')
+    )
+
+    ID: Mapped[int] = mapped_column(INTEGER(11), primary_key=True)
+    CODIGO: Mapped[str] = mapped_column(VARCHAR(8), nullable=False, server_default=text("''"))
+    DESCRIPCION: Mapped[str] = mapped_column(VARCHAR(100), nullable=False, server_default=text("'a'"))
+    C_P_H_S: Mapped[str] = mapped_column(VARCHAR(1), nullable=False, server_default=text("'C'"))
+
+
+class Consulta(Base):
+    __tablename__ = 'consulta'
+    __table_args__ = (
+        Index('CONSULTAS', 'CONSULTAS'),
+        Index('IDOBRASOCIAL', 'IDOBRASOCIAL')
+    )
+
+    ID: Mapped[int] = mapped_column(INTEGER(11), primary_key=True)
+    CONSULTAS: Mapped[str] = mapped_column(String(115, 'utf8_spanish2_ci'), nullable=False, server_default=text("'a'"), comment='NOMBRE DE LAS CONSULTAS')
+    IDOBRASOCIAL: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"), comment='INDENTIFICADOR DE LAS OBRA SOCIALES')
+
+
+class EspeCod(Base):
+    __tablename__ = 'espe_cod'
+
+    ID: Mapped[int] = mapped_column(INTEGER(11), primary_key=True)
+    ID_ESPE: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    CODIGO: Mapped[str] = mapped_column(String(8), nullable=False, server_default=text("'0'"))
+
+
+class EspeCodSwiss(Base):
+    __tablename__ = 'espe_cod_swiss'
+    __table_args__ = (
+        Index('CODIGO', 'CODIGO'),
+        Index('C_P_H_S', 'C_P_H_S')
+    )
+
+    ID: Mapped[int] = mapped_column(INTEGER(11), primary_key=True)
+    CODIGO: Mapped[str] = mapped_column(String(8, 'utf8_spanish2_ci'), nullable=False, server_default=text("''"))
+    C_P_H_S: Mapped[str] = mapped_column(String(1, 'utf8_spanish2_ci'), nullable=False, server_default=text("'C'"))
+
+
+class Especialidad(Base):
+    __tablename__ = 'especialidad'
+    __table_args__ = (
+        Index('ESPECIALIDAD', 'ESPECIALIDAD'),
+        Index('IDCOLEGIO', 'ID_COLEGIO_ESPE')
+    )
+
+    ID: Mapped[int] = mapped_column(INTEGER(11), primary_key=True)
+    ID_COLEGIO_ESPE: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"), comment='COLEGIO MEDICO, EL ID DE LA ESPECIALIDAD DEL COLEGIO MEDICO')
+    ESPECIALIDAD: Mapped[str] = mapped_column(String(50, 'utf8_spanish_ci'), nullable=False, server_default=text("'A'"), comment='COLEGIO MEDICO')
+
+
+class GuardarAtencion(Base):
+    __tablename__ = 'guardar_atencion'
+    __table_args__ = (
+        Index('ANIO_PERIODO', 'ANIO_PERIODO'),
+        Index('AYUDANTE_2', 'AYUDANTE_2'),
+        Index('CATEGORIA_A_B_C', 'CATEGORIA_A_B_C'),
+        Index('CODIGO_PRESTACION', 'CODIGO_PRESTACION'),
+        Index('CON_HONO_SANA', 'CON_HONO_SANA'),
+        Index('FECHA_CARGA', 'FECHA_CARGA'),
+        Index('FECHA_PRESTACION', 'FECHA_PRESTACION'),
+        Index('MAT_AYUDANTE_2', 'MAT_AYUDANTE_2'),
+        Index('MES_PERIODO', 'MES_PERIODO'),
+        Index('NOMBRE_AFILIADO', 'NOMBRE_AFILIADO'),
+        Index('NOMBRE_AYUDANTE', 'NOMBRE_AYUDANTE'),
+        Index('NOMBRE_AYUDANTE_2', 'NOMBRE_AYUDANTE_2'),
+        Index('NOMBRE_PRESTADOR', 'NOMBRE_PRESTADOR'),
+        Index('NRO_DOCUMENTO', 'NRO_DOCUMENTO'),
+        Index('NRO_ESPECIALIDAD', 'NRO_ESPECIALIDAD'),
+        Index('NRO_MATRICULA', 'NRO_MATRICULA'),
+        Index('NRO_SOCIO', 'NRO_SOCIO'),
+        Index('SANATORIO', 'SANATORIO')
+    )
+
+    ID: Mapped[int] = mapped_column(INTEGER(11), primary_key=True)
+    NRO_SOCIO: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"), comment='SOCIO DEL COLEGIO MEDICO')
+    CODIGO_PRESTACION: Mapped[str] = mapped_column(String(8, 'utf8_spanish_ci'), nullable=False, server_default=text("'0'"))
+    NRO_MATRICULA: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"), comment='matricula prov. colegio medico y judicial')
+    NOMBRE_PRESTADOR: Mapped[str] = mapped_column(String(40, 'utf8_spanish_ci'), nullable=False, server_default=text("'A'"), comment='campo colegio medico y judicial')
+    ESTADODESCRIPCION: Mapped[str] = mapped_column(String(100, 'utf8_spanish_ci'), nullable=False, server_default=text("'A'"), comment='DESCRIPCION DEL ESTADO DEL AFILIADO - campo judicial')
+    MENSAJE: Mapped[str] = mapped_column(String(5, 'utf8_spanish_ci'), nullable=False, server_default=text("'A'"), comment='EN CASO QUE LA PROPIEDAD "RESULTADO" SE FALSE. ESTA PROPIEDAD CONTENDRA LA DETALLE DEL MISMO. - campo judicial')
+    NOMBRE_AFILIADO: Mapped[str] = mapped_column(String(40, 'utf8_spanish_ci'), nullable=False, server_default=text("'A'"), comment='CAMPO COLEGIO Y judicial')
+    NRO_AFILIADO: Mapped[str] = mapped_column(String(20, 'utf8_spanish_ci'), nullable=False, server_default=text("'0'"), comment='CAMPO JUDICIAL')
+    BARRA_AFILIADO: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    NRO_CONSULTA: Mapped[str] = mapped_column(String(16, 'utf8_spanish_ci'), nullable=False, server_default=text("'0'"), comment='campo judicial/ validacion o autorizacion de las obra sociales')
+    NRO_DOCUMENTO: Mapped[str] = mapped_column(String(13, 'utf8_spanish_ci'), nullable=False, server_default=text("'0'"), comment='tambien se graba cuit swiss')
+    RESULTADO: Mapped[str] = mapped_column(String(5, 'utf8_spanish_ci'), nullable=False, server_default=text("'false'"), comment='true / false - campo judicial')
+    FECHASUSPENSION: Mapped[str] = mapped_column(String(10, 'utf8_spanish_ci'), nullable=False, server_default=text("'A'"), comment='campo judicial')
+    NRO_OBRA_SOCIAL: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"), comment='COLEGIO MEDICO')
+    IMPORTE_COLEGIO: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"), comment='COLEGIO MEDICO')
+    GASTOS: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    NRO_ESPECIALIDAD: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    CANTIDAD: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'1'"), comment='ALGUNAS OBRA SOCIAL TIENEN CANTIDAD DE LA MISMA PRESTACION DEL MISMO AFILIADO CON EL MISMO DOCTOR EN EL DIA')
+    EXISTE: Mapped[str] = mapped_column(String(1, 'utf8_spanish_ci'), nullable=False, server_default=text("'S'"), comment='N=ELIMINADO / S=EXISTE')
+    NOMBRE_ARCHIVO: Mapped[str] = mapped_column(String(100, 'utf8_spanish_ci'), nullable=False, server_default=text("'A1'"))
+    MES_PERIODO: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    ANIO_PERIODO: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    CANT_TRATAMIENTO: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    AYUDANTE_ACTUAL: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    CATEGORIA_A_B_C: Mapped[str] = mapped_column(String(1, 'utf8_spanish_ci'), nullable=False, server_default=text("'-'"))
+    PORCENTAJE: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    SANATORIO: Mapped[str] = mapped_column(String(50, 'utf8_spanish_ci'), nullable=False, server_default=text("'A'"))
+    PACIENTE: Mapped[str] = mapped_column(String(50, 'utf8_spanish_ci'), nullable=False, server_default=text("'A'"))
+    CODIGO_PRESTACION_2: Mapped[str] = mapped_column(String(8, 'utf8_spanish_ci'), nullable=False, server_default=text("'0'"))
+    CIRUJANO: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    PORCENTAJE_CIRUJANO: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    AYUDANTE: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    NOMBRE_AYUDANTE: Mapped[str] = mapped_column(String(40, 'utf8_spanish_ci'), nullable=False, server_default=text("'A'"))
+    MAT_AYUDANTE: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    PORCENTAJE_AYUDANTE: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    VALOR_CIRUJIA: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    VALOR_AYUDANTE: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    CON_HONO_SANA: Mapped[str] = mapped_column(String(1, 'utf8_spanish_ci'), nullable=False, server_default=text("'C'"), comment='CON=CONSULTA HONO=HONORARIO/ SANA=SANATORIO')
+    TOKEN: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    USUARIO_COLEGIO: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    AYUDANTE_2: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    NOMBRE_AYUDANTE_2: Mapped[str] = mapped_column(String(40, 'utf8_spanish_ci'), nullable=False, server_default=text("'a'"))
+    MAT_AYUDANTE_2: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    PORCENTAJE_AYUDANTE_2: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    VALOR_AYUDANTE_2: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    CODIGO_PRESTACION_3: Mapped[str] = mapped_column(String(6, 'utf8_spanish_ci'), nullable=False, server_default=text("'0'"))
+    COSEGURO: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    IMPORTE_AYUDANTE_2: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    FECHA_PRESTACION: Mapped[Optional[datetime.date]] = mapped_column(Date, comment='COLEGIO MEDICO')
+    FECHA_CARGA: Mapped[Optional[datetime.date]] = mapped_column(Date)
+    FECHA_CIRUGIA: Mapped[Optional[datetime.date]] = mapped_column(Date)
+
+
+class GuardarIoscor(Base):
+    __tablename__ = 'guardar_ioscor'
+    __table_args__ = (
+        Index('ANIO_PERIODO', 'ANIO_PERIODO'),
+        Index('FECHA_CARGA', 'FECHA_CARGA'),
+        Index('MES_PERIODO', 'MES_PERIODO'),
+        Index('NRO_DOCUMENTO', 'NRO_DOCUMENTO'),
+        Index('NRO_ESPECIALIDAD', 'NRO_ESPECIALIDAD'),
+        Index('NRO_MATRICULA', 'NRO_MATRICULA'),
+        Index('NRO_SOCIO', 'NRO_SOCIO')
+    )
+
+    ID: Mapped[int] = mapped_column(INTEGER(11), primary_key=True)
+    NRO_SOCIO: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"), comment='SOCIO DEL COLEGIO MEDICO')
+    CODIGO_PRESTACION: Mapped[str] = mapped_column(String(10, 'utf8_spanish_ci'), nullable=False, server_default=text("'0'"), comment='campo judicial')
+    NRO_MATRICULA: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"), comment='matricula prov. colegio medico y judicial')
+    NRO_DOCUMENTO: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"), comment='campo judicial')
+    NRO_OBRA_SOCIAL: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"), comment='COLEGIO MEDICO')
+    IMPORTE_COLEGIO: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"), comment='COLEGIO MEDICO')
+    GASTOS: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    NRO_ESPECIALIDAD: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    CANTIDAD: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'1'"), comment='ALGUNAS OBRA SOCIAL TIENEN CANTIDAD DE LA MISMA PRESTACION DEL MISMO AFILIADO CON EL MISMO DOCTOR EN EL DIA')
+    EXISTE: Mapped[str] = mapped_column(String(1, 'utf8_spanish_ci'), nullable=False, server_default=text("'S'"), comment='N=ELIMINADO / S=EXISTE')
+    MES_PERIODO: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    ANIO_PERIODO: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    CANT_TRATAMIENTO: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    AYUDANTE_ACTUAL: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    FECHA_CARGA: Mapped[Optional[datetime.date]] = mapped_column(Date)
+
+
+class GuardarRefacturacion(Base):
+    __tablename__ = 'guardar_refacturacion'
+    __table_args__ = (
+        Index('ANIO_PERIODO', 'ANIO_PERIODO'),
+        Index('CATEGORIA_A_B_C', 'CATEGORIA_A_B_C'),
+        Index('CODIGO_PRESTACION', 'CODIGO_PRESTACION'),
+        Index('CON_HONO_SANA', 'CON_HONO_SANA'),
+        Index('FECHA_CARGA', 'FECHA_CARGA'),
+        Index('FECHA_PRESTACION', 'FECHA_PRESTACION'),
+        Index('MES_PERIODO', 'MES_PERIODO'),
+        Index('NOMBRE_AFILIADO', 'NOMBRE_AFILIADO'),
+        Index('NOMBRE_AYUDANTE', 'NOMBRE_AYUDANTE'),
+        Index('NOMBRE_PRESTADOR', 'NOMBRE_PRESTADOR'),
+        Index('NRO_DOCUMENTO', 'NRO_DOCUMENTO'),
+        Index('NRO_ESPECIALIDAD', 'NRO_ESPECIALIDAD'),
+        Index('NRO_MATRICULA', 'NRO_MATRICULA'),
+        Index('NRO_SOCIO', 'NRO_SOCIO'),
+        Index('SANATORIO', 'SANATORIO')
+    )
+
+    ID: Mapped[int] = mapped_column(INTEGER(11), primary_key=True)
+    NRO_SOCIO: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"), comment='SOCIO DEL COLEGIO MEDICO')
+    CODIGO_PRESTACION: Mapped[str] = mapped_column(String(6, 'utf8_spanish_ci'), nullable=False, server_default=text("'0'"), comment='campo judicial')
+    NRO_MATRICULA: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"), comment='matricula prov. colegio medico y judicial')
+    NOMBRE_PRESTADOR: Mapped[str] = mapped_column(String(40, 'utf8_spanish_ci'), nullable=False, server_default=text("'A'"), comment='campo colegio medico y judicial')
+    ESTADODESCRIPCION: Mapped[str] = mapped_column(String(100, 'utf8_spanish_ci'), nullable=False, server_default=text("'A'"), comment='DESCRIPCION DEL ESTADO DEL AFILIADO - campo judicial')
+    MENSAJE: Mapped[str] = mapped_column(String(100, 'utf8_spanish_ci'), nullable=False, server_default=text("'A'"), comment='EN CASO QUE LA PROPIEDAD "RESULTADO" SE FALSE. ESTA PROPIEDAD CONTENDRA LA DETALLE DEL MISMO. - campo judicial')
+    NOMBRE_AFILIADO: Mapped[str] = mapped_column(String(40, 'utf8_spanish_ci'), nullable=False, server_default=text("'A'"), comment='CAMPO COLEGIO Y judicial')
+    NRO_AFILIADO: Mapped[str] = mapped_column(String(15, 'utf8_spanish_ci'), nullable=False, server_default=text("'0'"), comment='CAMPO JUDICIAL')
+    BARRA_AFILIADO: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    NRO_CONSULTA: Mapped[str] = mapped_column(String(16, 'utf8_spanish_ci'), nullable=False, server_default=text("'0'"), comment='campo judicial/ validacion o autorizacion de las obra sociales')
+    NRO_DOCUMENTO: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"), comment='campo judicial')
+    RESULTADO: Mapped[str] = mapped_column(String(5, 'utf8_spanish_ci'), nullable=False, server_default=text("'false'"), comment='true / false - campo judicial')
+    FECHASUSPENSION: Mapped[str] = mapped_column(String(10, 'utf8_spanish_ci'), nullable=False, server_default=text("'A'"), comment='campo judicial')
+    NRO_OBRA_SOCIAL: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"), comment='COLEGIO MEDICO')
+    IMPORTE_COLEGIO: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"), comment='COLEGIO MEDICO')
+    GASTOS: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    NRO_ESPECIALIDAD: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    CANTIDAD: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'1'"), comment='ALGUNAS OBRA SOCIAL TIENEN CANTIDAD DE LA MISMA PRESTACION DEL MISMO AFILIADO CON EL MISMO DOCTOR EN EL DIA')
+    EXISTE: Mapped[str] = mapped_column(String(1, 'utf8_spanish_ci'), nullable=False, server_default=text("'S'"), comment='N=ELIMINADO / S=EXISTE')
+    NOMBRE_ARCHIVO: Mapped[str] = mapped_column(String(100, 'utf8_spanish_ci'), nullable=False, server_default=text("'A1'"))
+    MES_PERIODO: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    ANIO_PERIODO: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    CANT_TRATAMIENTO: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    AYUDANTE_ACTUAL: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    CATEGORIA_A_B_C: Mapped[str] = mapped_column(String(1, 'utf8_spanish_ci'), nullable=False, server_default=text("'-'"))
+    PORCENTAJE: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    SANATORIO: Mapped[str] = mapped_column(String(50, 'utf8_spanish_ci'), nullable=False, server_default=text("'A'"))
+    PACIENTE: Mapped[str] = mapped_column(String(50, 'utf8_spanish_ci'), nullable=False, server_default=text("'A'"))
+    CODIGO_PRESTACION_2: Mapped[str] = mapped_column(String(6, 'utf8_spanish_ci'), nullable=False, server_default=text("'0'"))
+    CIRUJANO: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    PORCENTAJE_CIRUJANO: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    AYUDANTE: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    NOMBRE_AYUDANTE: Mapped[str] = mapped_column(String(40, 'utf8_spanish_ci'), nullable=False, server_default=text("'A'"))
+    MAT_AYUDANTE: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    PORCENTAJE_AYUDANTE: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    VALOR_CIRUJIA: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    VALOR_AYUDANTE: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    CON_HONO_SANA: Mapped[str] = mapped_column(String(1, 'utf8_spanish_ci'), nullable=False, server_default=text("'C'"), comment='CON=CONSULTA HONO=HONORARIO/ SANA=SANATORIO')
+    TOKEN: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    USUARIO_COLEGIO: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    FECHA_PRESTACION: Mapped[Optional[datetime.date]] = mapped_column(Date, comment='COLEGIO MEDICO')
+    FECHA_CARGA: Mapped[Optional[datetime.date]] = mapped_column(Date)
+    FECHA_CIRUGIA: Mapped[Optional[datetime.date]] = mapped_column(Date)
+
+
+class ListadoMedico(Base):
+    __tablename__ = 'listado_medico'
+    __table_args__ = (
+        Index('CATEGORIA', 'CATEGORIA'),
+        Index('NOMBRE', 'NOMBRE'),
+        Index('NRO_ESPECIALIDAD', 'NRO_ESPECIALIDAD'),
+        Index('NRO_ESPECIALIDAD2', 'NRO_ESPECIALIDAD2'),
+        Index('NRO_ESPECIALIDAD3', 'NRO_ESPECIALIDAD3'),
+        Index('NRO_ESPECIALIDAD4', 'NRO_ESPECIALIDAD4'),
+        Index('NRO_ESPECIALIDAD5', 'NRO_ESPECIALIDAD5'),
+        Index('NRO_SOCIO', 'NRO_SOCIO')
+    )
+
+    ID: Mapped[int] = mapped_column(INTEGER(11), primary_key=True)
+    NRO_ESPECIALIDAD: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    NRO_ESPECIALIDAD2: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    NRO_ESPECIALIDAD3: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    NRO_ESPECIALIDAD4: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    NRO_ESPECIALIDAD5: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    NRO_SOCIO: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    NOMBRE: Mapped[str] = mapped_column(String(40, 'utf8_spanish2_ci'), nullable=False, server_default=text("'a'"))
+    DOMICILIO_CONSULTA: Mapped[str] = mapped_column(String(100, 'utf8_spanish2_ci'), nullable=False, server_default=text("'a'"))
+    TELEFONO_CONSULTA: Mapped[str] = mapped_column(String(25, 'utf8_spanish2_ci'), nullable=False, server_default=text("'0'"))
+    MATRICULA_PROV: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    MATRICULA_NAC: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    DOMICILIO_PARTICULAR: Mapped[str] = mapped_column(String(100, 'utf8_spanish2_ci'), nullable=False, server_default=text("'a'"))
+    TELE_PARTICULAR: Mapped[str] = mapped_column(String(15, 'utf8_spanish2_ci'), nullable=False, server_default=text("'0'"))
+    CELULAR_PARTICULAR: Mapped[str] = mapped_column(String(15, 'utf8_spanish2_ci'), nullable=False, server_default=text("'0'"))
+    MAIL_PARTICULAR: Mapped[str] = mapped_column(String(50, 'utf8_spanish2_ci'), nullable=False, server_default=text("'a'"))
+    SEXO: Mapped[str] = mapped_column(String(1, 'utf8_spanish2_ci'), nullable=False, server_default=text("'M'"))
+    TIPO_DOC: Mapped[str] = mapped_column(String(3, 'utf8_spanish2_ci'), nullable=False, server_default=text("'DNI'"))
+    DOCUMENTO: Mapped[str] = mapped_column(String(8, 'utf8_spanish2_ci'), nullable=False, server_default=text("'0'"))
+    CUIT: Mapped[str] = mapped_column(String(12, 'utf8_spanish2_ci'), nullable=False, server_default=text("'0'"))
+    ANSSAL: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    MALAPRAXIS: Mapped[str] = mapped_column(String(100, 'utf8_spanish2_ci'), nullable=False, server_default=text("'A'"))
+    MONOTRIBUTISTA: Mapped[str] = mapped_column(String(2, 'utf8_spanish2_ci'), nullable=False, server_default=text("'NO'"))
+    FACTURA: Mapped[str] = mapped_column(String(2, 'utf8_spanish2_ci'), nullable=False, server_default=text("'NO'"))
+    COBERTURA: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    PROVINCIA: Mapped[str] = mapped_column(String(25, 'utf8_spanish2_ci'), nullable=False, server_default=text("'A'"))
+    CODIGO_POSTAL: Mapped[str] = mapped_column(String(15, 'utf8_spanish2_ci'), nullable=False, server_default=text("'0'"))
+    VITALICIO: Mapped[str] = mapped_column(String(1, 'utf8_spanish2_ci'), nullable=False, server_default=text("'N'"))
+    OBSERVACION: Mapped[str] = mapped_column(String(200, 'utf8_spanish2_ci'), nullable=False, server_default=text("'A'"))
+    CATEGORIA: Mapped[str] = mapped_column(String(1, 'utf8_spanish2_ci'), nullable=False, server_default=text("'A'"))
+    EXISTE: Mapped[str] = mapped_column(String(1, 'utf8_spanish2_ci'), nullable=False, server_default=text("'S'"))
+    NRO_ESPECIALIDAD6: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    EXCEP_DESDE: Mapped[str] = mapped_column(String(6, 'utf8_spanish2_ci'), nullable=False, server_default=text("'0'"))
+    EXCEP_HASTA: Mapped[str] = mapped_column(String(6, 'utf8_spanish2_ci'), nullable=False, server_default=text("'0'"))
+    EXCEP_DESDE2: Mapped[str] = mapped_column(String(6, 'utf8_spanish2_ci'), nullable=False, server_default=text("'0'"))
+    EXCEP_HASTA2: Mapped[str] = mapped_column(String(6, 'utf8_spanish2_ci'), nullable=False, server_default=text("'0'"))
+    EXCEP_DESDE3: Mapped[str] = mapped_column(String(6, 'utf8_spanish2_ci'), nullable=False, server_default=text("'0'"))
+    EXCEP_HASTA3: Mapped[str] = mapped_column(String(6, 'utf8_spanish2_ci'), nullable=False, server_default=text("'0'"))
+    INGRESAR: Mapped[str] = mapped_column(String(1, 'utf8_spanish2_ci'), nullable=False, server_default=text("'D'"), comment='D=DOCTOR / E=EMPLEADOS DEL COLEGIO / A ADMINISTRADOR')
+    FECHA_RECIBIDO: Mapped[Optional[datetime.date]] = mapped_column(Date)
+    FECHA_MATRICULA: Mapped[Optional[datetime.date]] = mapped_column(Date)
+    FECHA_INGRESO: Mapped[Optional[datetime.date]] = mapped_column(Date)
+    FECHA_NAC: Mapped[Optional[datetime.date]] = mapped_column(Date)
+    VENCIMIENTO_ANSSAL: Mapped[Optional[datetime.date]] = mapped_column(Date)
+    VENCIMIENTO_MALAPRAXIS: Mapped[Optional[datetime.date]] = mapped_column(Date)
+    VENCIMIENTO_COBERTURA: Mapped[Optional[datetime.date]] = mapped_column(Date)
+    FECHA_VITALICIO: Mapped[Optional[datetime.date]] = mapped_column(Date)
+
+
+class MedicoObraSocial(Base):
+    __tablename__ = 'medico_obra_social'
+    __table_args__ = (
+        Index('CATEGORIA', 'CATEGORIA'),
+        Index('ESPECIALIDAD', 'ESPECIALIDAD'),
+        Index('NOMBRE', 'NOMBRE'),
+        Index('NRO_OBRASOCIAL', 'NRO_OBRASOCIAL'),
+        Index('NRO_SOCIO', 'NRO_SOCIO')
+    )
+
+    ID: Mapped[int] = mapped_column(INTEGER(11), primary_key=True)
+    NRO_SOCIO: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    NOMBRE: Mapped[str] = mapped_column(String(40, 'utf8_spanish2_ci'), nullable=False, server_default=text("'a'"))
+    MATRICULA_PROV: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    MATRICULA_NAC: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    NRO_OBRASOCIAL: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    CATEGORIA: Mapped[str] = mapped_column(String(1, 'utf8_spanish2_ci'), nullable=False, server_default=text("'A'"))
+    ESPECIALIDAD: Mapped[str] = mapped_column(String(50, 'utf8_spanish2_ci'), nullable=False, server_default=text("'A'"))
+    TELEFONO_CONSULTA: Mapped[str] = mapped_column(String(25, 'utf8_spanish2_ci'), nullable=False, server_default=text("'0'"))
+    MARCA: Mapped[str] = mapped_column(String(1, 'utf8_spanish2_ci'), nullable=False, server_default=text("'N'"))
+
+
+class Nomenclador(Base):
+    __tablename__ = 'nomenclador'
+    __table_args__ = (
+        Index('CODIGO', 'CODIGO'),
+        Index('DESCRIPCION', 'DESCRIPCION')
+    )
+
+    ID: Mapped[int] = mapped_column(INTEGER(11), primary_key=True)
+    CODIGO: Mapped[str] = mapped_column(String(10, 'utf8_spanish2_ci'), nullable=False, server_default=text("'0'"))
+    DESCRIPCION: Mapped[str] = mapped_column(String(300, 'utf8_spanish2_ci'), nullable=False, server_default=text("'0'"))
+    CODIGOJUDICIALES: Mapped[str] = mapped_column(String(3, 'utf8_spanish2_ci'), nullable=False, server_default=text("'0'"))
+
+
+class NomencladorIoscor(Base):
+    __tablename__ = 'nomenclador_ioscor'
+    __table_args__ = (
+        Index('CODIGO', 'CODIGO'),
+        Index('DETALLE', 'DETALLE')
+    )
+
+    ID: Mapped[int] = mapped_column(INTEGER(11), primary_key=True)
+    CODIGO: Mapped[str] = mapped_column(String(11, 'utf8_spanish2_ci'), nullable=False, server_default=text("'0'"))
+    DETALLE: Mapped[str] = mapped_column(VARCHAR(200), nullable=False, server_default=text("'A'"))
+    HONORARIOS_ANTERIOR: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    AYUDANTE_ANTERIOR: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    GASTOS_ANTERIOR: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    HONORARIOS_ACTUAL: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    AYUDANTE_ACTUAL: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    GASTOS_ACTUAL: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    PORCEN_HONORARIOS: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    PORCEN_AYUDANTE: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    PORCEN_GASTOS: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+
+
+class ObrasSociales(Base):
+    __tablename__ = 'obras_sociales'
+    __table_args__ = (
+        Index('MARCA', 'MARCA'),
+        Index('NRO_OBRASOCIAL', 'NRO_OBRASOCIAL'),
+        Index('OBRA_SOCIAL', 'OBRA_SOCIAL')
+    )
+
+    ID: Mapped[int] = mapped_column(INTEGER(11), primary_key=True)
+    NRO_OBRASOCIAL: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    OBRA_SOCIAL: Mapped[str] = mapped_column(String(45, 'utf8_spanish2_ci'), nullable=False, server_default=text("'a'"))
+    MARCA: Mapped[str] = mapped_column(String(1, 'utf8_spanish2_ci'), nullable=False, server_default=text("'N'"))
+    VER_VALOR: Mapped[str] = mapped_column(String(1, 'utf8_spanish2_ci'), nullable=False, server_default=text("'N'"))
+
+
+class Paciente(Base):
+    __tablename__ = 'paciente'
+    __table_args__ = (
+        Index('NOMBRE', 'NOMBRE'),
+        Index('NRO_AFILIADO', 'NRO_AFILIADO'),
+        Index('NRO_DOCUMENTO', 'NRO_DOCUMENTO')
+    )
+
+    ID: Mapped[int] = mapped_column(INTEGER(11), primary_key=True)
+    NOMBRE: Mapped[str] = mapped_column(VARCHAR(40), nullable=False, server_default=text("'A'"))
+    NRO_AFILIADO: Mapped[str] = mapped_column(VARCHAR(15), nullable=False, server_default=text("'0'"))
+    NRO_DOCUMENTO: Mapped[str] = mapped_column(VARCHAR(13), nullable=False, server_default=text("'0'"))
+
+
+class Periodos(Base):
     __tablename__ = 'periodos'
+    __table_args__ = (
+        Index('ANIO', 'ANIO'),
+        Index('FECHA', 'FECHA'),
+        Index('MES', 'MES'),
+        Index('NRO_OBRA_SOCIAL', 'NRO_OBRA_SOCIAL')
+    )
 
-    created = Column(DateTime, nullable=True)
-    modified = Column(DateTime, nullable=True)
-    id = Column(Integer, primary_key=True)
-    mes = Column(Integer, nullable=True)
-    anio = Column(String(45), nullable=True)
-    liquidado = Column(Integer, nullable=False, default=0)
-
-    facturaciones = relationship("Facturacion", back_populates="periodo")
-
-
-class Facturacion(Base):
-    __tablename__ = 'facturaciones'
-
-    created = Column(DateTime, nullable=False)
-    modified = Column(DateTime, nullable=False)
-    deleted = Column(DateTime, nullable=True)
-    id = Column(Integer, primary_key=True)
-    periodo_id = Column(Integer, ForeignKey('periodos.id'), nullable=False)
-    obra_social_id = Column(Integer, ForeignKey('obra_sociales.id'), nullable=False)
-    estado_id = Column(Integer, nullable=False, default=1)
-    total = Column(Numeric(12, 2), nullable=False, default=0.00)
-    fact_hon_consultas = Column(Numeric(12, 2), nullable=False, default=0.00)
-    fact_hon_practicas = Column(Numeric(12, 2), nullable=False, default=0.00)
-    fact_gastos = Column(Numeric(12, 2), nullable=False, default=0.00)
-    fact_total = Column(Numeric(12, 2), nullable=False, default=0.00)
-    liquidacion_id = Column(Integer, nullable=True)
-    doble = Column(Integer, nullable=False, default=0)
-
-    periodo = relationship("Periodo", back_populates="facturaciones")
-    obra_social = relationship("ObraSocial", back_populates="facturaciones")
-    detalles = relationship("FacturacionDetalle", back_populates="facturacion")
-    debitos = relationship("Debito", back_populates="facturacion")
-    debito_detalles = relationship("DebitoDetalle", back_populates="facturacion")
+    ID: Mapped[int] = mapped_column(INTEGER(11), primary_key=True)
+    MES: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    ANIO: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    CERRADO: Mapped[str] = mapped_column(String(1, 'utf8_spanish2_ci'), nullable=False, server_default=text("'C'"), comment='C=CERRADO / A=ABIERTO')
+    TIPO_FACT: Mapped[str] = mapped_column(String(1, 'utf8_spanish2_ci'), nullable=False, server_default=text("'A'"))
+    NRO_FACT_1: Mapped[str] = mapped_column(String(5, 'utf8_spanish2_ci'), nullable=False, server_default=text("'0'"))
+    NRO_FACT_2: Mapped[str] = mapped_column(String(8, 'utf8_spanish2_ci'), nullable=False, server_default=text("'0'"))
+    NRO_OBRA_SOCIAL: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    FECHA: Mapped[str] = mapped_column(String(10, 'utf8_spanish2_ci'), nullable=False, server_default=text("'-'"))
 
 
-class FacturacionDetalle(Base):
-    __tablename__ = 'facturacion_detalles'
+class PeriodosDoctor(Base):
+    __tablename__ = 'periodos_doctor'
+    __table_args__ = (
+        Index('ANIO_DOCTOR', 'ANIO_DOCTOR'),
+        Index('CERRADO_DOCTOR', 'CERRADO_DOCTOR'),
+        Index('FECHA', 'FECHA'),
+        Index('MES_DOCTOR', 'MES_DOCTOR'),
+        Index('NRO_OBRA_SOCIAL', 'NRO_OBRA_SOCIAL')
+    )
 
-    created = Column(DateTime, nullable=False)
-    modified = Column(DateTime, nullable=False)
-    deleted = Column(DateTime, nullable=True)
-    id = Column(Integer, primary_key=True)
-    periodo_id = Column(Integer, nullable=False)
-    facturacion_id = Column(Integer, ForeignKey('facturaciones.id'), nullable=False)
-    socio_id = Column(Integer, nullable=False)
-    socio_modelo = Column(String(100), nullable=False)
-    categoria = Column(String(1), nullable=False)
-    nro_orden = Column(String(100), nullable=True)
-    nomenclador_codigo = Column(String(10), nullable=False)
-    nomenclador_practica_id = Column(Integer, nullable=True)
-    opcion_pago = Column(String(3), nullable=False)
-    sesion = Column(Integer, nullable=False)
-    cantidad = Column(Integer, nullable=False)
-    afiliado_id = Column(Integer, nullable=True)
-    nro_afiliado = Column(String(20), nullable=True)
-    apellido_nombre = Column(String(150), nullable=True)
-    tipo_servicio = Column(String(1), nullable=False)
-    clinica_id = Column(Integer, nullable=True)
-    fecha_practica = Column(Date, nullable=True)
-    tipo_orden = Column(String(1), nullable=False)
-    porcentaje = Column(Float, nullable=False)
-    honorarios = Column(Numeric(12, 2), nullable=False)
-    gastos = Column(Numeric(12, 2), nullable=False)
-    ayudantes = Column(Numeric(12, 2), nullable=False)
-    valor_unitario = Column(Numeric(12, 2), nullable=False, default=0.00)
-    total = Column(Numeric(12, 2), nullable=False)
-    recalculo_total = Column(Numeric(12, 2), nullable=False)
-    diferencia_total = Column(Numeric(12, 2), nullable=False)
-    tipo_calculo = Column(String(1), nullable=False)
-    matricula_profesional = Column(String(12), nullable=True)
-    cie10_codigo = Column(String(10), nullable=True)
-    diagnostico = Column(String(100), nullable=True)
-    nro_vias = Column(Integer, nullable=True)
-    fin_semana = Column(Integer, nullable=True)
-    nocturno = Column(Integer, nullable=True)
-    feriado = Column(Integer, nullable=True)
-    urgencias = Column(Integer, nullable=True)
-    nomenclador = Column(String(2), nullable=False)
-    tipo_via = Column(String(1), nullable=False, default='T')
-    estado_id = Column(Integer, nullable=False)
-    user_id = Column(Integer, nullable=False)
-    obra_social_socio_relacion = Column(Integer, nullable=False, default=1)
-    old_detalle_id = Column(Integer, nullable=False)
-
-    facturacion = relationship("Facturacion", back_populates="detalles")
-    debito_detalles = relationship("DebitoDetalle", back_populates="facturacion_detalle")
+    ID: Mapped[int] = mapped_column(INTEGER(11), primary_key=True)
+    MES_DOCTOR: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    ANIO_DOCTOR: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    CERRADO_DOCTOR: Mapped[str] = mapped_column(String(1, 'utf8_spanish2_ci'), nullable=False, server_default=text("'C'"))
+    NRO_OBRA_SOCIAL: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    FECHA: Mapped[str] = mapped_column(String(10, 'utf8_spanish2_ci'), nullable=False, server_default=text("'-'"))
 
 
-class Debito(Base):
-    __tablename__ = 'debitos'
+class UnidadNomenclador(Base):
+    __tablename__ = 'unidad_nomenclador'
 
-    created = Column(DateTime, nullable=False)
-    modified = Column(DateTime, nullable=False)
-    deleted = Column(DateTime, nullable=True)
-    id = Column(Integer, primary_key=True)
-    facturacion_id = Column(Integer, ForeignKey('facturaciones.id'), nullable=True)
-    estado_id = Column(Integer, nullable=False, default=0)
-    obra_social_id = Column(Integer, ForeignKey('obra_sociales.id'), nullable=True)
-    mes = Column(Integer, nullable=True)
-    anio = Column(Integer, nullable=True)
-    liquidacion_id = Column(Integer, ForeignKey('liquidaciones.id'), nullable=True)
-    grupo_id = Column(Integer, nullable=False, default=1)
-    pasar = Column(Integer, nullable=False, default=0)
-    tasks = Column(Integer, nullable=False, default=0)
-    factura_punto_venta = Column(Integer, nullable=True)
-    factura_numero = Column(Integer, nullable=True)
-
-    facturacion = relationship("Facturacion", back_populates="debitos")
-    obra_social = relationship("ObraSocial", back_populates="debitos")
-    liquidacion = relationship("Liquidacion", back_populates="debitos")
-    detalles = relationship("DebitoDetalle", back_populates="debito")
+    ID: Mapped[int] = mapped_column(INTEGER(11), primary_key=True)
+    CODIGOS: Mapped[str] = mapped_column(String(8), nullable=False, server_default=text("'0'"))
+    CIRUJANO: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    AYUDANTE: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    ANESTESISTA: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    OPERATORIO: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    CANTIDAD: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    ANESTESIA: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    INSTRUMENTO: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
 
 
-class DebitoDetalle(Base):
-    __tablename__ = 'debito_detalles'
+class UnidadNomenclador10(Base):
+    __tablename__ = 'unidad_nomenclador_10'
+    __table_args__ = (
+        Index('CODIGO', 'CODIGO'),
+        Index('NIVEL', 'NIVEL')
+    )
 
-    created = Column(DateTime, nullable=False)
-    modified = Column(DateTime, nullable=False)
-    deleted = Column(DateTime, nullable=True)
-    id = Column(Integer, primary_key=True)
-    debito_id = Column(Integer, ForeignKey('debitos.id'), nullable=False)
-    facturacion_id = Column(Integer, ForeignKey('facturaciones.id'), nullable=True)
-    facturacion_detalle_id = Column(Integer, ForeignKey('facturacion_detalles.id'), nullable=True)
-    socio_id = Column(Integer, nullable=False)
-    socio_modelo = Column(String(10), nullable=False)
-    corr = Column(String(10), nullable=True)
-    paciente = Column(Text, nullable=False)
-    cantidad = Column(Integer, nullable=False)
-    nomenclador_codigo = Column(String(10), nullable=False)
-    nro_orden = Column(String(100), nullable=True)
-    fecha_practica = Column(Date, nullable=True)
-    honorarios = Column(Numeric(12, 2), nullable=False, default=0.00)
-    gastos = Column(Numeric(12, 2), nullable=False, default=0.00)
-    antiguedad = Column(Numeric(12, 2), nullable=False, default=0.00)
-    porcentaje = Column(Numeric(10, 2), nullable=False, default=100.00)
-    clinica_id = Column(Integer, nullable=True)
-    tipo_movimiento = Column(String(1), nullable=False)
-    tipo = Column(Integer, nullable=False, default=1)
-    grupo_id = Column(Integer, nullable=False, default=1)
-    estado_id = Column(Integer, nullable=False, default=0)
-    tiene_facturacion = Column(Integer, nullable=False, default=1)
-    linea_indice = Column(Integer, nullable=False, default=0)
-
-    debito = relationship("Debito", back_populates="detalles")
-    facturacion = relationship("Facturacion", back_populates="debito_detalles")
-    facturacion_detalle = relationship("FacturacionDetalle", back_populates="debito_detalles")
+    ID: Mapped[int] = mapped_column(INTEGER(11), primary_key=True)
+    CODIGO: Mapped[str] = mapped_column(String(8), nullable=False, server_default=text("'0'"))
+    NIVEL: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    UQ: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    AYUDANTES: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
 
 
-class Concepto(Base):
-    __tablename__ = 'conceptos'
+class UnidadNomenclador7(Base):
+    __tablename__ = 'unidad_nomenclador_7'
+    __table_args__ = (
+        Index('CODIGO', 'CODIGO'),
+    )
 
-    created = Column(DateTime, nullable=False)
-    modified = Column(DateTime, nullable=False)
-    id = Column(Integer, primary_key=True)
-    descripcion = Column(Text, nullable=False)
-    codigo = Column(Integer, nullable=True)
-    es_deduccion = Column(Integer, nullable=False, default=0)
+    ID: Mapped[int] = mapped_column(INTEGER(11), primary_key=True)
+    CODIGO: Mapped[str] = mapped_column(String(8), nullable=False, server_default=text("'0'"))
+    UNIDAD: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
 
+
+class UnidadNomencladorInf(Base):
+    __tablename__ = 'unidad_nomenclador_inf'
+    __table_args__ = (
+        Index('CODIGO', 'CODIGO'),
+    )
+
+    ID: Mapped[int] = mapped_column(INTEGER(11), primary_key=True)
+    CODIGO: Mapped[str] = mapped_column(VARCHAR(4), nullable=False, server_default=text("'0'"))
+    NIVEL: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+
+
+class UsuarioColegio(Base):
+    __tablename__ = 'usuario_colegio'
+
+    ID: Mapped[int] = mapped_column(INTEGER(11), primary_key=True)
+    _10: Mapped[str] = mapped_column('10', String(10, 'utf8_spanish2_ci'), nullable=False, server_default=text("'A'"))
+    CLAVE: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    ADMINISTRA: Mapped[str] = mapped_column(String(1, 'utf8_spanish2_ci'), nullable=False, server_default=text("'N'"), comment='VA A LUGARES DETERMINADOS T=TODOS. A=AUTORIA/ R=REFACTURACION. ETC')
+    INGRESAR: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'1'"))
+
+
+class ValidarUsuario(Base):
+    __tablename__ = 'validar_usuario'
+    __table_args__ = (
+        Index('FECHA', 'FECHA'),
+        Index('IDOBRASOCIAL', 'IDOBRASOCIAL')
+    )
+
+    ID: Mapped[int] = mapped_column(INTEGER(11), primary_key=True)
+    REQUESTID: Mapped[str] = mapped_column(String(40, 'utf8_spanish2_ci'), nullable=False, server_default=text("'A'"), comment='campo judicial')
+    TOKEN: Mapped[str] = mapped_column(String(535, 'utf8_spanish2_ci'), nullable=False, server_default=text("'A'"), comment='campo judicial')
+    IDOBRASOCIAL: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"), comment='campo judicial')
+    FECHA: Mapped[Optional[datetime.date]] = mapped_column(Date)
+
+
+class ValorFijo(Base):
+    __tablename__ = 'valor_fijo'
+    __table_args__ = (
+        Index('CODIGO', 'CODIGO'),
+        Index('NROESPECIALIDAD', 'NRO_ESPECIALIDAD'),
+        Index('NRO_OBRA_SOCIAL', 'NRO_OBRA_SOCIAL')
+    )
+
+    ID: Mapped[int] = mapped_column(INTEGER(11), primary_key=True)
+    NRO_OBRA_SOCIAL: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    CODIGO: Mapped[str] = mapped_column(String(10, 'utf8_spanish2_ci'), nullable=False, server_default=text("'0'"))
+    CATEGORIA_A: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    CATEGORIA_B: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    CATEGORIA_C: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    GASTOS: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    AYUDANTE_A: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    AYUDANTE_B: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    AYUDANTE_C: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    NRO_ESPECIALIDAD: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    FECHA_CAMBIO: Mapped[str] = mapped_column(String(10, 'utf8_spanish2_ci'), nullable=False, server_default=text("'-'"))
+
+
+class ValorNomencladoFijo(Base):
+    __tablename__ = 'valor_nomenclado_fijo'
+
+    ID: Mapped[int] = mapped_column(INTEGER(11), primary_key=True)
+    NRO_OBRASOCIAL: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    CODIGO: Mapped[str] = mapped_column(String(8, 'utf8_spanish2_ci'), nullable=False, server_default=text("'0'"))
+    CONSULTA: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    GALEANO_QUIRURGICO: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    GASTOS_QUIRURGICOS: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    GALENO_PRACTICA: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    GALENO_RADIOLOGICO: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    GASTOS_RADIOLOGICO: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    GASTOS_BIOQUIMICOS: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    OTROS_GASTOS: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    GALENO_CIRUGIA_ADULTOS: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    GALENO_CIRUGIA_INFANTIL: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    CONSULTA_ESPECIAL: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    CATEGORIA_A: Mapped[str] = mapped_column(VARCHAR(1), nullable=False, server_default=text("'A'"))
+    CATEGORIA_B: Mapped[str] = mapped_column(VARCHAR(1), nullable=False, server_default=text("'B'"))
+    CATEGORIA_C: Mapped[str] = mapped_column(VARCHAR(1), nullable=False, server_default=text("'C'"))
+    HONORARIOS_A: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    HONORARIOS_B: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    HONORARIOS_C: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    GASTOS: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    AYUDANTE_A: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    AYUDANTE_B: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    AYUDANTE_C: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    NOMENCLADO: Mapped[str] = mapped_column(VARCHAR(1), nullable=False, server_default=text("'N'"))
+    C_P_H_S: Mapped[str] = mapped_column(String(1, 'utf8_spanish2_ci'), nullable=False, server_default=text("'C'"))
+    NRO_ESPECIALIDAD: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    NRO_ESPECIALIDAD2: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    NRO_ESPECIALIDAD3: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    NRO_ESPECIALIDAD4: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    NRO_ESPECIALIDAD5: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+
+
+class ValorNomencladoSwiss(Base):
+    __tablename__ = 'valor_nomenclado_swiss'
+
+    ID: Mapped[int] = mapped_column(INTEGER(11), primary_key=True)
+    CODIGO: Mapped[str] = mapped_column(String(8), nullable=False, server_default=text("'0'"))
+    HONORARIOS_A: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    GASTOS: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    AYUDANTE_A: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    C_P_H_S: Mapped[Optional[str]] = mapped_column(String(1))
+
+
+class ValorNomencladorNacional(Base):
+    __tablename__ = 'valor_nomenclador_nacional'
+    __table_args__ = (
+        Index('CODIGOS', 'CODIGOS'),
+        Index('C_P_H_S', 'C_P_H_S'),
+        Index('FECHA_CAMBIO', 'FECHA_CAMBIO'),
+        Index('NRO_OBRASOCIAL', 'NRO_OBRASOCIAL')
+    )
+
+    ID: Mapped[int] = mapped_column(INTEGER(11), primary_key=True)
+    CODIGOS: Mapped[str] = mapped_column(String(8), nullable=False, server_default=text("'0'"))
+    NRO_OBRASOCIAL: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    HONORARIOS_A: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    HONORARIOS_B: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    HONORARIOS_C: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    GASTOS: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    AYUDANTE_A: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    AYUDANTE_B: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    AYUDANTE_C: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    C_P_H_S: Mapped[str] = mapped_column(String(1), nullable=False, server_default=text("'P'"))
+    FECHA_CAMBIO: Mapped[Optional[datetime.date]] = mapped_column(Date)
+
+
+class ValorPrestacion(Base):
+    __tablename__ = 'valor_prestacion'
+    __table_args__ = (
+        Index('CODIGOS', 'CODIGOS'),
+        Index('C_P_H_S', 'C_P_H_S'),
+        Index('FECHA_CAMBIO', 'FECHA_CAMBIO'),
+        Index('NRO_OBRASOCIAL', 'NRO_OBRASOCIAL')
+    )
+
+    ID: Mapped[int] = mapped_column(INTEGER(11), primary_key=True)
+    CODIGOS: Mapped[str] = mapped_column(String(8), nullable=False, server_default=text("'0'"))
+    NRO_OBRASOCIAL: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    HONORARIOS_A: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    HONORARIOS_B: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    HONORARIOS_C: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    GASTOS: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    AYUDANTE_A: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    AYUDANTE_B: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    AYUDANTE_C: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    C_P_H_S: Mapped[str] = mapped_column(String(1), nullable=False, server_default=text("'C'"))
+    FECHA_CAMBIO: Mapped[Optional[datetime.date]] = mapped_column(Date)
+
+
+class ValorPrestacion10(Base):
+    __tablename__ = 'valor_prestacion_10'
+    __table_args__ = (
+        Index('CODIGOS', 'CODIGOS'),
+        Index('C_P_H_S', 'C_P_H_S'),
+        Index('FECHA_CAMBIO', 'FECHA_CAMBIO'),
+        Index('NRO_OBRASOCIAL', 'NRO_OBRASOCIAL')
+    )
+
+    ID: Mapped[int] = mapped_column(INTEGER(11), primary_key=True)
+    CODIGOS: Mapped[str] = mapped_column(String(8), nullable=False, server_default=text("'0'"))
+    NRO_OBRASOCIAL: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    HONORARIOS_A: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    HONORARIOS_B: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    HONORARIOS_C: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    GASTOS: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    AYUDANTE_A: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    AYUDANTE_B: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    AYUDANTE_C: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    C_P_H_S: Mapped[str] = mapped_column(String(1), nullable=False, server_default=text("'C'"))
+    FECHA_CAMBIO: Mapped[Optional[datetime.date]] = mapped_column(Date)
+
+
+class ValorPrestacion7(Base):
+    __tablename__ = 'valor_prestacion_7'
+    __table_args__ = (
+        Index('CODIGOS', 'CODIGOS'),
+        Index('C_P_H_S', 'C_P_H_S'),
+        Index('FECHA_CAMBIO', 'FECHA_CAMBIO'),
+        Index('NRO_OBRASOCIAL', 'NRO_OBRASOCIAL')
+    )
+
+    ID: Mapped[int] = mapped_column(INTEGER(11), primary_key=True)
+    CODIGOS: Mapped[str] = mapped_column(String(8), nullable=False, server_default=text("'0'"))
+    NRO_OBRASOCIAL: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    HONORARIOS_A: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    HONORARIOS_B: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    HONORARIOS_C: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    GASTOS: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    AYUDANTE_A: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    AYUDANTE_B: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    AYUDANTE_C: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    C_P_H_S: Mapped[str] = mapped_column(String(1), nullable=False, server_default=text("'C'"))
+    FECHA_CAMBIO: Mapped[Optional[datetime.date]] = mapped_column(Date)
+
+
+class ValorPrestacionInf(Base):
+    __tablename__ = 'valor_prestacion_inf'
+    __table_args__ = (
+        Index('CODIGOS', 'CODIGOS'),
+        Index('C_P_H_S', 'C_P_H_S'),
+        Index('FECHA_CAMBIO', 'FECHA_CAMBIO'),
+        Index('NRO_OBRASOCIAL', 'NRO_OBRASOCIAL')
+    )
+
+    ID: Mapped[int] = mapped_column(INTEGER(11), primary_key=True)
+    CODIGOS: Mapped[str] = mapped_column(String(8), nullable=False, server_default=text("'0'"))
+    NRO_OBRASOCIAL: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    HONORARIOS_A: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    HONORARIOS_B: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    HONORARIOS_C: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    GASTOS: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    AYUDANTE_A: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    AYUDANTE_B: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    AYUDANTE_C: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    C_P_H_S: Mapped[str] = mapped_column(String(1), nullable=False, server_default=text("'C'"))
+    FECHA_CAMBIO: Mapped[Optional[datetime.date]] = mapped_column(Date)
+
+
+class ValoresBoletin(Base):
+    __tablename__ = 'valores_boletin'
+    __table_args__ = (
+        Index('CATEGORIA_A', 'CATEGORIA_A'),
+        Index('CATEGORIA_B', 'CATEGORIA_B'),
+        Index('CATEGORIA_C', 'CATEGORIA_C'),
+        Index('FECHA_CAMBIO', 'FECHA_CAMBIO'),
+        Index('NIVEL', 'NIVEL'),
+        Index('NRO_OBRASOCIAL', 'NRO_OBRASOCIAL')
+    )
+
+    ID: Mapped[int] = mapped_column(INTEGER(11), primary_key=True)
+    NRO_OBRASOCIAL: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    CONSULTA: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    GALENO_QUIRURGICO: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    GASTOS_QUIRURGICOS: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    GALENO_PRACTICA: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    GALENO_RADIOLOGICO: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    GASTOS_RADIOLOGICO: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    GASTOS_BIOQUIMICOS: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    OTROS_GASTOS: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    GALENO_CIRUGIA_ADULTOS: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    GALENO_CIRUGIA_INFANTIL: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    CONSULTA_ESPECIAL: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    CATEGORIA_A: Mapped[str] = mapped_column(String(1, 'utf8_spanish2_ci'), nullable=False, server_default=text("'A'"))
+    CATEGORIA_B: Mapped[str] = mapped_column(String(1, 'utf8_spanish2_ci'), nullable=False, server_default=text("'A'"))
+    CATEGORIA_C: Mapped[str] = mapped_column(String(1, 'utf8_spanish2_ci'), nullable=False, server_default=text("'A'"))
+    NIVEL: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'7'"))
+    FECHA_CAMBIO: Mapped[Optional[datetime.date]] = mapped_column(Date)
+
+
+class ValoresBoletinHistorial(Base):
+    __tablename__ = 'valores_boletin_historial'
+    __table_args__ = (
+        Index('CATEGORIA_A', 'CATEGORIA_A'),
+        Index('CATEGORIA_B', 'CATEGORIA_B'),
+        Index('CATEGORIA_C', 'CATEGORIA_C'),
+        Index('FECHA_CAMBIO', 'FECHA_CAMBIO'),
+        Index('NIVEL', 'NIVEL'),
+        Index('NRO_OBRASOCIAL', 'NRO_OBRASOCIAL')
+    )
+
+    ID: Mapped[int] = mapped_column(INTEGER(11), primary_key=True)
+    NRO_OBRASOCIAL: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    CONSULTA: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    GALENO_QUIRURGICO: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    GASTOS_QUIRURGICOS: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    GALENO_PRACTICA: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    GALENO_RADIOLOGICO: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    GASTOS_RADIOLOGICO: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    GASTOS_BIOQUIMICOS: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    OTROS_GASTOS: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    GALENO_CIRUGIA_ADULTOS: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    GALENO_CIRUGIA_INFANTIL: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    CONSULTA_ESPECIAL: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    CATEGORIA_A: Mapped[str] = mapped_column(String(1, 'utf8_spanish2_ci'), nullable=False, server_default=text("'A'"))
+    CATEGORIA_B: Mapped[str] = mapped_column(String(1, 'utf8_spanish2_ci'), nullable=False, server_default=text("'A'"))
+    CATEGORIA_C: Mapped[str] = mapped_column(String(1, 'utf8_spanish2_ci'), nullable=False, server_default=text("'A'"))
+    NIVEL: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'7'"))
+    FECHA_CAMBIO: Mapped[str] = mapped_column(String(10, 'utf8_spanish2_ci'), nullable=False, server_default=text("'-'"))
+
+
+class ValoresObrasocial(Base):
+    __tablename__ = 'valores_obrasocial'
+    __table_args__ = (
+        Index('NRO_OBRASOCIAL', 'NRO_OBRASOCIAL'),
+    )
+
+    ID: Mapped[int] = mapped_column(INTEGER(11), primary_key=True)
+    NRO_OBRASOCIAL: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
+    CONSULTA: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    GALEANO_QUIRURGICO: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    GASTOS_QUIRURGICOS: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    GALENO_PRACTICA: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    GALENO_RADIOLOGICO: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    GASTOS_RADIOLOGICO: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    GASTOS_BIOQUIMICOS: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    OTROS_GASTOS: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    GALENO_CIRUGIA_ADULTOS: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+    GALENO_CIRUGIA_INFANTIL: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+
+
+class LiquidacionResumen(Base):
+    __tablename__ = "liquidacion_resumen"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    mes: Mapped[int] = mapped_column(Integer)                 # 1..12
+    anio: Mapped[int] = mapped_column(Integer)                # 1900..3000
+    nros_liquidacion: Mapped[Optional[str]] = mapped_column(Text)  # CSV o JSON de números/facturas
+    total_bruto: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default=0)
+    total_debitos: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default=0)
+    total_deduccion: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default=0)
+    estado: Mapped[Literal["a","c","e"]] = mapped_column(Enum("a","c","e", name="liqres_estado"), default="a")
+    cierre_timestamp: Mapped[Optional[str]] = mapped_column(String(25))  # o DateTime si preferís
+
+    liquidaciones: Mapped[list["Liquidacion"]] = relationship(back_populates="resumen", cascade="all, delete-orphan")
 
 class Liquidacion(Base):
-    __tablename__ = "liquidaciones"
-    created = Column(DateTime)
-    modified = Column(DateTime)
-    id = Column(Integer, primary_key=True)
-    mes = Column(Integer)
-    anio = Column(String(45))
-    dgi_mes = Column(Integer, nullable=False, default=0)
-    dgi_anio = Column(Integer, nullable=False, default=0)
-    nro_liquidacion = Column(Integer, nullable=False, default=0)
-    estado_id = Column(Integer, nullable=False, default=1)
-    proceso_id = Column(Integer, nullable=False, default=0)
-    calculo_deducciones = Column(Integer, nullable=False, default=0)
-    fecha_calculo = Column(DateTime)
-    resumen = Column(Text)
-    proceso_cerrar_id = Column(Integer, nullable=False, default=0)
-    fecha_cierre = Column(DateTime)
-    data_socio_grupo = Column(JSON)
-    es_visible = Column(Integer, nullable=False, default=1)
-    nro_inicio_cheque = Column(Integer, nullable=False, default=0)
-    santander_nro_inicio_cheque = Column(Integer, nullable=False, default=0)
-    proceso_pagos_id = Column(Integer, nullable=False, default=0)
+    __tablename__ = "liquidacion"
 
-    debitos = relationship("Debito", back_populates="liquidacion")
-    deducciones = relationship("Deduccion", back_populates="liquidacion")
-    liquidacion_detalles = relationship(
-        "LiquidacionDetalle",
-        back_populates="liquidacion"
-    )
-    liquidacion_obras = relationship(
-        "LiquidacionObra",
-        back_populates="liquidacion"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    resumen_id: Mapped[int] = mapped_column(ForeignKey("liquidacion_resumen.id"), nullable=True)
+
+    obra_social_id: Mapped[int] = mapped_column(Integer, index=True)              # NRO_OBRA_SOCIAL
+    periodo: Mapped[str] = mapped_column(String(7), index=True)                       # 'YYYY-MM'
+    nro_liquidacion: Mapped[Optional[str]] = mapped_column(String(30))                # (o factura)
+    total_bruto: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default=0)
+    total_debitos: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default=0)
+    total_neto: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default=0)
+
+    resumen: Mapped[Optional["LiquidacionResumen"]] = relationship(back_populates="liquidaciones")
+    detalles: Mapped[list["DetalleLiquidacion"]] = relationship(back_populates="liquidacion", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        UniqueConstraint("resumen_id", "obra_social_id", "periodo", name="uq_liq_res_os_per"),
     )
 
 
-class LiquidacionDetalle(Base):
-    __tablename__ = "liquidacion_detalles"
-    created = Column(DateTime)
-    modified = Column(DateTime)
-    id = Column(BigInteger, primary_key=True)
-    socio_id = Column(Integer)
-    socio_modelo = Column(String(10), nullable=False)
-    mes = Column(Integer, nullable=False, default=0)
-    anio = Column(Integer, nullable=False, default=0)
-    facturacion_id = Column(Integer)
-    liquidacion_obra_id = Column(Integer, nullable=False, default=0)
-    liquidacion_id = Column(Integer, ForeignKey("liquidaciones.id"))
-    concepto_id = Column(Integer, ForeignKey("conceptos.id"))
-    estado_id = Column(Integer, nullable=False, default=1)
-    liquidacion_estado_id = Column(Integer, nullable=False, default=0)
-    tipo_movimiento = Column(String(1), nullable=False)
-    fact_honorarios = Column(Numeric(12,2), nullable=False, default=0.00)
-    fact_gastos = Column(Numeric(12,2), nullable=False, default=0.00)
-    fact_antiguedad = Column(Numeric(12,2), nullable=False, default=0.00)
-    fact_total = Column(Numeric(12,2), nullable=False, default=0.00)
-    porcentaje = Column(Numeric(10,2), nullable=False, default=100.00)
-    liq_honorarios = Column(Numeric(12,2), nullable=False, default=0.00)
-    liq_gastos = Column(Numeric(10,2), nullable=False, default=0.00)
-    liq_antiguedad = Column(Numeric(12,2), nullable=False, default=0.00)
-    liq_total = Column(Numeric(12,2), nullable=False, default=0.00)
-    viene_de_id = Column(Integer, nullable=False, default=0)
-    debito_detalle_id = Column(Integer)
-    debito_id = Column(Integer)
-    obra_social_id = Column(Integer)
-    acarrea_liquidacion_id = Column(Integer)
-    reintegro_id = Column(Integer)
-    ultimo_descuento = Column(Integer, nullable=False, default=0)
-    tabla_relacionada = Column(String(50))
-    tabla_relacionada_id = Column(Integer)
-    paga_por_caja = Column(Integer, nullable=False, default=0)
-    orden = Column(Integer, nullable=False, default=0)
-    especialidad_id = Column(Integer)
-    paciente_descripcion = Column(Text)
-    clase = Column(Integer)
-    cbl_procesado = Column(Integer, nullable=False, default=0)
-    sis_viene_de = Column(String(50))
-    fecha_liq_obra = Column(DateTime)
-    orden_liq_socios = Column(Integer, nullable=False, default=0)
+class DetalleLiquidacion(Base):
+    __tablename__ = "detalle_liquidacion"
 
-    liquidacion = relationship("Liquidacion", back_populates="liquidacion_detalles")
-    concepto = relationship("Concepto", back_populates="liquidacion_detalles")
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    liquidacion_id: Mapped[int] = mapped_column(ForeignKey("liquidacion.id"), index=True)
+
+    medico_id: Mapped[int] = mapped_column(Integer, index=True)          
+    obra_social_id: Mapped[int] = mapped_column(Integer, index=True)
+    prestacion_id: Mapped[str] = mapped_column(String(16))
+    debito_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("debito.id"), nullable=True)
+    periodo: Mapped[str] = mapped_column(String(7), index=True)  # 'YYYY-MM'
 
 
-class LiquidacionObra(Base):
-    __tablename__ = "liquidacion_obras"
-    created = Column(DateTime, nullable=False)
-    modified = Column(DateTime, nullable=False)
-    deleted = Column(DateTime)
-    id = Column(Integer, primary_key=True)
-    facturacion_id = Column(Integer, nullable=False, default=0)
-    obra_social_id = Column(Integer, ForeignKey("obra_sociales.id"))
-    mes = Column(Integer)
-    anio = Column(Integer)
-    estado_id = Column(Integer, nullable=False, default=1)
-    porcentaje = Column(Numeric(10,2), nullable=False, default=0.00)
-    tipo = Column(Integer, nullable=False, default=0)
-    liquidaciones = Column(Text)
-    registros_total = Column(Integer, nullable=False, default=0)
-    registros_usados = Column(Integer, nullable=False, default=0)
-    modificaciones = Column(Text)
-    cantidad_modificaciones = Column(Integer, nullable=False, default=0)
-    bruto_registros = Column(Integer, nullable=False, default=0)
-    bruto_total = Column(Numeric(12,2), nullable=False, default=0.00)
-    es_visible = Column(Integer, nullable=False, default=1)
-    calculo_totales = Column(JSON)
-    pago_doble = Column(Integer, nullable=False, default=0)
+    bruto: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default=0)
+    debito_monto: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default=0)
+    deduccion_monto: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default=0)
+    neto: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default=0)
 
-    obra_social = relationship("ObraSocial", back_populates="liquidacion_obras")
-    liquidacion = relationship("Liquidacion", back_populates="liquidacion_obras")
-    detalles = relationship(
-        "LiquidacionObraDetalle",
-        back_populates="liquidacion_obra"
+    liquidacion: Mapped["Liquidacion"] = relationship(back_populates="detalles")
+
+    __table_args__ = (
+        UniqueConstraint("prestacion_id", name="uq_det_prestacion"),  # evita re-liquidar
+        Index("idx_det_os_per_med", "obra_social_id", "periodo", "medico_id"),
     )
-
-
-class LiquidacionObraDetalle(Base):
-    __tablename__ = "liquidacion_obra_detalles"
-    created = Column(DateTime, nullable=False)
-    modified = Column(DateTime, nullable=False)
-    id = Column(Integer, primary_key=True)
-    facturacion_id = Column(Integer, nullable=False, default=0)
-    fact_honorarios = Column(Numeric(12,2), nullable=False, default=0.00)
-    fact_gastos = Column(Numeric(12,2), nullable=False, default=0.00)
-    fact_antiguedad = Column(Numeric(12,2), nullable=False, default=0.00)
-    fact_total = Column(Numeric(12,2), nullable=False, default=0.00)
-    liquidacion_obra_id = Column(Integer, ForeignKey("liquidacion_obras.id"), nullable=False)
-    concepto_id = Column(Integer, ForeignKey("conceptos.id"), nullable=False)
-    liq_honorarios = Column(Numeric(12,2), nullable=False, default=0.00)
-    liq_gastos = Column(Numeric(12,2), nullable=False, default=0.00)
-    liq_antiguedad = Column(Numeric(12,2), nullable=False, default=0.00)
-    liq_total = Column(Numeric(12,2), nullable=False, default=0.00)
-    porcentaje = Column(Numeric(10,2), nullable=False, default=100.00)
-    tipo_movimiento = Column(String(1), nullable=False)
-    estado_id = Column(Integer, nullable=False, default=0)
-
-    liquidacion_obra = relationship("LiquidacionObra", back_populates="detalles")
-    concepto = relationship("Concepto", back_populates="liquidacion_obra_detalles")
-
-
-# class Descuento(Base):
-#     __tablename__ = "descuentos"
-#     id                           = Column(Integer, primary_key=True, autoincrement=True)
-#     created_at                   = Column(TIMESTAMP, nullable=False, server_default=func.current_timestamp())
-#     id_lista_concepto_descuento  = Column(Integer, ForeignKey("lista_concepto_descuento.id"), nullable=False)
-#     id_med                       = Column(Integer, ForeignKey("listado_medico.ID"), nullable=False)
-#     periodo                      = Column(String(7),ForeignKey("periodos.periodo"),nullable=False,comment="YYYYMM, FK a periodos.periodo")
-
-#     concepto    = relationship("ConceptoDescuento", back_populates="debitos")
-#     medico      = relationship("Medico", back_populates="descuentos")
-#     periodo_rel  = relationship("Periodo",back_populates="descuentos",foreign_keys=[periodo],viewonly=True)
-
-# class OtrosDescuentos(Base):
-#     __tablename__ = "otros_descuentos"
-#     id          = Column(Integer, primary_key=True, autoincrement=True)
-#     id_med     = Column(Integer, ForeignKey("listado_medico.ID"), nullable=False)
-#     concepto    = Column(String(100), nullable=False)
-#     importe     = Column(Numeric(10,2), nullable=False)
-#     periodo     = Column(String(7),ForeignKey("periodos.periodo"),nullable=False,comment="YYYYMM, FK a periodos.periodo")
-#     observacion = Column(String(200), nullable=True)
-#     created_at  = Column(TIMESTAMP, nullable=False, server_default=func.current_timestamp())
-
-#     medico      = relationship("Medico")
-#     periodo_rel = relationship("Periodo",back_populates="otros_descuentos",foreign_keys=[periodo],viewonly=True)
-
-# class Prestacion(Base):
-#     __tablename__ = "prestaciones"
-#     id                 = Column("id_prestacion", BigInteger, primary_key=True, autoincrement=True)
-#     periodo            = Column(String(7),ForeignKey("periodos.periodo"),nullable=False,comment="YYYYMM, FK a periodos.periodo")
-#     id_med             = Column(Integer, ForeignKey("listado_medico.ID"), nullable=False)
-#     id_os              = Column(Integer, ForeignKey("obras_sociales.id"), nullable=False)
-#     id_nomenclador     = Column(Integer, nullable=False)
-#     cantidad           = Column(Integer, nullable=False)
-#     honorarios         = Column(Numeric(10,2), nullable=False)
-#     gastos             = Column(Numeric(10,2), nullable=False)
-#     ayudante           = Column(Numeric(10,2), nullable=False)
-#     importe_total      = Column(Numeric(14,2), nullable=False)
-#     created_at         = Column(TIMESTAMP, nullable=False, server_default=func.current_timestamp())
-
-#     medico      = relationship("Medico", back_populates="prestaciones")
-#     obra_social = relationship("ObraSocial", back_populates="prestaciones")
-#     periodo_rel = relationship("Periodo",back_populates="prestaciones",foreign_keys=[periodo],viewonly=True)
-#     debitos     = relationship("Debito", back_populates="prestacion")
-# class DetalleFacturacion(Base):
-#     __tablename__ = "detalle_facturacion"
-#     id_detalle_prestaciones = Column(
-#         BigInteger, primary_key=True, autoincrement=True
-#     )
-#     periodo = Column(String(6), nullable=False)
-#     cod_med = Column(BigInteger, nullable=False)
-#     categoria = Column(CHAR(1), nullable=False)
-#     id_especialidad = Column(SmallInteger, nullable=False)
-#     nro_orden = Column(BigInteger, nullable=False)
-#     cod_obr = Column(SmallInteger, nullable=False)
-#     cod_nom = Column(String(8), nullable=False)
-#     tpo_funcion = Column(String(2), nullable=False)
-#     sesion = Column(Integer,nullable=False,comment="Cantidad de sesiones = X")
-#     cantidad = Column(Integer, nullable=False)
-#     dni_p = Column(String(20),nullable=False,comment="OSDE_nro_afiliado")
-#     nom_ape_p = Column(String(60), nullable=False)
-#     tpo_serv = Column(CHAR(1), nullable=False)
-#     cod_clinica = Column(SmallInteger, nullable=False)
-#     fecha_practica = Column(Date, nullable=False)
-#     tipo_orden = Column(CHAR(1), nullable=False)
-#     porc = Column(Integer, nullable=False)
-#     honorarios = Column(Numeric(10, 2), nullable=False) # double(10,2)
-#     gastos = Column(Numeric(10, 2), nullable=False) # double(10,2)
-#     ayudante = Column(Numeric(10, 2), nullable=False) # double(10,2)
-#     importe_total = Column(Numeric(10, 2), nullable=False) # double(10,2)
-#     manual = Column(CHAR(1), nullable=False)
-#     cod_med_indica = Column(String(12),nullable=False,comment="OSDE_codigo_prestador")
-#     codigo_oms = Column(String(12),nullable=False,comment="OSDE_codigo_prestador")
-#     diag = Column(String(100), nullable=False, comment="OSDE_nro_transaccion")
-#     nro_vias = Column(String(2), nullable=False, comment="OSDE_tipo_de_orden")
-#     fin_semana = Column(String(6), nullable=False, comment="OSDE_nro_plan")
-#     nocturno = Column(String(2), nullable=False, comment="Osde_Tipo_prestacion")
-#     feriado = Column(CHAR(2), nullable=False, comment="	Campo de tipo nomenclador: NN, CA, CI, NC.")
-#     urgencia = Column(CHAR(1), nullable=False, comment="Campo deVia__T=Tradicional, L=LaParoscopica	")
-#     estado = Column(CHAR(1), nullable=False, default="A")
-#     usuario = Column(String(15), nullable=False, default="")
-#     created = Column(TIMESTAMP, nullable=False, server_default=func.current_timestamp())
-#     ck_practica_id = Column(Integer, nullable=True)
-#     ck_revisar = Column(Integer, nullable=True)
-#     ck_estado_id = Column(Integer, nullable=True)
-

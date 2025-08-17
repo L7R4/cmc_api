@@ -13,8 +13,7 @@ class Settings(BaseSettings):
             f"mysql+aiomysql://{self.MYSQL_USER}:"
             f"{self.MYSQL_PASS}@{self.MYSQL_HOST}/{self.MYSQL_DB}"
         )
-
-    @property
+# 
     def CORS_LIST(self) -> list[str]:
         return [o.strip() for o in self.CORS_ORIGINS.split(',') if o.strip()]
 

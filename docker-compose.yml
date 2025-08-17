@@ -16,7 +16,7 @@ services:
       - MYSQL_USER=root
       - MYSQL_PASS=158896
       - MYSQL_HOST=mysql
-      - MYSQL_DB=cmcdb
+      - MYSQL_DB=coleg185_anexo
       - CORS_ORIGINS=http://localhost,http://localhost:5173
 
   mysql:
@@ -25,7 +25,7 @@ services:
     restart: always
     environment:
       MYSQL_ROOT_PASSWORD: 158896
-      MYSQL_DATABASE: cmcdb
+      MYSQL_DATABASE: coleg185_anexo
     volumes:
       - mysql_data:/var/lib/mysql
     ports:

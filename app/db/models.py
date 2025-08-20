@@ -873,8 +873,21 @@ class DetalleLiquidacion(Base):
     neto: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default=0)
 
     liquidacion: Mapped["Liquidacion"] = relationship(back_populates="detalles")
+    debito: Mapped["Debito"] = relationship(back_populates="detalles_liquidacion")
 
     __table_args__ = (
         UniqueConstraint("prestacion_id", name="uq_det_prestacion"),  # evita re-liquidar
         Index("idx_det_os_per_med", "obra_social_id", "periodo", "medico_id"),
     )
+
+
+class Debito(Base):
+    __tablename__ = "debito"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    nro_debito: Mapped[str] = mapped_column(String(16), unique=True, index=True)  # o UUID
+    descripcion: Mapped[str] = mapped_column(String(255), nullable=False)
+    monto: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default=0)
+    fecha: Mapped[Optional[datetime.date]] = mapped_column(Date, nullable=True)
+
+    detalles_liquidacion: Mapped[list["DetalleLiquidacion"]] = relationship(back_populates="debito", cascade="all, delete-orphan")

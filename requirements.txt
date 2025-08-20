@@ -8,3 +8,4 @@ alembic
 pydantic-settings
 pymysql
 python-dateutil
+openpyxl

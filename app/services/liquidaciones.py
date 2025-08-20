@@ -252,8 +252,10 @@ async def generar_preview(
     agrupado_por_medico: Dict[int, Dict[str, Any]] = {}
     totales_resumen = {"bruto": 0.0, "descuentos": 0.0,"debitos": 0.0, "neto": 0.0}
     total_incluidas = 0
-
+    actor_cont = 0
     for row in prestaciones_rows:
+        if actor_cont == 10:
+            break
         if row.get("nro_consulta") in ["0", "1"] or row.get("nro_consulta") is None:
             continue
 
@@ -274,12 +276,13 @@ async def generar_preview(
         factor = cantidad * cantidad_tratamiento
 
         codigo_prestacion = row["codigo_prestacion"]
-
+        
         # ----------------- Actor: Médico principal -----------------
         actor_id = to_int_id(row.get("medico_id"))
         actor_nombre = (row.get("medico_nombre") or "").strip().title() or None
 
         if actor_id is not None:
+            actor_cont += 1
             clave = (id_atencion, actor_id)
             if clave not in prestacion_actor_vista:
                 prestacion_actor_vista.add(clave)

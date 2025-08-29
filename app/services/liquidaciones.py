@@ -1,5 +1,4 @@
 # app/services/liquidaciones.py
-from __future__ import annotations
 from typing import Dict, Any, List, Optional, Set, Tuple
 from decimal import Decimal
 import re, datetime
@@ -84,7 +83,7 @@ def agregar_prestacion_agrupada(
     """
     Inserta la prestación en la estructura medico -> obra_social -> periodo
     y actualiza totales de periodo, de la obra social y del médico.
-    Si se recibe `totales_resumen`, también actualiza los totales globales.
+    Si se recibe totales_resumen, también actualiza los totales globales.
     """
     if user_id is None:
         return agrupado_por_medico  # sin id no agrupamos
@@ -228,16 +227,20 @@ async def generar_preview(
             GuardarAtencion.ANIO_PERIODO.label("anio_periodo"),
             GuardarAtencion.MES_PERIODO.label("mes_periodo"),
             GuardarAtencion.VALOR_CIRUJIA.label("valor_cirugia"),
+            GuardarAtencion.PORCENTAJE.label("porcentaje"),
             GuardarAtencion.GASTOS.label("gastos"),
             GuardarAtencion.CANTIDAD.label("cantidad"),
             GuardarAtencion.CANT_TRATAMIENTO.label("cantidad_tratamiento"),
             GuardarAtencion.AYUDANTE.label("nro_socio_ayudante"),
+            GuardarAtencion.PORCENTAJE_AYUDANTE.label("porcentaje_ayudante"),
+            GuardarAtencion.PORCENTAJE_AYUDANTE_2.label("porcentaje_ayudante_2"),
             GuardarAtencion.NOMBRE_AYUDANTE.label("nombre_ayudante"),
             GuardarAtencion.AYUDANTE_2.label("nro_socio_ayudante_2"),
             GuardarAtencion.NOMBRE_AYUDANTE_2.label("nombre_ayudante_2"),
             GuardarAtencion.VALOR_AYUDANTE.label("valor_ayudante"),
             GuardarAtencion.VALOR_AYUDANTE_2.label("valor_ayudante_2"),
             GuardarAtencion.NRO_CONSULTA.label("nro_consulta"),
+            GuardarAtencion.EXISTE.label("existe"),
         )
         .where(
             condicion_compuesta,
@@ -254,8 +257,8 @@ async def generar_preview(
     total_incluidas = 0
     actor_cont = 0
     for row in prestaciones_rows:
-        if actor_cont == 10:
-            break
+        if row.get("existe") != "S":
+            continue
         if row.get("nro_consulta") in ["0", "1"] or row.get("nro_consulta") is None:
             continue
 
@@ -581,4 +584,3 @@ async def generar_preview(
 #         },
 #         "por_medico": por_medico_salida
 #     }
-

@@ -1,123 +1,90 @@
-from pydantic import BaseModel
-from typing import Optional, List, Dict
-from datetime import datetime
+from __future__ import annotations
+from typing import Optional, List
 from decimal import Decimal
+from pydantic import BaseModel, Field, validator
+from enum import Enum
+import re
 
-# ================================
-#           LIQUIDACIÓN
-# ================================
+# --------- helpers ----------
+# _RX_PERIODO = re.compile(r"^\s*(\d{4})[-/]?(\d{1,2})\s*$")
 
-class LiquidacionBase(BaseModel):
-    mes: Optional[int]
-    anio: Optional[str]
-    dgi_mes: int = 0
-    dgi_anio: int = 0
-    nro_liquidacion: int = 0
-    estado_id: int = 1
-    proceso_id: int = 0
-    calculo_deducciones: int = 0
-    fecha_calculo: Optional[datetime] = None
-    resumen: Optional[str] = None
-    proceso_cerrar_id: int = 0
-    fecha_cierre: Optional[datetime] = None
-    data_socio_grupo: Optional[Dict] = None
-    es_visible: int = 1
-    nro_inicio_cheque: int = 0
-    santander_nro_inicio_cheque: int = 0
-    proceso_pagos_id: int = 0
+# def _normalizar_periodo(v: str) -> str:
+#     m = _RX_PERIODO.match(v or "")
+#     if not m:
+#         raise ValueError("Periodo inválido; use YYYY-MM.")
+#     y, mo = int(m.group(1)), int(m.group(2))
+#     if y < 1900 or y > 3000 or not (1 <= mo <= 12):
+#         raise ValueError("Periodo fuera de rango.")
+#     return f"{y:04d}-{mo:02d}"
 
-class LiquidacionCreate(LiquidacionBase):
-    detalles: List["LiquidacionDetalleCreate"] = []
+class EstadoResumen(str, Enum):
+    abierto = "a"     # abierto
+    cerrado = "c"     # cerrado
+    emitido = "e"     # emitido/facturado
 
-class LiquidacionUpdate(BaseModel):
-    mes: Optional[int] = None
-    anio: Optional[str] = None
-    dgi_mes: Optional[int] = None
-    dgi_anio: Optional[int] = None
-    nro_liquidacion: Optional[int] = None
-    estado_id: Optional[int] = None
-    proceso_id: Optional[int] = None
-    calculo_deducciones: Optional[int] = None
-    fecha_calculo: Optional[datetime] = None
-    resumen: Optional[str] = None
-    proceso_cerrar_id: Optional[int] = None
-    fecha_cierre: Optional[datetime] = None
-    data_socio_grupo: Optional[Dict] = None
-    es_visible: Optional[int] = None
-    nro_inicio_cheque: Optional[int] = None
-    santander_nro_inicio_cheque: Optional[int] = None
-    proceso_pagos_id: Optional[int] = None
+# --------- LiquidacionResumen ---------
+class LiquidacionResumenBase(BaseModel):
+    mes: int = Field(..., ge=1, le=12)
+    anio: int = Field(..., ge=1900, le=3000)
+    estado: EstadoResumen = EstadoResumen.abierto
+    cierre_timestamp: Optional[str] = None
 
-class LiquidacionOut(LiquidacionBase):
-    id: int
-    created: datetime
-    modified: datetime
-    detalles: List["LiquidacionDetalleOut"] = []
-
-    class Config:
-        orm_mode = True
-
-# ================================
-#      LIQUIDACIÓN DETALLE
-# ================================
-
-class LiquidacionDetalleBase(BaseModel):
-    socio_id: int
-    socio_modelo: str
-    mes: int = 0
-    anio: int = 0
-    facturacion_id: Optional[int] = None
-    # liquidacion_obra_id: int = 0
-    liquidacion_id: Optional[int] = None
-    concepto_id: Optional[int] = None
-    estado_id: int = 1
-    # liquidacion_estado_id: int = 0
-    tipo_movimiento: str
-    fact_honorarios: Decimal = Decimal("0.00")
-    fact_gastos: Decimal = Decimal("0.00")
-    fact_antiguedad: Decimal = Decimal("0.00")
-    fact_total: Decimal = Decimal("0.00")
-    porcentaje: Decimal = Decimal("100.00")
-    liq_honorarios: Decimal = Decimal("0.00")
-    liq_gastos: Decimal = Decimal("0.00")
-    liq_antiguedad: Decimal = Decimal("0.00")
-    liq_total: Decimal = Decimal("0.00")
-    debito_id: Optional[int] = None
-    obra_social_id: Optional[int] = None
-
-class LiquidacionDetalleCreate(LiquidacionDetalleBase):
+class LiquidacionResumenCreate(LiquidacionResumenBase):
+    # Totales se inician en 0; no se editan por POST
     pass
 
-class LiquidacionDetalleUpdate(BaseModel):
-    socio_id: Optional[int] = None
-    socio_modelo: Optional[str] = None
-    mes: Optional[int] = None
-    anio: Optional[int] = None
-    facturacion_id: Optional[int] = None
-    # liquidacion_obra_id: Optional[int] = None
-    liquidacion_id: Optional[int] = None
-    concepto_id: Optional[int] = None
-    estado_id: Optional[int] = None
-    # liquidacion_estado_id: Optional[int] = None
-    tipo_movimiento: Optional[str] = None
-    fact_honorarios: Optional[Decimal] = None
-    fact_gastos: Optional[Decimal] = None
-    fact_antiguedad: Optional[Decimal] = None
-    fact_total: Optional[Decimal] = None
-    porcentaje: Optional[Decimal] = None
-    liq_honorarios: Optional[Decimal] = None
-    liq_gastos: Optional[Decimal] = None
-    liq_antiguedad: Optional[Decimal] = None
-    liq_total: Optional[Decimal] = None
-    debito_id: Optional[int] = None
-    obra_social_id: Optional[int] = None
+class LiquidacionResumenUpdate(BaseModel):
+    mes: Optional[int] = Field(None, ge=1, le=12)
+    anio: Optional[int] = Field(None, ge=1900, le=3000)
+    estado: Optional[EstadoResumen] = None
+    cierre_timestamp: Optional[str] = None
 
-class LiquidacionDetalleOut(LiquidacionDetalleBase):
+class LiquidacionResumenRead(BaseModel):
     id: int
-    created: datetime
-    modified: datetime
+    mes: int
+    anio: int
+    total_bruto: Decimal
+    total_debitos: Decimal
+    total_deduccion: Decimal
+    estado: EstadoResumen
+    cierre_timestamp: Optional[str]
 
     class Config:
-        orm_mode = True
+        from_attributes = True
+
+# --------- Liquidacion (hija) ---------
+class LiquidacionBase(BaseModel):
+    resumen_id: int
+    obra_social_id: int
+    mes_periodo: int
+    anio_periodo: int
+    nro_liquidacion: Optional[str] = None
 
 
+class LiquidacionCreate(LiquidacionBase):
+    # Totales se inician en 0; no se editan por POST
+    pass
+
+class LiquidacionUpdate(BaseModel):
+    obra_social_id: Optional[int] = None
+    mes_periodo: Optional[int] =None
+    anio_periodo: Optional[int] =None
+    nro_liquidacion: Optional[str] = None
+
+class LiquidacionRead(BaseModel):
+    id: int
+    resumen_id: int
+    obra_social_id: int
+    mes_periodo: int
+    anio_periodo: int
+    nro_liquidacion: Optional[str]
+    total_bruto: Decimal
+    total_debitos: Decimal
+    total_neto: Decimal
+
+    class Config:
+        from_attributes = True
+
+# --------- composiciones de lectura ---------
+class LiquidacionResumenWithItems(LiquidacionResumenRead):
+    liquidaciones: List[LiquidacionRead] = []

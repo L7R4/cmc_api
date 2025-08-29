@@ -1,5 +1,4 @@
 # app/services/liquidaciones.py
-from __future__ import annotations
 from typing import Dict, Any, List, Optional, Set, Tuple
 from decimal import Decimal
 import re, datetime
@@ -84,7 +83,7 @@ def agregar_prestacion_agrupada(
     """
     Inserta la prestación en la estructura medico -> obra_social -> periodo
     y actualiza totales de periodo, de la obra social y del médico.
-    Si se recibe `totales_resumen`, también actualiza los totales globales.
+    Si se recibe totales_resumen, también actualiza los totales globales.
     """
     if user_id is None:
         return agrupado_por_medico  # sin id no agrupamos
@@ -585,4 +584,3 @@ async def generar_preview(
 #         },
 #         "por_medico": por_medico_salida
 #     }
-

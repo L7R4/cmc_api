@@ -228,16 +228,20 @@ async def generar_preview(
             GuardarAtencion.ANIO_PERIODO.label("anio_periodo"),
             GuardarAtencion.MES_PERIODO.label("mes_periodo"),
             GuardarAtencion.VALOR_CIRUJIA.label("valor_cirugia"),
+            GuardarAtencion.PORCENTAJE.label("porcentaje"),
             GuardarAtencion.GASTOS.label("gastos"),
             GuardarAtencion.CANTIDAD.label("cantidad"),
             GuardarAtencion.CANT_TRATAMIENTO.label("cantidad_tratamiento"),
             GuardarAtencion.AYUDANTE.label("nro_socio_ayudante"),
+            GuardarAtencion.PORCENTAJE_AYUDANTE.label("porcentaje_ayudante"),
+            GuardarAtencion.PORCENTAJE_AYUDANTE_2.label("porcentaje_ayudante_2"),
             GuardarAtencion.NOMBRE_AYUDANTE.label("nombre_ayudante"),
             GuardarAtencion.AYUDANTE_2.label("nro_socio_ayudante_2"),
             GuardarAtencion.NOMBRE_AYUDANTE_2.label("nombre_ayudante_2"),
             GuardarAtencion.VALOR_AYUDANTE.label("valor_ayudante"),
             GuardarAtencion.VALOR_AYUDANTE_2.label("valor_ayudante_2"),
             GuardarAtencion.NRO_CONSULTA.label("nro_consulta"),
+            GuardarAtencion.EXISTE.label("existe"),
         )
         .where(
             condicion_compuesta,
@@ -254,8 +258,8 @@ async def generar_preview(
     total_incluidas = 0
     actor_cont = 0
     for row in prestaciones_rows:
-        if actor_cont == 10:
-            break
+        if row.get("existe") != "S":
+            continue
         if row.get("nro_consulta") in ["0", "1"] or row.get("nro_consulta") is None:
             continue
 

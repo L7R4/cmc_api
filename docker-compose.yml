@@ -13,34 +13,40 @@ services:
     depends_on:
       - mysql
     environment:
-      - MYSQL_USER=root
-      - MYSQL_PASS=158896
-      - MYSQL_HOST=mysql
-      - MYSQL_DB=coleg185_anexo
+      - MYSQL_USER=c1611768_cmctest
+      - MYSQL_PASS=VI21divida
+      - MYSQL_HOST=localhost
+      - MYSQL_DB=c1611768_cmctest
       - CORS_ORIGINS=http://localhost,http://localhost:5173
+    # environment:
+    #   - MYSQL_USER=root
+    #   - MYSQL_PASS=158896
+    #   - MYSQL_HOST=mysql
+    #   - MYSQL_DB=coleg185_anexo
+    #   - CORS_ORIGINS=http://localhost,http://localhost:5173
 
-  mysql:
-    container_name: mysql
-    image: mysql:5.7
-    restart: always
-    environment:
-      MYSQL_ROOT_PASSWORD: 158896
-      MYSQL_DATABASE: coleg185_anexo
-    volumes:
-      - mysql_data:/var/lib/mysql
-    ports:
-      - "3306:3306"
+  # mysql:
+  #   container_name: mysql
+  #   image: mysql:5.7
+  #   restart: always
+  #   environment:
+  #     MYSQL_ROOT_PASSWORD: 158896
+  #     MYSQL_DATABASE: coleg185_anexo
+  #   volumes:
+  #     - mysql_data:/var/lib/mysql
+  #   ports:
+  #     - "3306:3306"
 
-  phpmyadmin:
-    container_name: phpmyadmin
-    image: phpmyadmin/phpmyadmin
-    restart: always
-    ports:
-      - "8080:80"
-    environment:
-      PMA_HOST: mysql
-      PMA_USER: root
-      PMA_PASSWORD: 158896
+  # phpmyadmin:
+  #   container_name: phpmyadmin
+  #   image: phpmyadmin/phpmyadmin
+  #   restart: always
+  #   ports:
+  #     - "8080:80"
+  #   environment:
+  #     PMA_HOST: mysql
+  #     PMA_USER: root
+  #     PMA_PASSWORD: 158896
 
 volumes:
   mysql_data:

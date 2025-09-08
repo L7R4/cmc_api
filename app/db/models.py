@@ -846,11 +846,22 @@ class Liquidacion(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     resumen_id: Mapped[int] = mapped_column(ForeignKey("liquidacion_resumen.id"), nullable=False)
 
-    obra_social_id: Mapped[int] = mapped_column(Integer, index=True)              
-    # periodo: Mapped[str] = mapped_column(String(7), index=True) 
-    mes_periodo: Mapped[int] = mapped_column(Integer)                 
-    anio_periodo: Mapped[int] = mapped_column(Integer)                       
-    nro_liquidacion: Mapped[Optional[str]] = mapped_column(String(30))                
+    obra_social_id: Mapped[int] = mapped_column(Integer, index=True)
+    mes_periodo: Mapped[int] = mapped_column(Integer)
+    anio_periodo: Mapped[int] = mapped_column(Integer)
+
+    # NUEVO: versión de reliquidación (0 = primera)
+    version: Mapped[int] = mapped_column(Integer, default=0)
+    
+    # NUEVO: estado A/C + timestamp opcional
+    estado: Mapped[Literal["A","C"]] = mapped_column(
+        Enum("A","C", name="liq_estado"), default="A", server_default="A", index=True
+    )
+    cierre_timestamp: Mapped[Optional[str]] = mapped_column(String(25), nullable=True)
+
+    # Mantengo el campo que ya usás, pero ahora lo guardamos con prefijo "NNN-"
+    nro_liquidacion: Mapped[Optional[str]] = mapped_column(String(30))
+
     total_bruto: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default=0)
     total_debitos: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default=0)
     total_neto: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default=0)
@@ -859,8 +870,9 @@ class Liquidacion(Base):
     detalles: Mapped[list["DetalleLiquidacion"]] = relationship(back_populates="liquidacion", cascade="all, delete-orphan")
 
     __table_args__ = (
-        UniqueConstraint("resumen_id", "obra_social_id", "mes_periodo","anio_periodo", name="uq_liq_res_os_per_v2"),
-        Index("resumen_id", "obra_social_id", "mes_periodo","anio_periodo"),
+        UniqueConstraint("resumen_id", "obra_social_id", "mes_periodo", "anio_periodo","version", name="uq_liq_res_os_per_v2"),
+        Index("idx_liq_res_os_per", "resumen_id", "obra_social_id", "mes_periodo", "anio_periodo"),
+        Index("idx_liq_os_per_version", "obra_social_id", "anio_periodo", "mes_periodo", "version"),
     )
 
 
@@ -870,33 +882,43 @@ class DetalleLiquidacion(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     liquidacion_id: Mapped[int] = mapped_column(ForeignKey("liquidacion.id"), index=True)
 
-    medico_id: Mapped[int] = mapped_column(Integer, index=True)          
+    medico_id: Mapped[int] = mapped_column(Integer, index=True)
     obra_social_id: Mapped[int] = mapped_column(Integer, index=True)
     prestacion_id: Mapped[str] = mapped_column(String(16))
-    debito_credito_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("debito_credito.id"), nullable=True)
-    # periodo: Mapped[str] = mapped_column(String(7), index=True)  # 'YYYY-MM'
 
+    # NUEVO: encadenamiento con el detalle anterior de la misma prestación (si existió)
+    prev_detalle_id: Mapped[Optional[int]] = mapped_column(ForeignKey("detalle_liquidacion.id"), nullable=True)
+    prev_detalle: Mapped[Optional["DetalleLiquidacion"]] = relationship(remote_side="DetalleLiquidacion.id")
 
-    bruto: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default=0)
-    debito_monto: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default=0)
-    deduccion_monto: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default=0)
-    neto: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default=0)
+    # vínculo opcional a un débito/crédito aplicado a ESTA fila (en esta liq/reliq)
+    debito_credito_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("debito_credito.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True
+    )
+
+    # cuánto se paga en ESTA liquidación/reliquidación por esta prestación
+    pagado: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default=Decimal("0"))
+
+    # renombraste a importe (perfecto)
+    importe: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default=0)
 
     liquidacion: Mapped["Liquidacion"] = relationship(back_populates="detalles")
     debito_credito: Mapped["Debito_Credito"] = relationship(back_populates="detalles_liquidacion")
 
     __table_args__ = (
-        UniqueConstraint("prestacion_id", name="uq_det_prestacion"),  # evita re-liquidar
-        Index("idx_det_os_per_med", "obra_social_id", "liquidacion_id", "medico_id"),
+        # Ahora se puede reliquidar la misma prestación en otra liquidación, pero NO duplicarla dentro de la misma
+        UniqueConstraint("prestacion_id", "liquidacion_id", "medico_id", name="uq_det_prest_en_liq"),
+        Index("idx_det_os_liq_med", "obra_social_id", "liquidacion_id", "medico_id"),
+        Index("idx_det_prest", "prestacion_id"),
     )
-
 
 class Debito_Credito(Base):
     __tablename__ = "debito_credito"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     tipo: Mapped[Literal["d","c"]] = mapped_column(Enum("d","c", name="debcre_tipo"))  # d=debito, c=crédito
-    id_atencion: Mapped[int] = mapped_column(ForeignKey("guardar_atencion.ID"), index=True)
+    id_atencion: Mapped[int] = mapped_column(ForeignKey("guardar_atencion.ID", ondelete="CASCADE") ,index=True)
     obra_social_id: Mapped[int] = mapped_column(ForeignKey("obras_sociales.NRO_OBRASOCIAL"), index=True)
     observacion: Mapped[str] = mapped_column(String(255), nullable=True)
     monto: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default=0)

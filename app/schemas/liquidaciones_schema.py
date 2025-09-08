@@ -1,7 +1,7 @@
 from __future__ import annotations
-from typing import Optional, List
+from typing import Optional, List, Literal
 from decimal import Decimal
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, validator 
 from enum import Enum
 import re
 
@@ -56,9 +56,9 @@ class LiquidacionResumenRead(BaseModel):
 class LiquidacionBase(BaseModel):
     resumen_id: int
     obra_social_id: int
-    mes_periodo: int
-    anio_periodo: int
-    nro_liquidacion: Optional[str] = None
+    mes_periodo: int = Field(ge=1, le=12)
+    anio_periodo: int = Field(ge=1900)
+    nro_liquidacion: str
 
 
 class LiquidacionCreate(LiquidacionBase):
@@ -77,7 +77,8 @@ class LiquidacionRead(BaseModel):
     obra_social_id: int
     mes_periodo: int
     anio_periodo: int
-    nro_liquidacion: Optional[str]
+    version: int | None = None
+    nro_liquidacion: str
     total_bruto: Decimal
     total_debitos: Decimal
     total_neto: Decimal
@@ -88,3 +89,46 @@ class LiquidacionRead(BaseModel):
 # --------- composiciones de lectura ---------
 class LiquidacionResumenWithItems(LiquidacionResumenRead):
     liquidaciones: List[LiquidacionRead] = []
+
+
+# Detalle liquidacion
+class DetalleLiquidacionRead(BaseModel):
+    id: int
+    liquidacion_id: int
+    medico_id: int
+    obra_social_id: int
+    prestacion_id: str
+    importe: Decimal
+    prev_detalle_id: int | None = None  # si ese campo existe en tu modelo
+    pagado: Decimal
+    debito_credito_id: Optional[int] = None
+    class Config:
+        from_attributes = True
+
+class DetalleVistaRow(BaseModel):
+    id: int
+    socio: int | str
+    nombreSocio: str
+    matri: int | str | None
+    nroOrden: int | str
+    fecha: str
+    codigo: str | int
+    nroAfiliado: str | None
+    afiliado: str | None
+    xCant: str
+    porcentaje: float
+    honorarios: float
+    gastos: float
+    coseguro: float
+    importe: float
+    pagado: float
+
+    # DEFAULTS solicitados 👇
+    tipo: Literal["N", "C", "D"] = "N"
+    monto: float = 0
+    obs: Optional[str] = None
+
+    total: float
+
+class ReabrirPayload(BaseModel):
+    nro_liquidacion: str  # base sin prefijo de versión, p.ej. "000123"

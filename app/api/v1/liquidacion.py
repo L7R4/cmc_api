@@ -1,19 +1,28 @@
 from decimal import Decimal
+from app.services.liquidaciones import cerrar_liquidacion, reabrir_liquidacion_creando_version, recomputar_totales_de_liquidacion
+from app.services.liquidaciones_calc import (
+    calcular_version_y_formatear_nro,
+    construir_detalles_y_totales,
+    vista_detalles_liquidacion
+    )
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Path
 from pydantic import BaseModel, Field
 from typing import Any, List, Dict, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.database import get_db
-from app.services.liquidaciones import generar_preview
+# from app.services.liquidaciones import generar_preview, normalizar_periodo_flexible
 from sqlalchemy import select, update, delete, and_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
-from app.db.models import LiquidacionResumen, Liquidacion, GuardarAtencion
-from app.utils.main import normalizar_periodo
+from app.db.models import Debito_Credito, DetalleLiquidacion, LiquidacionResumen, Liquidacion, GuardarAtencion
+# from app.utils.main import normalizar_periodo
 from app.schemas.liquidaciones_schema import (
-    LiquidacionResumenCreate, LiquidacionResumenUpdate, LiquidacionResumenRead, LiquidacionResumenWithItems,
-    LiquidacionCreate, LiquidacionUpdate, LiquidacionRead,
+    DetalleLiquidacionRead, DetalleVistaRow, LiquidacionResumenCreate, LiquidacionResumenUpdate, LiquidacionResumenRead, LiquidacionResumenWithItems,
+    LiquidacionCreate, LiquidacionUpdate, LiquidacionRead, ReabrirPayload,
 )
+
+
 
 router = APIRouter()
 
@@ -23,12 +32,12 @@ class GenerarReq(BaseModel):
         ...,
         description="Mapa de obra social -> lista de periodos 'YYYY-MM'"
     )
-@router.post("/generar")
-async def generar(req: GenerarReq, db: AsyncSession = Depends(get_db)) -> Any:
-    salida = await generar_preview(db, req.obra_sociales_con_periodos)
-    if salida.get("status") != "ok":
-        raise HTTPException(400, salida.get("message", "error"))
-    return salida
+# @router.post("/generar")
+# async def generar(req: GenerarReq, db: AsyncSession = Depends(get_db)) -> Any:
+#     salida = await generar_preview(db, req.obra_sociales_con_periodos)
+#     if salida.get("status") != "ok":
+#         raise HTTPException(400, salida.get("message", "error"))
+#     return salida
 
 
 
@@ -153,72 +162,77 @@ async def obtener_liquidacion(liquidacion_id: int, db: AsyncSession = Depends(ge
     return obj
 
 
-@router.get("/liquidaciones_por_os/{obra_social_id}/{periodo_id}")
-async def prestaciones_por_os_y_periodo(
-    obra_social_id: int = Path(..., description="Código de obra social"),
-    periodo_id: str = Path(..., description="YYYY-MM o YYYYMM"),
-    limit: int = Query(5000, ge=1, le=20000),
-    db: AsyncSession = Depends(get_db),
-) -> List[Dict[str, Any]]:
-    try:
-        anio, mes, _ = normalizar_periodo(periodo_id)
-    except ValueError as e:
-        raise HTTPException(400, str(e))
+# @router.get("/liquidaciones_por_os/{obra_social_id}/{periodo_id}")
+# async def prestaciones_por_os_y_periodo(
+#     obra_social_id: int = Path(..., description="Código de obra social"),
+#     periodo_id: str = Path(..., description="YYYY-MM o YYYYMM"),
+#     limit: int = Query(5000, ge=1, le=20000),
+#     db: AsyncSession = Depends(get_db),
+# ) -> List[Dict[str, Any]]:
+#     try:
+#         anio, mes, _ = normalizar_periodo_flexible(periodo_id)
+#     except ValueError as e:
+#         raise HTTPException(400, str(e))
 
-    stmt = (
-        select(
-            GuardarAtencion.ID.label("id_atencion"),
-            GuardarAtencion.NRO_SOCIO.label("medico_id"),
-            GuardarAtencion.NOMBRE_PRESTADOR.label("medico_nombre"),
-            GuardarAtencion.NRO_OBRA_SOCIAL.label("obra_social_id"),
-            GuardarAtencion.CODIGO_PRESTACION.label("codigo_prestacion"),
-            GuardarAtencion.FECHA_PRESTACION.label("fecha_prestacion"),
-            GuardarAtencion.VALOR_CIRUJIA.label("valor_cirugia"),
-            GuardarAtencion.VALOR_AYUDANTE.label("valor_ayudante"),
-            GuardarAtencion.VALOR_AYUDANTE_2.label("valor_ayudante_2"),
-            GuardarAtencion.GASTOS.label("gastos"),
-            GuardarAtencion.CANTIDAD.label("cantidad"),
-            GuardarAtencion.CANT_TRATAMIENTO.label("cantidad_tratamiento"),
-        )
-        .where(
-            and_(
-                GuardarAtencion.NRO_OBRA_SOCIAL == obra_social_id,
-                GuardarAtencion.ANIO_PERIODO == anio,
-                GuardarAtencion.MES_PERIODO == mes,
-            )
-        )
-        .limit(limit)
-    )
-    rows = (await db.execute(stmt)).mappings().all()
-    return [dict(r) for r in rows]
+#     stmt = (
+#         select(
+#             GuardarAtencion.ID.label("id_atencion"),
+#             GuardarAtencion.NRO_SOCIO.label("medico_id"),
+#             GuardarAtencion.NOMBRE_PRESTADOR.label("medico_nombre"),
+#             GuardarAtencion.NRO_OBRA_SOCIAL.label("obra_social_id"),
+#             GuardarAtencion.CODIGO_PRESTACION.label("codigo_prestacion"),
+#             GuardarAtencion.FECHA_PRESTACION.label("fecha_prestacion"),
+#             GuardarAtencion.VALOR_CIRUJIA.label("valor_cirugia"),
+#             GuardarAtencion.VALOR_AYUDANTE.label("valor_ayudante"),
+#             GuardarAtencion.VALOR_AYUDANTE_2.label("valor_ayudante_2"),
+#             GuardarAtencion.GASTOS.label("gastos"),
+#             GuardarAtencion.CANTIDAD.label("cantidad"),
+#             GuardarAtencion.CANT_TRATAMIENTO.label("cantidad_tratamiento"),
+#         )
+#         .where(
+#             and_(
+#                 GuardarAtencion.NRO_OBRA_SOCIAL == obra_social_id,
+#                 GuardarAtencion.ANIO_PERIODO == anio,
+#                 GuardarAtencion.MES_PERIODO == mes,
+#             )
+#         )
+#         .limit(limit)
+#     )
+#     rows = (await db.execute(stmt)).mappings().all()
+#     return [dict(r) for r in rows]
 
 
 @router.post("/liquidaciones_por_os/crear", response_model=LiquidacionRead, status_code=201)
 async def crear_liquidacion(payload: LiquidacionCreate, db: AsyncSession = Depends(get_db)):
-    # opcional: validar existencia de resumen_id antes
+    # validar resumen
     exists_res = await db.execute(
         select(LiquidacionResumen.id).where(LiquidacionResumen.id == payload.resumen_id).limit(1)
     )
     if not exists_res.first():
         raise HTTPException(400, "resumen_id inválido")
 
+    # calcular versión y formatear nro_liquidacion
+    version, nro_fmt = await calcular_version_y_formatear_nro(
+        db, payload.obra_social_id, payload.anio_periodo, payload.mes_periodo, payload.nro_liquidacion
+    )
+
     obj = Liquidacion(
         resumen_id=payload.resumen_id,
         obra_social_id=payload.obra_social_id,
         mes_periodo=payload.mes_periodo,
         anio_periodo=payload.anio_periodo,
-        nro_liquidacion=payload.nro_liquidacion,
+        version=version,
+        nro_liquidacion=nro_fmt,
         total_bruto=Decimal("0"),
         total_debitos=Decimal("0"),
         total_neto=Decimal("0"),
     )
     db.add(obj)
-    try:
-        await db.commit()
-    except IntegrityError as e:
-        await db.rollback()
-        # típico: viola uq_liq_res_os_per (ya existe esa OS+periodo dentro del mismo resumen)
-        raise HTTPException(409, f"No se pudo crear la liquidación: {e.orig}")
+    await db.flush()  # para obtener obj.id
+
+    # construir detalles + actualizar totales
+    await construir_detalles_y_totales(db, obj.id)
+    await recomputar_totales_de_liquidacion(db, obj.id)
     await db.refresh(obj)
     return obj
 
@@ -255,3 +269,87 @@ async def eliminar_liquidacion(liquidacion_id: int, db: AsyncSession = Depends(g
     await db.delete(obj)
     await db.commit()
     return None
+
+
+# ---------- PRESTACIONES (RAW) ya persistidas en DetalleLiquidacion ----------
+@router.get(
+    "/liquidaciones_por_os/{liquidacion_id}/detalles",
+    response_model=List[DetalleLiquidacionRead],
+)
+async def listar_detalles_liquidacion(
+    liquidacion_id: int,
+    medico_id: Optional[int] = Query(None),
+    obra_social_id: Optional[int] = Query(None),
+    prestacion_id: Optional[str] = Query(None),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(1000, ge=1, le=10000),
+    db: AsyncSession = Depends(get_db),
+):
+    # validar que existe la liquidación
+    exists = await db.execute(select(Liquidacion.id).where(Liquidacion.id == liquidacion_id))
+    if not exists.first():
+        raise HTTPException(404, "Liquidación no encontrada")
+
+    stmt = select(DetalleLiquidacion).where(DetalleLiquidacion.liquidacion_id == liquidacion_id)
+    if medico_id is not None:
+        stmt = stmt.where(DetalleLiquidacion.medico_id == medico_id)
+    if obra_social_id is not None:
+        stmt = stmt.where(DetalleLiquidacion.obra_social_id == obra_social_id)
+    if prestacion_id is not None:
+        stmt = stmt.where(DetalleLiquidacion.prestacion_id == prestacion_id)
+    stmt = stmt.order_by(DetalleLiquidacion.id).offset(skip).limit(limit)
+
+    res = await db.execute(stmt)
+    return res.scalars().all()
+
+# Mantén el alias actual si ya lo usas en el front
+@router.get(
+    "/liquidaciones_por_os/{liquidacion_id}/detalles_vista",
+    response_model=List[DetalleVistaRow]
+)
+async def detalles_vista(liquidacion_id: int, db: AsyncSession = Depends(get_db)):
+    rows = await vista_detalles_liquidacion(db, liquidacion_id)
+    return rows
+
+# ---- Débitos/Créditos listado con filtros ----
+@router.get("/debitos_creditos")
+async def listar_debitos_creditos(
+    medico_id: Optional[int] = None,
+    obra_social_id: Optional[int] = None,
+    periodo: Optional[str] = Query(None, description="YYYY-MM"),
+    skip: int = Query(0, ge=0), limit: int = Query(1000, ge=1, le=5000),
+    db: AsyncSession = Depends(get_db),
+):
+    stmt = select(Debito_Credito)
+    if medico_id is not None:
+        # Si necesitás vincular por prestacion -> medico, esto se resuelve en una vista uniendo con DetalleLiquidacion.
+        # Aquí filtro sólo por atributos nativos del DC.
+        pass
+    if obra_social_id is not None:
+        stmt = stmt.where(Debito_Credito.obra_social_id == obra_social_id)
+    if periodo:
+        stmt = stmt.where(Debito_Credito.periodo == periodo)
+    stmt = stmt.offset(skip).limit(limit)
+    res = await db.execute(stmt)
+    return [dc.__dict__ for dc in res.scalars().all()]
+
+
+@router.post("/liquidaciones_por_os/{liquidacion_id}/cerrar", status_code=204)
+async def cerrar_liquidacion_endpoint(
+    liquidacion_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    await cerrar_liquidacion(db, liquidacion_id)
+    await db.commit()
+    return None
+
+@router.post("/liquidaciones_por_os/{liquidacion_id}/reabrir", response_model=LiquidacionRead, status_code=201)
+async def reabrir_liquidacion_endpoint(
+    liquidacion_id: int,
+    payload: ReabrirPayload,
+    db: AsyncSession = Depends(get_db),
+):
+    nueva = await reabrir_liquidacion_creando_version(db, liquidacion_id, payload.nro_liquidacion)
+    await db.commit()
+    await db.refresh(nueva)
+    return nueva

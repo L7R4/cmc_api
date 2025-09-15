@@ -4,6 +4,7 @@ from sqlalchemy import select, func, and_, or_, literal, String, cast,case
 from sqlalchemy.ext.asyncio import AsyncSession
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Tuple
+import re
 
 from app.db.models import (
     Liquidacion, LiquidacionResumen, DetalleLiquidacion, Debito_Credito, GuardarAtencion
@@ -189,7 +190,9 @@ async def vista_detalles_liquidacion(
     db: AsyncSession,
     liquidacion_id: int,
     medico_id: Optional[int] = None,
-) -> List[Dict[str, Any]]:
+    offset: int = 0,
+    limit: int = 100,
+) -> Tuple[List[Dict[str, Any]], int]:
     DL, GA, DC = DetalleLiquidacion, GuardarAtencion, Debito_Credito
 
     NRO_AFILIADO = getattr(GA, "NRO_AFILIADO", literal(""))
@@ -197,25 +200,29 @@ async def vista_detalles_liquidacion(
     MATRICULA = getattr(GA, "MATRICULA", GA.NRO_SOCIO)
 
     importe_col = func.coalesce(DL.importe, 0).label("importe")
-    pagado_col  = func.coalesce(DL.pagado,  0).label("pagado")
 
-    # monto para la UI:
-    # - inicial: importe
-    # - reliquidación: ABS(pagado)
+    tipo_ui_col = case(
+        (DC.tipo == "d", literal("D")),
+        (DC.tipo == "c", literal("C")),
+        else_=literal("N"),
+    ).label("tipo")
+
     monto_ui_col = case(
+        (DC.id.isnot(None), func.coalesce(DC.monto, 0)),
         (DL.prev_detalle_id.is_(None), func.coalesce(DL.importe, 0)),
         else_=func.abs(func.coalesce(DL.pagado, 0)),
     ).label("monto")
 
-    # tipo por defecto "N" (la UI decide si el usuario cambia a D/C)
-    tipo_ui_col = literal("N").label("tipo")
-    obs_col = literal(None).label("obs")  # por defecto None para la UI
+    # --- COUNT total (para headers) ---
+    count_stmt = select(func.count(DL.id)).where(DL.liquidacion_id == liquidacion_id)
+    if medico_id is not None:
+        count_stmt = count_stmt.where(DL.medico_id == medico_id)
+    total_items = (await db.execute(count_stmt)).scalar_one() or 0
 
-    total_col = (func.coalesce(DL.importe, 0)).label("total")  # la UI luego aplica +/- monto según tipo
-
+    # --- SELECT paginado ---
     stmt = (
         select(
-            DL.id.label("id"),
+            DL.id.label("det_id"),
             DL.medico_id.label("socio"),
             GA.NOMBRE_PRESTADOR.label("nombreSocio"),
             MATRICULA.label("matri"),
@@ -231,15 +238,20 @@ async def vista_detalles_liquidacion(
             GA.GASTOS.label("gastos"),
             literal(0).label("coseguro"),
             importe_col,
-            pagado_col,
+            literal(0).label("pagado"),
+            DC.tipo.label("tipo_dc"),
+            DC.monto.label("monto_dc"),
+            DC.observacion.label("obs_dc"),
             tipo_ui_col,
             monto_ui_col,
-            obs_col,
-            total_col,
         )
+        .select_from(DL)
         .join(GA, DL.prestacion_id == cast(GA.ID, String(16)), isouter=True)
+        .join(DC, DL.debito_credito_id == DC.id, isouter=True)
         .where(DL.liquidacion_id == liquidacion_id)
         .order_by(DL.id)
+        .offset(offset)
+        .limit(limit)
     )
     if medico_id is not None:
         stmt = stmt.where(DL.medico_id == medico_id)
@@ -248,9 +260,15 @@ async def vista_detalles_liquidacion(
 
     out: List[Dict[str, Any]] = []
     for r in rows:
-        x_cant = f"{int(r.get('cantidad') or 1)}-{int(r.get('cantidad_tratamiento') or 1)}"
+        importe = Decimal(str(r["importe"] or "0"))
+        tipo = (r["tipo"] or "N").upper()
+        monto = Decimal(str(r["monto"] or "0"))
+
+        total = importe - monto if tipo == "D" else importe + monto if tipo == "C" else importe
+        xCant = f'{int(r.get("cantidad") or 1)}-{int(r.get("cantidad_tratamiento") or 1)}'
+
         out.append({
-            "id": r["id"],
+            "det_id": r["det_id"],
             "socio": r["socio"],
             "nombreSocio": (r["nombreSocio"] or "").strip(),
             "matri": r["matri"],
@@ -259,16 +277,70 @@ async def vista_detalles_liquidacion(
             "codigo": r["codigo"],
             "nroAfiliado": r.get("nroAfiliado") or "",
             "afiliado": r.get("afiliado") or "",
-            "xCant": x_cant,
+            "xCant": xCant,
             "porcentaje": float(r["porcentaje"] or 0),
             "honorarios": float(r["honorarios"] or 0),
             "gastos": float(r["gastos"] or 0),
             "coseguro": 0.0,
-            "importe": float(r["importe"] or 0),
-            "pagado": float(r["pagado"] or 0),
-            "tipo": r["tipo"],                      # "N"
-            "monto": float(r["monto"] or 0),        # importe o ABS(pagado)
-            "obs": None,                             # default
-            "total": float(r["total"] or 0),
+            "importe": float(importe),
+            "pagado": 0.0,
+            "tipo": tipo,
+            "monto": float(monto),
+            "obs": r.get("obs_dc") or None,
+            "total": float(total),
         })
-    return out
+    return out, int(total_items)
+
+async def _ajuste_por_dc(db: AsyncSession, debito_credito_id: Optional[int]) -> Decimal:
+    """
+    Devuelve el ajuste del DC con signo:
+      - 'd' => -monto
+      - 'c' => +monto
+      - None o inexistente => 0
+    """
+    if not debito_credito_id:
+        return Decimal("0")
+    dc = await db.get(Debito_Credito, debito_credito_id)
+    if not dc:
+        return Decimal("0")
+    monto = Decimal(str(dc.monto or 0))
+    return monto if dc.tipo == "c" else (Decimal("0") - monto)
+
+
+def _dec(v) -> float:
+    from decimal import Decimal as D
+    if v is None:
+        return 0.0
+    if isinstance(v, D):
+        return float(v)
+    return float(v)
+
+def _is_refacturacion(liq) -> bool:
+    """
+    Considera refacturación si el índice de facturación != '000'.
+    Si el campo llega con otros formatos, intenta tomar los últimos 3 dígitos.
+    """
+    raw = (liq.nro_liquidacion or "").strip()
+    
+    idx = re.match(r'^\s*(\d{3})(?=\s*[-/])', raw).group(1)
+    
+    return idx != "000"
+
+async def _calc_row_total(db: AsyncSession, det, liq) -> float:
+    """
+    Para la UI (columna 'Total'):
+      - si es refacturación => base = det.pagado
+      - si es factura inicial => base = det.importe
+    y luego aplica el ajuste del DC (± monto).
+    """
+    # Si querés asegurarte de que 'pagado' esté alineado en refacturación:
+    # if _is_refacturacion(liq):
+    #     await recomputar_pagado_detalle(db, det.id)  # opcional
+    ajuste = await _ajuste_por_dc(db, det.debito_credito_id)
+    if _is_refacturacion(liq):
+        print("WEpsss")
+        base = Decimal(str(det.pagado or 0))
+    else:
+        print("WEpsss2")
+        base = Decimal(str(det.importe or 0))
+    return _dec(base + ajuste)

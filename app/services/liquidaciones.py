@@ -7,7 +7,7 @@ from sqlalchemy import select, or_, and_, exists, func, case
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import HTTPException
 
-from app.db.models import GuardarAtencion, ObrasSociales, ListadoMedico, DetalleLiquidacion, Debito_Credito, DetalleLiquidacion, Liquidacion
+from app.db.models import DeduccionAplicacion, DeduccionColegio, Descuentos, GuardarAtencion, LiquidacionResumen, ObrasSociales, ListadoMedico, DetalleLiquidacion, Debito_Credito, DetalleLiquidacion, Liquidacion
 
 
 
@@ -168,30 +168,63 @@ async def recomputar_pagados_de_liquidacion(db: AsyncSession, liquidacion_id: in
 
     await db.flush()
 
+async def recomputar_totales_de_resumen(db: AsyncSession, resumen_id: int) -> None:
+    """
+    Recalcula el resumen en base a la suma de TODAS las liquidaciones que cuelgan de ese resumen.
+      - total_bruto   = SUM(liq.total_bruto)
+      - total_debitos = SUM(liq.total_debitos)
+      - total_deduccion: se deja como está (o se recalcula si tenés una tabla de deducciones del resumen)
+      - total_neto    = total_bruto - (total_debitos + total_deduccion)   (si el campo existe)
+    No hace commit; sólo flush.
+    """
+    # 1) traer el resumen
+    resumen = await db.get(LiquidacionResumen, resumen_id)
+    if not resumen:
+        raise HTTPException(404, "LiquidacionResumen no encontrado")
+
+    # 2) sumar bruto y débitos de TODAS las liquidaciones del resumen
+    sums = await db.execute(
+        select(
+            func.coalesce(func.sum(Liquidacion.total_bruto), 0),
+            func.coalesce(func.sum(Liquidacion.total_debitos), 0),
+        ).where(Liquidacion.resumen_id == resumen_id)
+    )
+    bruto_sum, debitos_sum = sums.first() or (0, 0)
+    total_bruto = Decimal(str(bruto_sum or 0))
+    total_debitos = Decimal(str(debitos_sum or 0))
+
+    # 3) deducciones del resumen:
+    #    Opción A (por defecto): mantener lo que ya tiene cargado el resumen (no lo recalculamos acá)
+    total_deduccion = Decimal(str(getattr(resumen, "total_deduccion", 0) or 0))
+
+    #    Opción B (si llevás deducciones del resumen en otra tabla, descomentá y ajustá):
+    # qd = await db.execute(
+    #     select(func.coalesce(func.sum(DebitoColegio.monto), 0))
+    #     .where(DebitoColegio.resumen_id == resumen_id)
+    # )
+    # total_deduccion = Decimal(str(qd.scalar_one() or 0))
+
+    # 4) neto del resumen (si el modelo tiene el campo). Si no lo tiene, se ignora.
+    total_neto = total_bruto - (total_debitos + total_deduccion)
+
+    resumen.total_bruto = total_bruto
+    resumen.total_debitos = total_debitos
+    resumen.total_deduccion = total_deduccion
+
+    await db.flush()
+
 async def recomputar_todo_de_liquidacion(db: AsyncSession, liquidacion_id: int) -> None:
     # 1) fijar pagados (según reglas arriba)
     await recomputar_pagados_de_liquidacion(db, liquidacion_id)
     # 2) recalcular totales de la liquidación (bruto, débitos, créditos, neto)
     await recomputar_totales_de_liquidacion(db, liquidacion_id)
-
+    
+    liq = await db.get(Liquidacion, liquidacion_id)
+    await recomputar_totales_de_resumen(db, int(liq.resumen_id))
 
 def now_string() -> str:
     return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-async def cerrar_liquidacion(db: AsyncSession, liquidacion_id: int) -> None:
-    liq = await db.get(Liquidacion, liquidacion_id)
-    if not liq:
-        raise HTTPException(404, "Liquidación no encontrada")
-    if liq.estado == "C":
-        raise HTTPException(409, "La liquidación ya está cerrada")
-
-    # 1) calcular pagados detalle por detalle con la lógica nueva
-    await recomputar_todo_de_liquidacion(db, liquidacion_id)
-
-    # 2) sellar estado
-    liq.estado = "C"
-    liq.cierre_timestamp = now_string()
-    await db.flush()
 
 async def reabrir_liquidacion_creando_version(
     db: AsyncSession,
@@ -245,3 +278,48 @@ async def reabrir_liquidacion_creando_version(
     await db.flush()
     await recomputar_totales_de_liquidacion(db, new_liq.id)
     return new_liq
+
+async def reabrir_liquidacion_simple(db: AsyncSession, liquidacion_id: int) -> Liquidacion:
+    liq = await db.get(Liquidacion, liquidacion_id)
+    if not liq:
+        raise HTTPException(404, "Liquidación no encontrada")
+    if liq.estado != "C":
+        raise HTTPException(409, "Solo se puede reabrir una liquidación cerrada")
+    liq.estado = "A"
+    liq.cierre_timestamp = None
+    await db.flush()
+    await db.refresh(liq)
+    return liq
+
+async def _base_bruto_por_medico_en_resumen(db: AsyncSession, resumen_id: int) -> dict[int, Decimal]:
+    """
+    Devuelve {medico_id: SUM(importe)} considerando *solo* las liquidaciones del resumen.
+    """
+    q = await db.execute(
+        select(DetalleLiquidacion.medico_id, func.coalesce(func.sum(DetalleLiquidacion.importe), 0))
+        .select_from(DetalleLiquidacion)
+        .join(Liquidacion, Liquidacion.id == DetalleLiquidacion.liquidacion_id)
+        .where(Liquidacion.resumen_id == resumen_id)
+        .group_by(DetalleLiquidacion.medico_id)
+    )
+    out: dict[int, Decimal] = {}
+    for med_id, suma in q:
+        out[int(med_id)] = Decimal(suma or 0)
+    return out
+
+
+async def recomputar_total_deduccion_resumen(db: AsyncSession, resumen_id: int) -> None:
+    """
+    total_deduccion del resumen = Σ(DeduccionAplicacion.aplicado) del mes.
+    """
+    res = await db.get(LiquidacionResumen, resumen_id)
+    if not res:
+        raise HTTPException(404, "Resumen no encontrado")
+
+    from sqlalchemy import func
+    qsum = await db.execute(
+        select(func.coalesce(func.sum(DeduccionAplicacion.aplicado), 0))
+        .where(DeduccionAplicacion.resumen_id == resumen_id)
+    )
+    res.total_deduccion = Decimal(qsum.scalar_one() or 0).quantize(Decimal("0.01"))
+    await db.flush()

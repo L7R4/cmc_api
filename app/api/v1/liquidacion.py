@@ -1,12 +1,14 @@
 from decimal import Decimal
-from app.services.liquidaciones import cerrar_liquidacion, reabrir_liquidacion_creando_version, recomputar_totales_de_liquidacion
+
+from fastapi.responses import JSONResponse
+from app.services.liquidaciones import now_string, reabrir_liquidacion_creando_version, reabrir_liquidacion_simple, recomputar_todo_de_liquidacion, recomputar_totales_de_liquidacion, recomputar_totales_de_resumen
 from app.services.liquidaciones_calc import (
     calcular_version_y_formatear_nro,
     construir_detalles_y_totales,
     vista_detalles_liquidacion
     )
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Path
+from fastapi import APIRouter, Depends, HTTPException, Query, Path, Response
 from pydantic import BaseModel, Field
 from typing import Any, List, Dict, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -19,7 +21,7 @@ from app.db.models import Debito_Credito, DetalleLiquidacion, LiquidacionResumen
 # from app.utils.main import normalizar_periodo
 from app.schemas.liquidaciones_schema import (
     DetalleLiquidacionRead, DetalleVistaRow, LiquidacionResumenCreate, LiquidacionResumenUpdate, LiquidacionResumenRead, LiquidacionResumenWithItems,
-    LiquidacionCreate, LiquidacionUpdate, LiquidacionRead, ReabrirPayload,
+    LiquidacionCreate, LiquidacionUpdate, LiquidacionRead, PreviewItem, PreviewResponse, RefacturarPayload,
 )
 
 
@@ -123,6 +125,74 @@ async def eliminar_resumen(resumen_id: int, db: AsyncSession = Depends(get_db)):
     await db.commit()
     return None
 
+@router.get("/resumen/{resumen_id}/preview", response_model=PreviewResponse)
+async def preview_liquidaciones(resumen_id: int, db: AsyncSession = Depends(get_db)):
+    # Traemos TODAS las liquidaciones del resumen
+    liqs = (await db.execute(
+        select(Liquidacion).where(Liquidacion.resumen_id == resumen_id)
+    )).scalars().all()
+
+    if not liqs:
+        # Si no hay, devolvemos todo en 0
+        z = Decimal("0")
+        return {
+            "items": [],
+            "totals": {
+                "cerradas_bruto": z, "cerradas_debitos": z, "cerradas_neto": z,
+                "abiertas_bruto": z, "abiertas_debitos": z, "abiertas_neto": z,
+                "resumen_deduccion": z, "total_general": z
+            }
+        }
+
+    items: List[PreviewItem] = []
+    # Podrías mapear nombres de OS aquí si tienes el modelo ObraSocial.
+    # Para mantenerlo genérico, dejamos 'obra_social_nombre=None'
+    for liq in liqs:
+        y = int(liq.anio_periodo)
+        m = int(liq.mes_periodo)
+        periodo = f"{y:04d}-{m:02d}"
+        estado = (liq.estado or "A").upper()
+        bruto = Decimal(str(liq.total_bruto or 0))
+        debitos = Decimal(str(liq.total_debitos or 0))
+        deduccion = Decimal(str(getattr(liq, "total_deduccion", 0) or 0))
+        neto = Decimal(str(liq.total_neto or (bruto - (debitos + deduccion))))
+
+        items.append({
+            "liquidacion_id": liq.id,
+            "obra_social_id": int(liq.obra_social_id),
+            "obra_social_nombre": None,  # <- si tienes el nombre aquí, colócalo
+            "periodo": periodo,
+            "estado": "C" if estado == "C" else "A",
+            "nro_liquidacion": liq.nro_liquidacion,
+            "total_bruto": bruto,
+            "total_debitos": debitos,
+            "total_deduccion": deduccion,
+            "total_neto": neto,
+        })
+
+    from decimal import Decimal
+    z = Decimal("0")
+    c_bruto = sum((it["total_bruto"] for it in items if it["estado"] == "C"), z)
+    c_deb = sum((it["total_debitos"] for it in items if it["estado"] == "C"), z)
+    c_neto = sum((it["total_neto"] for it in items if it["estado"] == "C"), z)
+    a_bruto = sum((it["total_bruto"] for it in items if it["estado"] == "A"), z)
+    a_deb = sum((it["total_debitos"] for it in items if it["estado"] == "A"), z)
+    a_neto = sum((it["total_neto"] for it in items if it["estado"] == "A"), z)
+
+    # Para traer la deducción del resumen, puedes hacer un SELECT del modelo Resumen si la guardas ahí.
+    # Si no, deja 0 y el front mostrará la que ya tiene.
+    resumen_deduccion = z
+    total_general = c_neto + a_neto + resumen_deduccion
+
+    return {
+        "items": items,
+        "totals": {
+            "cerradas_bruto": c_bruto, "cerradas_debitos": c_deb, "cerradas_neto": c_neto,
+            "abiertas_bruto": a_bruto, "abiertas_debitos": a_deb, "abiertas_neto": a_neto,
+            "resumen_deduccion": resumen_deduccion,
+            "total_general": total_general
+        }
+    }
 
 
 # ========================
@@ -233,6 +303,9 @@ async def crear_liquidacion(payload: LiquidacionCreate, db: AsyncSession = Depen
     # construir detalles + actualizar totales
     await construir_detalles_y_totales(db, obj.id)
     await recomputar_totales_de_liquidacion(db, obj.id)
+    await recomputar_totales_de_resumen(db,obj.resumen_id)
+
+    await db.commit()
     await db.refresh(obj)
     return obj
 
@@ -266,7 +339,10 @@ async def eliminar_liquidacion(liquidacion_id: int, db: AsyncSession = Depends(g
     obj = res.scalars().first()
     if not obj:
         raise HTTPException(404, "Liquidacion no encontrada")
+    
     await db.delete(obj)
+    await db.flush()
+    await recomputar_totales_de_resumen(db,obj.resumen_id)
     await db.commit()
     return None
 
@@ -307,9 +383,30 @@ async def listar_detalles_liquidacion(
     "/liquidaciones_por_os/{liquidacion_id}/detalles_vista",
     response_model=List[DetalleVistaRow]
 )
-async def detalles_vista(liquidacion_id: int, db: AsyncSession = Depends(get_db)):
-    rows = await vista_detalles_liquidacion(db, liquidacion_id)
-    return rows
+async def detalles_vista(
+    liquidacion_id: int,
+    medico_id: Optional[int] = Query(None),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=1000),
+    db: AsyncSession = Depends(get_db),
+    response: Response = None,
+):
+    items, total = await vista_detalles_liquidacion(
+        db=db,
+        liquidacion_id=liquidacion_id,
+        medico_id=medico_id,
+        offset=offset,
+        limit=limit,
+    )
+
+    # Headers útiles para el front
+    response.headers["X-Total-Count"] = str(total)
+    end = offset + max(len(items) - 1, 0)
+    response.headers["Content-Range"] = f"items {offset}-{end}/{total}"
+    response.headers["X-Offset"] = str(offset)
+    response.headers["X-Limit"] = str(limit)
+
+    return items
 
 # ---- Débitos/Créditos listado con filtros ----
 @router.get("/debitos_creditos")
@@ -339,17 +436,60 @@ async def cerrar_liquidacion_endpoint(
     liquidacion_id: int,
     db: AsyncSession = Depends(get_db),
 ):
-    await cerrar_liquidacion(db, liquidacion_id)
+    liq = await db.get(Liquidacion, liquidacion_id)
+    if not liq:
+        raise HTTPException(404, "Liquidación no encontrada")
+    if liq.estado == "C":
+        raise HTTPException(409, "La liquidación ya está cerrada")
+
+    # 1) calcular pagados detalle por detalle con la lógica nueva
+    await recomputar_todo_de_liquidacion(db, liquidacion_id)
+
+    # 2) sellar estado
+    liq.estado = "C"
+    liq.cierre_timestamp = now_string()
     await db.commit()
     return None
 
-@router.post("/liquidaciones_por_os/{liquidacion_id}/reabrir", response_model=LiquidacionRead, status_code=201)
-async def reabrir_liquidacion_endpoint(
-    liquidacion_id: int,
-    payload: ReabrirPayload,
-    db: AsyncSession = Depends(get_db),
-):
+@router.post("/liquidaciones_por_os/{liquidacion_id}/reabrir", response_model=LiquidacionRead, status_code=200)
+async def reabrir_simple_endpoint(liquidacion_id: int, db: AsyncSession = Depends(get_db)):
+    liq = await db.get(Liquidacion, liquidacion_id)
+    if not liq:
+        raise HTTPException(404, "Liquidación no encontrada")
+    if liq.estado != "C":
+        raise HTTPException(409, "Solo se puede reabrir una liquidación cerrada")
+
+    liq.estado = "A"
+    liq.cierre_timestamp = None
+    await db.commit()
+    await db.refresh(liq)
+    # devolvemos lo básico que consume el front
+    return JSONResponse({
+        "id": liq.id,
+        "resumen_id": liq.resumen_id,
+        "mes_periodo": liq.mes_periodo,
+        "anio_periodo": liq.anio_periodo,
+        "estado": liq.estado,
+        "nro_liquidacion": liq.nro_liquidacion,
+        "total_bruto": str(liq.total_bruto or 0),
+        "total_debitos": str(liq.total_debitos or 0),
+        "total_neto": str(liq.total_neto or 0),
+    })
+
+
+@router.post("/liquidaciones_por_os/{liquidacion_id}/refacturar", response_model=LiquidacionRead, status_code=201)
+async def refacturar_endpoint(liquidacion_id: int, payload: RefacturarPayload, db: AsyncSession = Depends(get_db)):
     nueva = await reabrir_liquidacion_creando_version(db, liquidacion_id, payload.nro_liquidacion)
     await db.commit()
     await db.refresh(nueva)
-    return nueva
+    return JSONResponse({
+        "id": nueva.id,
+        "resumen_id": nueva.resumen_id,
+        "mes_periodo": nueva.mes_periodo,
+        "anio_periodo": nueva.anio_periodo,
+        "estado": nueva.estado,
+        "nro_liquidacion": nueva.nro_liquidacion,
+        "total_bruto": str(nueva.total_bruto or 0),
+        "total_debitos": str(nueva.total_debitos or 0),
+        "total_neto": str(nueva.total_neto or 0),
+    })

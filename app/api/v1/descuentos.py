@@ -1,74 +1,74 @@
-# from typing import List
-# from fastapi import APIRouter, Depends, HTTPException, Query
-# from sqlalchemy.ext.asyncio import AsyncSession
+# app/api/routers/descuentos.py
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+from typing import List
+from decimal import Decimal
 
-# from app.db.crud import (
-#     get_descuentos,
-#     get_descuento,
-#     create_descuento,
-#     update_descuento,
-#     delete_descuento,
-#     bulk_create_descuentos,
-#     get_medicos,
-# )
-# from app.schemas.main import DescuentoCreate, DescuentoUpdate, DescuentoOut
-# from app.api.deps import get_async_db
+from app.db.database import get_db
+from app.db.models import Descuentos
+from app.schemas.descuentos_especialidades_schemas import DescuentoIn, DescuentoInPatch, DescuentoOut, DescuentoUpdate
 
-# router = APIRouter()
+router = APIRouter()
 
-# @router.get("/", response_model=List[DescuentoOut])
-# async def list_descuentos(
-#     skip: int = Query(0, ge=0),
-#     limit: int = Query(100, ge=1, le=500),
-#     concepto_id: int | None = Query(None, description="Filtrar por concepto"),
-#     periodo_id: int | None = Query(None, description="Filtrar por periodo"),
-#     db: AsyncSession = Depends(get_async_db),
-# ):
-#     return await get_descuentos(db, skip=skip, limit=limit, concepto_id=concepto_id, periodo_id=periodo_id)
+@router.get("", response_model=List[DescuentoOut])
+async def list_descuentos(db: AsyncSession = Depends(get_db)):
+    return (await db.execute(select(Descuentos))).scalars().all()
 
-# @router.post("/", response_model=DescuentoOut, status_code=201)
-# async def create_new_descuento(
-#     in_: DescuentoCreate,
-#     db: AsyncSession = Depends(get_async_db),
-# ):
-#     return await create_descuento(db, in_)
+@router.get("/{desc_id}", response_model=DescuentoOut)
+async def get_descuento(desc_id: int, db: AsyncSession = Depends(get_db)):
+    row = await db.get(Descuentos, desc_id)
+    if not row:
+        raise HTTPException(404, "Descuento no encontrado")
+    return row
 
-# @router.get("/{descuento_id}", response_model=DescuentoOut)
-# async def read_descuento(
-#     descuento_id: int,
-#     db: AsyncSession = Depends(get_async_db),
-# ):
-#     db_obj = await get_descuento(db, descuento_id)
-#     if not db_obj:
-#         raise HTTPException(status_code=404, detail="Descuento no encontrado")
-#     return db_obj
+@router.get("/by_nro/{nro_colegio}", response_model=DescuentoOut)
+async def get_descuento_by_nro(nro_colegio: int, db: AsyncSession = Depends(get_db)):
+    row = (await db.execute(
+        select(Descuentos).where(Descuentos.nro_colegio == nro_colegio)
+    )).scalars().first()
+    if not row:
+        raise HTTPException(404, "No existe descuento con ese nro de concepto")
+    return row
 
-# @router.patch("/{descuento_id}", response_model=DescuentoOut)
-# async def edit_descuento(
-#     descuento_id: int,
-#     in_: DescuentoUpdate,
-#     db: AsyncSession = Depends(get_async_db),
-# ):
-#     db_obj = await get_descuento(db, descuento_id)
-#     if not db_obj:
-#         raise HTTPException(status_code=404, detail="Descuento no encontrado")
-#     return await update_descuento(db, db_obj, in_)
+@router.post("", response_model=DescuentoOut, status_code=201)
+async def create_descuento(payload: DescuentoIn, db: AsyncSession = Depends(get_db)):
+    row = Descuentos(
+        nombre=payload.nombre,
+        nro_colegio=payload.nro_colegio,
+        precio=Decimal(str(payload.precio or 0)),
+        porcentaje=Decimal(str(payload.porcentaje or 0)),
+    )
+    db.add(row)
+    await db.flush()
+    await db.commit()
+    await db.refresh(row)
+    return row
 
-# @router.delete("/{descuento_id}", status_code=204)
-# async def remove_descuento(
-#     descuento_id: int,
-#     db: AsyncSession = Depends(get_async_db),
-# ):
-#     await delete_descuento(db, descuento_id)
+@router.patch("/{desc_id}", response_model=DescuentoOut)
+async def patch_descuento(id: int, payload: DescuentoInPatch, db: AsyncSession = Depends(get_db)):
+    row = await db.get(Descuentos, id)
+    if not row:
+        raise HTTPException(status_code=404, detail="No existe el descuento")
+    if payload.precio is not None:
+        row.precio = payload.precio
+    if payload.porcentaje is not None:
+        row.porcentaje = payload.porcentaje
+    await db.commit()
+    await db.refresh(row)
+    return DescuentoOut(
+        id=row.id,
+        nro_colegio=row.nro_colegio,
+        nombre=row.nombre,
+        precio=row.precio,
+        porcentaje=row.porcentaje,
+    )
 
-# @router.post("/generar/{concepto_id}", response_model=List[DescuentoOut])
-# async def generar_descuentos(
-#     concepto_id: int,
-#     periodo_id: int = Query(..., description="ID del periodo"),
-#     db: AsyncSession = Depends(get_async_db),
-# ):
-#     """
-#     —— WEPSSS —— Genera un descuento de ese concepto para TODOS los médicos en el periodo.
-#     """
-#     medicos = await get_medicos(db, skip=0, limit=1000)
-#     return await bulk_create_descuentos(db, concepto_id, periodo_id, medicos)
+@router.delete("/{desc_id}", status_code=204)
+async def delete_descuento(desc_id: int, db: AsyncSession = Depends(get_db)):
+    row = await db.get(Descuentos, desc_id)
+    if not row:
+        raise HTTPException(404, "Descuento no encontrado")
+    await db.delete(row)
+    await db.commit()
+    return None

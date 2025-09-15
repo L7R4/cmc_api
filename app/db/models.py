@@ -2,7 +2,7 @@ from typing import Literal, Optional
 import datetime
 import decimal
 
-from sqlalchemy import DECIMAL, Date, Enum, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
+from sqlalchemy import DECIMAL, JSON, Date, Enum, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.dialects.mysql import INTEGER, LONGTEXT, VARCHAR
 from decimal import Decimal
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -353,6 +353,12 @@ class ListadoMedico(Base):
     VENCIMIENTO_MALAPRAXIS: Mapped[Optional[datetime.date]] = mapped_column(Date)
     VENCIMIENTO_COBERTURA: Mapped[Optional[datetime.date]] = mapped_column(Date)
     FECHA_VITALICIO: Mapped[Optional[datetime.date]] = mapped_column(Date)
+    
+    conceps_espec: Mapped[dict] = mapped_column(
+        JSON,
+        nullable=False,
+        default=lambda: {"conceps": [], "espec": []}  # ← default client-side
+    )
 
 
 class MedicoObraSocial(Base):
@@ -927,3 +933,69 @@ class Debito_Credito(Base):
     created_by_user: Mapped[int] = mapped_column(ForeignKey("listado_medico.ID"), nullable=False)
 
     detalles_liquidacion: Mapped[list["DetalleLiquidacion"]] = relationship(back_populates="debito_credito", cascade="all, delete-orphan")
+
+
+class Descuentos(Base):
+    __tablename__ = "descuentos"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    nro_colegio : Mapped[int] = mapped_column(Integer, nullable= False)
+    nombre: Mapped[str] = mapped_column(String(200), nullable= False)
+    precio: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default = 0)
+    porcentaje: Mapped[Decimal] = mapped_column(DECIMAL(10,2), default = 0)
+
+class DeduccionColegio(Base):
+    __tablename__ = "deducciones_colegio"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    medico_id: Mapped[int] = mapped_column(ForeignKey("listado_medico.ID"), index=True, nullable=False)
+    resumen_id: Mapped[int] = mapped_column(ForeignKey("liquidacion_resumen.id", ondelete="CASCADE"), index=True, nullable=False)
+
+    # uno u otro:
+    descuento_id: Mapped[Optional[int]] = mapped_column(ForeignKey("descuentos.id"), nullable=True, index=True)
+    especialidad_id: Mapped[Optional[int]] = mapped_column(ForeignKey("especialidad.ID"), nullable=True, index=True)
+
+    # snapshot de lo aplicado
+    monto_aplicado: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default=Decimal("0.00"))
+    porcentaje_aplicado: Mapped[Decimal] = mapped_column(DECIMAL(10,2), default=Decimal("0.00"))
+
+    # Cargo calculado ese mes (monto + %*base_mes_del_medico)
+    calculado_total: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default=Decimal("0.00"))
+
+    # Uniques por tipo (MySQL permite múltiples NULL; por eso 2 uniques separados)
+    __table_args__ = (
+        UniqueConstraint("medico_id", "resumen_id", "descuento_id", name="uq_med_res_desc"),
+        UniqueConstraint("medico_id", "resumen_id", "especialidad_id", name="uq_med_res_esp2"),
+        Index("idx_med_res", "medico_id", "resumen_id"),
+    )
+
+
+class DeduccionSaldo(Base):
+    __tablename__ = "deduccion_saldo"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    medico_id: Mapped[int] = mapped_column(ForeignKey("listado_medico.ID"), index=True, nullable=False)
+    concepto_tipo: Mapped[Literal["desc","esp"]] = mapped_column(Enum("desc","esp", name="ded_saldo_tipo"), index=True)
+    concepto_id: Mapped[int] = mapped_column(Integer, index=True)  # id de descuentos.id o especialidad.ID
+
+    saldo: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default=Decimal("0.00"))
+
+    __table_args__ = (
+        UniqueConstraint("medico_id", "concepto_tipo", "concepto_id", name="uq_saldo_med_concepto"),
+    )
+
+
+class DeduccionAplicacion(Base):
+    __tablename__ = "deduccion_aplicacion"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    resumen_id: Mapped[int] = mapped_column(ForeignKey("liquidacion_resumen.id", ondelete="CASCADE"), index=True, nullable=False)
+    medico_id: Mapped[int] = mapped_column(ForeignKey("listado_medico.ID"), index=True, nullable=False)
+
+    concepto_tipo: Mapped[Literal["desc","esp"]] = mapped_column(Enum("desc","esp", name="ded_apl_tipo"), index=True)
+    concepto_id: Mapped[int] = mapped_column(Integer, index=True)
+
+    aplicado: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default=Decimal("0.00"))
+
+    __table_args__ = (
+        UniqueConstraint("resumen_id", "medico_id", "concepto_tipo", "concepto_id", name="uq_apl_res_med_concepto"),
+    )

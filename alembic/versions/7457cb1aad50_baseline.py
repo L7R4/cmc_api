@@ -1,8 +1,8 @@
-"""merge heads
+"""baseline
 
-Revision ID: 0c92a4d351cc
-Revises: 8055625763e3, 8476613a2f1d
-Create Date: 2025-09-07 18:08:09.578475
+Revision ID: 7457cb1aad50
+Revises: 
+Create Date: 2025-09-14 14:35:29.666239
 
 """
 from typing import Sequence, Union
@@ -12,8 +12,8 @@ import sqlalchemy as sa
 
 
 # revision identifiers, used by Alembic.
-revision: str = '0c92a4d351cc'
-down_revision: Union[str, Sequence[str], None] = ('8055625763e3', '8476613a2f1d')
+revision: str = '7457cb1aad50'
+down_revision: Union[str, Sequence[str], None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

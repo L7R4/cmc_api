@@ -20,7 +20,32 @@ import re
 class EstadoResumen(str, Enum):
     abierto = "a"     # abierto
     cerrado = "c"     # cerrado
-    emitido = "e"     # emitido/facturado
+
+class PreviewItem(BaseModel):
+    liquidacion_id: int
+    obra_social_id: int
+    obra_social_nombre: Optional[str] = None  # si no la tienes en el back, puede ir null
+    periodo: str                               # "YYYY-MM"
+    estado: Literal["A", "C"]
+    nro_liquidacion: Optional[str] = None
+    total_bruto: Decimal
+    total_debitos: Decimal
+    total_deduccion: Decimal
+    total_neto: Decimal
+
+class PreviewTotals(BaseModel):
+    cerradas_bruto: Decimal
+    cerradas_debitos: Decimal
+    cerradas_neto: Decimal
+    abiertas_bruto: Decimal
+    abiertas_debitos: Decimal
+    abiertas_neto: Decimal
+    resumen_deduccion: Decimal
+    total_general: Decimal  # (cerradas_neto + abiertas_neto + resumen_deduccion)
+
+class PreviewResponse(BaseModel):
+    items: List[PreviewItem]
+    totals: PreviewTotals
 
 # --------- LiquidacionResumen ---------
 class LiquidacionResumenBase(BaseModel):
@@ -78,6 +103,7 @@ class LiquidacionRead(BaseModel):
     mes_periodo: int
     anio_periodo: int
     version: int | None = None
+    estado: str
     nro_liquidacion: str
     total_bruto: Decimal
     total_debitos: Decimal
@@ -85,6 +111,7 @@ class LiquidacionRead(BaseModel):
 
     class Config:
         from_attributes = True
+
 
 # --------- composiciones de lectura ---------
 class LiquidacionResumenWithItems(LiquidacionResumenRead):
@@ -106,7 +133,7 @@ class DetalleLiquidacionRead(BaseModel):
         from_attributes = True
 
 class DetalleVistaRow(BaseModel):
-    id: int
+    det_id: int
     socio: int | str
     nombreSocio: str
     matri: int | str | None
@@ -130,5 +157,7 @@ class DetalleVistaRow(BaseModel):
 
     total: float
 
-class ReabrirPayload(BaseModel):
-    nro_liquidacion: str  # base sin prefijo de versión, p.ej. "000123"
+class RefacturarPayload(BaseModel):
+    nro_liquidacion: str
+
+

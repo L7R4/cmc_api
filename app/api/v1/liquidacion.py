@@ -23,6 +23,7 @@ from app.schemas.liquidaciones_schema import (
     DetalleLiquidacionRead, DetalleVistaRow, LiquidacionResumenCreate, LiquidacionResumenUpdate, LiquidacionResumenRead, LiquidacionResumenWithItems,
     LiquidacionCreate, LiquidacionUpdate, LiquidacionRead, PreviewItem, PreviewResponse, RefacturarPayload,
 )
+import datetime as dt
 
 
 
@@ -194,6 +195,51 @@ async def preview_liquidaciones(resumen_id: int, db: AsyncSession = Depends(get_
         }
     }
 
+@router.post("/resumen/next", response_model=LiquidacionResumenRead, status_code=201)
+async def crear_resumen_siguiente(db: AsyncSession = Depends(get_db)):
+    # 1) obtener el último (año desc, mes desc)
+    res = await db.execute(
+        select(LiquidacionResumen)
+        .order_by(LiquidacionResumen.anio.desc(), LiquidacionResumen.mes.desc())
+        .limit(1)
+    )
+    last = res.scalars().first()
+
+    if last:
+        y, m = int(last.anio), int(last.mes)
+        if m == 12:
+            y, m = y + 1, 1
+        else:
+            m = m + 1
+    else:
+        # si no hay ninguno, arranca en el mes actual
+        today = dt.date.today()
+        y, m = today.year, today.month
+
+    # 2) evitar duplicados (opcional: también poné UniqueConstraint en el modelo)
+    exists = await db.execute(
+        select(LiquidacionResumen.id)
+        .where(LiquidacionResumen.anio == y, LiquidacionResumen.mes == m)
+        .limit(1)
+    )
+    if exists.scalars().first():
+        raise HTTPException(status_code=409, detail=f"Ya existe un resumen para {y}-{m:02d}")
+
+    # 3) crear en 'a' (abierto) con totales en 0
+    obj = LiquidacionResumen(
+        anio=y,
+        mes=m,
+        estado="a",
+        cierre_timestamp=None,
+        total_bruto=Decimal("0"),
+        total_debitos=Decimal("0"),
+        total_deduccion=Decimal("0"),
+    )
+    db.add(obj)
+    await db.commit()
+    await db.refresh(obj)
+    return obj
+
 
 # ========================
 # Liquidacion CRUD
@@ -230,46 +276,6 @@ async def obtener_liquidacion(liquidacion_id: int, db: AsyncSession = Depends(ge
     if not obj:
         raise HTTPException(404, "Liquidacion no encontrada")
     return obj
-
-
-# @router.get("/liquidaciones_por_os/{obra_social_id}/{periodo_id}")
-# async def prestaciones_por_os_y_periodo(
-#     obra_social_id: int = Path(..., description="Código de obra social"),
-#     periodo_id: str = Path(..., description="YYYY-MM o YYYYMM"),
-#     limit: int = Query(5000, ge=1, le=20000),
-#     db: AsyncSession = Depends(get_db),
-# ) -> List[Dict[str, Any]]:
-#     try:
-#         anio, mes, _ = normalizar_periodo_flexible(periodo_id)
-#     except ValueError as e:
-#         raise HTTPException(400, str(e))
-
-#     stmt = (
-#         select(
-#             GuardarAtencion.ID.label("id_atencion"),
-#             GuardarAtencion.NRO_SOCIO.label("medico_id"),
-#             GuardarAtencion.NOMBRE_PRESTADOR.label("medico_nombre"),
-#             GuardarAtencion.NRO_OBRA_SOCIAL.label("obra_social_id"),
-#             GuardarAtencion.CODIGO_PRESTACION.label("codigo_prestacion"),
-#             GuardarAtencion.FECHA_PRESTACION.label("fecha_prestacion"),
-#             GuardarAtencion.VALOR_CIRUJIA.label("valor_cirugia"),
-#             GuardarAtencion.VALOR_AYUDANTE.label("valor_ayudante"),
-#             GuardarAtencion.VALOR_AYUDANTE_2.label("valor_ayudante_2"),
-#             GuardarAtencion.GASTOS.label("gastos"),
-#             GuardarAtencion.CANTIDAD.label("cantidad"),
-#             GuardarAtencion.CANT_TRATAMIENTO.label("cantidad_tratamiento"),
-#         )
-#         .where(
-#             and_(
-#                 GuardarAtencion.NRO_OBRA_SOCIAL == obra_social_id,
-#                 GuardarAtencion.ANIO_PERIODO == anio,
-#                 GuardarAtencion.MES_PERIODO == mes,
-#             )
-#         )
-#         .limit(limit)
-#     )
-#     rows = (await db.execute(stmt)).mappings().all()
-#     return [dict(r) for r in rows]
 
 
 @router.post("/liquidaciones_por_os/crear", response_model=LiquidacionRead, status_code=201)
@@ -309,6 +315,7 @@ async def crear_liquidacion(payload: LiquidacionCreate, db: AsyncSession = Depen
     await db.refresh(obj)
     return obj
 
+
 @router.put("/liquidaciones_por_os/{liquidacion_id}", response_model=LiquidacionRead)
 async def editar_liquidacion(liquidacion_id: int, payload: LiquidacionUpdate, db: AsyncSession = Depends(get_db)):
     res = await db.execute(select(Liquidacion).where(Liquidacion.id == liquidacion_id))
@@ -332,6 +339,7 @@ async def editar_liquidacion(liquidacion_id: int, payload: LiquidacionUpdate, db
         raise HTTPException(409, f"Conflicto de unicidad u otro constraint: {e.orig}")
     await db.refresh(obj)
     return obj
+
 
 @router.delete("/liquidaciones_por_os/{liquidacion_id}", status_code=204)
 async def eliminar_liquidacion(liquidacion_id: int, db: AsyncSession = Depends(get_db)):
@@ -386,8 +394,6 @@ async def listar_detalles_liquidacion(
 async def detalles_vista(
     liquidacion_id: int,
     medico_id: Optional[int] = Query(None),
-    offset: int = Query(0, ge=0),
-    limit: int = Query(100, ge=1, le=1000),
     db: AsyncSession = Depends(get_db),
     response: Response = None,
 ):
@@ -395,16 +401,11 @@ async def detalles_vista(
         db=db,
         liquidacion_id=liquidacion_id,
         medico_id=medico_id,
-        offset=offset,
-        limit=limit,
     )
 
-    # Headers útiles para el front
+    # Headers útiles para el front (opcional mantenerlos)
     response.headers["X-Total-Count"] = str(total)
-    end = offset + max(len(items) - 1, 0)
-    response.headers["Content-Range"] = f"items {offset}-{end}/{total}"
-    response.headers["X-Offset"] = str(offset)
-    response.headers["X-Limit"] = str(limit)
+    response.headers["Content-Range"] = f"items 0-{max(total-1,0)}/{total}"
 
     return items
 

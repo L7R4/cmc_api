@@ -190,8 +190,6 @@ async def vista_detalles_liquidacion(
     db: AsyncSession,
     liquidacion_id: int,
     medico_id: Optional[int] = None,
-    offset: int = 0,
-    limit: int = 100,
 ) -> Tuple[List[Dict[str, Any]], int]:
     DL, GA, DC = DetalleLiquidacion, GuardarAtencion, Debito_Credito
 
@@ -200,26 +198,15 @@ async def vista_detalles_liquidacion(
     MATRICULA = getattr(GA, "MATRICULA", GA.NRO_SOCIO)
 
     importe_col = func.coalesce(DL.importe, 0).label("importe")
-
-    tipo_ui_col = case(
-        (DC.tipo == "d", literal("D")),
-        (DC.tipo == "c", literal("C")),
-        else_=literal("N"),
-    ).label("tipo")
-
+    tipo_ui_col = case((DC.tipo == "d", literal("D")),
+                       (DC.tipo == "c", literal("C")),
+                       else_=literal("N")).label("tipo")
     monto_ui_col = case(
         (DC.id.isnot(None), func.coalesce(DC.monto, 0)),
         (DL.prev_detalle_id.is_(None), func.coalesce(DL.importe, 0)),
         else_=func.abs(func.coalesce(DL.pagado, 0)),
     ).label("monto")
 
-    # --- COUNT total (para headers) ---
-    count_stmt = select(func.count(DL.id)).where(DL.liquidacion_id == liquidacion_id)
-    if medico_id is not None:
-        count_stmt = count_stmt.where(DL.medico_id == medico_id)
-    total_items = (await db.execute(count_stmt)).scalar_one() or 0
-
-    # --- SELECT paginado ---
     stmt = (
         select(
             DL.id.label("det_id"),
@@ -250,8 +237,6 @@ async def vista_detalles_liquidacion(
         .join(DC, DL.debito_credito_id == DC.id, isouter=True)
         .where(DL.liquidacion_id == liquidacion_id)
         .order_by(DL.id)
-        .offset(offset)
-        .limit(limit)
     )
     if medico_id is not None:
         stmt = stmt.where(DL.medico_id == medico_id)
@@ -263,7 +248,6 @@ async def vista_detalles_liquidacion(
         importe = Decimal(str(r["importe"] or "0"))
         tipo = (r["tipo"] or "N").upper()
         monto = Decimal(str(r["monto"] or "0"))
-
         total = importe - monto if tipo == "D" else importe + monto if tipo == "C" else importe
         xCant = f'{int(r.get("cantidad") or 1)}-{int(r.get("cantidad_tratamiento") or 1)}'
 
@@ -289,7 +273,7 @@ async def vista_detalles_liquidacion(
             "obs": r.get("obs_dc") or None,
             "total": float(total),
         })
-    return out, int(total_items)
+    return out, len(out)
 
 async def _ajuste_por_dc(db: AsyncSession, debito_credito_id: Optional[int]) -> Decimal:
     """

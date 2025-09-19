@@ -464,7 +464,7 @@ class Periodos(Base):
     NRO_FACT_2: Mapped[str] = mapped_column(String(8, 'utf8_spanish2_ci'), nullable=False, server_default=text("'0'"))
     NRO_OBRA_SOCIAL: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
     FECHA: Mapped[str] = mapped_column(String(10, 'utf8_spanish2_ci'), nullable=False, server_default=text("'-'"))
-
+    USUARIO: Mapped[int] = mapped_column(INTEGER(10), nullable=False, server_default=text("'0'"))
 
 class PeriodosDoctor(Base):
     __tablename__ = 'periodos_doctor'
@@ -865,7 +865,7 @@ class Liquidacion(Base):
     )
     cierre_timestamp: Mapped[Optional[str]] = mapped_column(String(25), nullable=True)
 
-    # Mantengo el campo que ya usás, pero ahora lo guardamos con prefijo "NNN-"
+    
     nro_liquidacion: Mapped[Optional[str]] = mapped_column(String(30))
 
     total_bruto: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default=0)
@@ -932,7 +932,7 @@ class Debito_Credito(Base):
     creado_timestamp: Mapped[Optional[str]] = mapped_column(String(25))  
     created_by_user: Mapped[int] = mapped_column(ForeignKey("listado_medico.ID"), nullable=False)
 
-    detalles_liquidacion: Mapped[list["DetalleLiquidacion"]] = relationship(back_populates="debito_credito", cascade="all, delete-orphan")
+    detalles_liquidacion: Mapped[list["DetalleLiquidacion"]] = relationship(back_populates="debito_credito", passive_deletes=True)
 
 
 class Descuentos(Base):

@@ -10,6 +10,8 @@ from app.api.v1.exports import router as exports_router
 from app.api.v1.especialidades import router as especialidades_router
 from app.api.v1.asignaciones import router as asignaciones_router
 from app.api.v1.deducciones import router as deducciones_router
+from app.api.v1.periodos import router as periodos_router
+
 
 
 
@@ -26,4 +28,6 @@ api_router.include_router(descuentos_router,  prefix="/descuentos",  tags=["Desc
 api_router.include_router(exports_router, prefix="/exports", tags=["exports"])
 api_router.include_router(liquidacion_router, prefix="/liquidacion", tags=["Liquidacion"])
 api_router.include_router(asignaciones_router,    prefix="/medicos", tags=["Asignaciones Médico"])
+api_router.include_router(periodos_router,    prefix="/periodos", tags=["Periodos"])
+
 

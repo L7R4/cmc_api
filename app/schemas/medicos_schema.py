@@ -1,7 +1,7 @@
 # app/schemas.py
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional,Literal
 
 from pydantic import BaseModel, Field, field_validator
 class MedicoBase(BaseModel):
@@ -170,3 +170,63 @@ class DoctorStatsPointOut(BaseModel):
     consultas: int
     facturado: float
     obras: Dict[str, float] = Field(default_factory=dict)
+
+
+class ConceptoAplicacionOut(BaseModel):
+    resumen_id: int
+    periodo: str
+    created_at: Optional[datetime] = None
+    monto_aplicado: Decimal
+    porcentaje_aplicado: Decimal
+
+class MedicoConceptoOut(BaseModel):
+    concepto_tipo: Literal["desc","esp"]
+    concepto_id: int
+    concepto_nro_colegio: Optional[int] = None
+    concepto_nombre: Optional[str] = None
+    saldo: Decimal
+    aplicaciones: List[ConceptoAplicacionOut] = []
+
+class AsociarConceptoIn(BaseModel):
+    concepto_tipo: Literal["desc","esp"]
+    concepto_id: int
+
+
+# ==================================
+class CEAppOut(BaseModel):
+    resumen_id: int
+    periodo: str
+    created_at: Optional[str] = None
+    monto_aplicado: float
+    porcentaje_aplicado: float
+
+class ConceptRecordOut(BaseModel):
+    concepto_tipo: Literal["desc", "esp"]
+    concepto_id: int
+    concepto_nro_colegio: Optional[int] = None
+    concepto_nombre: Optional[str] = None
+    saldo: float
+    aplicaciones: List[CEAppOut] = Field(default_factory=list)
+
+class CEStoreOut(BaseModel):
+    conceps: List[int] = Field(default_factory=list)
+    espec: List[int] = Field(default_factory=list)
+
+class CEBundleOut(BaseModel):
+    store: CEStoreOut
+    conceptos: List[ConceptRecordOut] = Field(default_factory=list)
+
+class PatchCEIn(BaseModel):
+    concepto_tipo: Literal["desc", "esp"]
+    concepto_id: int
+    op: Literal["add", "remove"] = "add"
+
+class CEBundlePatchIn(BaseModel):
+    concepto_tipo: Literal["desc", "esp"]
+    concepto_id: int # desc = nro_colegio; esp = Especialidad.ID
+    op: Literal["add", "remove"] = "add"
+
+
+class MedicoEspecialidadOut(BaseModel):
+    id: int
+    nombre: Optional[str] = None

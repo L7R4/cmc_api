@@ -17,9 +17,6 @@ import re
 #         raise ValueError("Periodo fuera de rango.")
 #     return f"{y:04d}-{mo:02d}"
 
-class EstadoResumen(str, Enum):
-    abierto = "a"     # abierto
-    cerrado = "c"     # cerrado
 
 class PreviewItem(BaseModel):
     liquidacion_id: int
@@ -51,8 +48,8 @@ class PreviewResponse(BaseModel):
 class LiquidacionResumenBase(BaseModel):
     mes: int = Field(..., ge=1, le=12)
     anio: int = Field(..., ge=1900, le=3000)
-    estado: EstadoResumen = EstadoResumen.abierto
-    cierre_timestamp: Optional[str] = None
+    # estado: EstadoResumen = EstadoResumen.abierto
+    # cierre_timestamp: Optional[str] = None
 
 class LiquidacionResumenCreate(LiquidacionResumenBase):
     # Totales se inician en 0; no se editan por POST
@@ -61,8 +58,8 @@ class LiquidacionResumenCreate(LiquidacionResumenBase):
 class LiquidacionResumenUpdate(BaseModel):
     mes: Optional[int] = Field(None, ge=1, le=12)
     anio: Optional[int] = Field(None, ge=1900, le=3000)
-    estado: Optional[EstadoResumen] = None
-    cierre_timestamp: Optional[str] = None
+    # estado: Optional[EstadoResumen] = None
+    # cierre_timestamp: Optional[str] = None
 
 class LiquidacionResumenRead(BaseModel):
     id: int
@@ -71,8 +68,8 @@ class LiquidacionResumenRead(BaseModel):
     total_bruto: Decimal
     total_debitos: Decimal
     total_deduccion: Decimal
-    estado: EstadoResumen
-    cierre_timestamp: Optional[str]
+    # estado: EstadoResumen
+    # cierre_timestamp: Optional[str]
 
     class Config:
         from_attributes = True

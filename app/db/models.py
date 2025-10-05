@@ -2,14 +2,28 @@ from typing import Literal, Optional
 import datetime
 import decimal
 
-from sqlalchemy import DECIMAL, JSON, Date, Enum, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
+from sqlalchemy import DECIMAL, JSON, Date, DateTime, Enum, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.dialects.mysql import INTEGER, LONGTEXT, VARCHAR
 from decimal import Decimal
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.sql import func
 
 class Base(DeclarativeBase):
     pass
 
+class AuditMixin:
+    # UTC y con zona para portabilidad
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),    # Postgres: NOW(); MySQL: CURRENT_TIMESTAMP()
+        nullable=False
+    )
+    # NO obligatorio → nullable=True
+    created_by_user: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("listado_medico.ID"),
+        nullable=True,
+        index=True
+    )
 
 class Avisos(Base):
     __tablename__ = 'avisos'
@@ -824,7 +838,7 @@ class ValoresObrasocial(Base):
     GALENO_CIRUGIA_INFANTIL: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
 
 
-class LiquidacionResumen(Base):
+class LiquidacionResumen(AuditMixin,Base):
     __tablename__ = "liquidacion_resumen"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -834,8 +848,8 @@ class LiquidacionResumen(Base):
     total_bruto: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default=0)
     total_debitos: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default=0)
     total_deduccion: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default=0)
-    estado: Mapped[Literal["a","c","e"]] = mapped_column(Enum("a","c","e", name="liqres_estado"), default="a")
-    cierre_timestamp: Mapped[Optional[str]] = mapped_column(String(25))  # o DateTime si preferís
+    # estado: Mapped[Literal["a","c","e"]] = mapped_column(Enum("a","c","e", name="liqres_estado"), default="a")
+    # cierre_timestamp: Mapped[Optional[str]] = mapped_column(String(25))  # o DateTime si preferís
 
     liquidaciones: Mapped[list["Liquidacion"]] = relationship(
         back_populates="resumen",
@@ -845,8 +859,12 @@ class LiquidacionResumen(Base):
         order_by="(Liquidacion.obra_social_id, Liquidacion.anio_periodo, Liquidacion.mes_periodo)",  # ordena las hijas
         lazy="selectin",
     )
+    
+    __table_args__ = (
+    UniqueConstraint("anio", "mes", name="uq_liqres_anio_mes"),
+)
 
-class Liquidacion(Base):
+class Liquidacion(AuditMixin,Base):
     __tablename__ = "liquidacion"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -874,7 +892,7 @@ class Liquidacion(Base):
 
     resumen: Mapped[Optional["LiquidacionResumen"]] = relationship(back_populates="liquidaciones")
     detalles: Mapped[list["DetalleLiquidacion"]] = relationship(back_populates="liquidacion", cascade="all, delete-orphan")
-
+    
     __table_args__ = (
         UniqueConstraint("resumen_id", "obra_social_id", "mes_periodo", "anio_periodo","version", name="uq_liq_res_os_per_v2"),
         Index("idx_liq_res_os_per", "resumen_id", "obra_social_id", "mes_periodo", "anio_periodo"),
@@ -882,7 +900,7 @@ class Liquidacion(Base):
     )
 
 
-class DetalleLiquidacion(Base):
+class DetalleLiquidacion(AuditMixin,Base):
     __tablename__ = "detalle_liquidacion"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -919,7 +937,7 @@ class DetalleLiquidacion(Base):
         Index("idx_det_prest", "prestacion_id"),
     )
 
-class Debito_Credito(Base):
+class Debito_Credito(AuditMixin,Base):
     __tablename__ = "debito_credito"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -928,14 +946,11 @@ class Debito_Credito(Base):
     obra_social_id: Mapped[int] = mapped_column(ForeignKey("obras_sociales.NRO_OBRASOCIAL"), index=True)
     observacion: Mapped[str] = mapped_column(String(255), nullable=True)
     monto: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default=0)
-    periodo : Mapped[str] = mapped_column(String(7), index=True)  
-    creado_timestamp: Mapped[Optional[str]] = mapped_column(String(25))  
-    created_by_user: Mapped[int] = mapped_column(ForeignKey("listado_medico.ID"), nullable=False)
-
+    periodo : Mapped[str] = mapped_column(String(7), index=True) 
     detalles_liquidacion: Mapped[list["DetalleLiquidacion"]] = relationship(back_populates="debito_credito", passive_deletes=True)
 
 
-class Descuentos(Base):
+class Descuentos(AuditMixin,Base):
     __tablename__ = "descuentos"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     nro_colegio : Mapped[int] = mapped_column(Integer, nullable= False)
@@ -943,7 +958,7 @@ class Descuentos(Base):
     precio: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default = 0)
     porcentaje: Mapped[Decimal] = mapped_column(DECIMAL(10,2), default = 0)
 
-class DeduccionColegio(Base):
+class DeduccionColegio(AuditMixin,Base):
     __tablename__ = "deducciones_colegio"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
 
@@ -969,7 +984,7 @@ class DeduccionColegio(Base):
     )
 
 
-class DeduccionSaldo(Base):
+class DeduccionSaldo(AuditMixin,Base):
     __tablename__ = "deduccion_saldo"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
 
@@ -984,7 +999,7 @@ class DeduccionSaldo(Base):
     )
 
 
-class DeduccionAplicacion(Base):
+class DeduccionAplicacion(AuditMixin,Base):
     __tablename__ = "deduccion_aplicacion"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
 

@@ -49,7 +49,7 @@ async def listar_resumenes(
     db: AsyncSession = Depends(get_db),
     mes: Optional[int] = Query(None, ge=1, le=12),
     anio: Optional[int] = Query(None, ge=1900, le=3000),
-    estado: Optional[str] = Query(None, pattern="^(a|c|e)$"),
+    # estado: Optional[str] = Query(None, pattern="^(a|c|e)$"),
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=500),
 ):
@@ -58,8 +58,8 @@ async def listar_resumenes(
         stmt = stmt.where(LiquidacionResumen.mes == mes)
     if anio is not None:
         stmt = stmt.where(LiquidacionResumen.anio == anio)
-    if estado is not None:
-        stmt = stmt.where(LiquidacionResumen.estado == estado)
+    # if estado is not None:
+    #     stmt = stmt.where(LiquidacionResumen.estado == estado)
     stmt = stmt.offset(skip).limit(limit)
     res = await db.execute(stmt)
     return res.scalars().all()
@@ -80,11 +80,18 @@ async def obtener_resumen(resumen_id: int, db: AsyncSession = Depends(get_db)):
 
 @router.post("/resumen", response_model=LiquidacionResumenRead, status_code=201)
 async def crear_resumen(payload: LiquidacionResumenCreate, db: AsyncSession = Depends(get_db)):
+    # Evitar duplicados (además de recomendar un UniqueConstraint en el modelo)
+    exists = await db.execute(
+        select(LiquidacionResumen.id)
+        .where(LiquidacionResumen.anio == payload.anio, LiquidacionResumen.mes == payload.mes)
+        .limit(1)
+    )
+    if exists.scalars().first():
+        raise HTTPException(status_code=409, detail=f"Ya existe un resumen para {payload.anio}-{payload.mes:02d}")
+
     obj = LiquidacionResumen(
         mes=payload.mes,
         anio=payload.anio,
-        estado=payload.estado.value if hasattr(payload.estado, "value") else payload.estado,
-        cierre_timestamp=payload.cierre_timestamp,
         total_bruto=Decimal("0"),
         total_debitos=Decimal("0"),
         total_deduccion=Decimal("0"),
@@ -93,6 +100,7 @@ async def crear_resumen(payload: LiquidacionResumenCreate, db: AsyncSession = De
     await db.commit()
     await db.refresh(obj)
     return obj
+
 
 @router.put("/resumen/{resumen_id}", response_model=LiquidacionResumenRead)
 async def editar_resumen(resumen_id: int, payload: LiquidacionResumenUpdate, db: AsyncSession = Depends(get_db)):
@@ -105,8 +113,8 @@ async def editar_resumen(resumen_id: int, payload: LiquidacionResumenUpdate, db:
     if payload.mes is not None: obj.mes = payload.mes
     if payload.anio is not None: obj.anio = payload.anio
     if payload.nros_liquidacion is not None: obj.nros_liquidacion = payload.nros_liquidacion
-    if payload.estado is not None: obj.estado = payload.estado.value if hasattr(payload.estado, "value") else payload.estado
-    if payload.cierre_timestamp is not None: obj.cierre_timestamp = payload.cierre_timestamp
+    # if payload.estado is not None: obj.estado = payload.estado.value if hasattr(payload.estado, "value") else payload.estado
+    # if payload.cierre_timestamp is not None: obj.cierre_timestamp = payload.cierre_timestamp
 
     try:
         await db.commit()
@@ -229,8 +237,8 @@ async def crear_resumen_siguiente(db: AsyncSession = Depends(get_db)):
     obj = LiquidacionResumen(
         anio=y,
         mes=m,
-        estado="a",
-        cierre_timestamp=None,
+        # estado="a",
+        # cierre_timestamp=None,
         total_bruto=Decimal("0"),
         total_debitos=Decimal("0"),
         total_deduccion=Decimal("0"),

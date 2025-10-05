@@ -1,17 +1,18 @@
 from collections import defaultdict
 from decimal import Decimal
-from typing import Optional, Dict, List
+from operator import and_
+from typing import DefaultDict, Optional, Dict, List
 from fastapi import APIRouter, Body, Depends, Query, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import desc, func, select, or_, cast, String
 from app.db.database import get_db
 from app.db.models import (
-    DetalleLiquidacion, Liquidacion, ListadoMedico,
+    DeduccionColegio, Descuentos, DetalleLiquidacion, Especialidad, Liquidacion, ListadoMedico,
     DeduccionSaldo, DeduccionAplicacion, LiquidacionResumen
 )
 from app.schemas.deduccion_schema import CrearDeudaOut, NuevaDeudaIn
 from app.schemas.medicos_schema import (
-    DoctorStatsPointOut, MedicoDebtOut, MedicoDocOut, MedicoListRow, MedicoDetailOut
+    AsociarConceptoIn, CEAppOut, CEBundleOut, CEBundlePatchIn, CEStoreOut, ConceptRecordOut, ConceptoAplicacionOut, DoctorStatsPointOut, MedicoConceptoOut, MedicoDebtOut, MedicoDocOut, MedicoEspecialidadOut, MedicoListRow, MedicoDetailOut, PatchCEIn
 )
 
 router = APIRouter()
@@ -151,6 +152,8 @@ async def crear_deuda_manual(
             "last_invoice": None,
             "since": None,
         }
+
+
 @router.get("/{medico_id}/documentos", response_model=List[MedicoDocOut])
 async def documentos_medico(
     medico_id: int,
@@ -161,6 +164,7 @@ async def documentos_medico(
     De momento, devolvemos vacío.
     """
     return []
+
 
 @router.get("/{medico_id}/stats", response_model=List[DoctorStatsPointOut])
 async def stats_medico(
@@ -225,3 +229,171 @@ async def stats_medico(
     return out
 
 
+@router.patch("/{medico_id}/ce_bundle")
+async def patch_ce_bundle(
+    medico_id: int,
+    payload: CEBundlePatchIn = Body(...),
+    db: AsyncSession = Depends(get_db),
+):
+    # Validar existencia en catálogo
+    if payload.concepto_tipo == "desc":
+        exists = (await db.execute(
+            select(Descuentos.nro_colegio)
+            .where(Descuentos.nro_colegio == payload.concepto_id)
+            .limit(1)
+        )).scalar()
+    else:  # "esp"
+        exists = (await db.execute(
+            select(Especialidad.ID).where(Especialidad.ID == payload.concepto_id).limit(1)
+        )).scalar()
+
+    if not exists:
+        raise HTTPException(404, "Concepto/Especialidad no encontrado")
+
+    # Lock del médico
+    med = (await db.execute(
+        select(ListadoMedico).where(ListadoMedico.ID == medico_id).with_for_update()
+    )).scalars().first()
+    if not med:
+        raise HTTPException(404, "Médico no encontrado")
+
+    cfg = dict(med.conceps_espec or {"conceps": [], "espec": []})
+    cfg.setdefault("conceps", [])
+    cfg.setdefault("espec", [])
+
+    # Para desc guardamos nro_colegio; para esp el ID de Especialidad
+    target = "conceps" if payload.concepto_tipo == "desc" else "espec"
+    current = [int(x) for x in (cfg[target] or [])]
+
+    if payload.op == "add":
+        current.append(int(payload.concepto_id))
+    else:
+        current = [x for x in current if int(x) != int(payload.concepto_id)]
+
+    cfg[target] = sorted(set(current))  # dedupe + orden
+    med.conceps_espec = cfg
+    await db.commit()
+    return {"store": cfg}
+
+
+@router.get("/{medico_id}/conceptos", response_model=List[MedicoConceptoOut])
+async def listar_conceptos_medico(
+    medico_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    # 1) Leer store del médico (nro_colegio)
+    store = (await db.execute(
+        select(ListadoMedico.conceps_espec).where(ListadoMedico.ID == medico_id)
+    )).scalar_one_or_none() or {"conceps": [], "espec": []}
+
+    nro_list = [int(x) for x in (store.get("conceps") or [])]
+    if not nro_list:
+        return []
+
+    # 2) Catálogo: map nro_colegio -> [ids] y un nombre de referencia
+    rows = (await db.execute(
+        select(Descuentos.id, Descuentos.nro_colegio, Descuentos.nombre)
+        .where(Descuentos.nro_colegio.in_(nro_list))
+    )).all()
+
+    ids_by_nro: DefaultDict[int, List[int]] = defaultdict(list)
+    name_by_nro: Dict[int, str] = {}
+    for did, nro, nom in rows:
+        n = int(nro)
+        ids_by_nro[n].append(int(did))
+        # elegimos el último nombre visto (o podrías elegir el de mayor id, etc.)
+        name_by_nro[n] = str(nom) if nom is not None else name_by_nro.get(n, None)
+
+    # 3) Saldos: traemos por id de descuento y los agregamos por nro_colegio
+    all_desc_ids: List[int] = []
+    for n in nro_list:
+        all_desc_ids.extend(ids_by_nro.get(n, []))
+    all_desc_ids = sorted(set(all_desc_ids))
+
+    saldo_by_nro: Dict[int, Decimal] = {n: Decimal("0.00") for n in nro_list}
+    if all_desc_ids:
+        sal_rows = (await db.execute(
+            select(DeduccionSaldo.concepto_id, DeduccionSaldo.saldo)
+            .where(
+                DeduccionSaldo.medico_id == medico_id,
+                DeduccionSaldo.concepto_tipo == "desc",
+                DeduccionSaldo.concepto_id.in_(all_desc_ids),
+            )
+        )).all()
+        # map id -> nro
+        id_to_nro: Dict[int, int] = {}
+        for n, ids in ids_by_nro.items():
+            for i in ids:
+                id_to_nro[i] = n
+        for cid, saldo in sal_rows:
+            n = id_to_nro.get(int(cid))
+            if n is not None:
+                v = Decimal(str(saldo or 0)).quantize(Decimal("0.01"))
+                saldo_by_nro[n] = (saldo_by_nro.get(n, Decimal("0.00")) + v).quantize(Decimal("0.01"))
+
+    # 4) Aplicaciones: por todos los ids del grupo, agregadas por nro
+    apps_by_nro: DefaultDict[int, List[ConceptoAplicacionOut]] = defaultdict(list)
+    if all_desc_ids:
+        DC, LR = DeduccionColegio, LiquidacionResumen
+        apps = (await db.execute(
+            select(
+                DC.descuento_id, DC.resumen_id, LR.anio, LR.mes,
+                DC.monto_aplicado, DC.porcentaje_aplicado, DC.created_at
+            )
+            .join(LR, LR.id == DC.resumen_id)
+            .where(
+                DC.medico_id == medico_id,
+                DC.descuento_id.in_(all_desc_ids),
+            )
+            .order_by(desc(LR.anio), desc(LR.mes), DC.created_at.desc())
+        )).all()
+
+        id_to_nro: Dict[int, int] = {}
+        for n, ids in ids_by_nro.items():
+            for i in ids:
+                id_to_nro[i] = n
+
+        for descuento_id, resumen_id, anio, mes, monto, pct, created in apps:
+            n = id_to_nro.get(int(descuento_id))
+            if n is None:
+                continue
+            apps_by_nro[n].append(ConceptoAplicacionOut(
+                resumen_id=int(resumen_id),
+                periodo=f"{int(anio):04d}-{int(mes):02d}",
+                created_at=created,
+                monto_aplicado=Decimal(str(monto or 0)).quantize(Decimal("0.01")),
+                porcentaje_aplicado=Decimal(str(pct or 0)).quantize(Decimal("0.01")),
+            ))
+
+    # 5) Salida en el orden del store
+    out: List[MedicoConceptoOut] = []
+    for n in nro_list:
+        out.append(MedicoConceptoOut(
+            concepto_tipo="desc",
+            concepto_id=n,
+            concepto_nro_colegio=n,
+            concepto_nombre=name_by_nro.get(n),
+            saldo=saldo_by_nro.get(n, Decimal("0.00")),
+            aplicaciones=apps_by_nro.get(n, []),
+        ))
+    return out
+
+@router.get("/{medico_id}/especialidades", response_model=List[MedicoEspecialidadOut])
+async def listar_especialidades_medico(
+    medico_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    store = (await db.execute(
+        select(ListadoMedico.conceps_espec).where(ListadoMedico.ID == medico_id)
+    )).scalar_one_or_none() or {"conceps": [], "espec": []}
+
+    espec_ids = [int(x) for x in (store.get("espec") or [])]
+    if not espec_ids:
+        return []
+
+    rows = (await db.execute(
+        select(Especialidad.ID, Especialidad.ESPECIALIDAD)
+        .where(Especialidad.ID.in_(espec_ids))
+    )).all()
+    name_by_id = {int(r[0]): r[1] for r in rows}
+    return [MedicoEspecialidadOut(id=eid, nombre=name_by_id.get(eid)) for eid in espec_ids]

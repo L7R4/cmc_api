@@ -4,6 +4,18 @@ from decimal import Decimal
 from typing import Dict, List, Optional,Literal
 
 from pydantic import BaseModel, Field, field_validator
+
+class UserOut(BaseModel):
+    id: int
+    nro_socio: int
+    nombre: Optional[str] = None
+    scopes: List[str] = []
+    role: Optional[str] = None 
+
+
+class UserEnvelope(BaseModel):
+    user: UserOut
+
 class MedicoBase(BaseModel):
     nro_especialidad: int        = Field(..., description="Especialidad principal")
     nro_especialidad2: int       = Field(..., description="Especialidad 2")
@@ -131,12 +143,18 @@ class MedicoListRow(BaseModel):
     nro_socio: int
     nombre: str
     matricula_prov: int
+    mail_particular: str
+    tele_particular: str
+    fecha_ingreso: Optional[date] = None
     documento: str
 
 class MedicoDetailOut(BaseModel):
+    # --- básicos ya existentes ---
     id: int
     nro_socio: int
     nombre: str
+    nombre_:str
+    apellido:str
     matricula_prov: int
     matricula_nac: int
     telefono_consulta: str
@@ -151,6 +169,42 @@ class MedicoDetailOut(BaseModel):
     categoria: str
     existe: str
     fecha_nac: Optional[date] = None
+
+    # --- personales extra ---
+    localidad: Optional[str] = None
+    domicilio_particular: Optional[str] = None
+    tele_particular: Optional[str] = None
+    celular_particular: Optional[str] = None
+
+    # --- profesionales extra ---
+    titulo: Optional[str] = None
+    fecha_recibido: Optional[date] = None
+    fecha_matricula: Optional[date] = None
+    nro_resolucion: Optional[str] = None
+    fecha_resolucion: Optional[date] = None
+
+    # --- impositivos ---
+    condicion_impositiva: Optional[str] = None
+    anssal: Optional[int] = None
+    vencimiento_anssal: Optional[date] = None
+    malapraxis: Optional[str] = None
+    vencimiento_malapraxis: Optional[date] = None
+    cobertura: Optional[int] = None
+    vencimiento_cobertura: Optional[date] = None
+    cbu: Optional[str] = None
+    observacion: Optional[str] = None
+
+    @field_validator(
+        "fecha_recibido", "fecha_matricula", "fecha_nac",
+        "vencimiento_anssal", "vencimiento_malapraxis",
+        "vencimiento_cobertura",
+        mode="before"
+    )
+    @classmethod
+    def _fix_zero_dates(cls, v):
+        if isinstance(v, str) and (v == "0000-00-00" or v.startswith("0000-")):
+            return None
+        return v
 
 
 class MedicoDebtOut(BaseModel):

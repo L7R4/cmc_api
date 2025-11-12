@@ -1,23 +1,38 @@
 from collections import defaultdict
+from datetime import date, datetime
 from decimal import Decimal
 from operator import and_
+from pathlib import Path
+import re
+from sqlalchemy.orm.attributes import flag_modified
+
 from typing import DefaultDict, Optional, Dict, List
-from fastapi import APIRouter, Body, Depends, Query, HTTPException, status
+from fastapi import APIRouter, Body, Depends, File, Form, Query, HTTPException, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import desc, func, select, or_, cast, String
+from app.core.passwords import hash_password
 from app.db.database import get_db
 from app.db.models import (
-    DeduccionColegio, Descuentos, DetalleLiquidacion, Especialidad, Liquidacion, ListadoMedico,
-    DeduccionSaldo, DeduccionAplicacion, LiquidacionResumen
+    DeduccionColegio, Descuentos, DetalleLiquidacion, Documento, Especialidad, Liquidacion, ListadoMedico,
+    DeduccionSaldo, DeduccionAplicacion, LiquidacionResumen, SolicitudRegistro
 )
 from app.schemas.deduccion_schema import CrearDeudaOut, NuevaDeudaIn
 from app.schemas.medicos_schema import (
     AsociarConceptoIn, CEAppOut, CEBundleOut, CEBundlePatchIn, CEStoreOut, ConceptRecordOut, ConceptoAplicacionOut, DoctorStatsPointOut, MedicoConceptoOut, MedicoDebtOut, MedicoDocOut, MedicoEspecialidadOut, MedicoListRow, MedicoDetailOut, PatchCEIn
 )
+from app.auth.deps import require_scope
+from app.schemas.registro_schema import RegisterIn, RegisterOut
+from app.services.email import send_email_resend
+from app.core.config import settings
+from app.utils.main import _parse_date
 
 router = APIRouter()
 
-@router.get("", response_model=List[MedicoListRow])
+UPLOAD_DIR = Path(settings.UPLOAD_DIR)
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+
+@router.get("", response_model=List[MedicoListRow],dependencies=[Depends(require_scope("medicos:leer"))])
 async def listar_medicos(
     db: AsyncSession = Depends(get_db),
     q: Optional[str] = Query(None, description="Buscar por nombre, nro socio o matrículas"),
@@ -31,6 +46,9 @@ async def listar_medicos(
             ListadoMedico.NOMBRE.label("nombre"),
             ListadoMedico.MATRICULA_PROV.label("matricula_prov"),
             ListadoMedico.DOCUMENTO.label("documento"),
+            ListadoMedico.MAIL_PARTICULAR.label("mail_particular"),
+            ListadoMedico.TELE_PARTICULAR.label("tele_particular"),
+            ListadoMedico.FECHA_INGRESO.label("fecha_ingreso"),
         )
         .where(ListadoMedico.EXISTE == "S")
         .order_by(ListadoMedico.NOMBRE.asc())
@@ -45,11 +63,169 @@ async def listar_medicos(
                 cast(ListadoMedico.NRO_SOCIO, String).ilike(pattern),
                 cast(ListadoMedico.MATRICULA_PROV, String).ilike(pattern),
                 cast(ListadoMedico.DOCUMENTO, String).ilike(pattern),
+                cast(ListadoMedico.MAIL_PARTICULAR, String).ilike(pattern),
+
             )
         )
 
     rows = (await db.execute(stmt)).mappings().all()
     return [dict(r) for r in rows]
+
+@router.get("/count", dependencies=[Depends(require_scope("medicos:leer"))])
+async def contar_medicos(
+    q: Optional[str] = Query(None, description="Buscar por nombre, nro socio, matrículas o documento"),
+    db: AsyncSession = Depends(get_db),
+):
+    M = ListadoMedico
+    stmt = select(func.count()).select_from(M).where(M.EXISTE == "S")
+    if q:
+        like = f"%{q}%"
+        stmt = stmt.where(
+            or_(
+                M.NOMBRE.ilike(like),
+                cast(M.NRO_SOCIO, String).ilike(like),
+                cast(M.MATRICULA_PROV, String).ilike(like),
+                cast(M.DOCUMENTO, String).ilike(like),
+            )
+        )
+    total = (await db.execute(stmt)).scalar_one() or 0
+    return {"count": int(total)}
+
+@router.get("/stats/monthly", dependencies=[Depends(require_scope("medicos:leer"))])
+async def medicos_stats_monthly(
+    desde: Optional[date] = Query(None, description="YYYY-MM-DD"),
+    hasta: Optional[date] = Query(None, description="YYYY-MM-DD"),
+    db: AsyncSession = Depends(get_db),
+):
+    M = ListadoMedico
+    cond = [M.EXISTE == "S", M.FECHA_INGRESO.is_not(None)]
+    if desde: cond.append(M.FECHA_INGRESO >= desde)
+    if hasta: cond.append(M.FECHA_INGRESO <= hasta)
+
+    yr = func.extract("year", M.FECHA_INGRESO).label("year")
+    mo = func.extract("month", M.FECHA_INGRESO).label("month")
+
+    stmt = (
+        select(yr, mo, func.count().label("count"))
+        .where(and_(*cond))
+        .group_by(yr, mo)
+        .order_by(yr, mo)
+    )
+    rows = (await db.execute(stmt)).all()
+    return [{"year": int(r.year), "month": int(r.month), "count": int(r.count)} for r in rows]
+
+@router.post("/register", response_model=RegisterOut)
+async def register_medico(body: RegisterIn, db: AsyncSession = Depends(get_db)):
+    nombre = f"{(body.firstName or '').strip()} {(body.lastName or '').strip()}".strip()
+    # helpers: parse optional ints and dates from strings coming from the public schema
+    def _int_or_zero(v: Optional[str]) -> int:
+        try:
+            if v is None:
+                return 0
+            s = str(v).strip()
+            return int(s) if s != "" else 0
+        except Exception:
+            return 0
+
+    def _parse_date(s: Optional[str]):
+        if not s:
+            return None
+        try:
+            # accept ISO-like YYYY-MM-DD or full datetime
+            if "T" in s:
+                return datetime.fromisoformat(s).date()
+            return date.fromisoformat(s)
+        except Exception:
+            try:
+                # fallback: try parsing common formats
+                return datetime.strptime(s, "%d/%m/%Y").date()
+            except Exception:
+                return None
+
+    # map numeric licence fields
+    matricula_prov = _int_or_zero(body.provincialLicense)
+    matricula_nac = _int_or_zero(body.nationalLicense or body.matricula_nac if hasattr(body, 'matricula_nac') else None)
+
+    fecha_matricula = (_parse_date(body.provincialLicenseDate)
+                       or _parse_date(body.nationalLicenseDate)
+                       or _parse_date(body.graduationDate))
+
+    medico = ListadoMedico(
+        # columnas MAYÚSCULAS ya existentes
+        NOMBRE=nombre or "-",
+        TIPO_DOC=body.documentType or "DNI",
+        DOCUMENTO=str(body.documentNumber or "0"),
+        DOMICILIO_PARTICULAR=body.address or "a",
+        PROVINCIA=body.province or "A",
+        CODIGO_POSTAL=body.postalCode or "0",
+        TELE_PARTICULAR=body.phone or "0",
+        CELULAR_PARTICULAR=body.mobile or "0",
+        DOMICILIO_CONSULTA=body.officeAddress or "a",
+        TELEFONO_CONSULTA=body.officePhone or "0",
+        MAIL_PARTICULAR=body.email or "a",
+        CUIT=body.cuit or "0",
+        OBSERVACION=body.observations or "A",
+        EXISTE="N",  # <-- clave
+        ANSSAL=body.anssal,
+        # matrícula / licencias
+        MATRICULA_PROV=matricula_prov,
+        MATRICULA_NAC=matricula_nac,
+        FECHA_MATRICULA=fecha_matricula,
+        # fechas y vencimientos
+        FECHA_NAC=_parse_date(body.birthDate),
+        VENCIMIENTO_ANSSAL=_parse_date(body.anssalExpiry),
+        VENCIMIENTO_MALAPRAXIS=_parse_date(body.malpracticeExpiry),
+        VENCIMIENTO_COBERTURA=_parse_date(body.coverageExpiry),
+        FECHA_RECIBIDO = _parse_date(body.graduationDate),
+        # cobertura numeric (si viene como número)
+        COBERTURA=_int_or_zero(body.malpracticeCoverage),
+        # texto fields
+        MALAPRAXIS=body.malpracticeCompany or "A",
+        nro_resolucion=body.resolutionNumber or None,
+        fecha_resolucion=_parse_date(body.resolutionDate),
+        # columnas snake_case nuevas (opcionales)
+        apellido=body.lastName or None,
+        nombre_=body.firstName or None,
+        localidad=body.locality or None,
+        cbu=body.cbu or None,
+        condicion_impositiva=(body.condicionImpositiva or body.taxCondition) or None,
+        titulo=body.specialty or None,
+    )
+    # password temporal: DNI; luego el usuario la debe cambiar
+    pwd_raw = str(body.documentNumber or "")
+    medico.hashed_password = hash_password(pwd_raw)
+
+
+    db.add(medico)
+    await db.commit()
+    await db.refresh(medico)
+
+    solicitud = SolicitudRegistro(
+        estado="pendiente",
+        medico_id=medico.ID,
+        observaciones=None,
+    )
+    db.add(solicitud)
+    await db.commit()
+    await db.refresh(solicitud)
+
+    # Mail de notificación
+    try:
+        send_email_resend(
+            to=(settings.EMAIL_NOTIFY_TO),
+            subject="Nueva solicitud de registro",
+            html=f"""
+              <h3>Nueva solicitud de registro</h3>
+              <p><b>Médico:</b> {nombre}</p>
+              <p><b>Documento:</b> {body.documentType} {body.documentNumber}</p>
+              <p><b>Email:</b> {body.email or "-"}</p>
+              <p>Solicitud #{solicitud.id} — Médico ID {medico.ID}</p>
+            """,
+        )
+    except Exception as e:
+        print("EMAIL_SEND_FAILED:", e)
+
+    return {"medico_id": medico.ID, "solicitud_id": solicitud.id, "ok": True}
 
 
 @router.get("/{medico_id}", response_model=MedicoDetailOut)
@@ -58,9 +234,12 @@ async def obtener_medico(
     db: AsyncSession = Depends(get_db),
 ):
     stmt = select(
+        # ---- básicos ----
         ListadoMedico.ID.label("id"),
         ListadoMedico.NRO_SOCIO.label("nro_socio"),
         ListadoMedico.NOMBRE.label("nombre"),
+        ListadoMedico.nombre_.label("nombre_"),
+        ListadoMedico.apellido.label("apellido"),
         ListadoMedico.MATRICULA_PROV.label("matricula_prov"),
         ListadoMedico.MATRICULA_NAC.label("matricula_nac"),
         ListadoMedico.TELEFONO_CONSULTA.label("telefono_consulta"),
@@ -75,13 +254,38 @@ async def obtener_medico(
         ListadoMedico.CATEGORIA.label("categoria"),
         ListadoMedico.EXISTE.label("existe"),
         ListadoMedico.FECHA_NAC.label("fecha_nac"),
+
+        # ---- personales extra ----
+        ListadoMedico.localidad.label("localidad"),
+        ListadoMedico.DOMICILIO_PARTICULAR.label("domicilio_particular"),
+        ListadoMedico.TELE_PARTICULAR.label("tele_particular"),
+        ListadoMedico.CELULAR_PARTICULAR.label("celular_particular"),
+
+        # ---- profesionales extra ----
+        # OJO: si en tu modelo es MAYÚSCULA, usar ListadoMedico.TITULO
+        ListadoMedico.titulo.label("titulo"),
+        ListadoMedico.FECHA_RECIBIDO.label("fecha_recibido"),
+        ListadoMedico.FECHA_MATRICULA.label("fecha_matricula"),
+        # Si tu modelo las tiene en snake-case, así; si están en MAYÚSCULA, cambialas.
+        ListadoMedico.nro_resolucion.label("nro_resolucion"),
+        ListadoMedico.fecha_resolucion.label("fecha_resolucion"),
+
+        # ---- impositivos ----
+        ListadoMedico.condicion_impositiva.label("condicion_impositiva"),
+        ListadoMedico.ANSSAL.label("anssal"),
+        ListadoMedico.VENCIMIENTO_ANSSAL.label("vencimiento_anssal"),
+        ListadoMedico.MALAPRAXIS.label("malapraxis"),
+        ListadoMedico.VENCIMIENTO_MALAPRAXIS.label("vencimiento_malapraxis"),
+        ListadoMedico.COBERTURA.label("cobertura"),
+        ListadoMedico.VENCIMIENTO_COBERTURA.label("vencimiento_cobertura"),
+        ListadoMedico.cbu.label("cbu"),
+        ListadoMedico.OBSERVACION.label("observacion"),
     ).where(ListadoMedico.ID == medico_id)
 
     row = (await db.execute(stmt)).mappings().first()
     if not row:
         raise HTTPException(404, "Médico no encontrado")
     return dict(row)
-
 
 @router.get("/{medico_id}/deuda", response_model=MedicoDebtOut)
 async def deuda_medico(medico_id: int, db: AsyncSession = Depends(get_db)):
@@ -397,3 +601,322 @@ async def listar_especialidades_medico(
     )).all()
     name_by_id = {int(r[0]): r[1] for r in rows}
     return [MedicoEspecialidadOut(id=eid, nombre=name_by_id.get(eid)) for eid in espec_ids]
+
+
+LABEL_TO_FIELD = {
+    "titulo":                 "attach_titulo",
+    "matricula_nac":          "attach_matricula_nac",
+    "matricula_nacional":     "attach_matricula_nac",
+    "matricula_prov":         "attach_matricula_prov",
+    "resolucion":             "attach_resolucion",
+    "habilitacion_municipal": "attach_habilitacion_municipal",
+    "cuit":                   "attach_cuit",
+    "condicion_impositiva":   "attach_condicion_impositiva",
+    "anssal":                 "attach_anssal",
+    "malapraxis":             "attach_malapraxis",
+    "cbu":                    "attach_cbu",
+    "documento":              "attach_dni",
+}
+
+@router.post("/register/{medico_id}/document")
+async def upload_document(
+    medico_id: int,
+    file: UploadFile = File(...),
+    label: str | None = Form(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    med = await db.get(ListadoMedico, medico_id)
+    if not med:
+        raise HTTPException(404, "Médico no encontrado")
+
+    folder = UPLOAD_DIR / "medicos" / str(medico_id)
+    folder.mkdir(parents=True, exist_ok=True)
+
+    safe_name = f"{int(datetime.now().timestamp())}_{(file.filename or 'doc').replace(' ','_')}"
+    dest = folder / safe_name
+
+    content = await file.read()
+    dest.write_bytes(content)
+
+    doc = Documento(
+        medico_id = medico_id,
+        label = label,
+        original_name = file.filename or "",
+        filename = safe_name,
+        content_type = file.content_type or "application/octet-stream",
+        size = len(content),
+        path = str(dest),
+    )
+    db.add(doc)
+
+    if label:
+        field = LABEL_TO_FIELD.get(label.strip().lower())
+        if field and hasattr(med, field):
+            setattr(med, field, str(dest))
+
+    await db.flush()         # 🔸 asegura PK
+    await db.commit()
+    await db.refresh(doc)    # 🔸 garantiza doc.id
+    try:
+        if label:
+            lab = label.strip().lower()
+            idx = None
+            if lab == "resolucion":
+                idx = 0
+            else:
+                m = re.match(r"resolucion_(\d+)$", lab)
+                if m:
+                    idx = int(m.group(1)) - 1  # <-- corrige off-by-one (0..5)
+
+            if idx is not None:
+                # construir antes de usar
+                data = med.conceps_espec or {"conceps": [], "espec": []}
+                espec = list(data.get("espec") or [])
+
+                print("LABEL:", lab, "IDX:", idx, "LEN:", len(espec))
+
+                if 0 <= idx < len(espec):
+                    espec[idx]["adjunto"] = str(doc.id)  # o doc.filename / path
+                    data["espec"] = espec
+                    med.conceps_espec = data
+                    flag_modified(med, "conceps_espec") # ← *** clave ***
+
+                    await db.flush()
+                    await db.commit()  # <-- asegurá persistencia
+    except Exception as e:
+        # te conviene loguearlo al menos mientras debugueás
+        print("ADMIN_UPLOAD_EXC:", repr(e))
+    return {"ok": True, "doc_id": doc.id}
+
+@router.post("/admin/register",
+             response_model=RegisterOut,
+             dependencies=[Depends(require_scope("medicos:agregar"))])
+async def admin_register_medico(body: RegisterIn,
+                                db: AsyncSession = Depends(get_db)):
+    nombre = f"{(body.firstName or '').strip()} {(body.lastName or '').strip()}".strip()
+    def _int_or_zero(v: Optional[str]) -> int:
+        try:
+            if v is None:
+                return 0
+            s = str(v).strip()
+            return int(s) if s != "" else 0
+        except Exception:
+            return 0
+
+
+    # map numeric licence fields
+    matricula_prov = _int_or_zero(body.provincialLicense)
+    matricula_nac = _int_or_zero(body.nationalLicense or body.matricula_nac if hasattr(body, 'matricula_nac') else None)
+
+    fecha_matricula = (_parse_date(body.provincialLicenseDate)
+                       or _parse_date(body.nationalLicenseDate)
+                       or _parse_date(body.graduationDate))
+    # --- Especialidades -------------------------------------------------
+    # Si vino specialties (nuevo), lo usamos. Si no, mapeamos desde los campos viejos.
+    spec_items = []
+    if body.specialties:
+        # ya vienen con id_colegio_espe
+        for it in (body.specialties or []):
+            if not it or not getattr(it, "id_colegio_espe", None):
+                continue
+            spec_items.append({
+                "id_colegio": int(it.id_colegio_espe),
+                "n_resolucion": (it.n_resolucion or None),
+                "fecha_resolucion": (_parse_date(it.fecha_resolucion) or None),
+                "adjunto": (it.adjunto or None),
+            })
+    else:
+        # retrocompat: specialty (id tabla), resolutionNumber, resolutionDate
+        # Debemos traducir specialty(ID) -> ID_COLEGIO_ESPE
+        id_tabla = None
+        try:
+            id_tabla = int(body.specialty) if body.specialty else None
+        except Exception:
+            id_tabla = None
+
+        id_colegio = None
+        if id_tabla:
+            row = (await db.execute(select(Especialidad).where(Especialidad.ID == id_tabla))).scalar_one_or_none()
+            if row:
+                id_colegio = int(row.ID_COLEGIO_ESPE)
+
+        if id_colegio:
+            spec_items.append({
+                "id_colegio": id_colegio,
+                "n_resolucion": (body.resolutionNumber or None),
+                "fecha_resolucion": (_parse_date(body.resolutionDate) or None),
+                "adjunto": None,  # se actualizará al subir documento(s)
+            })
+
+    # Limitar a 6 como máximo
+    spec_items = spec_items[:6]
+
+    # Para NRO_ESPECIALIDAD* necesitamos SOLO los ID_COLEGIO_ESPE
+    nro_especs = [int(x["id_colegio"]) for x in spec_items]
+    while len(nro_especs) < 6:
+        nro_especs.append(0)  # completar con 0
+        
+    medico = ListadoMedico(
+        # columnas MAYÚSCULAS ya existentes
+        NOMBRE=nombre or "-",
+        TIPO_DOC=body.documentType or "DNI",
+        DOCUMENTO=str(body.documentNumber or "0"),
+        DOMICILIO_PARTICULAR=body.address or "a",
+        PROVINCIA=body.province or "A",
+        CODIGO_POSTAL=body.postalCode or "0",
+        TELE_PARTICULAR=body.phone or "0",
+        CELULAR_PARTICULAR=body.mobile or "0",
+        DOMICILIO_CONSULTA=body.officeAddress or "a",
+        TELEFONO_CONSULTA=body.officePhone or "0",
+        MAIL_PARTICULAR=body.email or "a",
+        CUIT=body.cuit or "0",
+        OBSERVACION=body.observations or "A",
+        EXISTE="N",  # <-- clave
+        ANSSAL=_int_or_zero(body.anssal),
+        NRO_ESPECIALIDAD = nro_especs[0],
+        NRO_ESPECIALIDAD2 = nro_especs[1],
+        NRO_ESPECIALIDAD3 = nro_especs[2],
+        NRO_ESPECIALIDAD4 = nro_especs[3],
+        NRO_ESPECIALIDAD5 = nro_especs[4],
+        NRO_ESPECIALIDAD6 = nro_especs[5],
+        # matrícula / licencias
+        MATRICULA_PROV=matricula_prov,
+        MATRICULA_NAC=matricula_nac,
+        FECHA_MATRICULA=fecha_matricula,
+        # fechas y vencimientos
+        FECHA_NAC=_parse_date(body.birthDate),
+        VENCIMIENTO_ANSSAL=_parse_date(body.anssalExpiry),
+        VENCIMIENTO_MALAPRAXIS=_parse_date(body.malpracticeExpiry),
+        VENCIMIENTO_COBERTURA=_parse_date(body.coverageExpiry),
+        FECHA_RECIBIDO = _parse_date(body.graduationDate),
+        # cobertura numeric (si viene como número)
+        COBERTURA=_int_or_zero(body.malpracticeCoverage),
+        # texto fields
+        MALAPRAXIS=body.malpracticeCompany or "A",
+        nro_resolucion=body.resolutionNumber or None,
+        fecha_resolucion=_parse_date(body.resolutionDate),
+        # columnas snake_case nuevas (opcionales)
+        apellido=body.lastName or None,
+        nombre_=body.firstName or None,
+        localidad=body.locality or None,
+        cbu=body.cbu or None,
+        condicion_impositiva=(body.condicionImpositiva or body.taxCondition) or None,
+        titulo=body.specialty or None,
+    )
+    # password temporal: DNI; luego el usuario la debe cambiar
+    pwd_raw = str(body.documentNumber or "")
+    medico.hashed_password = hash_password(pwd_raw)
+
+    medico.conceps_espec = {
+        "conceps": [],         # no tocamos acá
+        "espec": [
+            {
+                "id_colegio": it["id_colegio"],
+                "n_resolucion": it["n_resolucion"],
+                "fecha_resolucion": (it["fecha_resolucion"].isoformat() if it["fecha_resolucion"] else None),
+                "adjunto": it["adjunto"],  # luego se podrá actualizar cuando subas el archivo
+            }
+            for it in spec_items
+        ]
+    }
+
+    db.add(medico)
+    await db.commit()
+    await db.refresh(medico)
+
+    solicitud = SolicitudRegistro(
+        estado="pendiente",
+        medico_id=medico.ID,
+        observaciones=None,
+    )
+    db.add(solicitud)
+    await db.commit()
+    await db.refresh(solicitud)
+
+    # Mail de notificación
+    try:
+        send_email_resend(
+            to=(settings.EMAIL_NOTIFY_TO),
+            subject="Nueva solicitud de registro",
+            html=f"""
+              <h3>Nueva solicitud de registro</h3>
+              <p><b>Médico:</b> {nombre}</p>
+              <p><b>Documento:</b> {body.documentType} {body.documentNumber}</p>
+              <p><b>Email:</b> {body.email or "-"}</p>
+              <p>Solicitud #{solicitud.id} — Médico ID {medico.ID}</p>
+            """,
+        )
+    except Exception as e:
+        print("EMAIL_SEND_FAILED:", e)
+
+    return {"medico_id": medico.ID, "solicitud_id": solicitud.id, "ok": True}
+
+
+@router.post("/admin/register/{medico_id}/document",
+             dependencies=[Depends(require_scope("medicos:agregar"))])
+async def admin_upload_document(medico_id: int,
+                                file: UploadFile = File(...),
+                                label: Optional[str] = Form(None),
+                                db: AsyncSession = Depends(get_db)):
+    med = await db.get(ListadoMedico, medico_id)
+    if not med:
+        raise HTTPException(404, "Médico no encontrado")
+
+    folder = UPLOAD_DIR / "medicos" / str(medico_id)
+    folder.mkdir(parents=True, exist_ok=True)
+
+    safe_name = f"{int(datetime.now().timestamp())}_{(file.filename or 'doc').replace(' ','_')}"
+    dest = folder / safe_name
+
+    content = await file.read()
+    dest.write_bytes(content)
+
+    doc = Documento(
+        medico_id = medico_id,
+        label = label,
+        original_name = file.filename or "",
+        filename = safe_name,
+        content_type = file.content_type or "application/octet-stream",
+        size = len(content),
+        path = str(dest),
+    )
+    db.add(doc)
+
+    if label:
+        field = LABEL_TO_FIELD.get(label.strip().lower())
+        if field and hasattr(med, field):
+            setattr(med, field, str(dest))
+
+    await db.flush()         # 🔸 asegura PK
+    await db.commit()
+    await db.refresh(doc)    # 🔸 garantiza doc.id
+    try:
+        if label:
+            lab = label.strip().lower()
+            idx = None
+            if lab == "resolucion":
+                idx = 0
+            else:
+                m = re.match(r"resolucion_(\d+)$", lab)
+                if m:
+                    idx = int(m.group(1)) - 1  # <-- corrige off-by-one (0..5)
+
+            if idx is not None:
+                # construir antes de usar
+                data = med.conceps_espec or {"conceps": [], "espec": []}
+                espec = list(data.get("espec") or [])
+
+                print("LABEL:", lab, "IDX:", idx, "LEN:", len(espec))
+
+                if 0 <= idx < len(espec):
+                    espec[idx]["adjunto"] = str(doc.id)  # o doc.filename / path
+                    data["espec"] = espec
+                    med.conceps_espec = data
+                    flag_modified(med, "conceps_espec") # ← *** clave ***
+                    await db.flush()
+                    await db.commit()  # <-- asegurá persistencia
+    except Exception as e:
+        # te conviene loguearlo al menos mientras debugueás
+        print("ADMIN_UPLOAD_EXC:", repr(e))
+    return {"ok": True, "doc_id": doc.id}
+

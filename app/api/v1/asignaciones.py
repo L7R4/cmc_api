@@ -10,10 +10,19 @@ router = APIRouter()
 def _ensure_json(doc: dict | None) -> dict:
     if not isinstance(doc, dict):
         return {"conceps": [], "espec": []}
-    return {
-        "conceps": list(map(int, doc.get("conceps", []) or [])),
-        "espec": list(map(int, doc.get("espec", []) or [])),
-    }
+    conceps = list(map(int, (doc.get("conceps") or [])))
+    espec_raw = doc.get("espec") or []
+    espec_ids: list[int] = []
+    if espec_raw and isinstance(espec_raw, list):
+        if espec_raw and isinstance(espec_raw[0], dict):
+            for it in espec_raw:
+                try:
+                    espec_ids.append(int(it.get("id_colegio") or it.get("id_colegio_espe") or 0))
+                except Exception:
+                    pass
+        else:
+            espec_ids = [int(x) for x in espec_raw]
+    return {"conceps": conceps, "espec": espec_ids}
 
 @router.get("/{medico_id}/asignaciones", response_model=AsignacionesOut)
 async def get_asignaciones(medico_id: int, db: AsyncSession = Depends(get_db)):
@@ -30,8 +39,9 @@ async def add_concepto(medico_id: int, nro_concepto: int, db: AsyncSession = Dep
         raise HTTPException(404, "Médico no encontrado")
     data = _ensure_json(med.conceps_espec)
     if nro_concepto not in data["conceps"]:
-        data["conceps"].append(int(nro_concepto))
-        med.conceps_espec = data
+        full = med.conceps_espec or {"conceps": [], "espec": []}
+        full["conceps"] = data["conceps"]
+        med.conceps_espec = full
         await db.flush(); await db.commit()
     return AsignacionesOut(**data)
 
@@ -41,8 +51,9 @@ async def remove_concepto(medico_id: int, nro_concepto: int, db: AsyncSession = 
     if not med:
         raise HTTPException(404, "Médico no encontrado")
     data = _ensure_json(med.conceps_espec)
-    data["conceps"] = [c for c in data["conceps"] if int(c) != int(nro_concepto)]
-    med.conceps_espec = data
+    full = med.conceps_espec or {"conceps": [], "espec": []}
+    full["conceps"] = data["conceps"]
+    med.conceps_espec = full
     await db.flush(); await db.commit()
     return AsignacionesOut(**data)
 

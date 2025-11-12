@@ -1,4 +1,5 @@
 from pydantic_settings import BaseSettings
+from pydantic import SecretStr
 
 class Settings(BaseSettings):
     MYSQL_USER: str
@@ -7,6 +8,20 @@ class Settings(BaseSettings):
     MYSQL_DB: str
     CORS_ORIGINS: str
 
+    JWT_SECRET: SecretStr                  # ← SIN valor por defecto
+    JWT_ALG: str = "HS256"
+    ACCESS_MINUTES: int = 15
+    REFRESH_DAYS: int = 15
+    COOKIE_SECURE: bool = False  # True en prod (https)
+
+    LEGACY_BASE_URL: str | None = None  # ej: "https://colegiomedicocorrientes.com"
+    LEGACY_SSO_PATH: str = "/sso_login.php"
+    LEGACY_SSO_SECRET: SecretStr | None = None
+    
+    UPLOAD_DIR: str = "uploads"             
+    RESEND_API_KEY: str | None = None     
+    EMAIL_NOTIFY_TO: str | None = None
+    EMAIL_FROM: str | None = None
     @property
     def MYSQL_URL(self) -> str:
         return (

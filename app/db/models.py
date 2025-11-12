@@ -2,7 +2,7 @@ from typing import Literal, Optional
 import datetime
 import decimal
 
-from sqlalchemy import DECIMAL, JSON, Date, DateTime, Enum, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
+from sqlalchemy import DECIMAL, JSON, BigInteger, Boolean, Column, Date, DateTime, Enum, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.dialects.mysql import INTEGER, LONGTEXT, VARCHAR
 from decimal import Decimal
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -350,7 +350,7 @@ class ListadoMedico(Base):
     VITALICIO: Mapped[str] = mapped_column(String(1, 'utf8_spanish2_ci'), nullable=False, server_default=text("'N'"))
     OBSERVACION: Mapped[str] = mapped_column(String(200, 'utf8_spanish2_ci'), nullable=False, server_default=text("'A'"))
     CATEGORIA: Mapped[str] = mapped_column(String(1, 'utf8_spanish2_ci'), nullable=False, server_default=text("'A'"))
-    EXISTE: Mapped[str] = mapped_column(String(1, 'utf8_spanish2_ci'), nullable=False, server_default=text("'S'"))
+    EXISTE: Mapped[str] = mapped_column(String(1, 'utf8_spanish2_ci'), nullable=False, server_default=text("'N'"))
     NRO_ESPECIALIDAD6: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
     EXCEP_DESDE: Mapped[str] = mapped_column(String(6, 'utf8_spanish2_ci'), nullable=False, server_default=text("'0'"))
     EXCEP_HASTA: Mapped[str] = mapped_column(String(6, 'utf8_spanish2_ci'), nullable=False, server_default=text("'0'"))
@@ -368,12 +368,35 @@ class ListadoMedico(Base):
     VENCIMIENTO_COBERTURA: Mapped[Optional[datetime.date]] = mapped_column(Date)
     FECHA_VITALICIO: Mapped[Optional[datetime.date]] = mapped_column(Date)
     
+    # adherente = Column(Boolean, nullable=True, default=False)
     conceps_espec: Mapped[dict] = mapped_column(
         JSON,
         nullable=False,
         default=lambda: {"conceps": [], "espec": []}  # ← default client-side
     )
+    cbu: Mapped[str] = mapped_column(String(50, 'utf8_spanish2_ci'), nullable=True)
+    nro_resolucion: Mapped[str] = mapped_column(String(70, 'utf8_spanish2_ci'), nullable=True)
+    fecha_resolucion:Mapped[Optional[datetime.date]] = mapped_column(Date) 
+    apellido:  Mapped[str] = mapped_column(String(70, 'utf8_spanish2_ci'), nullable=True)
+    nombre_:  Mapped[str] = mapped_column(String(70, 'utf8_spanish2_ci'), nullable=True)
+    titulo:  Mapped[str] = mapped_column(String(70, 'utf8_spanish2_ci'), nullable=True)
+    localidad:  Mapped[str] = mapped_column(String(70, 'utf8_spanish2_ci'), nullable=True)
+    condicion_impositiva: Mapped[str] = mapped_column(String(70, 'utf8_spanish2_ci'), nullable=True)
+    attach_titulo                 = Column(String(512), nullable=True)
+    attach_matricula_nac          = Column(String(512), nullable=True)
+    attach_matricula_prov         = Column(String(512), nullable=True)
+    attach_resolucion             = Column(String(512), nullable=True)
+    attach_habilitacion_municipal = Column(String(512), nullable=True)
+    attach_cuit                   = Column(String(512), nullable=True)
+    attach_condicion_impositiva   = Column(String(512), nullable=True)
+    attach_anssal                 = Column(String(512), nullable=True)
+    attach_malapraxis             = Column(String(512), nullable=True)
+    attach_cbu                    = Column(String(512), nullable=True)
+    attach_dni                    = Column(String(512), nullable=True)
 
+    # Relación 1–N con documentos
+    documentos = relationship("Documento", back_populates="medico", cascade="all, delete-orphan")
+    hashed_password = Column(String(255), nullable=False)
 
 class MedicoObraSocial(Base):
     __tablename__ = 'medico_obra_social'
@@ -1014,3 +1037,134 @@ class DeduccionAplicacion(AuditMixin,Base):
     __table_args__ = (
         UniqueConstraint("resumen_id", "medico_id", "concepto_tipo", "concepto_id", name="uq_apl_res_med_concepto"),
     )
+
+class Role(Base):
+    __tablename__ = "roles"
+    id = Column(Integer, primary_key=True)
+    name = Column(String(64), unique=True, nullable=False)
+    description = Column(String(255))
+
+class Permission(Base):
+    __tablename__ = "permissions"
+    id = Column(Integer, primary_key=True)
+    code = Column(String(128), unique=True, nullable=False)
+    description = Column(String(255))
+
+class UserRole(Base):
+    __tablename__ = "user_role"
+    user_id = Column(Integer, ForeignKey("listado_medico.ID", ondelete="CASCADE"), primary_key=True)
+    role_id = Column(Integer, ForeignKey("roles.id", ondelete="CASCADE"), primary_key=True)
+
+class RolePermission(Base):
+    __tablename__ = "role_permission"
+    role_id = Column(Integer, ForeignKey("roles.id", ondelete="CASCADE"), primary_key=True)
+    permission_id = Column(Integer, ForeignKey("permissions.id", ondelete="CASCADE"), primary_key=True)
+
+class UserPermission(Base):
+    __tablename__ = "user_permission"
+    user_id = Column(Integer, ForeignKey("listado_medico.ID", ondelete="CASCADE"), primary_key=True)
+    permission_id = Column(Integer, ForeignKey("permissions.id", ondelete="CASCADE"), primary_key=True)
+    allow = Column(Boolean, nullable=False, default=True)
+
+class Documento(Base):
+    __tablename__ = "documentos"
+
+    id            = Column(Integer, primary_key=True, autoincrement=True)
+    medico_id     = Column(Integer, ForeignKey("listado_medico.ID", ondelete="CASCADE"), index=True, nullable=False)
+
+    label         = Column(String(50),  nullable=True)     # 'documento', 'titulo', 'matricula_prov', etc.
+    original_name = Column(String(255), nullable=False)
+    filename      = Column(String(255), nullable=False)
+    content_type  = Column(String(100), nullable=True)
+    size          = Column(Integer, nullable=True)
+    path          = Column(String(512), nullable=False)
+
+    created_at    = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    medico        = relationship("ListadoMedico", back_populates="documentos")
+
+class SolicitudRegistro(Base):
+    __tablename__ = "solicitudes_registros"
+
+    id            = Column(Integer, primary_key=True, autoincrement=True)
+    estado        = Column(Enum("pendiente","aprobada","rechazada", name="estado_solicitud"),
+                           nullable=False, server_default="pendiente", index=True)
+
+    medico_id     = Column(Integer, ForeignKey("listado_medico.ID", ondelete="CASCADE"), nullable=False, index=True)
+    aprobado_por  = Column(Integer, nullable=True)
+    aprobado_at   = Column(DateTime(timezone=True), nullable=True)
+    observaciones = Column(Text, nullable=True)
+
+    created_at    = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at    = Column(DateTime(timezone=True), onupdate=func.now())
+
+
+
+class Noticia(Base):
+    __tablename__ = "noticias"
+
+    id               = Column(Integer, primary_key=True, autoincrement=True)
+    titulo           = Column(String(255), nullable=False)
+    contenido        = Column(Text, nullable=False)
+    resumen          = Column(String(1000), nullable=False)
+    autor            = Column(String(120), nullable=False, default="Colegio Médico de Corrientes")
+    publicada        = Column(Boolean, nullable=False, server_default="1")
+
+    portada          = Column(String(500), nullable=True)
+
+
+    fecha_creacion   = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    fecha_actualizacion = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    __table_args__ = (
+        Index("ix_noticias_publicada_fecha", "publicada", "fecha_creacion"),
+    )
+
+    documentos = relationship(
+        "DocumentoNoticias",
+        back_populates="noticia",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        lazy="selectin",
+    )
+class DocumentoNoticias(Base):
+    __tablename__ = "documentos_noticias"
+
+    id            = Column(Integer, primary_key=True, autoincrement=True)
+    noticia_id    = Column(Integer, ForeignKey("noticias.id", ondelete="CASCADE"), index=True, nullable=False)
+
+    label         = Column(String(50),  nullable=True)      # p.ej. 'portada', 'galeria', 'adjunto'
+    original_name = Column(String(255), nullable=False)
+    filename      = Column(String(255), nullable=False)
+    content_type  = Column(String(100), nullable=True)
+    size          = Column(Integer, nullable=True)
+    path          = Column(String(512), nullable=False)      # URL pública tipo /uploads/web_noticias/...
+
+    created_at: Mapped[datetime.datetime] = mapped_column(
+     DateTime(timezone=True),
+     server_default=func.now(),
+     nullable=False,
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+    noticia       = relationship("Noticia", back_populates="documentos")
+
+
+class PublicidadMedico(Base):
+    __tablename__ = "publicidad_medicos"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    medico_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    activo: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="1")
+
+    adjunto_filename: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    adjunto_content_type: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    adjunto_size: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    adjunto_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+    created_at: Mapped["DateTime"] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped["DateTime"] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)

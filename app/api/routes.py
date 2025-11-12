@@ -11,6 +11,11 @@ from app.api.v1.especialidades import router as especialidades_router
 from app.api.v1.asignaciones import router as asignaciones_router
 from app.api.v1.deducciones import router as deducciones_router
 from app.api.v1.periodos import router as periodos_router
+from app.api.v1.solicitudes import router as solicitudes_router
+from app.api.v1.noticias import router as noticias_router
+from app.api.v1.publicidad_medicos import router as publicidades_medico_router
+
+from app.api.v1.rbac import router as rbac_router
 
 
 
@@ -29,5 +34,12 @@ api_router.include_router(exports_router, prefix="/exports", tags=["exports"])
 api_router.include_router(liquidacion_router, prefix="/liquidacion", tags=["Liquidacion"])
 api_router.include_router(asignaciones_router,    prefix="/medicos", tags=["Asignaciones Médico"])
 api_router.include_router(periodos_router,    prefix="/periodos", tags=["Periodos"])
+api_router.include_router(rbac_router,    prefix="/admin/rbac", tags=["Rbac"])
+api_router.include_router(solicitudes_router,    prefix="/solicitudes", tags=["Solicitudes"])
+api_router.include_router(noticias_router, prefix="/noticias",tags=["Noticias"])
+api_router.include_router(publicidades_medico_router, prefix="/publicidad-medicos", tags=["publicidad-medicos"])
+
+
+
 
 

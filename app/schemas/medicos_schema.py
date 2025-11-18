@@ -1,9 +1,9 @@
 # app/schemas.py
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Dict, List, Optional,Literal
+from typing import Any, Dict, List, Optional,Literal, Union
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 class UserOut(BaseModel):
     id: int
@@ -140,34 +140,85 @@ class MedicoOut(MedicoBase):
 
 class MedicoListRow(BaseModel):
     id: int
-    nro_socio: int
+    nro_socio: Optional[int] = None
     nombre: str
-    matricula_prov: int
-    mail_particular: str
-    tele_particular: str
-    fecha_ingreso: Optional[date] = None
-    documento: str
+    matricula_prov: Optional[int] = None
+    mail_particular: Optional[str] = None
+    tele_particular: Optional[str] = None
+    fecha_ingreso: Optional[str] = None
+    documento: Optional[str] = None
+
+    # nuevo:
+    activo: bool = False
+    existe: Optional[str] = None  # opcional, solo informativo
+
+    @field_validator("nro_socio", mode="before")
+    @classmethod
+    def _coerce_nro_socio(cls, v):
+        if v is None:
+            return None
+        if isinstance(v, (bytes, bytearray, memoryview)):
+            v = bytes(v).decode("utf-8", errors="ignore")
+        s = str(v).strip()
+        if s == "" or s == "0":
+            return None
+        try:
+            return int(s)
+        except Exception:
+            return None
+
+
+    @field_validator("fecha_ingreso", mode="before")
+    @classmethod
+    def _coerce_fecha_ingreso(cls, v):
+        if v is None:
+            return None
+        if isinstance(v, (date, datetime)):
+            return v.strftime("%Y-%m-%d")
+        s = str(v).strip()
+        if not s or s.startswith("0000"):
+            return None
+        return s[:10]
+
+    @field_validator("documento", mode="before")
+    @classmethod
+    def _coerce_documento(cls, v):
+        if v is None:
+            return None
+        s = str(v).strip()
+        if s in ("", "0"):
+            return None
+        return s
+
+class EspecialidadOut(BaseModel):
+    id_colegio: Optional[int] = None
+    n_resolucion: Optional[str] = None
+    fecha_resolucion: Optional[date] = None
+    adjunto: Optional[str] = None
+    adjunto_url: Optional[str] = None
+    especialidad_nombre: Optional[str] = None
+    id_colegio_label: Optional[str] = None
 
 class MedicoDetailOut(BaseModel):
-    # --- básicos ya existentes ---
+    # --- básicos ---
     id: int
-    nro_socio: int
-    nombre: str
-    nombre_:str
-    apellido:str
-    matricula_prov: int
-    matricula_nac: int
-    telefono_consulta: str
-    domicilio_consulta: str
-    mail_particular: str
-    sexo: str
-    tipo_doc: str
-    documento: str
-    cuit: str
-    provincia: str
-    codigo_postal: str
-    categoria: str
-    existe: str
+    nro_socio: Optional[int] = None
+    name: str
+    nombre_: Optional[str] = None
+    apellido: Optional[str] = None
+    matricula_prov: Optional[int] = None
+    matricula_nac: Optional[int] = None
+    telefono_consulta: Optional[str] = None
+    domicilio_consulta: Optional[str] = None
+    mail_particular: Optional[str] = None
+    sexo: Optional[str] = None
+    tipo_doc: Optional[str] = None
+    documento: Optional[str] = None
+    cuit: Optional[str] = None
+    provincia: Optional[str] = None
+    codigo_postal: Optional[str] = None
+    categoria: Optional[str] = None
+    existe: Optional[str] = None
     fecha_nac: Optional[date] = None
 
     # --- personales extra ---
@@ -182,6 +233,7 @@ class MedicoDetailOut(BaseModel):
     fecha_matricula: Optional[date] = None
     nro_resolucion: Optional[str] = None
     fecha_resolucion: Optional[date] = None
+    especialidades: List[EspecialidadOut] = []
 
     # --- impositivos ---
     condicion_impositiva: Optional[str] = None
@@ -194,10 +246,56 @@ class MedicoDetailOut(BaseModel):
     cbu: Optional[str] = None
     observacion: Optional[str] = None
 
+    # --- adjuntos (paths/URLs relativos) ---
+    attach_titulo: Optional[str] = None
+    attach_matricula_nac: Optional[str] = None
+    attach_matricula_prov: Optional[str] = None
+    attach_resolucion: Optional[str] = None
+    attach_habilitacion_municipal: Optional[str] = None
+    attach_cuit: Optional[str] = None
+    attach_condicion_impositiva: Optional[str] = None
+    attach_anssal: Optional[str] = None
+    attach_malapraxis: Optional[str] = None
+    attach_cbu: Optional[str] = None
+    attach_dni: Optional[str] = None
+
+    @field_validator("telefono_consulta","domicilio_consulta","mail_particular","sexo","tipo_doc","documento","cuit","provincia","codigo_postal","categoria","existe","localidad","domicilio_particular","tele_particular","celular_particular","titulo","nro_resolucion","attach_titulo","attach_matricula_nac","attach_matricula_prov","attach_resolucion","attach_habilitacion_municipal","attach_cuit","attach_condicion_impositiva","attach_anssal","attach_malapraxis","attach_cbu","attach_dni",mode="before")
+    @classmethod
+    def _coerce_str(cls, v):
+        if v is None:
+            return None
+        if isinstance(v, (bytes, bytearray, memoryview)):
+            v = bytes(v).decode("utf-8", errors="ignore")
+        s = str(v).strip()
+        # valores “basura” típicos del legacy
+        if s in ("", "0", "@"):
+            return None
+        return s
+    
+
+    @field_validator(
+        "telefono_consulta", "domicilio_consulta", "mail_particular",
+        "sexo", "tipo_doc", "documento", "cuit", "provincia",
+        "codigo_postal", "categoria", "existe",
+        "localidad", "domicilio_particular", "tele_particular",
+        "celular_particular", "titulo", "nro_resolucion",
+        mode="before",
+    )
+    @classmethod
+    def _coerce_str(cls, v):
+        if v is None:
+            return None
+        if isinstance(v, (bytes, bytearray, memoryview)):
+            v = bytes(v).decode("utf-8", errors="ignore")
+        s = str(v).strip()
+        # valores “basura” típicos del legacy
+        if s in ("", "0", "@"):
+            return None
+        return s
+
     @field_validator(
         "fecha_recibido", "fecha_matricula", "fecha_nac",
-        "vencimiento_anssal", "vencimiento_malapraxis",
-        "vencimiento_cobertura",
+        "vencimiento_anssal", "vencimiento_malapraxis", "vencimiento_cobertura",
         mode="before"
     )
     @classmethod
@@ -206,18 +304,115 @@ class MedicoDetailOut(BaseModel):
             return None
         return v
 
-
 class MedicoDebtOut(BaseModel):
     has_debt: bool = False
     amount: Decimal = Decimal("0")
     last_invoice: Optional[str] = None   # "YYYY-MM"
     since: Optional[str] = None          # "YYYY-MM-DD"
 
-class MedicoDocOut(BaseModel):
-    id: str
-    label: str
-    file_name: str
-    url: str
+
+def _none_if_dashish(v: Any):
+    if isinstance(v, str) and v.strip() in {"—", "-", "N/A", "n/a"}:
+        return None
+    return v
+
+def _none_if_empty(v: Any):
+    # Convierte "" o "   " -> None
+    if isinstance(v, str) and v.strip() == "":
+        return None
+    return v
+
+def _date_ymd_or_none(v: Any):
+    # Acepta "YYYY-MM-DD" o None; si viene "" -> None
+    v = _none_if_empty(v)
+    if v is None:
+        return None
+    # Dejá que el endpoint lo parsee luego con date.fromisoformat,
+    # acá solo validamos que tenga pinta de fecha "YYYY-MM-DD"
+    if isinstance(v, str) and len(v) == 10 and v[4] == "-" and v[7] == "-":
+        return v
+    return v  # lo demás lo toma el endpoint y lo normaliza
+
+class MedicoUpdateIn(BaseModel):
+    # todos opcionales (coinciden con tus nombres del front)
+    name: Optional[str] = None
+    nombre_: Optional[str] = None
+    apellido: Optional[str] = None
+    sexo: Optional[str] = None
+    documento: Optional[str] = None
+    cuit: Optional[str] = None
+    fecha_nac: Optional[str] = None
+    existe: Optional[str] = None
+    provincia: Optional[str] = None
+    localidad: Optional[str] = None
+    codigo_postal: Optional[str] = None
+    domicilio_particular: Optional[str] = None
+    tele_particular: Optional[str] = None
+    celular_particular: Optional[str] = None
+    mail_particular: Optional[str] = None
+
+    nro_socio: Optional[str] = None
+    categoria: Optional[str] = None
+    titulo: Optional[str] = None
+    matricula_prov: Optional[str] = None
+    matricula_nac: Optional[str] = None
+    fecha_recibido: Optional[str] = None
+    fecha_matricula: Optional[str] = None
+    # nro_resolucion: Optional[str] = None
+    # fecha_resolucion: Optional[str] = None
+    domicilio_consulta: Optional[str] = None
+    telefono_consulta: Optional[str] = None
+
+    condicion_impositiva: Optional[str] = None
+    anssal: Optional[Union[int, str]] = None
+    cobertura: Optional[Union[int, str]] = None
+    vencimiento_anssal: Optional[str] = None
+    malapraxis: Optional[str] = None
+    vencimiento_malapraxis: Optional[str] = None
+    # cobertura: Optional[str] = None
+    vencimiento_cobertura: Optional[str] = None
+    cbu: Optional[str] = None
+    observacion: Optional[str] = None
+
+    model_config = ConfigDict(extra="ignore")  # ignora keys desconocidas
+
+    # Sanitizadores globales para strings vacíos
+    @field_validator(
+        "name","nombre_","apellido","sexo","documento","cuit","existe","provincia",
+        "localidad","codigo_postal","domicilio_particular","tele_particular",
+        "celular_particular","mail_particular","nro_socio","categoria","titulo",
+        "matricula_prov","matricula_nac","nro_resolucion","domicilio_consulta",
+        "telefono_consulta","condicion_impositiva","malapraxis","cobertura",
+        "cbu","observacion",
+        mode="before"
+    )
+
+    @classmethod
+    def _blank_dash_to_none(cls, v):
+        v = _none_if_empty(v)
+        v = _none_if_dashish(v)
+        return v
+
+    # Fechas como string (aceptá "" también)
+    @field_validator(
+        "fecha_nac","fecha_recibido","fecha_matricula","fecha_resolucion",
+        "vencimiento_anssal","vencimiento_malapraxis","vencimiento_cobertura",
+        mode="before"
+    )
+    @classmethod
+    def _date_str_ok(cls, v):
+        return _date_ymd_or_none(v)
+
+    @field_validator("anssal", "cobertura", mode="before")
+    @classmethod
+    def _intish(cls, v):
+        v = _none_if_empty(_none_if_dashish(v))
+        if v is None:
+            return None
+        if isinstance(v, int):
+            return v
+        s = str(v).strip().replace(".", "").replace(",", "")
+        return int(s) if s.isdigit() else None
 
 class DoctorStatsPointOut(BaseModel):
     month: str                      # "YYYY-MM"
@@ -245,6 +440,13 @@ class AsociarConceptoIn(BaseModel):
     concepto_tipo: Literal["desc","esp"]
     concepto_id: int
 
+class MedicoEspecialidadOut(BaseModel):
+    id: int                          # ID de la especialidad (ID colegio)
+    nombre: Optional[str] = None     # nombre de la especialidad
+    n_resolucion: Optional[str] = None
+    fecha_resolucion: Optional[str] = None
+    adjunto_id: Optional[int] = None
+    adjunto_url: Optional[str] = None
 
 # ==================================
 class CEAppOut(BaseModel):
@@ -281,6 +483,18 @@ class CEBundlePatchIn(BaseModel):
     op: Literal["add", "remove"] = "add"
 
 
-class MedicoEspecialidadOut(BaseModel):
+class MedicoDocOut(BaseModel):
     id: int
-    nombre: Optional[str] = None
+    label: str                # label crudo tal como está en la DB
+    pretty_label: str         # label formateado para UI
+    file_name: str            # original_name
+    url: str                  # "/uploads/medicos/2446/xxx.pdf"
+    content_type: Optional[str] = None
+    size: Optional[int] = None
+
+class AsignarEspecialidadIn(BaseModel):
+    op: Literal["add", "remove", "update"] = "add"
+    id_colegio: int                       # ID_COLEGIO_ESPE
+    n_resolucion: Optional[str] = None
+    fecha_resolucion: Optional[str] = None  # "YYYY-MM-DD" (texto; aceptamos None)
+    adjunto_id: Optional[int] = None        # Documento.id (opcional)

@@ -18,7 +18,10 @@ class Settings(BaseSettings):
     LEGACY_SSO_PATH: str = "/sso_login.php"
     LEGACY_SSO_SECRET: SecretStr | None = None
     
-    UPLOAD_DIR: str = "uploads"             
+    MEDIA_ROOT: str = "uploads"    # carpeta física
+    MEDIA_URL: str = "uploads"         # URL base que servís
+    MEDIA_BASE_URL: str | None = None   # si querés forzar dominio (https://api.x.com)
+                 
     RESEND_API_KEY: str | None = None     
     EMAIL_NOTIFY_TO: str | None = None
     EMAIL_FROM: str | None = None

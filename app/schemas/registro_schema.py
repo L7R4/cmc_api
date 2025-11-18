@@ -20,6 +20,7 @@ class RegisterIn(BaseModel):
     phone: str | None = None
     mobile: str | None = None
     address: str | None = None
+    gender: Optional[str] = None
     province: str | None = None
     locality: str | None = None
     postalCode: str | None = None
@@ -30,6 +31,7 @@ class RegisterIn(BaseModel):
     condicionImpositiva: str | None = None
     observations: str | None = None
     provincialLicense: str | None = None
+    title: str | None = None
     nationalLicense: str | None = None
     graduationDate: str | None = None
     specialty: str | None = None
@@ -46,6 +48,20 @@ class RegisterIn(BaseModel):
     coverageExpiry: str | None = None
     taxCondition: str | None = None
     specialties: Optional[List[SpecialtyItemIn]] = None
+
+    @field_validator("gender")
+    @classmethod
+    def norm_gender(cls, v: Optional[str]) -> Optional[str]:
+      if not v:
+          return None
+      s = str(v).strip().upper()
+      if s in ("M", "F"):
+          return s
+      if s.startswith("MASC"):
+          return "M"
+      if s.startswith("FEM"):
+          return "F"
+      return s[:1]  # fallback
 
 class RegisterOut(BaseModel):
     medico_id: int

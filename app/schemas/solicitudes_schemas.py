@@ -18,7 +18,7 @@ class SolicitudListItem(BaseModel):
     rejection_reason: Optional[str] = None
 
 class SolicitudDetailOut(SolicitudListItem):
-    documento: Optional[str] = None
+    documento: Optional[int] = None
     provincia: Optional[str] = None
     localidad: Optional[str] = None
     categoria: Optional[str] = None

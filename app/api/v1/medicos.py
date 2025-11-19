@@ -27,7 +27,7 @@ from app.db.models import (
 )
 from app.schemas.deduccion_schema import CrearDeudaOut, NuevaDeudaIn
 from app.schemas.medicos_schema import (
-    AsignarEspecialidadIn, AsociarConceptoIn, CEAppOut, CEBundleOut, CEBundlePatchIn, CEStoreOut, ConceptRecordOut, ConceptoAplicacionOut, DoctorStatsPointOut, MedicoConceptoOut, MedicoDebtOut, MedicoDocOut, MedicoEspecialidadOut, MedicoListRow, MedicoDetailOut, MedicoUpdateIn, PatchCEIn
+    AsignarEspecialidadIn, AsociarConceptoIn, CEAppOut, CEBundleOut, CEBundlePatchIn, CEStoreOut, ConceptRecordOut, ConceptoAplicacionOut, DoctorStatsPointOut, MedicoConceptoOut, MedicoDebtOut, MedicoDocOut, MedicoEspecialidadOut, MedicoListRow, MedicoDetailOut, MedicoUpdateIn, MedicoUpdateOut, PatchCEIn
 )
 from app.auth.deps import require_scope
 from app.schemas.registro_schema import RegisterIn, RegisterOut
@@ -383,10 +383,8 @@ async def update_medico(
     row = await db.get(ListadoMedico, medico_id)
     if not row:
         raise HTTPException(404, "Médico no encontrado")
+    
     data = payload.model_dump(exclude_unset=True)
-    print("\n========================================================\n")
-    print(data)
-    print("\n========================================================\n")
     # (si querés ver qué llegó validado)
     print("📝 PATCH payload normalizado:", data)
 
@@ -405,7 +403,9 @@ async def update_medico(
     await db.flush()
     await db.commit()
     await db.refresh(row)
-    return MedicoDetailOut.model_validate(row, from_attributes=True)
+    return MedicoUpdateOut.model_validate(row, from_attributes=True)
+
+
 # Deudas de medicos ===========================================
 
 @router.get("/{medico_id}/deuda", response_model=MedicoDebtOut)

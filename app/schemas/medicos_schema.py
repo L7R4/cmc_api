@@ -334,7 +334,6 @@ def _date_ymd_or_none(v: Any):
     return v  # lo demás lo toma el endpoint y lo normaliza
 
 class MedicoUpdateIn(BaseModel):
-    # todos opcionales (coinciden con tus nombres del front)
     name: Optional[str] = None
     nombre_: Optional[str] = None
     apellido: Optional[str] = None
@@ -351,15 +350,13 @@ class MedicoUpdateIn(BaseModel):
     celular_particular: Optional[str] = None
     mail_particular: Optional[str] = None
 
-    nro_socio: Optional[str] = None
+    nro_socio: Optional[int] = None
     categoria: Optional[str] = None
     titulo: Optional[str] = None
-    matricula_prov: Optional[str] = None
-    matricula_nac: Optional[str] = None
+    matricula_prov: Optional[int] = None
+    matricula_nac: Optional[int] = None
     fecha_recibido: Optional[str] = None
     fecha_matricula: Optional[str] = None
-    # nro_resolucion: Optional[str] = None
-    # fecha_resolucion: Optional[str] = None
     domicilio_consulta: Optional[str] = None
     telefono_consulta: Optional[str] = None
 
@@ -369,7 +366,6 @@ class MedicoUpdateIn(BaseModel):
     vencimiento_anssal: Optional[str] = None
     malapraxis: Optional[str] = None
     vencimiento_malapraxis: Optional[str] = None
-    # cobertura: Optional[str] = None
     vencimiento_cobertura: Optional[str] = None
     cbu: Optional[str] = None
     observacion: Optional[str] = None
@@ -381,7 +377,7 @@ class MedicoUpdateIn(BaseModel):
         "name","nombre_","apellido","sexo","documento","cuit","existe","provincia",
         "localidad","codigo_postal","domicilio_particular","tele_particular",
         "celular_particular","mail_particular","nro_socio","categoria","titulo",
-        "matricula_prov","matricula_nac","nro_resolucion","domicilio_consulta",
+        "matricula_prov","matricula_nac","domicilio_consulta",
         "telefono_consulta","condicion_impositiva","malapraxis","cobertura",
         "cbu","observacion",
         mode="before"
@@ -395,7 +391,7 @@ class MedicoUpdateIn(BaseModel):
 
     # Fechas como string (aceptá "" también)
     @field_validator(
-        "fecha_nac","fecha_recibido","fecha_matricula","fecha_resolucion",
+        "fecha_nac","fecha_recibido","fecha_matricula",
         "vencimiento_anssal","vencimiento_malapraxis","vencimiento_cobertura",
         mode="before"
     )
@@ -413,6 +409,43 @@ class MedicoUpdateIn(BaseModel):
             return v
         s = str(v).strip().replace(".", "").replace(",", "")
         return int(s) if s.isdigit() else None
+
+class MedicoUpdateOut(BaseModel):
+    name: Optional[str] = None
+    nombre_: Optional[str] = None
+    apellido: Optional[str] = None
+    sexo: Optional[str] = None
+    documento: Optional[str] = None
+    cuit: Optional[str] = None
+    fecha_nac: Optional[str] = None
+    existe: Optional[str] = None
+    provincia: Optional[str] = None
+    localidad: Optional[str] = None
+    codigo_postal: Optional[str] = None
+    domicilio_particular: Optional[str] = None
+    tele_particular: Optional[str] = None
+    celular_particular: Optional[str] = None
+    mail_particular: Optional[str] = None
+
+    nro_socio: Optional[int] = None
+    categoria: Optional[str] = None
+    titulo: Optional[str] = None
+    matricula_prov: Optional[int] = None
+    matricula_nac: Optional[int] = None
+    fecha_recibido: Optional[str] = None
+    fecha_matricula: Optional[str] = None
+    domicilio_consulta: Optional[str] = None
+    telefono_consulta: Optional[str] = None
+
+    condicion_impositiva: Optional[str] = None
+    anssal: Optional[Union[int, str]] = None
+    cobertura: Optional[Union[int, str]] = None
+    vencimiento_anssal: Optional[str] = None
+    malapraxis: Optional[str] = None
+    vencimiento_malapraxis: Optional[str] = None
+    vencimiento_cobertura: Optional[str] = None
+    cbu: Optional[str] = None
+    observacion: Optional[str] = None
 
 class DoctorStatsPointOut(BaseModel):
     month: str                      # "YYYY-MM"

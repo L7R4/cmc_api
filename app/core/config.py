@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     
     COOKIE_SAMESITE: str
     COOKIE_SECURE: bool = False  
+    COOKIE_DOMAIN: str | None = None
 
     LEGACY_BASE_URL: str | None = None 
     LEGACY_SSO_PATH: str = "/sso_login.php"

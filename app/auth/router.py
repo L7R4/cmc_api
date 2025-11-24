@@ -12,7 +12,7 @@ from app.core.config import settings
 import time, json, hmac, hashlib, base64, urllib.parse
 from fastapi import HTTPException
 import secrets
-
+from urllib.parse import urlparse
 from app.schemas.medicos_schema import UserEnvelope, UserOut
 from app.utils.main import get_effective_permission_codes
 from starlette.responses import RedirectResponse
@@ -266,6 +266,38 @@ async def legacy_sso_link(
     return {"url": url}
 
 
+def _safe_front_redirect(next_path: str | None) -> str:
+    # FRONT_BASE_URL obligatorio para construir absolutos
+    base = (settings.FRONT_BASE_URL or "https://colegiomedicocorrientes.com").rstrip("/")
+    default = f"{base}/panel/dashboard"
+
+    # lista permitida desde tu método
+    allowed_hosts = set(settings.ALLOWED_FRONT_HOSTS_LIST() if settings.ALLOWED_FRONT_HOSTS else [])
+    # añade el host del FRONT_BASE_URL por si no lo pusiste en ALLOWED_FRONT_HOSTS
+    try:
+        fb = urlparse(base)
+        if fb.hostname:
+            allowed_hosts.add(fb.hostname)
+    except Exception:
+        pass
+
+    if not next_path:
+        return default
+
+    # Si es relativo, lo pegamos al apex del front
+    if next_path.startswith("/"):
+        return base + next_path
+
+    # Si viene absoluto, sólo permití hosts conocidos
+    try:
+        u = urlparse(next_path)
+        if u.scheme in {"https", "http"} and u.hostname in allowed_hosts:
+            return next_path
+    except Exception:
+        pass
+
+    return default
+
 @router.get("/legacy-sso-accept")
 async def legacy_sso_accept(
     payload: str,
@@ -344,7 +376,8 @@ async def legacy_sso_accept(
     if settings.COOKIE_DOMAIN:
         csrf_kwargs["domain"] = settings.COOKIE_DOMAIN
 
-    resp = RedirectResponse(url=next, status_code=302)
+    redirect_url = _safe_front_redirect(next)
+    resp = RedirectResponse(url=redirect_url, status_code=302)
     resp.set_cookie("refresh_token", refresh, **common)
     resp.set_cookie("csrf_token", csrf, **csrf_kwargs)
     # opcional: mandar el access en cookie no-HttpOnly si querés rehidratar más rápido (yo no lo recomiendo)

@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     COOKIE_SECURE: bool = False  
     COOKIE_DOMAIN: str | None = None
 
+    FRONT_BASE_URL: str | None = None
+    ALLOWED_FRONT_HOSTS: str | None = None
+
     LEGACY_BASE_URL: str | None = None 
     LEGACY_SSO_PATH: str = "/sso_login.php"
     LEGACY_SSO_SECRET: SecretStr | None = None
@@ -39,6 +42,9 @@ class Settings(BaseSettings):
 # 
     def CORS_LIST(self) -> list[str]:
         return [o.strip() for o in self.CORS_ORIGINS.split(',') if o.strip()]
+
+    def ALLOWED_FRONT_HOSTS_LIST(self) -> list[str]:
+        return [o.strip() for o in self.ALLOWED_FRONT_HOSTS.split(',') if o.strip()]
 
 # Carga valores desde .env o .env.prod según entorno que se defina en docker-compose
 settings = Settings()

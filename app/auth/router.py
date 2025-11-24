@@ -15,6 +15,7 @@ import secrets
 
 from app.schemas.medicos_schema import UserEnvelope, UserOut
 from app.utils.main import get_effective_permission_codes
+from starlette.responses import RedirectResponse
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 COOKIE_REFRESH = "refresh_token"
@@ -24,50 +25,63 @@ class LoginIn(BaseModel):
     nro_socio: int
     password: str  # = matricula_prov (inicialmente)
 
+def _b64url_decode(data: str) -> bytes:
+    pad = '=' * (-len(data) % 4)
+    return base64.urlsafe_b64decode((data + pad).encode('ascii'))
+
+
 @router.post("/login")
 async def login(body: LoginIn, res: Response, db: AsyncSession = Depends(get_db)):
-    # Buscar por NRO_SOCIO
-    stmt = select(ListadoMedico).where(ListadoMedico.NRO_SOCIO == body.nro_socio)
+    ns = body.nro_socio
+    stmt = select(ListadoMedico).where(ListadoMedico.NRO_SOCIO == ns)
     medico = (await db.execute(stmt)).scalar_one_or_none()
     if not medico:
-        raise HTTPException(401, "Usuario inválido")
+        raise HTTPException(401, "Usuario invalido")
 
     if getattr(medico, "EXISTE", "N") != "S":
-        raise HTTPException(403, "Tu registro está pendiente de aprobación")
-    
+        raise HTTPException(403, "Tu registro está pendiente de aprobacion")
+
     ok = await verify_and_upgrade(db, medico, body.password)
     if not ok:
-        raise HTTPException(status_code=401, detail="Credenciales inválidas")
+        raise HTTPException(401, "Credenciales invalidas")
 
-    if not verify_password(body.password, medico.hashed_password):
-        raise HTTPException(401, "Credenciales inválidas")
-    
-    
-
-    # 🔴 NUEVO: permisos efectivos desde RBAC
+    # ... emitir tokens usando SIEMPRE el mismo identificador
+    sub = str(medico.NRO_SOCIO)
     scopes = await get_effective_permission_codes(db, medico.ID)
-    role = await get_user_role(db, medico.ID)
+    role   = await get_user_role(db, medico.ID)
 
-    access = create_access_token(sub=str(medico.NRO_SOCIO), scopes=scopes,role=role)
-    jti = secrets.token_hex(16)
-    refresh = create_refresh_token(sub=str(medico.NRO_SOCIO), jti=jti)
-    csrf = secrets.token_urlsafe(16)
+    access  = create_access_token(sub=sub, scopes=scopes, role=role)
+    jti     = secrets.token_hex(16)
+    refresh = create_refresh_token(sub=sub, jti=jti)
+    csrf    = secrets.token_urlsafe(16)
 
-    # cookies (igual que antes)
-    COOKIE_SAMESITE = "none" if settings.COOKIE_SECURE else "lax"
     common = dict(
-        httponly=True, samesite=COOKIE_SAMESITE, secure=settings.COOKIE_SECURE,
+        httponly=True, samesite=settings.COOKIE_SAMESITE, secure=settings.COOKIE_SECURE,
         path="/auth", max_age=60*60*24*settings.REFRESH_DAYS
     )
+    if settings.COOKIE_DOMAIN:
+        common["domain"] = settings.COOKIE_DOMAIN
     res.set_cookie(COOKIE_REFRESH, refresh, **common)
-    res.set_cookie(COOKIE_CSRF, csrf, httponly=False, samesite=COOKIE_SAMESITE,
-                   secure=settings.COOKIE_SECURE, path="/",
-                   max_age=60*60*24*settings.REFRESH_DAYS)
+
+    csrf_kwargs = dict(
+        httponly=False, samesite=settings.COOKIE_SAMESITE, secure=settings.COOKIE_SECURE,
+        path="/", max_age=60*60*24*settings.REFRESH_DAYS
+    )
+    if settings.COOKIE_DOMAIN:
+        csrf_kwargs["domain"] = settings.COOKIE_DOMAIN
+        
+    res.set_cookie(COOKIE_CSRF, csrf, **csrf_kwargs)
 
     return {
         "access_token": access,
         "token_type": "bearer",
-        "user": {"id": medico.ID, "nro_socio": medico.NRO_SOCIO, "nombre": medico.NOMBRE, "scopes": scopes, "role": role},
+        "user": {
+            "id": medico.ID,
+            "nro_socio": sub,
+            "nombre": medico.NOMBRE,
+            "scopes": scopes,
+            "role": role,
+        },
     }
 
 @router.post("/refresh")
@@ -77,84 +91,101 @@ async def refresh_token(
     x_csrf_token: str | None = Header(default=None, alias="X-CSRF-Token"),
     db: AsyncSession = Depends(get_db),
 ):
-    print(">> cookies:", request.cookies)           # ¿Viene refresh_token?
-    print(">> header X-CSRF-Token:", x_csrf_token)  # ¿Llega?
-    rt = request.cookies.get("refresh_token")
+    # 0) Cookies y CSRF
+    rt = request.cookies.get(COOKIE_REFRESH)
     if not rt:
         raise HTTPException(401, "Falta refresh_token")
 
-    # 1) CSRF: header debe igualar a cookie 'csrf_token'
-    csrf_cookie = request.cookies.get("csrf_token")
+    csrf_cookie = request.cookies.get(COOKIE_CSRF)
     if not x_csrf_token or not csrf_cookie or x_csrf_token != csrf_cookie:
         raise HTTPException(401, "CSRF inválido")
 
-    # 2) Decodificar refresh
+    # 1) Decodificar y validar refresh
     try:
         payload = decode_token(rt)
     except Exception:
         raise HTTPException(401, "Refresh inválido")
 
-    if payload.get("type") != "refresh":
-        raise HTTPException(401, "Tipo de token no válido")
+    if not payload or payload.get("type") != "refresh":
+        raise HTTPException(401, "Token no es refresh")
 
     sub = payload.get("sub")
     if not sub:
         raise HTTPException(401, "Refresh sin sub")
 
-    medico = None
-    # intentar como ID interno
-    try:
-        medico = (await db.execute(
-            select(ListadoMedico).where(ListadoMedico.ID == int(sub))
-        )).scalar_one_or_none()
-    except ValueError:
-        medico = None
-
-    # si no lo encontramos, probar como NRO_SOCIO
-    if not medico:
-        try:
-            medico = (await db.execute(
-                select(ListadoMedico).where(ListadoMedico.NRO_SOCIO == int(sub))
-            )).scalar_one_or_none()
-        except ValueError:
-            medico = None
-
+    # 2) Usuario + permisos/rol
+    medico = (await db.execute(select(ListadoMedico).where(ListadoMedico.NRO_SOCIO == int(sub)))).scalar_one_or_none()
     if not medico:
         raise HTTPException(401, "Usuario no encontrado")
 
     scopes = await get_effective_permission_codes(db, medico.ID)
     role = await get_user_role(db, medico.ID)
-    if not role:
-        raise HTTPException(409, "El usuario no tiene rol asignado")
-    # mantené el mismo 'sub' que venía en el refresh para compatibilidad
+
+    # 3) Emitir access (siempre) y (opcional) rotar refresh+csrf
     access = create_access_token(sub=str(sub), scopes=scopes, role=role)
 
-    # 4) (Dev) no rotar refresh para evitar bloqueo de Set-Cookie
-    #    Si quieres rotarlo en prod, aquí generas y seteas uno nuevo.
     COOKIE_SAMESITE = "none" if settings.COOKIE_SECURE else "lax"
 
-    # Reafirma csrf cookie (opcional)
-    response.set_cookie(
-        "csrf_token", csrf_cookie,
-        httponly=False, samesite=COOKIE_SAMESITE, secure=settings.COOKIE_SECURE, path="/",
-        max_age=60*60*24*settings.REFRESH_DAYS,
+    # Args comunes para cookies con domain opcional
+    common = dict(
+        httponly=True, samesite=COOKIE_SAMESITE, secure=settings.COOKIE_SECURE,
+        path="/auth", max_age=60 * 60 * 24 * settings.REFRESH_DAYS
     )
+    if settings.COOKIE_DOMAIN:
+        common["domain"] = settings.COOKIE_DOMAIN
 
-    return {"access_token": access, "token_type": "bearer"}
+    csrf_kwargs = dict(
+        httponly=False, samesite=COOKIE_SAMESITE, secure=settings.COOKIE_SECURE,
+        path="/", max_age=60 * 60 * 24 * settings.REFRESH_DAYS
+    )
+    if settings.COOKIE_DOMAIN:
+        csrf_kwargs["domain"] = settings.COOKIE_DOMAIN
 
+    # --- Opción A (recomendada en prod): ROTAR refresh y CSRF
+    jti = secrets.token_hex(16)
+    new_refresh = create_refresh_token(sub=str(sub), jti=jti)
+    response.set_cookie(COOKIE_REFRESH, new_refresh, **common)
+
+    new_csrf = secrets.token_urlsafe(16)
+    response.set_cookie(COOKIE_CSRF, new_csrf, **csrf_kwargs)
+
+    # --- Opción B (dev): NO rotar refresh (comentar Opción A y re-afirmar el mismo CSRF)
+    # response.set_cookie(COOKIE_CSRF, csrf_cookie, **csrf_kwargs)
+
+    return {
+        "access_token": access,
+        "token_type": "bearer",
+        "user": {
+            "id": int(medico.ID),
+            "nro_socio": int(sub),
+            "nombre": getattr(medico, "NOMBRE", None),
+            "scopes": scopes,
+            "role": role,
+        },
+    }
 
 @router.post("/logout")
 async def logout(response: Response):
     COOKIE_SAMESITE = "none" if settings.COOKIE_SECURE else "lax"
 
-    # Borrar cookies (coincidiendo path/flags)
-    response.delete_cookie(
-        "refresh_token", path="/auth", samesite=COOKIE_SAMESITE, secure=settings.COOKIE_SECURE, httponly=True
+    # Borrar refresh (path=/auth, httponly)
+    refresh_kwargs = dict(
+        path="/auth", samesite=COOKIE_SAMESITE, secure=settings.COOKIE_SECURE, httponly=True
     )
-    response.delete_cookie(
-        "csrf_token", path="/", samesite=COOKIE_SAMESITE, secure=settings.COOKIE_SECURE, httponly=False
+    if settings.COOKIE_DOMAIN:
+        refresh_kwargs["domain"] = settings.COOKIE_DOMAIN
+    response.delete_cookie(COOKIE_REFRESH, **refresh_kwargs)
+
+    # Borrar csrf (path=/, no-httponly)
+    csrf_kwargs = dict(
+        path="/", samesite=COOKIE_SAMESITE, secure=settings.COOKIE_SECURE, httponly=False
     )
+    if settings.COOKIE_DOMAIN:
+        csrf_kwargs["domain"] = settings.COOKIE_DOMAIN
+    response.delete_cookie(COOKIE_CSRF, **csrf_kwargs)
+
     return {"ok": True}
+
 
 class ChangePasswordIn(BaseModel):
     old_password: str
@@ -163,13 +194,13 @@ class ChangePasswordIn(BaseModel):
 @router.post("/change-password")
 async def change_password(body: ChangePasswordIn, req: Request, db: AsyncSession = Depends(get_db)):
     # Requiere estar logueado: decodificamos access desde header en un paso simple:
-    # (Si preferís, usá get_current_user de deps.py)
+    # (Si preferÃ­s, usÃ¡ get_current_user de deps.py)
     auth = req.headers.get("Authorization", "")
     if not auth.startswith("Bearer "):
         raise HTTPException(401, "Falta token")
     data = decode_token(auth.split()[1])
     if data.get("type") != "access":
-        raise HTTPException(401, "Token inválido")
+        raise HTTPException(401, "Token invÃ¡lido")
 
     nro_socio = int(data["sub"])
     stmt = select(ListadoMedico).where(ListadoMedico.NRO_SOCIO == nro_socio)
@@ -177,7 +208,7 @@ async def change_password(body: ChangePasswordIn, req: Request, db: AsyncSession
     if not medico:
         raise HTTPException(404, "Usuario no encontrado")
     if not verify_password(body.old_password, medico.hashed_password):
-        raise HTTPException(400, "La contraseña actual es incorrecta")
+        raise HTTPException(400, "La contrasena actual es incorrecta")
 
     medico.hashed_password = hash_password(body.new_password)
     await db.commit()
@@ -209,10 +240,10 @@ async def legacy_sso_link(
 
 
     # if not any(s in scopes for s in ["legacy:access", "legacy:facturista", "facturista","facturas:ver", "medicos:ver_solo_perfil"]):
-    #     raise HTTPException(403, "No tenés permiso para el legacy")
+    #     raise HTTPException(403, "No tenÃ©s permiso para el legacy")
 
     if not settings.LEGACY_BASE_URL or not settings.LEGACY_SSO_SECRET:
-        raise HTTPException(503, "SSO del legacy no está configurado")
+        raise HTTPException(503, "SSO del legacy no estÃ¡ configurado")
 
     now = int(time.time())
     exp = now + 300  # 5 minutos de validez
@@ -233,3 +264,88 @@ async def legacy_sso_link(
     next_qs = urllib.parse.quote(next, safe="/:?=&")
     url = f"{settings.LEGACY_BASE_URL}{settings.LEGACY_SSO_PATH}?payload={body}&sig={sig}&next={next_qs}"
     return {"url": url}
+
+
+@router.get("/legacy-sso-accept")
+async def legacy_sso_accept(
+    payload: str,
+    sig: str,
+    next: str = "/panel/dashboard",
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Acepta un SSO iniciado DESDE el legacy hacia el NUEVO sistema.
+    1) Verifica HMAC (mismo LEGACY_SSO_SECRET que usa /auth/legacy/sso-link).
+    2) Decodifica payload (base64url(JSON)) y valida exp.
+    3) Emite/Setea refresh y csrf cookies igual que /auth/login.
+    4) Redirige a `next` (por defecto /panel/dashboard).
+    """
+    if not settings.LEGACY_SSO_SECRET:
+        raise HTTPException(500, "LEGACY_SSO_SECRET no configurado")
+
+    # 1) verificar firma
+    key = settings.LEGACY_SSO_SECRET.get_secret_value().encode("utf-8")
+    expected = base64.urlsafe_b64encode(hmac.new(key, payload.encode("ascii"), hashlib.sha256).digest()).decode("ascii").rstrip("=")
+    if not hmac.compare_digest(sig, expected):
+        raise HTTPException(401, "Firma inválida")
+
+    # 2) decodificar payload
+    try:
+        data = json.loads(_b64url_decode(payload))
+    except Exception:
+        raise HTTPException(400, "Payload inválido")
+
+    now = int(time.time())
+    if int(data.get("exp", 0)) < now:
+        raise HTTPException(401, "Payload expirado")
+
+    # Puede venir sub/nro_socio o id. Soportá ambos.
+    sub = data.get("nro_socio") or data.get("sub")
+    if not sub:
+        raise HTTPException(400, "Payload sin sub/nro_socio")
+
+    # buscar usuario (por ID o NRO_SOCIO)
+    medico = None
+    try:
+        medico = (await db.execute(select(ListadoMedico).where(ListadoMedico.NRO_SOCIO == int(sub)))).scalar_one_or_none()
+    except:
+        pass
+    if not medico and data.get("id"):
+        try:
+            medico = (await db.execute(select(ListadoMedico).where(ListadoMedico.ID == int(data["id"])))).scalar_one_or_none()
+        except:
+            pass
+    if not medico:
+        raise HTTPException(401, "Usuario no encontrado")
+
+    # scopes/role desde payload o recomputados
+    scopes = data.get("scopes") or await get_effective_permission_codes(db, medico.ID)
+    role   = data.get("role")   or await get_user_role(db, medico.ID)
+
+    access  = create_access_token(sub=str(medico.NRO_SOCIO), scopes=scopes, role=role)
+    jti     = secrets.token_hex(16)
+    refresh = create_refresh_token(sub=str(medico.NRO_SOCIO), jti=jti)
+    csrf    = secrets.token_urlsafe(16)
+
+    COOKIE_SAMESITE = "none" if settings.COOKIE_SECURE else "lax"
+
+    # cookies con domain opcional
+    common = dict(
+        httponly=True, samesite=COOKIE_SAMESITE, secure=settings.COOKIE_SECURE,
+        path="/auth", max_age=60*60*24*settings.REFRESH_DAYS
+    )
+    if settings.COOKIE_DOMAIN:
+        common["domain"] = settings.COOKIE_DOMAIN
+
+    csrf_kwargs = dict(
+        httponly=False, samesite=COOKIE_SAMESITE, secure=settings.COOKIE_SECURE,
+        path="/", max_age=60*60*24*settings.REFRESH_DAYS
+    )
+    if settings.COOKIE_DOMAIN:
+        csrf_kwargs["domain"] = settings.COOKIE_DOMAIN
+
+    resp = RedirectResponse(url=next, status_code=302)
+    resp.set_cookie("refresh_token", refresh, **common)
+    resp.set_cookie("csrf_token", csrf, **csrf_kwargs)
+    # opcional: mandar el access en cookie no-HttpOnly si querés rehidratar más rápido (yo no lo recomiendo)
+    return resp

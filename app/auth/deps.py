@@ -90,7 +90,7 @@ async def get_current_user_with_scopes_and_role(
     user = None
     try:
         user = (await db.execute(
-            select(ListadoMedico).where(ListadoMedico.ID == int(sub))
+            select(ListadoMedico).where(ListadoMedico.NRO_SOCIO == int(sub))
         )).scalar_one_or_none()
     except ValueError:
         user = None

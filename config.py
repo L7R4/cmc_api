@@ -1,30 +1,27 @@
 from pydantic_settings import BaseSettings
 from pydantic import SecretStr
-import os
 
 class Settings(BaseSettings):
     MYSQL_USER: str
     MYSQL_PASS: str
     MYSQL_HOST: str
     MYSQL_DB: str
-    MYSQL_PORT: int | None = 3306
-
     CORS_ORIGINS: str
-    JWT_SECRET: SecretStr                 
+
+    JWT_SECRET: SecretStr                  # ← SIN valor por defecto
     JWT_ALG: str = "HS256"
     ACCESS_MINUTES: int = 15
     REFRESH_DAYS: int = 15
-    
-    COOKIE_SAMESITE: str
-    COOKIE_SECURE: bool = False  
+    COOKIE_SECURE: bool = False  # True en prod (https)
+    COOKIE_DOMAIN: str | None = None
 
-    LEGACY_BASE_URL: str | None = None 
+    LEGACY_BASE_URL: str | None = None  # ej: "https://colegiomedicocorrientes.com"
     LEGACY_SSO_PATH: str = "/sso_login.php"
     LEGACY_SSO_SECRET: SecretStr | None = None
     
-    MEDIA_ROOT: str = "uploads"   
-    MEDIA_URL: str = "uploads"        
-    MEDIA_BASE_URL: str | None = None   
+    MEDIA_ROOT: str = "uploads"    # carpeta física
+    MEDIA_URL: str = "uploads"         # URL base que servís
+    MEDIA_BASE_URL: str | None = None   # si querés forzar dominio (https://api.x.com)
                  
     RESEND_API_KEY: str | None = None     
     EMAIL_NOTIFY_TO: str | None = None
@@ -39,6 +36,5 @@ class Settings(BaseSettings):
     def CORS_LIST(self) -> list[str]:
         return [o.strip() for o in self.CORS_ORIGINS.split(',') if o.strip()]
 
-# Carga valores desde .env o .env.prod según entorno que se defina en docker-compose
-settings = Settings()
-
+# Carga valores desde .env
+settings = Settings(_env_file=".env")

@@ -1,4 +1,4 @@
-version: '3.8'
+version: "3.8"
 
 services:
   fastapi:
@@ -12,26 +12,15 @@ services:
       - .:/app
     depends_on:
       - mysql
-    # environment:
-      # - MYSQL_USER=root
-      # - MYSQL_PASS=158896
-      # - MYSQL_HOST=149.50.136.149
-      # - MYSQL_DB=coleg185_anexo
-      # - CORS_ORIGINS=http://localhost,http://localhost:8000,http://localhost:5173,https://cmc-project-react.vercel.app
-    environment:
-      - MYSQL_USER=root
-      - MYSQL_PASS=158896
-      - MYSQL_HOST=mysql
-      - MYSQL_DB=coleg185_anexo
-      - CORS_ORIGINS=http://localhost,http://localhost:5173
+    env_file:
+      - .env
 
   mysql:
     container_name: mysql
     image: mysql:5.7
     restart: always
-    environment:
-      MYSQL_ROOT_PASSWORD: 158896
-      MYSQL_DATABASE: coleg185_anexo
+    env_file:
+      - .env
     volumes:
       - mysql_data:/var/lib/mysql
     ports:
@@ -43,10 +32,8 @@ services:
     restart: always
     ports:
       - "8080:80"
-    environment:
-      PMA_HOST: mysql
-      PMA_USER: root
-      PMA_PASSWORD: 158896
+    env_file:
+      - .env
 
 volumes:
   mysql_data:

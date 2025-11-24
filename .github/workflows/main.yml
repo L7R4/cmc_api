@@ -1,0 +1,58 @@
+name: CD API
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+concurrency:
+  group: cd-api
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      # 1) Chequeo conexión SSH al VPS
+      - name: SSH check (VPS up?)
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ secrets.SSH_PORT }}
+          script: |
+            set -euo pipefail
+            echo "Host:" $(hostname)
+            echo "Uptime:" $(uptime)
+            docker --version
+            docker compose version
+
+      # 2) Actualizar código del API en el VPS
+      - name: Update API code (git fetch/reset)
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ secrets.SSH_PORT }}
+          script: |
+            set -euo pipefail
+            cd "${{ secrets.API_DIR }}"
+            git fetch --all
+            git reset --hard origin/main
+            git rev-parse --short HEAD
+
+      # 3) Rebuild & restart solo el servicio api
+      - name: Rebuild & restart api
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ secrets.SSH_PORT }}
+          script: |
+            set -euo pipefail
+            cd "${{ secrets.COMPOSE_DIR }}"
+            docker compose up -d --no-deps --build --force-recreate api
+            docker compose ps api

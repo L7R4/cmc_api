@@ -233,14 +233,6 @@ async def legacy_sso_link(
     dep = Depends(get_current_user_with_scopes_and_role),
 ):
     user, scopes, role = dep
-    # print("USUARIO")
-    # print(user)
-    # print(scopes)
-    # print(role)
-
-
-    # if not any(s in scopes for s in ["legacy:access", "legacy:facturista", "facturista","facturas:ver", "medicos:ver_solo_perfil"]):
-    #     raise HTTPException(403, "No tenÃ©s permiso para el legacy")
 
     if not settings.LEGACY_BASE_URL or not settings.LEGACY_SSO_SECRET:
         raise HTTPException(503, "SSO del legacy no estÃ¡ configurado")

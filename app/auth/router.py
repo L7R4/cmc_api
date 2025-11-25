@@ -20,6 +20,8 @@ from starlette.responses import RedirectResponse
 router = APIRouter(prefix="/auth", tags=["auth"])
 COOKIE_REFRESH = "refresh_token"
 COOKIE_CSRF = "csrf_token"
+COOKIE_LOGGED  = "CMC_LOGGED"   # <- cookie visible para Caddy
+
 
 class LoginIn(BaseModel):
     nro_socio: int
@@ -29,6 +31,19 @@ def _b64url_decode(data: str) -> bytes:
     pad = '=' * (-len(data) % 4)
     return base64.urlsafe_b64decode((data + pad).encode('ascii'))
 
+def _cookie_args(path: str, http_only: bool, max_age: int | None = None) -> dict:
+    """Kwargs consistentes para set_cookie/delete_cookie."""
+    d = {
+        "httponly": http_only,
+        "samesite": settings.COOKIE_SAMESITE,   # 'lax'
+        "secure": settings.COOKIE_SECURE,
+        "path": path,
+    }
+    if max_age is not None:
+        d["max_age"] = max_age
+    if settings.COOKIE_DOMAIN:
+        d["domain"] = settings.COOKIE_DOMAIN
+    return d
 
 @router.post("/login")
 async def login(body: LoginIn, res: Response, db: AsyncSession = Depends(get_db)):
@@ -55,22 +70,15 @@ async def login(body: LoginIn, res: Response, db: AsyncSession = Depends(get_db)
     refresh = create_refresh_token(sub=sub, jti=jti)
     csrf    = secrets.token_urlsafe(16)
 
-    common = dict(
-        httponly=True, samesite=settings.COOKIE_SAMESITE, secure=settings.COOKIE_SECURE,
-        path="/auth", max_age=60*60*24*settings.REFRESH_DAYS
-    )
-    if settings.COOKIE_DOMAIN:
-        common["domain"] = settings.COOKIE_DOMAIN
-    res.set_cookie(COOKIE_REFRESH, refresh, **common)
+    max_age = 60 * 60 * 24 * settings.REFRESH_DAYS
 
-    csrf_kwargs = dict(
-        httponly=False, samesite=settings.COOKIE_SAMESITE, secure=settings.COOKIE_SECURE,
-        path="/", max_age=60*60*24*settings.REFRESH_DAYS
-    )
-    if settings.COOKIE_DOMAIN:
-        csrf_kwargs["domain"] = settings.COOKIE_DOMAIN
-        
-    res.set_cookie(COOKIE_CSRF, csrf, **csrf_kwargs)
+    # Cookies:
+    res.set_cookie(COOKIE_REFRESH, refresh, **_cookie_args("/auth", True,  max_age))
+    res.set_cookie(COOKIE_CSRF,    csrf,    **_cookie_args("/",     False, max_age))
+
+    # Cookie visible para Caddy (marca "logueado"):
+    res.set_cookie(COOKIE_LOGGED,  "1",     **_cookie_args("/",     False, max_age))
+
 
     return {
         "access_token": access,
@@ -124,33 +132,16 @@ async def refresh_token(
     # 3) Emitir access (siempre) y (opcional) rotar refresh+csrf
     access = create_access_token(sub=str(sub), scopes=scopes, role=role)
 
-    COOKIE_SAMESITE = "none" if settings.COOKIE_SECURE else "lax"
 
-    # Args comunes para cookies con domain opcional
-    common = dict(
-        httponly=True, samesite=COOKIE_SAMESITE, secure=settings.COOKIE_SECURE,
-        path="/auth", max_age=60 * 60 * 24 * settings.REFRESH_DAYS
-    )
-    if settings.COOKIE_DOMAIN:
-        common["domain"] = settings.COOKIE_DOMAIN
-
-    csrf_kwargs = dict(
-        httponly=False, samesite=COOKIE_SAMESITE, secure=settings.COOKIE_SECURE,
-        path="/", max_age=60 * 60 * 24 * settings.REFRESH_DAYS
-    )
-    if settings.COOKIE_DOMAIN:
-        csrf_kwargs["domain"] = settings.COOKIE_DOMAIN
-
-    # --- Opción A (recomendada en prod): ROTAR refresh y CSRF
+    max_age = 60 * 60 * 24 * settings.REFRESH_DAYS
     jti = secrets.token_hex(16)
     new_refresh = create_refresh_token(sub=str(sub), jti=jti)
-    response.set_cookie(COOKIE_REFRESH, new_refresh, **common)
-
     new_csrf = secrets.token_urlsafe(16)
-    response.set_cookie(COOKIE_CSRF, new_csrf, **csrf_kwargs)
 
-    # --- Opción B (dev): NO rotar refresh (comentar Opción A y re-afirmar el mismo CSRF)
-    # response.set_cookie(COOKIE_CSRF, csrf_cookie, **csrf_kwargs)
+    response.set_cookie(COOKIE_REFRESH, new_refresh, **_cookie_args("/auth", True,  max_age))
+    response.set_cookie(COOKIE_CSRF,    new_csrf,    **_cookie_args("/",     False, max_age))
+    # Refrescar "logueado"
+    response.set_cookie(COOKIE_LOGGED,  "1",         **_cookie_args("/",     False, max_age))
 
     return {
         "access_token": access,
@@ -166,24 +157,12 @@ async def refresh_token(
 
 @router.post("/logout")
 async def logout(response: Response):
-    COOKIE_SAMESITE = "none" if settings.COOKIE_SECURE else "lax"
-
     # Borrar refresh (path=/auth, httponly)
-    refresh_kwargs = dict(
-        path="/auth", samesite=COOKIE_SAMESITE, secure=settings.COOKIE_SECURE, httponly=True
-    )
-    if settings.COOKIE_DOMAIN:
-        refresh_kwargs["domain"] = settings.COOKIE_DOMAIN
-    response.delete_cookie(COOKIE_REFRESH, **refresh_kwargs)
-
+    response.delete_cookie(COOKIE_REFRESH, **_cookie_args("/auth", True))
     # Borrar csrf (path=/, no-httponly)
-    csrf_kwargs = dict(
-        path="/", samesite=COOKIE_SAMESITE, secure=settings.COOKIE_SECURE, httponly=False
-    )
-    if settings.COOKIE_DOMAIN:
-        csrf_kwargs["domain"] = settings.COOKIE_DOMAIN
-    response.delete_cookie(COOKIE_CSRF, **csrf_kwargs)
-
+    response.delete_cookie(COOKIE_CSRF,    **_cookie_args("/",     False))
+    # Borrar marca de logueado (visible)
+    response.delete_cookie(COOKIE_LOGGED,  **_cookie_args("/",     False))
     return {"ok": True}
 
 

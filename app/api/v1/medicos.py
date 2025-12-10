@@ -27,14 +27,14 @@ from app.db.models import (
 )
 from app.schemas.deduccion_schema import CrearDeudaOut, NuevaDeudaIn
 from app.schemas.medicos_schema import (
-    AsignarEspecialidadIn, AsociarConceptoIn, CEAppOut, CEBundleOut, CEBundlePatchIn, CEStoreOut, ConceptRecordOut, ConceptoAplicacionOut, DoctorStatsPointOut, MedicoConceptoOut, MedicoDebtOut, MedicoDocOut, MedicoEspecialidadOut, MedicoListRow, MedicoDetailOut, MedicoUpdateIn, MedicoUpdateOut, PatchCEIn
+    DATE_KEYS, FIELD_MAP, AdminSaveContinueIn, AsignarEspecialidadIn, AsociarConceptoIn, CEAppOut, CEBundleOut, CEBundlePatchIn, CEStoreOut, ConceptRecordOut, ConceptoAplicacionOut, DoctorStatsPointOut, ExisteIn, MedicoConceptoOut, MedicoDebtOut, MedicoDocOut, MedicoEspecialidadOut, MedicoListRow, MedicoDetailOut, MedicoPartialIn, MedicoUpdateIn, MedicoUpdateOut, PatchCEIn, SaveContinueOut, _coerce_existe, _coerce_sexo
 )
 from app.auth.deps import require_scope
 from app.schemas.registro_schema import RegisterIn, RegisterOut
 from app.services.email import send_email_resend
 from app.core.config import settings
 from app.utils.main import _parse_date
-from app.services.medicos_register_service import create_medico_and_solicitud
+from app.services.medicos_register_service import create_medico_and_solicitud, save_medico_admin_draft
 
 router = APIRouter()
 
@@ -374,36 +374,51 @@ async def obtener_medico(
 
     return d
 
-@router.put("/{medico_id}", response_model=MedicoDetailOut)
+@router.put("/{medico_id}", status_code=204)
 async def update_medico(
     medico_id: int,
-    payload: MedicoUpdateIn = Body(default={}),   # ← clave: default={}
+    payload: MedicoUpdateIn = Body(default={}),
     db: AsyncSession = Depends(get_db),
 ):
     row = await db.get(ListadoMedico, medico_id)
     if not row:
         raise HTTPException(404, "Médico no encontrado")
-    
-    data = payload.model_dump(exclude_unset=True)
-    # (si querés ver qué llegó validado)
-    print("📝 PATCH payload normalizado:", data)
 
-    # normalización de fechas → date (tu código actual)
-    for k in [
-        "fecha_nac","fecha_recibido","fecha_matricula","fecha_resolucion",
-        "vencimiento_anssal","vencimiento_malapraxis","vencimiento_cobertura",
-    ]:
-        if k in data:
+    data = payload.model_dump(exclude_unset=True)
+    # normalizaciones puntuales
+    if "existe" in data:
+        data["existe"] = _coerce_existe(data["existe"])
+    if "sexo" in data:
+        data["sexo"] = _coerce_sexo(data["sexo"])
+
+    # fechas a date
+    for k in list(data.keys()):
+        if k in DATE_KEYS:
             data[k] = _parse_date_or_none(data[k])
 
-    for k, v in data.items():
-        if hasattr(row, k):
-            setattr(row, k, v)
+    # aplicar patch con mapping de claves API -> columnas reales
+    touched = []
+    for api_key, value in data.items():
+        attr = FIELD_MAP.get(api_key, api_key)
+        if not hasattr(row, attr):
+            # fallback por si alguna quedó mal mapeada
+            alt = attr.upper()
+            if hasattr(row, alt):
+                attr = alt
+            else:
+                # logueá para detectar errores de mapeo
+                print(f"⚠️  Campo ignorado (sin atributo en modelo): {api_key} -> {attr}")
+                continue
+
+        setattr(row, attr, value)
+        touched.append((api_key, attr, value))
+
+    print("✅ Campos seteados:", touched)
 
     await db.flush()
     await db.commit()
-    await db.refresh(row)
-    return MedicoUpdateOut.model_validate(row, from_attributes=True)
+    # 204: sin body
+    return
 
 
 # Deudas de medicos ===========================================
@@ -1125,6 +1140,7 @@ LABEL_TO_FIELD = {
     "malapraxis":             "attach_malapraxis",
     "cbu":                    "attach_cbu",
     "documento":              "attach_dni",
+    "dni":                    "attach_dni",
 }
 
 @router.post("/register/{medico_id}/document")
@@ -1266,3 +1282,107 @@ async def admin_upload_document(medico_id: int,
         print("ADMIN_UPLOAD_EXC:", repr(e))
     return {"ok": True, "doc_id": doc.id}
 
+
+@router.post("/admin/save-continue", response_model=SaveContinueOut,
+             dependencies=[Depends(require_scope("medicos:agregar"))])
+async def admin_save_continue(body: AdminSaveContinueIn,
+                              db: AsyncSession = Depends(get_db)):
+    med = await save_medico_admin_draft(db, body, medico_id=body.medico_id)
+    return {"medico_id": int(med.ID), "ok": True}
+
+
+@router.patch("/{medico_id}/existe", dependencies=[Depends(require_scope("medicos:editar_perfil"))])
+async def set_existe(medico_id: int, body: ExisteIn, db: AsyncSession = Depends(get_db)):
+    med = await db.get(ListadoMedico, medico_id)
+    if not med:
+        raise HTTPException(404, "Médico no encontrado")
+    med.EXISTE = body.existe  # 'S' o 'N'
+    await db.flush()
+    await db.commit()
+    return {"ok": True, "medico_id": medico_id, "EXISTE": med.EXISTE}
+
+@router.delete("/{medico_id}", status_code=204,
+               dependencies=[Depends(require_scope("medicos:eliminar"))])
+async def delete_medico(medico_id: int, db: AsyncSession = Depends(get_db)):
+    med = await db.get(ListadoMedico, medico_id)
+    if not med:
+        raise HTTPException(404, "Médico no encontrado")
+    await db.delete(med)
+    await db.commit()
+
+
+def storage_path(doc: Documento) -> str:
+  # ajusta según cómo guardes
+  return doc.path  # ej: "/var/data/docs/xxx.pdf"
+
+@router.delete("/{medico_id}/documentos/{doc_id}", status_code=204)
+async def delete_documento(
+    medico_id: int,
+    doc_id: int,
+    db: AsyncSession = Depends(get_db),
+    _=Depends(require_scope("medicos:editar_perfil")),  # protege como corresponda
+):
+    doc = await db.get(Documento, doc_id)
+    if not doc or doc.medico_id != medico_id:
+        raise HTTPException(status_code=404, detail="Documento no encontrado")
+
+    # Si este doc está etiquetado con un tipo conocido, limpiamos el attach_*
+    label_norm = (doc.label or "").replace("attach_", "").lower()
+    attach_field = LABEL_TO_FIELD.get(label_norm)
+
+    if attach_field:
+        medico = await db.get(ListadoMedico, medico_id)
+        if medico:
+            setattr(medico, attach_field, None)
+            db.add(medico)
+
+    # borrar el archivo físico si existe
+    try:
+        path = storage_path(doc)
+        if path and os.path.exists(path):
+            os.remove(path)
+    except Exception:
+        pass  # no romper si no se puede borrar archivo
+
+    await db.delete(doc)
+    await db.commit()
+    return
+
+# (Opcional) endpoint para mapear attach_* a un doc_id
+from pydantic import BaseModel
+
+class AttachMapIn(BaseModel):
+    field: str  # "attach_titulo"
+    doc_id: int | None  # None para limpiar
+
+@router.patch("/{medico_id}/attach", status_code=204)
+async def map_attach(
+    medico_id: int,
+    body: AttachMapIn,
+    db: AsyncSession = Depends(get_db),
+    _=Depends(require_scope("medicos:editar_perfil")),
+):
+    # validar field permitido
+    field = body.field
+    if field not in LABEL_TO_FIELD.values():
+        raise HTTPException(status_code=400, detail="Campo attach_* no permitido")
+
+    # si doc_id no es None, validar que exista y pertenezca al médico
+    if body.doc_id is not None:
+        doc = await db.get(Documento, body.doc_id)
+        if not doc or doc.medico_id != medico_id:
+            raise HTTPException(status_code=404, detail="Documento inválido")
+        # opcional: forzar que el label del doc coincida con el field (titulo -> attach_titulo)
+        expected_norm = field.replace("attach_", "")
+        if (doc.label or "").replace("attach_", "").lower() != expected_norm:
+            # permitís o rechazás; acá advertimos
+            pass
+
+    medico = await db.get(ListadoMedico, medico_id)
+    if not medico:
+        raise HTTPException(status_code=404, detail="Médico no encontrado")
+
+    setattr(medico, field, body.doc_id)  # o url si tu modelo guarda url; ajusta acá
+    db.add(medico)
+    await db.commit()
+    return

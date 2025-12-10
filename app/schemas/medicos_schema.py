@@ -16,6 +16,68 @@ class UserOut(BaseModel):
 class UserEnvelope(BaseModel):
     user: UserOut
 
+FIELD_MAP = {
+    # básicos
+    "name": "NOMBRE",
+    "nombre_": "nombre_",
+    "apellido": "apellido",
+    "sexo": "SEXO",
+    "documento": "DOCUMENTO",
+    "cuit": "CUIT",
+    "fecha_nac": "FECHA_NAC",
+    "existe": "EXISTE",
+    "provincia": "PROVINCIA",
+    "localidad": "localidad",
+    "codigo_postal": "CODIGO_POSTAL",
+    "domicilio_particular": "DOMICILIO_PARTICULAR",
+    "tele_particular": "TELE_PARTICULAR",
+    "celular_particular": "CELULAR_PARTICULAR",
+    "mail_particular": "MAIL_PARTICULAR",
+
+    # profesionales
+    "nro_socio": "NRO_SOCIO",
+    "categoria": "categoria",              # si en tu modelo es MAYÚS poné "CATEGORIA"
+    "titulo": "titulo",
+    "matricula_prov": "MATRICULA_PROV",
+    "matricula_nac": "MATRICULA_NAC",
+    "fecha_recibido": "FECHA_RECIBIDO",
+    "fecha_matricula": "FECHA_MATRICULA",
+    "domicilio_consulta": "DOMICILIO_CONSULTA",
+    "telefono_consulta": "TELEFONO_CONSULTA",
+
+    # impositivos
+    "condicion_impositiva": "condicion_impositiva",
+    "anssal": "ANSSAL",
+    "cobertura": "COBERTURA",
+    "vencimiento_anssal": "VENCIMIENTO_ANSSAL",
+    "malapraxis": "MALAPRAXIS",
+    "vencimiento_malapraxis": "VENCIMIENTO_MALAPRAXIS",
+    "vencimiento_cobertura": "VENCIMIENTO_COBERTURA",
+    "cbu": "cbu",
+    "observacion": "OBSERVACION",
+}
+
+DATE_KEYS = {
+    "fecha_nac","fecha_recibido","fecha_matricula","fecha_resolucion",
+    "vencimiento_anssal","vencimiento_malapraxis","vencimiento_cobertura",
+}
+
+def _coerce_existe(v):
+    if v is None:
+        return None
+    s = str(v).strip().upper()
+    if s in ("S","N"):
+        return s
+    # acepta truthy/falsy
+    return "S" if s in ("1","TRUE","T","SI","SÍ","Y","YES","ON") else "N"
+
+def _coerce_sexo(v):
+    if v is None:
+        return None
+    s = str(v).strip().upper()
+    return s[:1] if s else None  # "M" / "F" (o lo que uses)
+
+
 class MedicoBase(BaseModel):
     nro_especialidad: int        = Field(..., description="Especialidad principal")
     nro_especialidad2: int       = Field(..., description="Especialidad 2")
@@ -531,3 +593,119 @@ class AsignarEspecialidadIn(BaseModel):
     n_resolucion: Optional[str] = None
     fecha_resolucion: Optional[str] = None  # "YYYY-MM-DD" (texto; aceptamos None)
     adjunto_id: Optional[int] = None        # Documento.id (opcional)
+
+
+class MedicoPartialIn(BaseModel):
+    # Identificación
+    documentType: Optional[str] = None      # DNI, LE, LC, Pasaporte, etc.
+    documentNumber: Optional[str] = None
+    firstName: Optional[str] = None
+    lastName: Optional[str] = None
+    gender: Optional[str] = None            # 'M'/'F'/otro
+    birthDate: Optional[str] = None         # 'YYYY-MM-DD'
+
+    # Contacto
+    phone: Optional[str] = None
+    altPhone: Optional[str] = None
+    email: Optional[str] = None
+
+    # Domicilio
+    address: Optional[str] = None
+    addressNumber: Optional[str] = None
+    addressFloor: Optional[str] = None
+    addressDept: Optional[str] = None
+    province: Optional[str] = None
+    locality: Optional[str] = None
+    postalCode: Optional[str] = None
+
+    # Profesionales
+    matriculaProv: Optional[str] = None
+    matriculaNac: Optional[str] = None
+    joinDate: Optional[str] = None          # 'YYYY-MM-DD'
+
+    # Especialidades (admin puede cargar luego en su pestaña; acá lo dejamos opcional)
+    specialties: Optional[List[str]] = None
+
+    # Fiscales / Seguros
+    cuit: Optional[str] = None
+    taxCondition: Optional[str] = None      # RI/Monotrib/Exento/etc.
+    anssal: Optional[str] = None
+    anssalExpiry: Optional[str] = None      # 'YYYY-MM-DD'
+    malpracticeCompany: Optional[str] = None
+    malpracticeExpiry: Optional[str] = None # 'YYYY-MM-DD'
+    cbu: Optional[str] = None
+
+    # Otros
+    observations: Optional[str] = None
+
+class SaveContinueOut(BaseModel):
+    medico_id: int
+    ok: bool = True
+
+class ExisteIn(BaseModel):
+    existe: Literal["S", "N"]
+
+# class MedicoDetailOut(BaseModel):
+#     # Esquemita simple para GET; ajustá si necesitás más campos
+#     ID: int = Field(..., alias="id")
+#     DOCUMENTO: Optional[str] = None
+#     NOMBRE: Optional[str] = None
+#     nombre_: Optional[str] = None
+#     apellido: Optional[str] = None
+#     EMAIL: Optional[str] = None
+#     TELEFONO: Optional[str] = None
+#     DOMICILIO: Optional[str] = None
+#     LOCALIDAD: Optional[str] = None
+#     PROVINCIA: Optional[str] = None
+#     COD_POSTAL: Optional[str] = None
+#     MATRICULA_PROV: Optional[str] = None
+#     MATRICULA_NAC: Optional[str] = None
+#     FECHA_INGRESO: Optional[str] = None
+#     CUIT: Optional[str] = None
+#     COND_IMPOSITIVA: Optional[str] = None
+#     ANSSAL: Optional[str] = None
+#     ANSSAL_VENC: Optional[str] = None
+#     MALAPRACTICA_COMPANIA: Optional[str] = None
+#     MALAPRACTICA_VENC: Optional[str] = None
+#     CBU: Optional[str] = None
+#     OBSERVACIONES: Optional[str] = None
+#     SEXO: Optional[str] = None
+#     FECHA_NAC: Optional[str] = None
+#     EXISTE: Optional[str] = None    
+
+class AdminSaveContinueIn(BaseModel):
+    medico_id: Optional[int] = None
+    # todos los del público, opcionales:
+    documentType: Optional[str] = None
+    documentNumber: Optional[str] = None
+    firstName: Optional[str] = None
+    lastName: Optional[str] = None
+    gender: Optional[str] = None
+    birthDate: Optional[str] = None
+    address: Optional[str] = None
+    province: Optional[str] = None
+    locality: Optional[str] = None
+    postalCode: Optional[str] = None
+    phone: Optional[str] = None
+    mobile: Optional[str] = None
+    email: Optional[str] = None
+    officeAddress: Optional[str] = None
+    officePhone: Optional[str] = None
+    cuit: Optional[str] = None
+    observations: Optional[str] = None
+    anssal: Optional[str] = None
+    anssalExpiry: Optional[str] = None
+    malpracticeCompany: Optional[str] = None
+    malpracticeExpiry: Optional[str] = None
+    malpracticeCoverage: Optional[str] = None
+    provincialLicense: Optional[str] = None
+    provincialLicenseDate: Optional[str] = None
+    nationalLicense: Optional[str] = None
+    nationalLicenseDate: Optional[str] = None
+    graduationDate: Optional[str] = None
+    resolutionNumber: Optional[str] = None
+    resolutionDate: Optional[str] = None
+    specialty: Optional[str] = None
+    condicionImpositiva: Optional[str] = None
+    taxCondition: Optional[str] = None
+    cbu: Optional[str] = None

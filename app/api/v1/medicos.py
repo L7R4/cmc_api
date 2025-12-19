@@ -18,7 +18,7 @@ from app.utils.main import (
 from typing import Any, DefaultDict, Literal, Optional, Dict, List
 from fastapi import APIRouter, Body, Depends, File, Form, Query, HTTPException, Request, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import case, delete, desc, func, literal, select, or_, cast, String, update
+from sqlalchemy import case, delete, desc, func, literal, select, or_, cast, String, Integer, update
 from app.core.passwords import hash_password
 from app.db.database import get_db
 from app.db.models import (
@@ -27,7 +27,7 @@ from app.db.models import (
 )
 from app.schemas.deduccion_schema import CrearDeudaOut, NuevaDeudaIn
 from app.schemas.medicos_schema import (
-    DATE_KEYS, FIELD_MAP, AdminSaveContinueIn, AsignarEspecialidadIn, AsociarConceptoIn, CEAppOut, CEBundleOut, CEBundlePatchIn, CEStoreOut, ConceptRecordOut, ConceptoAplicacionOut, DoctorStatsPointOut, ExisteIn, MedicoConceptoOut, MedicoDebtOut, MedicoDocOut, MedicoEspecialidadOut, MedicoListRow, MedicoDetailOut, MedicoPartialIn, MedicoUpdateIn, MedicoUpdateOut, PatchCEIn, SaveContinueOut, _coerce_existe, _coerce_sexo
+    DATE_KEYS, FIELD_MAP, AdminSaveContinueIn, AsignarEspecialidadIn, AsociarConceptoIn, CEAppOut, CEBundleOut, CEBundlePatchIn, CEStoreOut, ConceptRecordOut, ConceptoAplicacionOut, DoctorStatsPointOut, ExisteIn, MedicoBase, MedicoConceptoOut, MedicoDebtOut, MedicoDocOut, MedicoEspecialidadOut, MedicoListRow, MedicoDetailOut, MedicoPartialIn, MedicoUpdateIn, MedicoUpdateOut, PatchCEIn, SaveContinueOut, _coerce_existe, _coerce_sexo
 )
 from app.auth.deps import require_scope
 from app.schemas.registro_schema import RegisterIn, RegisterOut
@@ -49,6 +49,155 @@ def _parse_date_or_none(s: str | None) -> date | None:
         return date.fromisoformat(s)
     except Exception:
         return None
+
+def _parse_period_yyyymm(s: str | None) -> int | None:
+    if not s:
+        return None
+    raw = str(s).strip()
+    if not raw:
+        return None
+    if re.fullmatch(r"\d{6}", raw):
+        mm, yyyy = raw[:2], raw[2:]
+    elif re.fullmatch(r"\d{4}[-/]\d{2}", raw):
+        yyyy, mm = raw[:4], raw[5:7]
+    elif re.fullmatch(r"\d{4}\d{2}", raw):
+        yyyy, mm = raw[:4], raw[4:]
+    else:
+        return None
+    try:
+        return int(f"{yyyy}{mm}")
+    except Exception:
+        return None
+
+def _period_col_yyyymm(col):
+    raw = func.nullif(func.trim(col), "0")
+    yyyymm = func.concat(func.substr(raw, 3, 4), func.substr(raw, 1, 2))
+    return cast(func.nullif(yyyymm, "000000"), Integer)
+
+MEDICO_ALL_FIELDS = [
+    "nro_especialidad",
+    "nro_especialidad2",
+    "nro_especialidad3",
+    "nro_especialidad4",
+    "nro_especialidad5",
+    "nro_especialidad6",
+    "nro_socio",
+    "nombre",
+    "nombre_",
+    "apellido",
+    "domicilio_consulta",
+    "telefono_consulta",
+    "matricula_prov",
+    "matricula_nac",
+    "fecha_recibido",
+    "fecha_matricula",
+    "fecha_ingreso",
+    "domicilio_particular",
+    "tele_particular",
+    "celular_particular",
+    "mail_particular",
+    "sexo",
+    "tipo_doc",
+    "documento",
+    "fecha_nac",
+    "cuit",
+    "condicion_impositiva",
+    "anssal",
+    "vencimiento_anssal",
+    "malapraxis",
+    "vencimiento_malapraxis",
+    "monotributista",
+    "factura",
+    "cobertura",
+    "vencimiento_cobertura",
+    "provincia",
+    "localidad",
+    "codigo_postal",
+    "vitalicio",
+    "fecha_vitalicio",
+    "observacion",
+    "categoria",
+    "existe",
+    "excep_desde",
+    "excep_hasta",
+    "excep_desde2",
+    "excep_hasta2",
+    "excep_desde3",
+    "excep_hasta3",
+    "ingresar",
+    "cbu",
+    "nro_resolucion",
+    "fecha_resolucion",
+    "conceps_espec",
+    "attach_titulo",
+    "attach_matricula_nac",
+    "attach_matricula_prov",
+    "attach_resolucion",
+    "attach_habilitacion_municipal",
+    "attach_cuit",
+    "attach_condicion_impositiva",
+    "attach_anssal",
+    "attach_malapraxis",
+    "attach_cbu",
+    "attach_dni",
+    "titulo",
+]
+
+def _medico_col_for(field: str):
+    if hasattr(ListadoMedico, field):
+        return getattr(ListadoMedico, field)
+    upper = field.upper()
+    if hasattr(ListadoMedico, upper):
+        return getattr(ListadoMedico, upper)
+    return None
+
+MEDICO_COLUMNS = {field: _medico_col_for(field) for field in MEDICO_ALL_FIELDS}
+
+MEDICO_NUMERIC_FIELDS = {
+    "nro_especialidad",
+    "nro_especialidad2",
+    "nro_especialidad3",
+    "nro_especialidad4",
+    "nro_especialidad5",
+    "nro_especialidad6",
+    "nro_socio",
+    "matricula_prov",
+    "matricula_nac",
+    "anssal",
+    "cobertura",
+}
+
+MEDICO_DATE_FIELDS = {
+    "fecha_recibido",
+    "fecha_matricula",
+    "fecha_ingreso",
+    "fecha_nac",
+    "vencimiento_anssal",
+    "vencimiento_malapraxis",
+    "vencimiento_cobertura",
+    "fecha_vitalicio",
+    "fecha_resolucion",
+}
+
+MEDICO_TEXT_DATE_FIELDS = {
+    "excep_desde",
+    "excep_hasta",
+    "excep_desde2",
+    "excep_hasta2",
+    "excep_desde3",
+    "excep_hasta3",
+}
+
+MEDICO_EXACT_STRING_FIELDS = {
+    "existe",
+    "sexo",
+    "vitalicio",
+    "monotributista",
+    "factura",
+    "ingresar",
+    "categoria",
+    "tipo_doc",
+}
 
 @router.get(
     "",
@@ -153,6 +302,117 @@ async def listar_medicos(
         out.append(d)
 
     return out
+
+
+
+@router.get("/all", response_model=List[MedicoBase], dependencies=[Depends(require_scope("medicos:leer"))])
+async def listar_medicos_full(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    skip: int = Query(0, ge=0),
+    limit: Optional[int] = Query(None, ge=1, le=50000),
+):
+    params = request.query_params
+
+    select_cols = []
+    for field, col in MEDICO_COLUMNS.items():
+        if col is None:
+            continue
+
+        if field in ("documento", "codigo_postal"):
+            select_cols.append(cast(col, String).label(field))
+        else:
+            select_cols.append(col.label(field))
+
+    stmt = (
+        select(*select_cols)
+        .select_from(ListadoMedico)
+        .order_by(ListadoMedico.NOMBRE.asc())
+        .offset(skip)
+    )
+
+    if limit is not None:
+        stmt = stmt.limit(limit)
+    filters = []
+
+    # filtros exactos/like por campo
+    for field, col in MEDICO_COLUMNS.items():
+        if col is None:
+            continue
+        if field not in params:
+            continue
+        raw = params.get(field)
+        if raw is None or str(raw).strip() == "":
+            continue
+
+        if field in MEDICO_NUMERIC_FIELDS:
+            try:
+                num_val = int(str(raw).strip())
+            except Exception:
+                raise HTTPException(status_code=400, detail=f"Filtro invalido para {field}")
+            filters.append(col == num_val)
+            continue
+
+        if field in MEDICO_DATE_FIELDS:
+            date_val = _parse_date(raw)
+            if date_val is None:
+                raise HTTPException(status_code=400, detail=f"Fecha invalida para {field}")
+            filters.append(col == date_val)
+            continue
+
+        if field in MEDICO_TEXT_DATE_FIELDS:
+            period_val = _parse_period_yyyymm(raw)
+            if period_val is None:
+                raise HTTPException(status_code=400, detail=f"Periodo invalido para {field}")
+            filters.append(_period_col_yyyymm(col) == period_val)
+            continue
+
+        if field in MEDICO_EXACT_STRING_FIELDS:
+            filters.append(func.upper(func.trim(cast(col, String))) == str(raw).strip().upper())
+        else:
+            filters.append(cast(col, String).ilike(f"%{raw}%"))
+
+    # rangos para fechas tipo date
+    for field in MEDICO_DATE_FIELDS:
+        col = MEDICO_COLUMNS.get(field)
+        if col is None:
+            continue
+        desde = params.get(f"{field}_desde")
+        hasta = params.get(f"{field}_hasta")
+        if desde:
+            start = _parse_date(desde)
+            if start is None:
+                raise HTTPException(status_code=400, detail=f"Fecha invalida para {field}_desde")
+            filters.append(col >= start)
+        if hasta:
+            end = _parse_date(hasta)
+            if end is None:
+                raise HTTPException(status_code=400, detail=f"Fecha invalida para {field}_hasta")
+            filters.append(col <= end)
+
+    # rangos para fechas en texto (MMYYYY / YYYY-MM)
+    for field in MEDICO_TEXT_DATE_FIELDS:
+        col = MEDICO_COLUMNS.get(field)
+        if col is None:
+            continue
+        desde = params.get(f"{field}_desde")
+        hasta = params.get(f"{field}_hasta")
+        if desde:
+            start = _parse_period_yyyymm(desde)
+            if start is None:
+                raise HTTPException(status_code=400, detail=f"Periodo invalido para {field}_desde")
+            filters.append(_period_col_yyyymm(col) >= start)
+        if hasta:
+            end = _parse_period_yyyymm(hasta)
+            if end is None:
+                raise HTTPException(status_code=400, detail=f"Periodo invalido para {field}_hasta")
+            filters.append(_period_col_yyyymm(col) <= end)
+
+    if filters:
+        stmt = stmt.where(*filters)
+
+    rows = (await db.execute(stmt)).mappings().all()
+    return [dict(r) for r in rows]
 
 
 @router.get("/count", dependencies=[Depends(require_scope("medicos:leer"))])

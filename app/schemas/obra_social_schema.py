@@ -24,3 +24,5 @@ class ObraSocialUpdate(BaseModel):
 class ObraSocialOut(ObraSocialBase):
     ID: int = Field(..., description="PK en la tabla obras_sociales")
     model_config = {"from_attributes": True}
+
+

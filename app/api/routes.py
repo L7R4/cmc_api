@@ -14,6 +14,7 @@ from app.api.v1.periodos import router as periodos_router
 from app.api.v1.solicitudes import router as solicitudes_router
 from app.api.v1.noticias import router as noticias_router
 from app.api.v1.publicidad_medicos import router as publicidades_medico_router
+from app.api.v1.padrones import router as padrones_router
 
 from app.api.v1.rbac import router as rbac_router
 
@@ -28,6 +29,8 @@ api_router.include_router(especialidades_router,    prefix="/especialidades", ta
 api_router.include_router(deducciones_router,    prefix="/deducciones", tags=["Deducciones - Generar"])
 api_router.include_router(medicos_router,     prefix="/medicos",     tags=["Medicos"])
 api_router.include_router(obras_social_router, prefix="/obras_social", tags=["Obras Sociales"])
+api_router.include_router(padrones_router, prefix="/padrones", tags=["Padrones Médico"])
+
 api_router.include_router(debitos_router,     prefix="/debitos_creditos",     tags=["Debitos / Creditos"])
 api_router.include_router(descuentos_router,  prefix="/descuentos",  tags=["Descuentos"])
 api_router.include_router(exports_router, prefix="/exports", tags=["exports"])
@@ -37,6 +40,7 @@ api_router.include_router(periodos_router,    prefix="/periodos", tags=["Periodo
 api_router.include_router(rbac_router,    prefix="/admin/rbac", tags=["Rbac"])
 api_router.include_router(solicitudes_router,    prefix="/solicitudes", tags=["Solicitudes"])
 api_router.include_router(noticias_router, prefix="/noticias",tags=["Noticias"])
+
 api_router.include_router(publicidades_medico_router, prefix="/publicidad-medicos", tags=["publicidad-medicos"])
 
 

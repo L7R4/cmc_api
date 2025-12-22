@@ -1109,7 +1109,7 @@ class Noticia(Base):
     resumen          = Column(String(1000), nullable=False)
     autor            = Column(String(120), nullable=False, default="Colegio Médico de Corrientes")
     publicada        = Column(Boolean, nullable=False, server_default="1")
-
+    tipo: Mapped[str] = mapped_column( String(10, 'utf8_spanish2_ci'), nullable=False, server_default=text("'Noticia'"))
     portada          = Column(String(500), nullable=True)
 
 

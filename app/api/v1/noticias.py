@@ -1,7 +1,7 @@
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, Query, status, UploadFile, File, Form
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc, delete
-from typing import List, Optional
+from typing import List, Literal, Optional
 from uuid import uuid4
 from pathlib import Path
 
@@ -84,12 +84,16 @@ async def _try_unlink_file(doc_path: str) -> None:
 
 # LISTAR NOTICIAS ==========================================
 @router.get("/", response_model=List[NoticiaOut])
-async def listar_noticias(db: AsyncSession = Depends(get_db)):
-    res = await db.execute(
-        select(NoticiaModel)
-        .where(NoticiaModel.publicada.is_(True))
-        .order_by(desc(NoticiaModel.fecha_creacion))
-    )
+async def list_noticias(
+    tipo: Optional[Literal["Blog", "Noticia"]] = Query(None, description="Filtrar por tipo"),
+    db: AsyncSession = Depends(get_db),
+):
+    stmt = select(NoticiaModel).where(NoticiaModel.publicada.is_(True))
+    if tipo:
+        stmt = stmt.where(NoticiaModel.tipo == tipo)
+    stmt = stmt.order_by(desc(NoticiaModel.fecha_creacion))
+
+    res = await db.execute(stmt)
     return [
         NoticiaOut(
             id=str(n.id),
@@ -98,9 +102,10 @@ async def listar_noticias(db: AsyncSession = Depends(get_db)):
             resumen=n.resumen,
             autor=n.autor,
             publicada=n.publicada,
+            tipo = n.tipo,
             fecha_creacion=n.fecha_creacion,
             fecha_actualizacion=n.fecha_actualizacion,
-            portada=n.portada,     # ✅
+            portada=n.portada, 
         )
         for n in res.scalars().all()
     ]
@@ -122,6 +127,7 @@ async def crear_noticia(
     titulo: str = Form(...),
     resumen: str = Form(...),
     contenido: str = Form(...),
+    tipo: str = Form(...),
     publicada: bool = Form(True),
     autor: Optional[str] = Form(None),
 
@@ -138,6 +144,7 @@ async def crear_noticia(
         titulo=titulo.strip(),
         resumen=resumen.strip(),
         contenido=contenido,
+        tipo=tipo,
         publicada=publicada,
         autor=autor.strip() if autor else "Colegio Médico de Corrientes",
     )
@@ -180,6 +187,7 @@ async def actualizar_noticia(
     titulo: Optional[str] = Form(None),
     resumen: Optional[str] = Form(None),
     contenido: Optional[str] = Form(None),
+    tipo: Optional[str] = Form(None),
     publicada: Optional[bool] = Form(None),
     autor: Optional[str] = Form(None),
 

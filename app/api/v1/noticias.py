@@ -85,7 +85,7 @@ async def _try_unlink_file(doc_path: str) -> None:
 # LISTAR NOTICIAS ==========================================
 @router.get("/", response_model=List[NoticiaOut])
 async def list_noticias(
-    tipo: Optional[Literal["Blog", "Noticia"]] = Query(None, description="Filtrar por tipo"),
+    tipo: Optional[Literal["Blog", "Noticia","Curso"]] = Query(None, description="Filtrar por tipo"),
     db: AsyncSession = Depends(get_db),
 ):
     stmt = select(NoticiaModel).where(NoticiaModel.publicada.is_(True))

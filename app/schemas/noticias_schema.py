@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import List, Optional,Literal
 from pydantic import BaseModel, Field
 
-TipoPublicacion = Literal["Blog", "Noticia"]
+TipoPublicacion = Literal["Blog", "Noticia", "Curso"]
 
 
 #region NOTICIAS 
@@ -32,7 +32,7 @@ class NoticiaOut(BaseModel):
     resumen: str
     autor: str
     publicada: bool
-    tipo: str
+    tipo: Optional[str] = None
     portada: Optional[str] = None
     fechaCreacion: datetime = Field(..., alias="fecha_creacion")
     fechaActualizacion: datetime = Field(..., alias="fecha_actualizacion")

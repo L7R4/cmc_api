@@ -1,5 +1,5 @@
 from collections import defaultdict
-from datetime import date, datetime
+from datetime import date, datetime,timedelta
 from decimal import Decimal
 import json
 from operator import and_
@@ -75,6 +75,7 @@ def _period_col_yyyymm(col):
     return cast(func.nullif(yyyymm, "000000"), Integer)
 
 MEDICO_ALL_FIELDS = [
+    "id",
     "nro_especialidad",
     "nro_especialidad2",
     "nro_especialidad3",
@@ -154,6 +155,7 @@ def _medico_col_for(field: str):
 MEDICO_COLUMNS = {field: _medico_col_for(field) for field in MEDICO_ALL_FIELDS}
 
 MEDICO_NUMERIC_FIELDS = {
+    "id",
     "nro_especialidad",
     "nro_especialidad2",
     "nro_especialidad3",
@@ -305,20 +307,80 @@ async def listar_medicos(
 
 
 
+MEDICO_NUMERIC_FIELDS = {
+    "nro_socio", "matricula_prov"
+}
+
+MEDICO_DATE_FIELDS = {
+    # fechas DATE reales
+    "fecha_ingreso",
+    "vencimiento_anssal",
+    "vencimiento_malapraxis",
+    # si tenés otras, agregalas
+}
+
+# Fechas almacenadas como TEXTO con formato MMYYYY / YYYY-MM (si las tuvieras)
+MEDICO_TEXT_DATE_FIELDS = set()
+
+# Strings que deben matchear EXACTO (normalizados)
+MEDICO_EXACT_STRING_FIELDS = {"existe"}  # "S"/"N" o lo que uses
+
+def _parse_date(raw: str):
+    # acepta "YYYY-MM-DD" y "YYYY/MM/DD"
+    try:
+        raw = str(raw).strip().replace("/", "-")
+        y, m, d = raw.split("-")
+        return f"{int(y):04d}-{int(m):02d}-{int(d):02d}"
+    except Exception:
+        return None
+
+def _parse_period_yyyymm(raw: str):
+    # para MMYYYY / YYYY-MM, si lo necesitás
+    s = str(raw).strip().replace("/", "-")
+    if "-" in s:
+        y, m = s.split("-")[:2]
+    else:
+        # ej "122025" -> 2025-12
+        if len(s) != 6:
+            return None
+        m, y = s[:2], s[2:]
+    try:
+        return f"{int(y):04d}{int(m):02d}"
+    except Exception:
+        return None
+
+def _period_col_yyyymm(col):
+    # convierte columna de texto a clave YYYYMM (para comparar)
+    # si no usás "text dates", no lo vas a usar.
+    return func.concat(func.date_format(col, "%Y"), func.date_format(col, "%m"))
+
 @router.get("/all", response_model=List[MedicoBase], dependencies=[Depends(require_scope("medicos:leer"))])
 async def listar_medicos_full(
     request: Request,
     db: AsyncSession = Depends(get_db),
     skip: int = Query(0, ge=0),
-    limit: Optional[int] = Query(None, ge=1, le=50000),
+    limit: Optional[int] = Query(None, ge=1),
+    estado: Optional[Literal["todos", "activos", "inactivos"]] = Query(None),
+
+    # === NUEVO: flags de vencimientos ===
+    malapraxis_vencida: Optional[bool] = Query(None),
+    malapraxis_por_vencer: Optional[bool] = Query(None),
+    anssal_vencido: Optional[bool] = Query(None),
+    anssal_por_vencer: Optional[bool] = Query(None),
+    cobertura_vencida: Optional[bool] = Query(None),
+    cobertura_por_vencer: Optional[bool] = Query(None),
+
+    por_vencer_dias: Optional[int] = Query(30, ge=1, le=365),
+    vencimientos_desde: Optional[str] = Query(None),
+    vencimientos_hasta: Optional[str] = Query(None),
 ):
     params = request.query_params
 
+    # build select — casteos para campos “problemáticos”
     select_cols = []
     for field, col in MEDICO_COLUMNS.items():
         if col is None:
             continue
-
         if field in ("documento", "codigo_postal"):
             select_cols.append(cast(col, String).label(field))
         else:
@@ -330,12 +392,19 @@ async def listar_medicos_full(
         .order_by(ListadoMedico.NOMBRE.asc())
         .offset(skip)
     )
-
     if limit is not None:
         stmt = stmt.limit(limit)
+
     filters = []
 
-    # filtros exactos/like por campo
+    if estado:
+        if estado == "activos":
+            filters.append(func.upper(func.trim(ListadoMedico.EXISTE)) == "S")
+        elif estado == "inactivos":
+            filters.append(func.upper(func.trim(ListadoMedico.EXISTE)) != "S")
+        # "todos" => sin filtro
+
+    # filtros iguales/like por campo (vienen del modal)
     for field, col in MEDICO_COLUMNS.items():
         if col is None:
             continue
@@ -354,6 +423,7 @@ async def listar_medicos_full(
             continue
 
         if field in MEDICO_DATE_FIELDS:
+            # para date exacto (si alguien lo usa)
             date_val = _parse_date(raw)
             if date_val is None:
                 raise HTTPException(status_code=400, detail=f"Fecha invalida para {field}")
@@ -367,12 +437,13 @@ async def listar_medicos_full(
             filters.append(_period_col_yyyymm(col) == period_val)
             continue
 
+        # string exacto vs like
         if field in MEDICO_EXACT_STRING_FIELDS:
             filters.append(func.upper(func.trim(cast(col, String))) == str(raw).strip().upper())
         else:
             filters.append(cast(col, String).ilike(f"%{raw}%"))
 
-    # rangos para fechas tipo date
+    # rangos para FECHAS reales (YYYY-MM-DD)
     for field in MEDICO_DATE_FIELDS:
         col = MEDICO_COLUMNS.get(field)
         if col is None:
@@ -390,7 +461,7 @@ async def listar_medicos_full(
                 raise HTTPException(status_code=400, detail=f"Fecha invalida para {field}_hasta")
             filters.append(col <= end)
 
-    # rangos para fechas en texto (MMYYYY / YYYY-MM)
+    # rangos para fechas en TEXTO (si usás ese esquema)
     for field in MEDICO_TEXT_DATE_FIELDS:
         col = MEDICO_COLUMNS.get(field)
         if col is None:
@@ -408,12 +479,67 @@ async def listar_medicos_full(
                 raise HTTPException(status_code=400, detail=f"Periodo invalido para {field}_hasta")
             filters.append(_period_col_yyyymm(col) <= end)
 
+    
+    # === VENCIMIENTOS ===
+    # columnas DATE (ajusta nombres si difieren en tu modelo)
+    col_mala = ListadoMedico.VENCIMIENTO_MALAPRAXIS
+    col_ans = ListadoMedico.VENCIMIENTO_ANSSAL
+    col_cob = ListadoMedico.VENCIMIENTO_COBERTURA
+
+    def _parse_date(s: Optional[str]):
+        if not s:
+            return None
+        try:
+            s = s.strip().replace("/", "-")
+            y, m, d = s.split("-")
+            return f"{int(y):04d}-{int(m):02d}-{int(d):02d}"
+        except Exception:
+            return None
+
+    today = date.today()
+    pv_to = today + timedelta(days=(por_vencer_dias or 30))
+
+    # rango global opcional para la sección vencimientos
+    v_desde = _parse_date(vencimientos_desde)
+    v_hasta = _parse_date(vencimientos_hasta)
+
+    def with_global(col, base):
+      cond = base
+      if v_desde:
+          cond = and_(cond, col >= v_desde)
+      if v_hasta:
+          cond = and_(cond, col <= v_hasta)
+      return cond
+
+    venc_group = []
+
+    # mala praxis
+    if malapraxis_vencida:
+        venc_group.append(with_global(col_mala, col_mala < today))
+    if malapraxis_por_vencer:
+        venc_group.append(with_global(col_mala, and_(col_mala >= today, col_mala <= pv_to)))
+
+    # anssal
+    if anssal_vencido:
+        venc_group.append(with_global(col_ans, col_ans < today))
+    if anssal_por_vencer:
+        venc_group.append(with_global(col_ans, and_(col_ans >= today, col_ans <= pv_to)))
+
+    # cobertura
+    if cobertura_vencida:
+        venc_group.append(with_global(col_cob, col_cob < today))
+    if cobertura_por_vencer:
+        venc_group.append(with_global(col_cob, and_(col_cob >= today, col_cob <= pv_to)))
+
+      # Si hay checks marcados, unimos por OR (cualquiera de los tildados)
+    if venc_group:
+        filters.append(or_(*venc_group))
+
     if filters:
         stmt = stmt.where(*filters)
 
     rows = (await db.execute(stmt)).mappings().all()
     return [dict(r) for r in rows]
-
 
 @router.get("/count", dependencies=[Depends(require_scope("medicos:leer"))])
 async def contar_medicos(

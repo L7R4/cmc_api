@@ -861,6 +861,8 @@ class ValoresObrasocial(Base):
     GALENO_CIRUGIA_INFANTIL: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
 
 
+
+
 class LiquidacionResumen(AuditMixin,Base):
     __tablename__ = "liquidacion_resumen"
 
@@ -980,6 +982,21 @@ class Descuentos(AuditMixin,Base):
     nombre: Mapped[str] = mapped_column(String(200), nullable= False)
     precio: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default = 0)
     porcentaje: Mapped[Decimal] = mapped_column(DECIMAL(10,2), default = 0)
+
+class SocioDescuento(AuditMixin,Base):
+    __tablename__ = "socio_descuento"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    medico_id: Mapped[int] = mapped_column(ForeignKey("listado_medico.ID"), index=True, nullable=False)
+    descuento_id: Mapped[int] = mapped_column(ForeignKey("descuentos.id"), index=True, nullable=False)
+
+    fecha_alta: Mapped[datetime.date] = mapped_column(Date, default=datetime.date.today, nullable=True)
+    fecha_baja: Mapped[Optional[datetime.date]] = mapped_column(Date, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("medico_id", "descuento_id", name="uq_socio_descuento"),
+        Index("idx_med_desc", "medico_id", "descuento_id"),
+    )
 
 class DeduccionColegio(AuditMixin,Base):
     __tablename__ = "deducciones_colegio"

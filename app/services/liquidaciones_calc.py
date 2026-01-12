@@ -1,7 +1,8 @@
 # services/liquidaciones_v2.py
 
-from sqlalchemy import select, func, and_, or_, literal, String, cast,case
+from sqlalchemy import BigInteger, select, func, and_, or_, literal, String, cast,case
 from sqlalchemy.ext.asyncio import AsyncSession
+from app.db.models import Debito_Credito
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Tuple
 import re
@@ -232,11 +233,20 @@ async def vista_detalles_liquidacion(
             tipo_ui_col,
             monto_ui_col,
         )
-        .select_from(DL)
-        .join(GA, DL.prestacion_id == cast(GA.ID, String(16)), isouter=True)
-        .join(DC, DL.debito_credito_id == DC.id, isouter=True)
-        .where(DL.liquidacion_id == liquidacion_id)
-        .order_by(DL.id)
+        .select_from(
+            DetalleLiquidacion.__table__
+            .outerjoin(
+                GuardarAtencion.__table__,
+                # ✅ comparamos número con número
+                cast(DetalleLiquidacion.prestacion_id, BigInteger) == GuardarAtencion.ID,
+            )
+            .outerjoin(
+                Debito_Credito.__table__,
+                DetalleLiquidacion.debito_credito_id == Debito_Credito.id,
+            )
+        )
+        .where(DetalleLiquidacion.liquidacion_id == liquidacion_id)
+        .order_by(DetalleLiquidacion.id)
     )
     if medico_id is not None:
         stmt = stmt.where(DL.medico_id == medico_id)

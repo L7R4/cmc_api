@@ -1,15 +1,15 @@
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
-from sqlalchemy import select, and_
+from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Response, status
+from sqlalchemy import func, select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
-
+from sqlalchemy.orm import aliased
 from app.api.deps import get_async_db
 from app.db.models import MedicoObraSocial, ListadoMedico, ObrasSociales
-from app.schemas.padrones_schema import ObraSocialOut, PadronOut, PadronUpdate
+from app.schemas.padrones_schema import ObraSocialOut, PadronOut, PadronUpdate, PageMedicoOS
 
 router = APIRouter()
 
-# Helpers de compatibilidad por si tu modelo usa NRO_OBRA_SOCIAL vs NRO_OBRASOCIAL
+#region Helpers de compatibilidad por si tu modelo usa NRO_OBRA_SOCIAL vs NRO_OBRASOCIAL
 def _os_number_col():
     # columna del número en el catálogo
     return getattr(ObrasSociales, "NRO_OBRA_SOCIAL", getattr(ObrasSociales, "NRO_OBRASOCIAL"))
@@ -28,6 +28,7 @@ async def _listado_defaults(db: AsyncSession, nro_socio: int):
         "MATRICULA_NAC": getattr(lm, "MATRICULA_NAC", None),
         "TELEFONO_CONSULTA": getattr(lm, "TELEFONO_CONSULTA", None),
     }
+#endregion 
 
 # 1) Catálogo: listar obras sociales con MARCA = "S"
 @router.get("/catalogo", response_model=List[ObraSocialOut])
@@ -61,72 +62,189 @@ async def list_padrones_de_medico(
     nro_socio: int = Path(..., ge=1),
     db: AsyncSession = Depends(get_async_db),
 ):
-    stmt = select(MedicoObraSocial).where(MedicoObraSocial.NRO_SOCIO == nro_socio).order_by(MedicoObraSocial.ID.desc())
-    return list((await db.execute(stmt)).scalars())
+    stmt = (
+        select(MedicoObraSocial)
+        .join(ListadoMedico, MedicoObraSocial.NRO_SOCIO == ListadoMedico.NRO_SOCIO)
+        .where(ListadoMedico.ID == nro_socio)
+        .order_by(MedicoObraSocial.ID.desc())
+    )
+    result = await db.execute(stmt)
+    return list(result.scalars())
 
-# 3) PUT idempotente por checkbox: crea si no existe (por NRO_SOCIO + NRO_OBRASOCIAL), actualiza si existe
-@router.put("/{nro_socio}/obras-sociales/{nro_os}", response_model=PadronOut, status_code=status.HTTP_200_OK)
-async def upsert_padron_checkbox(
-    nro_socio: int = Path(..., ge=1),
+@router.post("/{medico_id}/obras-sociales/{nro_os}", response_model=PadronOut)
+async def create_padron_checkbox(
+    response: Response,
+    medico_id: int = Path(..., ge=1),
     nro_os: int = Path(..., ge=1),
-    body: Optional[PadronUpdate] = None,
+    body: Optional[PadronUpdate] = Body(default=None),
     db: AsyncSession = Depends(get_async_db),
 ):
+    # 0) Resolver medico por ID y obtener su NRO_SOCIO
+    medico = (
+        await db.execute(select(ListadoMedico).where(ListadoMedico.ID == medico_id))
+    ).scalar_one_or_none()
+    if not medico:
+        raise HTTPException(status_code=404, detail="Médico no encontrado")
+
+    nro_socio = getattr(medico, "NRO_SOCIO", None)
+    if not nro_socio:
+        raise HTTPException(status_code=400, detail="Médico sin NRO_SOCIO")
+
+    # 1) Validar OS activa
     nro_col = _os_number_col()
-    # validamos que la obra social exista y esté activa (MARCA='S')
-    os_row = (await db.execute(
-        select(ObrasSociales).where(and_(nro_col == nro_os, ObrasSociales.MARCA == "S"))
-    )).scalar_one_or_none()
+    os_row = (
+        await db.execute(
+            select(ObrasSociales).where(
+                and_(nro_col == nro_os, ObrasSociales.MARCA == "S")
+            )
+        )
+    ).scalar_one_or_none()
     if not os_row:
         raise HTTPException(status_code=404, detail="Obra social no encontrada o inactiva")
 
-    # buscamos vínculo existente
+    # 2) Buscar si ya existe el vínculo para este NRO_SOCIO
     padron_os_attr = _padron_number_attr()
-    existing = (await db.execute(
-        select(MedicoObraSocial).where(
-            and_(MedicoObraSocial.NRO_SOCIO == nro_socio, padron_os_attr == nro_os)
+    existing = (
+        await db.execute(
+            select(MedicoObraSocial).where(
+                and_(MedicoObraSocial.NRO_SOCIO == nro_socio, padron_os_attr == nro_os)
+            )
         )
-    )).scalar_one_or_none()
+    ).scalar_one_or_none()
 
     defaults = await _listado_defaults(db, nro_socio)
 
     if existing:
+        # idempotente: si viene body, actualizar
         if body:
             for k, v in body.model_dump(exclude_unset=True).items():
                 if hasattr(existing, k) and v is not None:
                     setattr(existing, k, v)
-        # completa campos vacíos desde listado
+        # completar vacíos desde defaults
         for k, v in defaults.items():
             if getattr(existing, k, None) in (None, "", 0):
                 setattr(existing, k, v)
+
         await db.commit()
         await db.refresh(existing)
+        response.status_code = status.HTTP_200_OK
         return existing
 
+    # 3) Crear
     nuevo = MedicoObraSocial(
         NRO_SOCIO=nro_socio,
         **defaults,
-        **{"NRO_OBRASOCIAL": nro_os},
+        **({"NRO_OBRASOCIAL": nro_os}),  # ajustá si tu columna difiere
+        **(body.model_dump(exclude_unset=True) if body else {}),
     )
     db.add(nuevo)
     await db.commit()
     await db.refresh(nuevo)
+    response.status_code = status.HTTP_201_CREATED
     return nuevo
 
-# 4) DELETE por checkbox: elimina el vínculo usando el NRO_OBRASOCIAL
-@router.delete("/{nro_socio}/obras-sociales/{nro_os}", status_code=status.HTTP_204_NO_CONTENT)
+
+@router.delete("/{medico_id}/obras-sociales/{nro_os}", status_code=status.HTTP_200_OK)
 async def delete_padron_checkbox(
-    nro_socio: int = Path(..., ge=1),
+    medico_id: int = Path(..., ge=1),
     nro_os: int = Path(..., ge=1),
     db: AsyncSession = Depends(get_async_db),
 ):
+    # Resolver medico por ID -> NRO_SOCIO
+    medico = (
+        await db.execute(select(ListadoMedico).where(ListadoMedico.ID == medico_id))
+    ).scalar_one_or_none()
+    if not medico:
+        return {"deleted": 0}
+
+    nro_socio = getattr(medico, "NRO_SOCIO", None)
+    if not nro_socio:
+        return {"deleted": 0}
+
     padron_os_attr = _padron_number_attr()
-    row = (await db.execute(
-        select(MedicoObraSocial).where(
-            and_(MedicoObraSocial.NRO_SOCIO == nro_socio, padron_os_attr == nro_os)
+    row = (
+        await db.execute(
+            select(MedicoObraSocial).where(
+                and_(MedicoObraSocial.NRO_SOCIO == nro_socio, padron_os_attr == nro_os)
+            )
         )
-    )).scalar_one_or_none()
+    ).scalar_one_or_none()
+
     if not row:
-        return
+        return {"deleted": 0}
+
     await db.delete(row)
     await db.commit()
+    return {"deleted": 1}
+
+
+@router.get("/obras-sociales/{nro_os}/medicos", response_model=PageMedicoOS)
+async def list_medicos_por_obra_social(
+    nro_os: int = Path(..., ge=1),
+    search: str | None = Query(None, description="Filtra por NOMBRE contiene o NRO_SOCIO exacto"),
+    page: int = Query(1, ge=1),
+    size: int = Query(50, ge=1, le=200),
+    db: AsyncSession = Depends(get_async_db),
+):
+    padron_os_attr = _padron_number_attr()  # lo que ya tenías
+
+    filters = [padron_os_attr == nro_os]
+    if search:
+        s = search.strip()
+        if s.isdigit():
+            filters.append(MedicoObraSocial.NRO_SOCIO == int(s))
+        else:
+            # ILIKE si tuvieras PG; en MySQL con collation ya suele ser case-insensitive
+            filters.append(MedicoObraSocial.NOMBRE.like(f"%{s}%"))
+
+    # Alias/Modelo maestro con el ID real del médico
+    LM = aliased(ListadoMedico)
+
+    base = (
+        select(
+            LM.ID.label("ID"),
+            MedicoObraSocial.NRO_SOCIO.label("NRO_SOCIO"),
+            MedicoObraSocial.NOMBRE.label("NOMBRE"),
+            MedicoObraSocial.MATRICULA_PROV.label("MATRICULA_PROV"),
+            MedicoObraSocial.MATRICULA_NAC.label("MATRICULA_NAC"),
+            MedicoObraSocial.CATEGORIA.label("CATEGORIA"),
+            MedicoObraSocial.ESPECIALIDAD.label("ESPECIALIDAD"),
+            MedicoObraSocial.TELEFONO_CONSULTA.label("TELEFONO_CONSULTA"),
+            MedicoObraSocial.MARCA.label("MARCA"),
+        )
+        .join(LM, LM.NRO_SOCIO == MedicoObraSocial.NRO_SOCIO)
+        .where(and_(*filters))
+    )
+
+    # total
+    total = (
+        await db.execute(select(func.count()).select_from(base.subquery()))
+    ).scalar_one()
+
+    # page
+    offset = (page - 1) * size
+    result = await db.execute(
+        base.order_by(MedicoObraSocial.NOMBRE.asc())
+            .offset(offset)
+            .limit(size)
+    )
+
+    # 👇 filas como dict por label (evita desfasajes de índice)
+    rows = result.mappings().all()
+
+    # (opcional) pequeñas coerciones/strips seguros
+    items = []
+    for r in rows:
+        items.append({
+            "ID": int(r["ID"]),
+            "NRO_SOCIO": int(r["NRO_SOCIO"]),
+            "NOMBRE": (r["NOMBRE"] or "").strip(),
+            "MATRICULA_PROV": r["MATRICULA_PROV"],
+            "MATRICULA_NAC": r["MATRICULA_NAC"],
+            "CATEGORIA": r["CATEGORIA"],
+            "ESPECIALIDAD": r["ESPECIALIDAD"],
+            "TELEFONO_CONSULTA": r["TELEFONO_CONSULTA"],
+            "MARCA": r["MARCA"],
+        })
+
+    return {"items": items, "total": total, "page": page, "size": size}

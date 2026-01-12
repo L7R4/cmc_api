@@ -40,6 +40,7 @@ api_router.include_router(periodos_router,    prefix="/periodos", tags=["Periodo
 api_router.include_router(rbac_router,    prefix="/admin/rbac", tags=["Rbac"])
 api_router.include_router(solicitudes_router,    prefix="/solicitudes", tags=["Solicitudes"])
 api_router.include_router(noticias_router, prefix="/noticias",tags=["Noticias"])
+api_router.include_router(padrones_router, prefix="/padrones", tags=["Padrones"])
 
 api_router.include_router(publicidades_medico_router, prefix="/publicidad-medicos", tags=["publicidad-medicos"])
 

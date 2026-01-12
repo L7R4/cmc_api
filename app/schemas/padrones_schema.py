@@ -31,3 +31,23 @@ class PadronUpdate(BaseModel):
     MATRICULA_NAC: Optional[int] = None
     NOMBRE: Optional[str] = None
     MARCA: Optional[str] = None
+
+
+class MedicoOSItemOut(BaseModel):
+    ID: int
+    NRO_SOCIO: int
+    NOMBRE: str | None = None
+    MATRICULA_PROV: int | None = None
+    MATRICULA_NAC: int | None = None
+    CATEGORIA: str | None = None
+    ESPECIALIDAD: str | None = None
+    TELEFONO_CONSULTA: str | None = None
+    MARCA: str | None = None
+    model_config = {"from_attributes": True}
+
+
+class PageMedicoOS(BaseModel):
+    items: list[MedicoOSItemOut]
+    total: int = Field(ge=0)
+    page: int = Field(ge=1)
+    size: int = Field(ge=1, le=200)

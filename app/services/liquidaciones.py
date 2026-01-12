@@ -323,3 +323,5 @@ async def recomputar_total_deduccion_resumen(db: AsyncSession, resumen_id: int) 
     )
     res.total_deduccion = Decimal(qsum.scalar_one() or 0).quantize(Decimal("0.01"))
     await db.flush()
+
+

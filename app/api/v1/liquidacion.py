@@ -80,14 +80,22 @@ async def obtener_resumen(resumen_id: int, db: AsyncSession = Depends(get_db)):
 
 @router.post("/resumen", response_model=LiquidacionResumenRead, status_code=201)
 async def crear_resumen(payload: LiquidacionResumenCreate, db: AsyncSession = Depends(get_db)):
-    # Evitar duplicados (además de recomendar un UniqueConstraint en el modelo)
     exists = await db.execute(
         select(LiquidacionResumen.id)
         .where(LiquidacionResumen.anio == payload.anio, LiquidacionResumen.mes == payload.mes)
         .limit(1)
     )
-    if exists.scalars().first():
-        raise HTTPException(status_code=409, detail=f"Ya existe un resumen para {payload.anio}-{payload.mes:02d}")
+    existing_id = exists.scalars().first()
+    if existing_id:
+        # 📌 devolvemos metadata útil
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "reason": "exists",
+                "resumen_id": existing_id,
+                "message": f"Ya existe un resumen para {payload.anio}-{payload.mes:02d}",
+            },
+        )
 
     obj = LiquidacionResumen(
         mes=payload.mes,

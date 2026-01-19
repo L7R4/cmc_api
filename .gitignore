@@ -2,3 +2,4 @@
 .env
 *.sql
 .env.prod
+uploads

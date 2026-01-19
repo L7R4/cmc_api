@@ -15,6 +15,7 @@ from app.api.v1.solicitudes import router as solicitudes_router
 from app.api.v1.noticias import router as noticias_router
 from app.api.v1.publicidad_medicos import router as publicidades_medico_router
 from app.api.v1.padrones import router as padrones_router
+from app.api.v1.valores_boletin import router as valores_boletin_router
 
 from app.api.v1.rbac import router as rbac_router
 
@@ -41,6 +42,8 @@ api_router.include_router(rbac_router,    prefix="/admin/rbac", tags=["Rbac"])
 api_router.include_router(solicitudes_router,    prefix="/solicitudes", tags=["Solicitudes"])
 api_router.include_router(noticias_router, prefix="/noticias",tags=["Noticias"])
 api_router.include_router(padrones_router, prefix="/padrones", tags=["Padrones"])
+api_router.include_router(valores_boletin_router, prefix="/valores", tags=["ValoresBoletin"])
+
 
 api_router.include_router(publicidades_medico_router, prefix="/publicidad-medicos", tags=["publicidad-medicos"])
 

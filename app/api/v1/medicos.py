@@ -22,7 +22,7 @@ from sqlalchemy import case, delete, desc, func, literal, select, or_, cast, Str
 from app.core.passwords import hash_password
 from app.db.database import get_db
 from app.db.models import (
-    DeduccionColegio, Descuentos, DetalleLiquidacion, Documento, Especialidad, Liquidacion, ListadoMedico,
+    Deduccion, Descuentos, DetalleLiquidacion, Documento, Especialidad, Liquidacion, ListadoMedico,
     DeduccionSaldo, DeduccionAplicacion, LiquidacionResumen, SolicitudRegistro
 )
 from app.schemas.deduccion_schema import CrearDeudaOut, NuevaDeudaIn
@@ -1468,7 +1468,7 @@ async def listar_conceptos_medico(
     # 4) Aplicaciones: por todos los ids del grupo, agregadas por nro
     apps_by_nro: DefaultDict[int, List[ConceptoAplicacionOut]] = defaultdict(list)
     if all_desc_ids:
-        DC, LR = DeduccionColegio, LiquidacionResumen
+        DC, LR = Deduccion, LiquidacionResumen
         apps = (await db.execute(
             select(
                 DC.descuento_id, DC.resumen_id, LR.anio, LR.mes,

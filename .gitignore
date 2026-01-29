@@ -1,5 +1,26 @@
 /venv
+/.venv
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Env files / secrets
 .env
+.env.*
+!.env.example
+
+# DB dumps
 *.sql
-.env.prod
+
+# Uploads / media
+uploads/*
 uploads
+
+# IDE
+.idea/
+.vscode/
+.DS_Store

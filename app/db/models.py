@@ -861,21 +861,12 @@ class ValoresObrasocial(Base):
     GALENO_CIRUGIA_INFANTIL: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
 
 
-
-
 class LiquidacionResumen(AuditMixin,Base):
     __tablename__ = "liquidacion_resumen"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    mes: Mapped[int] = mapped_column(Integer)                 # 1..12
-    anio: Mapped[int] = mapped_column(Integer)                # 1900..3000
-    # nros_liquidacion: Mapped[Optional[str]] = mapped_column(Text)  # CSV o JSON de números/facturas
-    total_bruto: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default=0)
-    total_debitos: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default=0)
-    total_deduccion: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default=0)
-    # estado: Mapped[Literal["a","c","e"]] = mapped_column(Enum("a","c","e", name="liqres_estado"), default="a")
-    # cierre_timestamp: Mapped[Optional[str]] = mapped_column(String(25))  # o DateTime si preferís
-
+    mes: Mapped[int] = mapped_column(Integer)        
+    anio: Mapped[int] = mapped_column(Integer)
     liquidaciones: Mapped[list["Liquidacion"]] = relationship(
         back_populates="resumen",
         cascade="all, delete-orphan",    # borra hijas al borrar del collection
@@ -899,29 +890,28 @@ class Liquidacion(AuditMixin,Base):
     mes_periodo: Mapped[int] = mapped_column(Integer)
     anio_periodo: Mapped[int] = mapped_column(Integer)
 
-    # NUEVO: versión de reliquidación (0 = primera)
-    version: Mapped[int] = mapped_column(Integer, default=0)
-    
-    # NUEVO: estado A/C + timestamp opcional
+
     estado: Mapped[Literal["A","C"]] = mapped_column(
         Enum("A","C", name="liq_estado"), default="A", server_default="A", index=True
     )
+
     cierre_timestamp: Mapped[Optional[str]] = mapped_column(String(25), nullable=True)
 
     
-    nro_liquidacion: Mapped[Optional[str]] = mapped_column(String(30))
-
+    nro_factura: Mapped[Optional[str]] = mapped_column(String(30))
+    refacturado_from : Mapped[Optional[int]] = mapped_column(ForeignKey("liquidacion.id"), nullable=True, index=True)
+    
     total_bruto: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default=0)
     total_debitos: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default=0)
     total_neto: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default=0)
-
+    
     resumen: Mapped[Optional["LiquidacionResumen"]] = relationship(back_populates="liquidaciones")
     detalles: Mapped[list["DetalleLiquidacion"]] = relationship(back_populates="liquidacion", cascade="all, delete-orphan")
     
     __table_args__ = (
-        UniqueConstraint("resumen_id", "obra_social_id", "mes_periodo", "anio_periodo","version", name="uq_liq_res_os_per_v2"),
+        UniqueConstraint("resumen_id", "obra_social_id", "mes_periodo", "anio_periodo", name="uq_liq_res_os_per_v2"),
         Index("idx_liq_res_os_per", "resumen_id", "obra_social_id", "mes_periodo", "anio_periodo"),
-        Index("idx_liq_os_per_version", "obra_social_id", "anio_periodo", "mes_periodo", "version"),
+        Index("idx_liq_os_per_version", "obra_social_id", "anio_periodo", "mes_periodo"),
     )
 
 
@@ -998,29 +988,28 @@ class SocioDescuento(AuditMixin,Base):
         Index("idx_med_desc", "medico_id", "descuento_id"),
     )
 
-class DeduccionColegio(AuditMixin,Base):
-    __tablename__ = "deducciones_colegio"
+class Deduccion(AuditMixin, Base):
+    __tablename__ = "deducciones"
+
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
 
-    medico_id: Mapped[int] = mapped_column(ForeignKey("listado_medico.ID"), index=True, nullable=False)
-    resumen_id: Mapped[int] = mapped_column(ForeignKey("liquidacion_resumen.id", ondelete="CASCADE"), index=True, nullable=False)
+    medico_id: Mapped[int] = mapped_column(ForeignKey("listado_medico.ID"), nullable=False, index=True)
+    anio: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    mes: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
 
-    # uno u otro:
-    descuento_id: Mapped[Optional[int]] = mapped_column(ForeignKey("descuentos.id"), nullable=True, index=True)
-    especialidad_id: Mapped[Optional[int]] = mapped_column(ForeignKey("especialidad.ID"), nullable=True, index=True)
+    descuento_id: Mapped[int | None] = mapped_column(ForeignKey("descuentos.id"), nullable=True, index=True)
 
-    # snapshot de lo aplicado
-    monto_aplicado: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default=Decimal("0.00"))
-    porcentaje_aplicado: Mapped[Decimal] = mapped_column(DECIMAL(10,2), default=Decimal("0.00"))
+    calculado_total: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), nullable=False, default=Decimal("0.00"), server_default="0.00")
+    porcentaje_aplicado: Mapped[Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, default=Decimal("0.00"), server_default="0.00")
+    monto_aplicado: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), nullable=False, default=Decimal("0.00"), server_default="0.00")
 
-    # Cargo calculado ese mes (monto + %*base_mes_del_medico)
-    calculado_total: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default=Decimal("0.00"))
+    # tinyint(1) en MySQL -> Boolean en SQLAlchemy suele mapear bien
+    pagado: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
 
-    # Uniques por tipo (MySQL permite múltiples NULL; por eso 2 uniques separados)
     __table_args__ = (
-        UniqueConstraint("medico_id", "resumen_id", "descuento_id", name="uq_med_res_desc"),
-        UniqueConstraint("medico_id", "resumen_id", "especialidad_id", name="uq_med_res_esp2"),
-        Index("idx_med_res", "medico_id", "resumen_id"),
+        UniqueConstraint("medico_id", "anio", "mes", "descuento_id", name="uq_ded_med_per_desc"),
+        UniqueConstraint("medico_id", "descuento_id", "anio", "mes", name="uq_deducc_med_desc_period"),
+        Index("idx_ded_med_per", "medico_id", "anio", "mes"),
     )
 
 
@@ -1038,22 +1027,26 @@ class DeduccionSaldo(AuditMixin,Base):
         UniqueConstraint("medico_id", "concepto_tipo", "concepto_id", name="uq_saldo_med_concepto"),
     )
 
-
-class DeduccionAplicacion(AuditMixin,Base):
+class DeduccionAplicacion(AuditMixin, Base):
     __tablename__ = "deduccion_aplicacion"
+
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
 
-    resumen_id: Mapped[int] = mapped_column(ForeignKey("liquidacion_resumen.id", ondelete="CASCADE"), index=True, nullable=False)
-    medico_id: Mapped[int] = mapped_column(ForeignKey("listado_medico.ID"), index=True, nullable=False)
+    anio: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    mes: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
 
-    concepto_tipo: Mapped[Literal["desc","esp"]] = mapped_column(Enum("desc","esp", name="ded_apl_tipo"), index=True)
-    concepto_id: Mapped[int] = mapped_column(Integer, index=True)
+    medico_id: Mapped[int] = mapped_column(ForeignKey("listado_medico.ID"), nullable=False, index=True)
 
-    aplicado: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default=Decimal("0.00"))
+    descuento_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+
+    aplicado: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), nullable=False, default=Decimal("0.00"), server_default="0.00")
 
     __table_args__ = (
-        UniqueConstraint("resumen_id", "medico_id", "concepto_tipo", "concepto_id", name="uq_apl_res_med_concepto"),
+        UniqueConstraint("anio", "mes", "medico_id", "descuento_id", name="uq_dedapli_med_desc_period"),
+        Index("idx_apl_per_med", "anio", "mes", "medico_id"),
     )
+
+
 
 class Role(Base):
     __tablename__ = "roles"

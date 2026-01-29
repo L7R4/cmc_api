@@ -8,7 +8,7 @@ from sqlalchemy.dialects.mysql import insert as mysql_insert
 
 from app.db.models import (
     LiquidacionResumen,
-    DeduccionColegio,      # snapshot del mes (resumen_id, medico_id, descuento_id, monto, porcentaje)
+    Deduccion,      # snapshot del mes (resumen_id, medico_id, descuento_id, monto, porcentaje)
     DeduccionSaldo,        # saldo acumulado por (concepto_tipo='desc', concepto_id, medico_id, saldo)
     SocioDescuento,        # NUEVO: (medico_id, descuento_id, fecha_alta, fecha_baja)
     Descuentos,             # NUEVO: (id, nombre, nro_colegio, precio, porcentaje, ...)

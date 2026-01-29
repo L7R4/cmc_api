@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import re
 
 from app.db.models import (
-    Liquidacion, LiquidacionResumen, DetalleLiquidacion, Debito_Credito, GuardarAtencion
+    Liquidacion, DetalleLiquidacion, Debito_Credito, GuardarAtencion
 )
 
 def period_str(anio: int, mes: int) -> str:
@@ -70,121 +70,120 @@ def desdoblar_en_actores(row: Dict[str, Any]) -> List[Dict[str, Any]]:
     return piezas
 
 # -------- 2) Calcular versión y formatear nro_liquidacion --------
-async def calcular_version_y_formatear_nro(
-    db: AsyncSession, obra_social_id: int, anio: int, mes: int, nro_base: str
-) -> Tuple[int, str]:
-    q = await db.execute(
-        select(func.count(Liquidacion.id)).where(
-            Liquidacion.obra_social_id == obra_social_id,
-            Liquidacion.anio_periodo == anio,
-            Liquidacion.mes_periodo == mes,
-        )
-    )
-    version = int(q.scalar_one() or 0)
-    nro_fmt = f"{version:03d}-{(nro_base or '').strip()}"
-    return version, nro_fmt
+# async def calcular_version_y_formatear_nro(
+#     db: AsyncSession, obra_social_id: int, anio: int, mes: int, nro_base: str
+# ) -> Tuple[int, str]:
+#     q = await db.execute(
+#         select(func.count(Liquidacion.id)).where(
+#             Liquidacion.obra_social_id == obra_social_id,
+#             Liquidacion.anio_periodo == anio,
+#             Liquidacion.mes_periodo == mes,
+#         )
+#     )
+#     version = int(q.scalar_one() or 0)
+#     nro_fmt = f"{version:03d}-{(nro_base or '').strip()}"
+#     return version, nro_fmt
 
 # -------- 3) Construir detalles y actualizar totales --------
-async def construir_detalles_y_totales(db: AsyncSession, liquidacion_id: int) -> None:
-    liq = (await db.execute(select(Liquidacion).where(Liquidacion.id == liquidacion_id))).scalars().first()
-    if not liq:
-        return
+# async def construir_detalles_y_totales(db: AsyncSession, liquidacion_id: int) -> None:
+#     liq = (await db.execute(select(Liquidacion).where(Liquidacion.id == liquidacion_id))).scalars().first()
+#     if not liq:
+#         return
 
-    anio, mes = int(liq.anio_periodo), int(liq.mes_periodo)
-    os_id = int(liq.obra_social_id)
-    periodo = period_str(anio, mes)
+#     anio, mes, os_id = int(liq.anio_periodo), int(liq.mes_periodo), int(liq.obra_social_id)
+#     periodo = period_str(anio, mes)
 
-    # traer atenciones del periodo
-    rows = (await db.execute(
-        select(
-            GuardarAtencion.ID.label("id_atencion"),
-            GuardarAtencion.NRO_SOCIO.label("medico_id"),
-            GuardarAtencion.NRO_OBRA_SOCIAL.label("obra_social_id"),
-            GuardarAtencion.CODIGO_PRESTACION.label("codigo_prestacion"),
-            GuardarAtencion.FECHA_PRESTACION.label("fecha_prestacion"),
-            GuardarAtencion.VALOR_CIRUJIA.label("valor_cirugia"),
-            GuardarAtencion.VALOR_AYUDANTE.label("valor_ayudante"),
-            GuardarAtencion.VALOR_AYUDANTE_2.label("valor_ayudante_2"),
-            GuardarAtencion.GASTOS.label("gastos"),
-            GuardarAtencion.CANTIDAD.label("cantidad"),
-            GuardarAtencion.CANT_TRATAMIENTO.label("cantidad_tratamiento"),
-            GuardarAtencion.AYUDANTE.label("nro_socio_ayudante"),
-            GuardarAtencion.AYUDANTE_2.label("nro_socio_ayudante_2"),
-        ).where(
-            GuardarAtencion.NRO_OBRA_SOCIAL == os_id,
-            GuardarAtencion.ANIO_PERIODO == anio,
-            GuardarAtencion.MES_PERIODO == mes,
-            GuardarAtencion.EXISTE == "S",
-        )
-    )).mappings().all()
+#     # traer atenciones del periodo
+#     rows = (await db.execute(
+#         select(
+#             GuardarAtencion.ID.label("id_atencion"),
+#             GuardarAtencion.NRO_SOCIO.label("medico_id"),
+#             GuardarAtencion.NRO_OBRA_SOCIAL.label("obra_social_id"),
+#             GuardarAtencion.CODIGO_PRESTACION.label("codigo_prestacion"),
+#             GuardarAtencion.FECHA_PRESTACION.label("fecha_prestacion"),
+#             GuardarAtencion.VALOR_CIRUJIA.label("valor_cirugia"),
+#             GuardarAtencion.VALOR_AYUDANTE.label("valor_ayudante"),
+#             GuardarAtencion.VALOR_AYUDANTE_2.label("valor_ayudante_2"),
+#             GuardarAtencion.GASTOS.label("gastos"),
+#             GuardarAtencion.CANTIDAD.label("cantidad"),
+#             GuardarAtencion.CANT_TRATAMIENTO.label("cantidad_tratamiento"),
+#             GuardarAtencion.AYUDANTE.label("nro_socio_ayudante"),
+#             GuardarAtencion.AYUDANTE_2.label("nro_socio_ayudante_2"),
+#         ).where(
+#             GuardarAtencion.NRO_OBRA_SOCIAL == os_id,
+#             GuardarAtencion.ANIO_PERIODO == anio,
+#             GuardarAtencion.MES_PERIODO == mes,
+#             GuardarAtencion.EXISTE == "S",
+#         )
+#     )).mappings().all()
 
-    # mapa para buscar el último detalle anterior por prestacion_id
-    prev_detalle_by_prest: Dict[str, int] = {}
+#     # mapa para buscar el último detalle anterior por prestacion_id
+#     prev_detalle_by_prest: Dict[str, int] = {}
 
-    if liq.version > 0:
-        # buscar el último detalle anterior (máxima version < liq.version) para mismas prestaciones
-        # primero obtengo ids de liquidaciones previas para el mismo OS+periodo
-        prev_liq_ids = (await db.execute(
-            select(Liquidacion.id).where(
-                Liquidacion.obra_social_id == os_id,
-                Liquidacion.anio_periodo == anio,
-                Liquidacion.mes_periodo == mes,
-                Liquidacion.version < liq.version
-            )
-        )).scalars().all()
+#     if liq.version > 0:
+#         # buscar el último detalle anterior (máxima version < liq.version) para mismas prestaciones
+#         # primero obtengo ids de liquidaciones previas para el mismo OS+periodo
+#         prev_liq_ids = (await db.execute(
+#             select(Liquidacion.id).where(
+#                 Liquidacion.obra_social_id == os_id,
+#                 Liquidacion.anio_periodo == anio,
+#                 Liquidacion.mes_periodo == mes,
+#                 Liquidacion.version < liq.version
+#             )
+#         )).scalars().all()
 
-        if prev_liq_ids:
-            prev_detalles = (await db.execute(
-                select(DetalleLiquidacion.prestacion_id, func.max(DetalleLiquidacion.id))
-                .where(DetalleLiquidacion.liquidacion_id.in_(prev_liq_ids))
-                .group_by(DetalleLiquidacion.prestacion_id)
-            )).all()
-            prev_detalle_by_prest = {str(p): int(did) for (p, did) in prev_detalles}
+#         if prev_liq_ids:
+#             prev_detalles = (await db.execute(
+#                 select(DetalleLiquidacion.prestacion_id, func.max(DetalleLiquidacion.id))
+#                 .where(DetalleLiquidacion.liquidacion_id.in_(prev_liq_ids))
+#                 .group_by(DetalleLiquidacion.prestacion_id)
+#             )).all()
+#             prev_detalle_by_prest = {str(p): int(did) for (p, did) in prev_detalles}
 
-    total_bruto = Decimal("0")
+#     total_bruto = Decimal("0")
 
-    for r in rows:
-        piezas = desdoblar_en_actores(dict(r))
-        for p in piezas:
-            prev_id = prev_detalle_by_prest.get(p["prestacion_id"])
-            det = DetalleLiquidacion(
-                liquidacion_id=liq.id,
-                medico_id=p["medico_id"],
-                obra_social_id=os_id,
-                prestacion_id=p["prestacion_id"],
-                prev_detalle_id=prev_id,
-                importe=p["importe"],
-            )
-            db.add(det)
-            total_bruto += p["importe"]
+#     for r in rows:
+#         piezas = desdoblar_en_actores(dict(r))
+#         for p in piezas:
+#             prev_id = prev_detalle_by_prest.get(p["prestacion_id"])
+#             det = DetalleLiquidacion(
+#                 liquidacion_id=liq.id,
+#                 medico_id=p["medico_id"],
+#                 obra_social_id=os_id,
+#                 prestacion_id=p["prestacion_id"],
+#                 prev_detalle_id=prev_id,
+#                 importe=p["importe"],
+#             )
+#             db.add(det)
+#             total_bruto += p["importe"]
 
-    await db.flush()
+#     await db.flush()
 
-    # Débitos/Créditos del periodo actual para las atenciones incluidas
-    atencion_ids = [str(r["id_atencion"]) for r in rows]
-    sum_debitos = Decimal("0")
-    sum_creditos = Decimal("0")
-    if atencion_ids:
-        dc = (await db.execute(
-            select(Debito_Credito.tipo, func.sum(Debito_Credito.monto))
-            .where(
-                Debito_Credito.obra_social_id == os_id,
-                Debito_Credito.periodo == periodo,
-                Debito_Credito.id_atencion.in_(atencion_ids),
-            )
-            .group_by(Debito_Credito.tipo)
-        )).all()
-        for tipo, total in dc:
-            if tipo == "d":
-                sum_debitos += to_dec(total)
-            else:
-                sum_creditos += to_dec(total)
+#     # Débitos/Créditos del periodo actual para las atenciones incluidas
+#     atencion_ids = [str(r["id_atencion"]) for r in rows]
+#     sum_debitos = Decimal("0")
+#     sum_creditos = Decimal("0")
+#     if atencion_ids:
+#         dc = (await db.execute(
+#             select(Debito_Credito.tipo, func.sum(Debito_Credito.monto))
+#             .where(
+#                 Debito_Credito.obra_social_id == os_id,
+#                 Debito_Credito.periodo == periodo,
+#                 Debito_Credito.id_atencion.in_(atencion_ids),
+#             )
+#             .group_by(Debito_Credito.tipo)
+#         )).all()
+#         for tipo, total in dc:
+#             if tipo == "d":
+#                 sum_debitos += to_dec(total)
+#             else:
+#                 sum_creditos += to_dec(total)
 
-    liq.total_bruto = total_bruto
-    liq.total_debitos = sum_debitos   # (separado de créditos)
-    liq.total_neto = total_bruto - sum_debitos + sum_creditos
+#     liq.total_bruto = total_bruto
+#     liq.total_debitos = sum_debitos   # (separado de créditos)
+#     liq.total_neto = total_bruto - sum_debitos + sum_creditos
 
-    await db.commit()
+#     await db.commit()
 
 # -------- 4) Vista de filas para InsuranceDetail --------
 async def vista_detalles_liquidacion(

@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.database import get_db
 from app.db.models import (
-    Debito_Credito, LiquidacionResumen, Descuentos, DeduccionColegio,
+    Debito_Credito, LiquidacionResumen, Descuentos, Deduccion,
     DeduccionSaldo, DeduccionAplicacion,
     DetalleLiquidacion, Liquidacion,SocioDescuento
 )
@@ -23,6 +23,7 @@ class OverrideValores(BaseModel):
     monto: Optional[Decimal] = None
     porcentaje: Optional[Decimal] = None
 
+# region Helpers
 def _tipo_id_for_desc(desc_id: int) -> tuple[str,int]:
     return ("desc", int(desc_id))
 
@@ -73,6 +74,44 @@ def _calc_monto(p_base: Decimal, precio: Decimal | None, porcentaje: Decimal | N
         return (precio.quantize(TWOPLACES, rounding=ROUND_HALF_UP), None)
     return (Decimal(0), None)
 
+async def _disponible_por_medico_en_resumen(db: AsyncSession, resumen_id: int) -> dict[int, Decimal]:
+    # bruto por médico
+    bruto = await db.execute(
+        select(DetalleLiquidacion.medico_id, func.coalesce(func.sum(DetalleLiquidacion.importe), 0))
+        .join(Liquidacion, Liquidacion.id == DetalleLiquidacion.liquidacion_id)
+        .where(Liquidacion.resumen_id == resumen_id)
+        .group_by(DetalleLiquidacion.medico_id)
+    )
+    bruto_map = {int(m): Decimal(v or 0) for m, v in bruto}
+
+    # débitos y créditos por médico (por DC ligados a sus detalles del resumen)
+    qdc = await db.execute(
+        select(
+            DetalleLiquidacion.medico_id,
+            func.coalesce(func.sum(case((Debito_Credito.tipo=="d", Debito_Credito.monto), else_=0)), 0),
+            func.coalesce(func.sum(case((Debito_Credito.tipo=="c", Debito_Credito.monto), else_=0)), 0),
+        )
+        .select_from(DetalleLiquidacion)
+        .join(Liquidacion, Liquidacion.id == DetalleLiquidacion.liquidacion_id)
+        .join(Debito_Credito, DetalleLiquidacion.debito_credito_id == Debito_Credito.id, isouter=True)
+        .where(Liquidacion.resumen_id == resumen_id)
+        .group_by(DetalleLiquidacion.medico_id)
+    )
+    deb_map, cred_map = {}, {}
+    for med, deb, cred in qdc:
+        deb_map[int(med)] = Decimal(deb or 0)
+        cred_map[int(med)] = Decimal(cred or 0)
+
+    # disponible = bruto - déb + créd
+    out: dict[int, Decimal] = {}
+    keys = set(bruto_map) | set(deb_map) | set(cred_map)
+    for k in keys:
+        out[k] = (bruto_map.get(k, Decimal("0")) - deb_map.get(k, Decimal("0")) + cred_map.get(k, Decimal("0")))
+    return out
+
+# endregion
+
+
 @router.post("/{resumen_id}/colegio/bulk_generar_descuento/{desc_id}")
 async def bulk_generar_descuento(resumen_id: int, desc_id: int, db: AsyncSession = Depends(get_db)):
     # 1) Traer descuento y médicos asociados
@@ -88,7 +127,7 @@ async def bulk_generar_descuento(resumen_id: int, desc_id: int, db: AsyncSession
     # 2) Base bruto por médico en el período
     base_por_med = await _base_bruto_por_medico_en_resumen(db, resumen_id)
 
-    # 3) Preparar snapshots del mes (DeduccionColegio) y acumulación (DeduccionSaldo)
+    # 3) Preparar snapshots del mes (Deduccion) y acumulación (DeduccionSaldo)
     to_snapshot = []
     to_saldo = []
 
@@ -131,7 +170,7 @@ async def bulk_generar_descuento(resumen_id: int, desc_id: int, db: AsyncSession
         return {"generados": 0, "actualizados": 0, "cargado_total": 0}
 
     # 4) UPSERT snapshot del mes
-    snap_tbl = DeduccionColegio.__table__
+    snap_tbl = Deduccion.__table__
     stmt_snap = mysql_insert(snap_tbl).values(to_snapshot)
     up_snap = stmt_snap.on_duplicate_key_update(
         # si ya existe (resumen_id, medico_id, descuento_id),
@@ -157,40 +196,6 @@ async def bulk_generar_descuento(resumen_id: int, desc_id: int, db: AsyncSession
         "cargado_total": float(total_cargado.quantize(TWOPLACES)),
     }
 
-async def _disponible_por_medico_en_resumen(db: AsyncSession, resumen_id: int) -> dict[int, Decimal]:
-    # bruto por médico
-    bruto = await db.execute(
-        select(DetalleLiquidacion.medico_id, func.coalesce(func.sum(DetalleLiquidacion.importe), 0))
-        .join(Liquidacion, Liquidacion.id == DetalleLiquidacion.liquidacion_id)
-        .where(Liquidacion.resumen_id == resumen_id)
-        .group_by(DetalleLiquidacion.medico_id)
-    )
-    bruto_map = {int(m): Decimal(v or 0) for m, v in bruto}
-
-    # débitos y créditos por médico (por DC ligados a sus detalles del resumen)
-    qdc = await db.execute(
-        select(
-            DetalleLiquidacion.medico_id,
-            func.coalesce(func.sum(case((Debito_Credito.tipo=="d", Debito_Credito.monto), else_=0)), 0),
-            func.coalesce(func.sum(case((Debito_Credito.tipo=="c", Debito_Credito.monto), else_=0)), 0),
-        )
-        .select_from(DetalleLiquidacion)
-        .join(Liquidacion, Liquidacion.id == DetalleLiquidacion.liquidacion_id)
-        .join(Debito_Credito, DetalleLiquidacion.debito_credito_id == Debito_Credito.id, isouter=True)
-        .where(Liquidacion.resumen_id == resumen_id)
-        .group_by(DetalleLiquidacion.medico_id)
-    )
-    deb_map, cred_map = {}, {}
-    for med, deb, cred in qdc:
-        deb_map[int(med)] = Decimal(deb or 0)
-        cred_map[int(med)] = Decimal(cred or 0)
-
-    # disponible = bruto - déb + créd
-    out: dict[int, Decimal] = {}
-    keys = set(bruto_map) | set(deb_map) | set(cred_map)
-    for k in keys:
-        out[k] = (bruto_map.get(k, Decimal("0")) - deb_map.get(k, Decimal("0")) + cred_map.get(k, Decimal("0")))
-    return out
 
 @router.post("/{resumen_id}/colegio/aplicar", status_code=status.HTTP_200_OK)
 async def aplicar_deducciones_resumen(
@@ -218,11 +223,11 @@ async def aplicar_deducciones_resumen(
 
         if solo_generado_mes:
             base = base.join(
-                DeduccionColegio,
+                Deduccion,
                 and_(
-                    DeduccionColegio.medico_id == DeduccionSaldo.medico_id,
-                    DeduccionColegio.resumen_id == resumen_id,
-                    DeduccionColegio.descuento_id == DeduccionSaldo.concepto_id,
+                    Deduccion.medico_id == DeduccionSaldo.medico_id,
+                    Deduccion.resumen_id == resumen_id,
+                    Deduccion.descuento_id == DeduccionSaldo.concepto_id,
                 )
             )
 
@@ -308,7 +313,7 @@ async def aplicar_deducciones_resumen(
             )
 
         # 3) Reflejar en snapshot del mes cuánto se aplicó (monto_aplicado += tomado)
-        snap_tbl = DeduccionColegio.__table__
+        snap_tbl = Deduccion.__table__
         snap_values = [
             {
                 "resumen_id": resumen_id,
@@ -337,3 +342,4 @@ async def aplicar_deducciones_resumen(
         "aplicado_total": float(aplicados_total),
         "nota": "Aplicado respetando el disponible por médico. Remanente queda en saldos."
     }
+

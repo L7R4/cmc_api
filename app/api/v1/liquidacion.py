@@ -1,10 +1,10 @@
 from decimal import Decimal
 
 from fastapi.responses import JSONResponse
-from app.services.liquidaciones import now_string, reabrir_liquidacion_creando_version, reabrir_liquidacion_simple, recomputar_todo_de_liquidacion, recomputar_totales_de_liquidacion, recomputar_totales_de_resumen
+from app.services.liquidaciones import now_string, refacturar_service, recalcular_resumen_liquidacion, recomputar_todo_de_liquidacion, recomputar_totales_de_liquidacion, recomputar_totales_de_resumen
 from app.services.liquidaciones_calc import (
-    calcular_version_y_formatear_nro,
-    construir_detalles_y_totales,
+    # calcular_version_y_formatear_nro,
+    # construir_detalles_y_totales,
     vista_detalles_liquidacion
     )
 
@@ -20,12 +20,10 @@ from sqlalchemy.orm import selectinload
 from app.db.models import Debito_Credito, DetalleLiquidacion, LiquidacionResumen, Liquidacion, GuardarAtencion
 # from app.utils.main import normalizar_periodo
 from app.schemas.liquidaciones_schema import (
-    DetalleLiquidacionRead, DetalleVistaRow, LiquidacionResumenCreate, LiquidacionResumenUpdate, LiquidacionResumenRead, LiquidacionResumenWithItems,
+    DetalleLiquidacionRead, DetalleVistaRow, LiquidacionResumenCreate, LiquidacionResumenRead, LiquidacionResumenWithItems,
     LiquidacionCreate, LiquidacionUpdate, LiquidacionRead, PreviewItem, PreviewResponse, RefacturarPayload,
 )
 import datetime as dt
-
-
 
 router = APIRouter()
 
@@ -35,21 +33,16 @@ class GenerarReq(BaseModel):
         ...,
         description="Mapa de obra social -> lista de periodos 'YYYY-MM'"
     )
-# @router.post("/generar")
-# async def generar(req: GenerarReq, db: AsyncSession = Depends(get_db)) -> Any:
-#     salida = await generar_preview(db, req.obra_sociales_con_periodos)
-#     if salida.get("status") != "ok":
-#         raise HTTPException(400, salida.get("message", "error"))
-#     return salida
 
 
-
+# ================================================ 
+# GET: Lista los periodos que ya tienen liquidación generada
+# ================================================
 @router.get("/resumen", response_model=List[LiquidacionResumenRead])
 async def listar_resumenes(
     db: AsyncSession = Depends(get_db),
     mes: Optional[int] = Query(None, ge=1, le=12),
     anio: Optional[int] = Query(None, ge=1900, le=3000),
-    # estado: Optional[str] = Query(None, pattern="^(a|c|e)$"),
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=500),
 ):
@@ -58,12 +51,79 @@ async def listar_resumenes(
         stmt = stmt.where(LiquidacionResumen.mes == mes)
     if anio is not None:
         stmt = stmt.where(LiquidacionResumen.anio == anio)
-    # if estado is not None:
-    #     stmt = stmt.where(LiquidacionResumen.estado == estado)
     stmt = stmt.offset(skip).limit(limit)
     res = await db.execute(stmt)
-    return res.scalars().all()
+    resumenes = res.scalars().all()
 
+    # Recalcular los totales para cada resumen
+    resultados = []
+    for resumen in resumenes:
+        totales = await recalcular_resumen_liquidacion(db, resumen.id)
+        resumen.total_bruto = totales["total_bruto"]
+        resumen.total_debitos = totales["total_debitos"]
+        resumen.total_deduccion = totales["total_deduccion"]
+        resumen.total_neto = totales["total_neto"]
+        resultados.append(resumen)
+
+    return resultados
+
+
+# ================================================ 
+# POST: Crea un resumen
+# ================================================
+@router.post("/resumen", response_model=LiquidacionResumenRead, status_code=201)
+async def crear_resumen(payload: LiquidacionResumenCreate, db: AsyncSession = Depends(get_db)):
+    exists = await db.execute(
+        select(LiquidacionResumen.id)
+        .where(LiquidacionResumen.anio == payload.anio, LiquidacionResumen.mes == payload.mes)
+        .limit(1)
+    )
+    existing_id = exists.scalars().first()
+    if existing_id:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "reason": "exists",
+                "resumen_id": existing_id,
+                "message": f"Ya existe un resumen para {payload.anio}-{payload.mes:02d}",
+            },
+        )
+    
+    obj = LiquidacionResumen(
+        mes=payload.mes,
+        anio=payload.anio
+    )
+    db.add(obj)
+    await db.commit()
+    await db.refresh(obj)
+    await db.flush()
+
+    totales = await recalcular_resumen_liquidacion(db, obj.id)
+    obj.total_bruto = totales["total_bruto"]
+    obj.total_debitos = totales["total_debitos"]
+    obj.total_deduccion = totales["total_deduccion"]
+    obj.total_neto = totales["total_neto"]
+    return obj
+
+
+# ================================================ 
+# DELETE: Elimina un resumen
+# ================================================
+@router.delete("/resumen/{resumen_id}", status_code=204)
+async def eliminar_resumen(resumen_id: int, db: AsyncSession = Depends(get_db)):
+    res = await db.execute(select(LiquidacionResumen).where(LiquidacionResumen.id == resumen_id))
+    obj = res.scalars().first()
+    if not obj:
+        raise HTTPException(404, "LiquidacionResumen no encontrado")
+    await db.delete(obj)
+    await db.commit()
+    return None
+
+
+
+# ================================================ 
+# GET: Obtiene un resumen por su ID 
+# ================================================
 @router.get("/resumen/{resumen_id}", response_model=LiquidacionResumenWithItems)
 async def obtener_resumen(resumen_id: int, db: AsyncSession = Depends(get_db)):
     stmt = (
@@ -76,215 +136,59 @@ async def obtener_resumen(resumen_id: int, db: AsyncSession = Depends(get_db)):
     obj = res.scalars().first()
     if not obj:
         raise HTTPException(404, "LiquidacionResumen no encontrado")
-    return obj
+    
+    totales = await recalcular_resumen_liquidacion(db, resumen_id)
+    obj.total_bruto = totales["total_bruto"]
+    obj.total_debitos = totales["total_debitos"]
+    obj.total_deduccion = totales["total_deduccion"]
+    obj.total_neto = totales["total_neto"]
 
-@router.post("/resumen", response_model=LiquidacionResumenRead, status_code=201)
-async def crear_resumen(payload: LiquidacionResumenCreate, db: AsyncSession = Depends(get_db)):
-    exists = await db.execute(
-        select(LiquidacionResumen.id)
-        .where(LiquidacionResumen.anio == payload.anio, LiquidacionResumen.mes == payload.mes)
-        .limit(1)
-    )
-    existing_id = exists.scalars().first()
-    if existing_id:
-        # 📌 devolvemos metadata útil
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "reason": "exists",
-                "resumen_id": existing_id,
-                "message": f"Ya existe un resumen para {payload.anio}-{payload.mes:02d}",
-            },
-        )
-
-    obj = LiquidacionResumen(
-        mes=payload.mes,
-        anio=payload.anio,
-        total_bruto=Decimal("0"),
-        total_debitos=Decimal("0"),
-        total_deduccion=Decimal("0"),
-    )
-    db.add(obj)
-    await db.commit()
-    await db.refresh(obj)
     return obj
 
 
-@router.put("/resumen/{resumen_id}", response_model=LiquidacionResumenRead)
-async def editar_resumen(resumen_id: int, payload: LiquidacionResumenUpdate, db: AsyncSession = Depends(get_db)):
-    res = await db.execute(select(LiquidacionResumen).where(LiquidacionResumen.id == resumen_id))
-    obj = res.scalars().first()
-    if not obj:
-        raise HTTPException(404, "LiquidacionResumen no encontrado")
+# ================================================
+# POST: Crea una liquidación por obra social
+# ================================================
+# @router.post("/liquidaciones_por_os/crear", response_model=LiquidacionRead, status_code=201)
+# async def crear_liquidacion(payload: LiquidacionCreate, db: AsyncSession = Depends(get_db)):
+#     exists_res = await db.execute(
+#         select(LiquidacionResumen.id).where(LiquidacionResumen.id == payload.resumen_id).limit(1)
+#     )
+#     if not exists_res.first():
+#         raise HTTPException(400, "resumen_id inválido")
 
-    # actualizar campos permitidos
-    if payload.mes is not None: obj.mes = payload.mes
-    if payload.anio is not None: obj.anio = payload.anio
-    if payload.nros_liquidacion is not None: obj.nros_liquidacion = payload.nros_liquidacion
-    # if payload.estado is not None: obj.estado = payload.estado.value if hasattr(payload.estado, "value") else payload.estado
-    # if payload.cierre_timestamp is not None: obj.cierre_timestamp = payload.cierre_timestamp
+#     # calcular versión y formatear nro_factura
+#     version, nro_fmt = await calcular_version_y_formatear_nro(
+#         db, payload.obra_social_id, payload.anio_periodo, payload.mes_periodo, payload.nro_factura
+#     )
 
-    try:
-        await db.commit()
-    except IntegrityError as e:
-        await db.rollback()
-        raise HTTPException(409, f"Conflicto al actualizar: {e.orig}")  # p.ej. si tenés algún constraint nuevo
-    await db.refresh(obj)
-    return obj
+#     obj = Liquidacion(
+#         resumen_id=payload.resumen_id,
+#         obra_social_id=payload.obra_social_id,
+#         mes_periodo=payload.mes_periodo,
+#         anio_periodo=payload.anio_periodo,
+#         version=version,
+#         nro_factura=nro_fmt,
+#         total_bruto=Decimal("0"),
+#         total_debitos=Decimal("0"),
+#         total_neto=Decimal("0"),
+#     )
+#     db.add(obj)
+#     await db.flush()  # para obtener obj.id
 
-@router.delete("/resumen/{resumen_id}", status_code=204)
-async def eliminar_resumen(resumen_id: int, db: AsyncSession = Depends(get_db)):
-    res = await db.execute(select(LiquidacionResumen).where(LiquidacionResumen.id == resumen_id))
-    obj = res.scalars().first()
-    if not obj:
-        raise HTTPException(404, "LiquidacionResumen no encontrado")
-    await db.delete(obj)  # gracias a ondelete="CASCADE" + cascade ORM borra hijas
-    await db.commit()
-    return None
+#     # construir detalles + actualizar totales
+#     await construir_detalles_y_totales(db, obj.id)
+#     await recomputar_totales_de_liquidacion(db, obj.id)
+#     await recomputar_totales_de_resumen(db,obj.resumen_id)
 
-@router.get("/resumen/{resumen_id}/preview", response_model=PreviewResponse)
-async def preview_liquidaciones(resumen_id: int, db: AsyncSession = Depends(get_db)):
-    # Traemos TODAS las liquidaciones del resumen
-    liqs = (await db.execute(
-        select(Liquidacion).where(Liquidacion.resumen_id == resumen_id)
-    )).scalars().all()
-
-    if not liqs:
-        # Si no hay, devolvemos todo en 0
-        z = Decimal("0")
-        return {
-            "items": [],
-            "totals": {
-                "cerradas_bruto": z, "cerradas_debitos": z, "cerradas_neto": z,
-                "abiertas_bruto": z, "abiertas_debitos": z, "abiertas_neto": z,
-                "resumen_deduccion": z, "total_general": z
-            }
-        }
-
-    items: List[PreviewItem] = []
-    # Podrías mapear nombres de OS aquí si tienes el modelo ObraSocial.
-    # Para mantenerlo genérico, dejamos 'obra_social_nombre=None'
-    for liq in liqs:
-        y = int(liq.anio_periodo)
-        m = int(liq.mes_periodo)
-        periodo = f"{y:04d}-{m:02d}"
-        estado = (liq.estado or "A").upper()
-        bruto = Decimal(str(liq.total_bruto or 0))
-        debitos = Decimal(str(liq.total_debitos or 0))
-        deduccion = Decimal(str(getattr(liq, "total_deduccion", 0) or 0))
-        neto = Decimal(str(liq.total_neto or (bruto - (debitos + deduccion))))
-
-        items.append({
-            "liquidacion_id": liq.id,
-            "obra_social_id": int(liq.obra_social_id),
-            "obra_social_nombre": None,  # <- si tienes el nombre aquí, colócalo
-            "periodo": periodo,
-            "estado": "C" if estado == "C" else "A",
-            "nro_liquidacion": liq.nro_liquidacion,
-            "total_bruto": bruto,
-            "total_debitos": debitos,
-            "total_deduccion": deduccion,
-            "total_neto": neto,
-        })
-
-    from decimal import Decimal
-    z = Decimal("0")
-    c_bruto = sum((it["total_bruto"] for it in items if it["estado"] == "C"), z)
-    c_deb = sum((it["total_debitos"] for it in items if it["estado"] == "C"), z)
-    c_neto = sum((it["total_neto"] for it in items if it["estado"] == "C"), z)
-    a_bruto = sum((it["total_bruto"] for it in items if it["estado"] == "A"), z)
-    a_deb = sum((it["total_debitos"] for it in items if it["estado"] == "A"), z)
-    a_neto = sum((it["total_neto"] for it in items if it["estado"] == "A"), z)
-
-    # Para traer la deducción del resumen, puedes hacer un SELECT del modelo Resumen si la guardas ahí.
-    # Si no, deja 0 y el front mostrará la que ya tiene.
-    resumen_deduccion = z
-    total_general = c_neto + a_neto + resumen_deduccion
-
-    return {
-        "items": items,
-        "totals": {
-            "cerradas_bruto": c_bruto, "cerradas_debitos": c_deb, "cerradas_neto": c_neto,
-            "abiertas_bruto": a_bruto, "abiertas_debitos": a_deb, "abiertas_neto": a_neto,
-            "resumen_deduccion": resumen_deduccion,
-            "total_general": total_general
-        }
-    }
-
-@router.post("/resumen/next", response_model=LiquidacionResumenRead, status_code=201)
-async def crear_resumen_siguiente(db: AsyncSession = Depends(get_db)):
-    # 1) obtener el último (año desc, mes desc)
-    res = await db.execute(
-        select(LiquidacionResumen)
-        .order_by(LiquidacionResumen.anio.desc(), LiquidacionResumen.mes.desc())
-        .limit(1)
-    )
-    last = res.scalars().first()
-
-    if last:
-        y, m = int(last.anio), int(last.mes)
-        if m == 12:
-            y, m = y + 1, 1
-        else:
-            m = m + 1
-    else:
-        # si no hay ninguno, arranca en el mes actual
-        today = dt.date.today()
-        y, m = today.year, today.month
-
-    # 2) evitar duplicados (opcional: también poné UniqueConstraint en el modelo)
-    exists = await db.execute(
-        select(LiquidacionResumen.id)
-        .where(LiquidacionResumen.anio == y, LiquidacionResumen.mes == m)
-        .limit(1)
-    )
-    if exists.scalars().first():
-        raise HTTPException(status_code=409, detail=f"Ya existe un resumen para {y}-{m:02d}")
-
-    # 3) crear en 'a' (abierto) con totales en 0
-    obj = LiquidacionResumen(
-        anio=y,
-        mes=m,
-        # estado="a",
-        # cierre_timestamp=None,
-        total_bruto=Decimal("0"),
-        total_debitos=Decimal("0"),
-        total_deduccion=Decimal("0"),
-    )
-    db.add(obj)
-    await db.commit()
-    await db.refresh(obj)
-    return obj
+#     await db.commit()
+#     await db.refresh(obj)
+#     return obj
 
 
-# ========================
-# Liquidacion CRUD
-# ========================
-
-@router.get("/liquidaciones_por_os", response_model=List[LiquidacionRead])
-async def listar_liquidaciones(
-    db: AsyncSession = Depends(get_db),
-    resumen_id: Optional[int] = None,
-    obra_social_id: Optional[int] = None,
-    mes_periodo: Optional[int] = None,
-    anio_periodo: Optional[int] = None,
-    skip: int = Query(0, ge=0),
-    limit: int = Query(100, ge=1, le=500),
-):
-    stmt = select(Liquidacion)
-    if resumen_id is not None:
-        stmt = stmt.where(Liquidacion.resumen_id == resumen_id)
-    if obra_social_id is not None:
-        stmt = stmt.where(Liquidacion.obra_social_id == obra_social_id)
-    if mes_periodo is not None:
-        stmt = stmt.where(Liquidacion.mes_periodo == mes_periodo)
-    if anio_periodo is not None:
-        stmt = stmt.where(Liquidacion.anio_periodo == anio_periodo)
-    stmt = stmt.order_by(Liquidacion.id.desc()).offset(skip).limit(limit)
-
-    res = await db.execute(stmt)
-    return res.scalars().all()
-
+# ================================================
+# GET: Obtiene una liquidación de la obra social por su ID
+# ================================================
 @router.get("/liquidaciones_por_os/{liquidacion_id}", response_model=LiquidacionRead)
 async def obtener_liquidacion(liquidacion_id: int, db: AsyncSession = Depends(get_db)):
     res = await db.execute(select(Liquidacion).where(Liquidacion.id == liquidacion_id))
@@ -294,44 +198,9 @@ async def obtener_liquidacion(liquidacion_id: int, db: AsyncSession = Depends(ge
     return obj
 
 
-@router.post("/liquidaciones_por_os/crear", response_model=LiquidacionRead, status_code=201)
-async def crear_liquidacion(payload: LiquidacionCreate, db: AsyncSession = Depends(get_db)):
-    # validar resumen
-    exists_res = await db.execute(
-        select(LiquidacionResumen.id).where(LiquidacionResumen.id == payload.resumen_id).limit(1)
-    )
-    if not exists_res.first():
-        raise HTTPException(400, "resumen_id inválido")
-
-    # calcular versión y formatear nro_liquidacion
-    version, nro_fmt = await calcular_version_y_formatear_nro(
-        db, payload.obra_social_id, payload.anio_periodo, payload.mes_periodo, payload.nro_liquidacion
-    )
-
-    obj = Liquidacion(
-        resumen_id=payload.resumen_id,
-        obra_social_id=payload.obra_social_id,
-        mes_periodo=payload.mes_periodo,
-        anio_periodo=payload.anio_periodo,
-        version=version,
-        nro_liquidacion=nro_fmt,
-        total_bruto=Decimal("0"),
-        total_debitos=Decimal("0"),
-        total_neto=Decimal("0"),
-    )
-    db.add(obj)
-    await db.flush()  # para obtener obj.id
-
-    # construir detalles + actualizar totales
-    await construir_detalles_y_totales(db, obj.id)
-    await recomputar_totales_de_liquidacion(db, obj.id)
-    await recomputar_totales_de_resumen(db,obj.resumen_id)
-
-    await db.commit()
-    await db.refresh(obj)
-    return obj
-
-
+# ================================================
+# PUT: Obtiene una liquidación de la obra social por su ID
+# ================================================
 @router.put("/liquidaciones_por_os/{liquidacion_id}", response_model=LiquidacionRead)
 async def editar_liquidacion(liquidacion_id: int, payload: LiquidacionUpdate, db: AsyncSession = Depends(get_db)):
     res = await db.execute(select(Liquidacion).where(Liquidacion.id == liquidacion_id))
@@ -345,8 +214,8 @@ async def editar_liquidacion(liquidacion_id: int, payload: LiquidacionUpdate, db
         obj.mes_periodo = payload.mes_periodo
     if payload.anio_periodo is not None:
         obj.anio_periodo = payload.anio_periodo
-    if payload.nro_liquidacion is not None:
-        obj.nro_liquidacion = payload.nro_liquidacion
+    if payload.nro_factura is not None:
+        obj.nro_factura = payload.nro_factura
 
     try:
         await db.commit()
@@ -357,6 +226,9 @@ async def editar_liquidacion(liquidacion_id: int, payload: LiquidacionUpdate, db
     return obj
 
 
+# ================================================
+# DELETE: Elimina una liquidación de la obra social por su ID
+# ================================================
 @router.delete("/liquidaciones_por_os/{liquidacion_id}", status_code=204)
 async def eliminar_liquidacion(liquidacion_id: int, db: AsyncSession = Depends(get_db)):
     res = await db.execute(select(Liquidacion).where(Liquidacion.id == liquidacion_id))
@@ -468,6 +340,8 @@ async def cerrar_liquidacion_endpoint(
     await db.commit()
     return None
 
+
+
 @router.post("/liquidaciones_por_os/{liquidacion_id}/reabrir", response_model=LiquidacionRead, status_code=200)
 async def reabrir_simple_endpoint(liquidacion_id: int, db: AsyncSession = Depends(get_db)):
     liq = await db.get(Liquidacion, liquidacion_id)
@@ -487,26 +361,29 @@ async def reabrir_simple_endpoint(liquidacion_id: int, db: AsyncSession = Depend
         "mes_periodo": liq.mes_periodo,
         "anio_periodo": liq.anio_periodo,
         "estado": liq.estado,
-        "nro_liquidacion": liq.nro_liquidacion,
+        "nro_factura": liq.nro_factura,
         "total_bruto": str(liq.total_bruto or 0),
         "total_debitos": str(liq.total_debitos or 0),
         "total_neto": str(liq.total_neto or 0),
     })
 
 
+# ================================================
+# POST: Refacturar una liquidación por obra social pasandole nuevo punto de venta y nro de factura
+# ================================================
 @router.post("/liquidaciones_por_os/{liquidacion_id}/refacturar", response_model=LiquidacionRead, status_code=201)
-async def refacturar_endpoint(liquidacion_id: int, payload: RefacturarPayload, db: AsyncSession = Depends(get_db)):
-    nueva = await reabrir_liquidacion_creando_version(db, liquidacion_id, payload.nro_liquidacion)
+async def refacturar(liquidacion_id: int, payload: RefacturarPayload, db: AsyncSession = Depends(get_db)):
+    nueva = await refacturar_service(db, liquidacion_id, payload.punto_venta, payload.nro_factura)
     await db.commit()
-    await db.refresh(nueva)
+    # await db.refresh(nueva)
     return JSONResponse({
         "id": nueva.id,
         "resumen_id": nueva.resumen_id,
         "mes_periodo": nueva.mes_periodo,
         "anio_periodo": nueva.anio_periodo,
         "estado": nueva.estado,
-        "nro_liquidacion": nueva.nro_liquidacion,
-        "total_bruto": str(nueva.total_bruto or 0),
-        "total_debitos": str(nueva.total_debitos or 0),
-        "total_neto": str(nueva.total_neto or 0),
+        "nro_factura": nueva.nro_factura,
+        "total_bruto": nueva.total_bruto,
+        "total_debitos": nueva.total_debitos,
+        "total_neto": nueva.total_neto,
     })

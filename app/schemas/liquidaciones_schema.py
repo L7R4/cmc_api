@@ -5,26 +5,14 @@ from pydantic import BaseModel, Field, validator
 from enum import Enum
 import re
 
-# --------- helpers ----------
-# _RX_PERIODO = re.compile(r"^\s*(\d{4})[-/]?(\d{1,2})\s*$")
-
-# def _normalizar_periodo(v: str) -> str:
-#     m = _RX_PERIODO.match(v or "")
-#     if not m:
-#         raise ValueError("Periodo inválido; use YYYY-MM.")
-#     y, mo = int(m.group(1)), int(m.group(2))
-#     if y < 1900 or y > 3000 or not (1 <= mo <= 12):
-#         raise ValueError("Periodo fuera de rango.")
-#     return f"{y:04d}-{mo:02d}"
-
 
 class PreviewItem(BaseModel):
     liquidacion_id: int
     obra_social_id: int
-    obra_social_nombre: Optional[str] = None  # si no la tienes en el back, puede ir null
-    periodo: str                               # "YYYY-MM"
+    obra_social_nombre: Optional[str] = None
+    periodo: str                              
     estado: Literal["A", "C"]
-    nro_liquidacion: Optional[str] = None
+    nro_facutra: Optional[str] = None
     total_bruto: Decimal
     total_debitos: Decimal
     total_deduccion: Decimal
@@ -44,22 +32,16 @@ class PreviewResponse(BaseModel):
     items: List[PreviewItem]
     totals: PreviewTotals
 
-# --------- LiquidacionResumen ---------
+# ================================================
+# LiquidacionResumen
+# ================================================
 class LiquidacionResumenBase(BaseModel):
     mes: int = Field(..., ge=1, le=12)
     anio: int = Field(..., ge=1900, le=3000)
-    # estado: EstadoResumen = EstadoResumen.abierto
-    # cierre_timestamp: Optional[str] = None
 
 class LiquidacionResumenCreate(LiquidacionResumenBase):
-    # Totales se inician en 0; no se editan por POST
     pass
 
-class LiquidacionResumenUpdate(BaseModel):
-    mes: Optional[int] = Field(None, ge=1, le=12)
-    anio: Optional[int] = Field(None, ge=1900, le=3000)
-    # estado: Optional[EstadoResumen] = None
-    # cierre_timestamp: Optional[str] = None
 
 class LiquidacionResumenRead(BaseModel):
     id: int
@@ -68,30 +50,35 @@ class LiquidacionResumenRead(BaseModel):
     total_bruto: Decimal
     total_debitos: Decimal
     total_deduccion: Decimal
-    # estado: EstadoResumen
-    # cierre_timestamp: Optional[str]
-
+    total_neto: Decimal
     class Config:
         from_attributes = True
 
-# --------- Liquidacion (hija) ---------
+
+class LiquidacionResumenWithItems(LiquidacionResumenRead):
+    liquidaciones: List[LiquidacionRead] = []
+
+# ================================================ 
+# Liquidacion por obra social
+# ================================================
 class LiquidacionBase(BaseModel):
     resumen_id: int
     obra_social_id: int
     mes_periodo: int = Field(ge=1, le=12)
     anio_periodo: int = Field(ge=1900)
-    nro_liquidacion: str
+    nro_facutra: str
 
 
 class LiquidacionCreate(LiquidacionBase):
-    # Totales se inician en 0; no se editan por POST
     pass
+
 
 class LiquidacionUpdate(BaseModel):
     obra_social_id: Optional[int] = None
     mes_periodo: Optional[int] =None
     anio_periodo: Optional[int] =None
-    nro_liquidacion: Optional[str] = None
+    nro_facutra: Optional[str] = None
+
 
 class LiquidacionRead(BaseModel):
     id: int
@@ -99,9 +86,8 @@ class LiquidacionRead(BaseModel):
     obra_social_id: int
     mes_periodo: int
     anio_periodo: int
-    version: int | None = None
     estado: str
-    nro_liquidacion: str
+    nro_facutra: str
     total_bruto: Decimal
     total_debitos: Decimal
     total_neto: Decimal
@@ -110,12 +96,11 @@ class LiquidacionRead(BaseModel):
         from_attributes = True
 
 
-# --------- composiciones de lectura ---------
-class LiquidacionResumenWithItems(LiquidacionResumenRead):
-    liquidaciones: List[LiquidacionRead] = []
 
 
-# Detalle liquidacion
+# ================================================ 
+# Detalle liquidacion por obra social
+# ================================================
 class DetalleLiquidacionRead(BaseModel):
     id: int
     liquidacion_id: int
@@ -128,6 +113,7 @@ class DetalleLiquidacionRead(BaseModel):
     debito_credito_id: Optional[int] = None
     class Config:
         from_attributes = True
+
 
 class DetalleVistaRow(BaseModel):
     det_id: int
@@ -154,7 +140,9 @@ class DetalleVistaRow(BaseModel):
 
     total: float
 
+
 class RefacturarPayload(BaseModel):
-    nro_liquidacion: str
+    punto_venta: str
+    nro_facutra: str
 
 

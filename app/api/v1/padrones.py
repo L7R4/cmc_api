@@ -4,7 +4,7 @@ from sqlalchemy import func, select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 from app.api.deps import get_async_db
-from app.db.models import MedicoObraSocial, ListadoMedico, ObrasSociales
+from app.db.models import Especialidad, MedicoObraSocial, ListadoMedico, ObrasSociales
 from app.schemas.padrones_schema import ObraSocialOut, PadronOut, PadronUpdate, PageMedicoOS
 
 router = APIRouter()
@@ -186,21 +186,24 @@ async def list_medicos_por_obra_social(
     size: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_async_db),
 ):
-    padron_os_attr = _padron_number_attr()  # lo que ya tenías
+    padron_os_attr = _padron_number_attr()
 
     filters = [padron_os_attr == nro_os]
+
     if search:
         s = search.strip()
         if s.isdigit():
             filters.append(MedicoObraSocial.NRO_SOCIO == int(s))
         else:
-            # ILIKE si tuvieras PG; en MySQL con collation ya suele ser case-insensitive
             filters.append(MedicoObraSocial.NOMBRE.like(f"%{s}%"))
 
-    # Alias/Modelo maestro con el ID real del médico
     LM = aliased(ListadoMedico)
+    OS = aliased(ObrasSociales)
 
-    base = (
+    # Columnas de especialidad (códigos)
+    esp_keys = ["ESP1", "ESP2", "ESP3", "ESP4", "ESP5", "ESP6"]
+
+    stmt = (
         select(
             LM.ID.label("ID"),
             MedicoObraSocial.NRO_SOCIO.label("NRO_SOCIO"),
@@ -208,33 +211,76 @@ async def list_medicos_por_obra_social(
             MedicoObraSocial.MATRICULA_PROV.label("MATRICULA_PROV"),
             MedicoObraSocial.MATRICULA_NAC.label("MATRICULA_NAC"),
             MedicoObraSocial.CATEGORIA.label("CATEGORIA"),
-            MedicoObraSocial.ESPECIALIDAD.label("ESPECIALIDAD"),
             MedicoObraSocial.TELEFONO_CONSULTA.label("TELEFONO_CONSULTA"),
             MedicoObraSocial.MARCA.label("MARCA"),
+            OS.OBRA_SOCIAL.label("OBRA_SOCIAL"),
+            LM.NRO_ESPECIALIDAD.label("ESP1"),
+            LM.NRO_ESPECIALIDAD2.label("ESP2"),
+            LM.NRO_ESPECIALIDAD3.label("ESP3"),
+            LM.NRO_ESPECIALIDAD4.label("ESP4"),
+            LM.NRO_ESPECIALIDAD5.label("ESP5"),
+            LM.NRO_ESPECIALIDAD6.label("ESP6"),
         )
         .join(LM, LM.NRO_SOCIO == MedicoObraSocial.NRO_SOCIO)
+        .outerjoin(OS, OS.NRO_OBRASOCIAL == padron_os_attr)  # JOIN con ObrasSociales
         .where(and_(*filters))
     )
 
-    # total
-    total = (
-        await db.execute(select(func.count()).select_from(base.subquery()))
-    ).scalar_one()
+    # Total (más liviano que contar un subquery gigante)
+    total_stmt = (
+        select(func.count())
+        .select_from(MedicoObraSocial)
+        .join(LM, LM.NRO_SOCIO == MedicoObraSocial.NRO_SOCIO)
+        .where(and_(*filters))
+    )
+    total = (await db.execute(total_stmt)).scalar_one()
 
-    # page
     offset = (page - 1) * size
     result = await db.execute(
-        base.order_by(MedicoObraSocial.NOMBRE.asc())
+        stmt.order_by(MedicoObraSocial.NOMBRE.asc())
             .offset(offset)
             .limit(size)
     )
-
-    # 👇 filas como dict por label (evita desfasajes de índice)
     rows = result.mappings().all()
 
-    # (opcional) pequeñas coerciones/strips seguros
-    items = []
+    # 1) Recolectar todos los códigos de especialidad (ignorando 0)
+    all_codes: set[int] = set()
+    codes_per_row: list[list[int]] = []
+
     for r in rows:
+        codes = []
+        for k in esp_keys:
+            v = r.get(k)
+            if v is None:
+                continue
+            try:
+                iv = int(v)
+            except Exception:
+                continue
+            if iv > 0:
+                codes.append(iv)
+        # dedup manteniendo orden
+        codes = list(dict.fromkeys(codes))
+        codes_per_row.append(codes)
+        all_codes.update(codes)
+
+    # 2) Buscar nombres de especialidades en 1 query
+    espec_map: dict[int, str] = {}
+    if all_codes:
+        espec_rows = await db.execute(
+            select(Especialidad.ID_COLEGIO_ESPE, Especialidad.ESPECIALIDAD)
+            .where(Especialidad.ID_COLEGIO_ESPE.in_(all_codes))
+        )
+        for code, name in espec_rows.all():
+            if code is None:
+                continue
+            espec_map[int(code)] = (name or "").strip()
+
+    # 3) Armar respuesta final
+    items: list[dict] = []
+    for r, codes in zip(rows, codes_per_row):
+        especialidades = [espec_map.get(c) for c in codes if espec_map.get(c)]
+
         items.append({
             "ID": int(r["ID"]),
             "NRO_SOCIO": int(r["NRO_SOCIO"]),
@@ -242,9 +288,10 @@ async def list_medicos_por_obra_social(
             "MATRICULA_PROV": r["MATRICULA_PROV"],
             "MATRICULA_NAC": r["MATRICULA_NAC"],
             "CATEGORIA": r["CATEGORIA"],
-            "ESPECIALIDAD": r["ESPECIALIDAD"],
             "TELEFONO_CONSULTA": r["TELEFONO_CONSULTA"],
             "MARCA": r["MARCA"],
+            "OBRA_SOCIAL": (r["OBRA_SOCIAL"] or "").strip() if r["OBRA_SOCIAL"] is not None else None,
+            "ESPECIALIDADES": especialidades,
         })
 
     return {"items": items, "total": total, "page": page, "size": size}

@@ -40,9 +40,12 @@ class MedicoOSItemOut(BaseModel):
     MATRICULA_PROV: int | None = None
     MATRICULA_NAC: int | None = None
     CATEGORIA: str | None = None
-    ESPECIALIDAD: str | None = None
     TELEFONO_CONSULTA: str | None = None
     MARCA: str | None = None
+
+    OBRA_SOCIAL: str | None = None
+    ESPECIALIDADES: list[str] = Field(default_factory=list)
+
     model_config = {"from_attributes": True}
 
 

@@ -16,58 +16,139 @@ class UserOut(BaseModel):
 class UserEnvelope(BaseModel):
     user: UserOut
 
+FIELD_MAP = {
+    # básicos
+    "name": "NOMBRE",
+    "nombre_": "nombre_",
+    "apellido": "apellido",
+    "sexo": "SEXO",
+    "documento": "DOCUMENTO",
+    "cuit": "CUIT",
+    "fecha_nac": "FECHA_NAC",
+    "existe": "EXISTE",
+    "provincia": "PROVINCIA",
+    "localidad": "localidad",
+    "codigo_postal": "CODIGO_POSTAL",
+    "domicilio_particular": "DOMICILIO_PARTICULAR",
+    "tele_particular": "TELE_PARTICULAR",
+    "celular_particular": "CELULAR_PARTICULAR",
+    "mail_particular": "MAIL_PARTICULAR",
+
+    # profesionales
+    "nro_socio": "NRO_SOCIO",
+    "categoria": "categoria",              # si en tu modelo es MAYÚS poné "CATEGORIA"
+    "titulo": "titulo",
+    "matricula_prov": "MATRICULA_PROV",
+    "matricula_nac": "MATRICULA_NAC",
+    "fecha_recibido": "FECHA_RECIBIDO",
+    "fecha_matricula": "FECHA_MATRICULA",
+    "domicilio_consulta": "DOMICILIO_CONSULTA",
+    "telefono_consulta": "TELEFONO_CONSULTA",
+
+    # impositivos
+    "condicion_impositiva": "condicion_impositiva",
+    "anssal": "ANSSAL",
+    "cobertura": "COBERTURA",
+    "vencimiento_anssal": "VENCIMIENTO_ANSSAL",
+    "malapraxis": "MALAPRAXIS",
+    "vencimiento_malapraxis": "VENCIMIENTO_MALAPRAXIS",
+    "vencimiento_cobertura": "VENCIMIENTO_COBERTURA",
+    "cbu": "cbu",
+    "observacion": "OBSERVACION",
+}
+
+DATE_KEYS = {
+    "fecha_nac","fecha_recibido","fecha_matricula","fecha_resolucion",
+    "vencimiento_anssal","vencimiento_malapraxis","vencimiento_cobertura",
+}
+
+def _coerce_existe(v):
+    if v is None:
+        return None
+    s = str(v).strip().upper()
+    if s in ("S","N"):
+        return s
+    # acepta truthy/falsy
+    return "S" if s in ("1","TRUE","T","SI","SÍ","Y","YES","ON") else "N"
+
+def _coerce_sexo(v):
+    if v is None:
+        return None
+    s = str(v).strip().upper()
+    return s[:1] if s else None  # "M" / "F" (o lo que uses)
+
+
 class MedicoBase(BaseModel):
-    nro_especialidad: int        = Field(..., description="Especialidad principal")
-    nro_especialidad2: int       = Field(..., description="Especialidad 2")
-    nro_especialidad3: int       = Field(..., description="Especialidad 3")
-    nro_especialidad4: int       = Field(..., description="Especialidad 4")
-    nro_especialidad5: int       = Field(..., description="Especialidad 5")
-    nro_especialidad6: int       = Field(..., description="Especialidad 6")
-    nro_socio: int               = Field(..., description="Número de socio")
-    nombre: str                  = Field(..., description="Nombre completo")
-    domicilio_consulta: str      = Field(..., description="Domicilio de consulta")
-    telefono_consulta: str       = Field(..., description="Teléfono de consulta")
-    matricula_prov: int          = Field(..., description="Matrícula Provincial")
-    matricula_nac: int           = Field(..., description="Matrícula Nacional")
+    nro_especialidad: Optional[int]        = Field(None, description="Especialidad principal")
+    nro_especialidad2: Optional[int]       = Field(None, description="Especialidad 2")
+    nro_especialidad3: Optional[int]       = Field(None, description="Especialidad 3")
+    nro_especialidad4: Optional[int]       = Field(None, description="Especialidad 4")
+    nro_especialidad5: Optional[int]       = Field(None, description="Especialidad 5")
+    nro_especialidad6: Optional[int]       = Field(None, description="Especialidad 6")
+    nro_socio: Optional[int]               = Field(None, description="Número de socio")
+    nombre: Optional[str]                  = Field(None, description="Nombre completo")
+    nombre_: Optional[str]       = Field(None, description="Nombre alternativo")
+    apellido: Optional[str]      = Field(None, description="Apellido")
+    domicilio_consulta: Optional[str]      = Field(None, description="Domicilio de consulta")
+    telefono_consulta: Optional[str]       = Field(None, description="Teléfono de consulta")
+    matricula_prov: Optional[int]          = Field(None, description="Matrícula Provincial")
+    matricula_nac: Optional[int]           = Field(None, description="Matrícula Nacional")
     fecha_recibido: Optional[date]        = Field(None, description="Fecha recibido expediente")
     fecha_matricula: Optional[date]       = Field(None, description="Fecha de matrícula")
     fecha_ingreso: Optional[date]         = Field(None, description="Fecha de ingreso al colegio")
-    domicilio_particular: str    = Field(..., description="Domicilio particular")
-    tele_particular: str         = Field(..., description="Teléfono particular")
-    celular_particular: str      = Field(..., description="Celular particular")
-    mail_particular: str         = Field(..., description="Email particular")
-    sexo: str                    = Field(..., description="Sexo (M/F)")
-    tipo_doc: str                = Field(..., description="Tipo de documento")
-    documento: str               = Field(..., description="Número de documento")
+    domicilio_particular: Optional[str]    = Field(None, description="Domicilio particular")
+    tele_particular: Optional[str]         = Field(None, description="Teléfono particular")
+    celular_particular: Optional[str]      = Field(None, description="Celular particular")
+    mail_particular: Optional[str]         = Field(None, description="Email particular")
+    sexo: Optional[str]                    = Field(None, description="Sexo (M/F)")
+    tipo_doc: Optional[str]                = Field(None, description="Tipo de documento")
+    documento: Optional[str]               = Field(None, description="Número de documento")
     fecha_nac: Optional[date]    = Field(None, description="Fecha de nacimiento")
-    cuit: str                    = Field(..., description="CUIT")
-    anssal: int                  = Field(..., description="ANS Salud")
+    cuit: Optional[str]                    = Field(None, description="CUIT")
+    condicion_impositiva: Optional[str] = Field(None, description="Condicion impositiva")
+    anssal: Optional[int]                  = Field(None, description="ANS Salud")
     vencimiento_anssal: Optional[date] = Field(None, description="Vencimiento ANSSAL")
-    malapraxis: str              = Field(..., description="Seguro de mala praxis")
+    malapraxis: Optional[str]              = Field(None, description="Seguro de mala praxis")
     vencimiento_malapraxis: Optional[date] = Field(None, description="Vencimiento mala praxis")
-    monotributista: str          = Field(..., description="¿Es monotributista? (SI/NO)")
-    factura: str                 = Field(..., description="¿Factura? (SI/NO)")
-    cobertura: int               = Field(..., description="Cobertura")
+    monotributista: Optional[str]          = Field(None, description="¿Es monotributista? (SI/NO)")
+    factura: Optional[str]                 = Field(None, description="¿Factura? (SI/NO)")
+    cobertura: Optional[int]               = Field(None, description="Cobertura")
     vencimiento_cobertura: Optional[date] = Field(None, description="Vencimiento cobertura")
-    provincia: str               = Field(..., description="Provincia")
-    codigo_postal: str           = Field(..., description="Código postal")
-    vitalicio: str               = Field(..., description="¿Es vitalicio? (S/N)")
+    provincia: Optional[str]               = Field(None, description="Provincia")
+    localidad: Optional[str]     = Field(None, description="Localidad")
+    codigo_postal: Optional[str]           = Field(None, description="Código postal")
+    vitalicio: Optional[str]               = Field(None, description="¿Es vitalicio? (S/N)")
     fecha_vitalicio: Optional[date] = Field(None, description="Fecha de vitalicio")
-    observacion: str             = Field(..., description="Observaciones")
-    categoria: str               = Field(..., description="Categoría")
-    existe: str                  = Field(..., description="¿Existe? (S/N)")
-    excep_desde: str             = Field(..., description="Excepción desde (MMYYYY)")
-    excep_hasta: str             = Field(..., description="Excepción hasta (MMYYYY)")
-    excep_desde2: str            = Field(..., description="Segunda excepción desde")
-    excep_hasta2: str            = Field(..., description="Segunda excepción hasta")
-    excep_desde3: str            = Field(..., description="Tercera excepción desde")
-    excep_hasta3: str            = Field(..., description="Tercera excepción hasta")
-    ingresar: str                = Field(..., description="Campo de control ingreso")
+    observacion: Optional[str]             = Field(None, description="Observaciones")
+    categoria: Optional[str]               = Field(None, description="Categoría")
+    existe:  Optional[str]            = Field(None, description="¿Existe? (S/N)")
+    excep_desde:  Optional[str]            = Field(None, description="Excepción desde (MMYYYY)")
+    excep_hasta: Optional[str]            = Field(None, description="Excepción hasta (MMYYYY)")
+    excep_desde2: Optional[str]           = Field(None, description="Segunda excepción desde")
+    excep_hasta2: Optional[str]           = Field(None, description="Segunda excepción hasta")
+    excep_desde3: Optional[str]           = Field(None, description="Tercera excepción desde")
+    excep_hasta3: Optional[str]           = Field(None, description="Tercera excepción hasta")
+    ingresar:  Optional[str]                = Field(None, description="Campo de control ingreso")
+    cbu: Optional[str]           = Field(None, description="CBU")
+    nro_resolucion: Optional[str] = Field(None, description="Numero de resolucion")
+    fecha_resolucion: Optional[date] = Field(None, description="Fecha de resolucion")
+    conceps_espec: Optional[Dict[str, Any]] = Field(None, description="Store conceps/espec")
+    attach_titulo: Optional[str] = Field(None, description="Adjunto titulo")
+    attach_matricula_nac: Optional[str] = Field(None, description="Adjunto matricula nac")
+    attach_matricula_prov: Optional[str] = Field(None, description="Adjunto matricula prov")
+    attach_resolucion: Optional[str] = Field(None, description="Adjunto resolucion")
+    attach_habilitacion_municipal: Optional[str] = Field(None, description="Adjunto habilitacion municipal")
+    attach_cuit: Optional[str] = Field(None, description="Adjunto cuit")
+    attach_condicion_impositiva: Optional[str] = Field(None, description="Adjunto condicion impositiva")
+    attach_anssal: Optional[str] = Field(None, description="Adjunto anssal")
+    attach_malapraxis: Optional[str] = Field(None, description="Adjunto malapraxis")
+    attach_cbu: Optional[str] = Field(None, description="Adjunto cbu")
+    attach_dni: Optional[str] = Field(None, description="Adjunto dni")
 
     @field_validator(
         "fecha_recibido", "fecha_matricula", "fecha_ingreso",
         "fecha_nac", "vencimiento_anssal", "vencimiento_malapraxis",
-        "vencimiento_cobertura", "fecha_vitalicio",
+        "vencimiento_cobertura", "fecha_vitalicio", "fecha_resolucion",
         mode="before"
     )
     @classmethod
@@ -231,6 +312,7 @@ class MedicoDetailOut(BaseModel):
     titulo: Optional[str] = None
     fecha_recibido: Optional[date] = None
     fecha_matricula: Optional[date] = None
+    fecha_ingreso: Optional[date] = None
     nro_resolucion: Optional[str] = None
     fecha_resolucion: Optional[date] = None
     especialidades: List[EspecialidadOut] = []
@@ -294,7 +376,7 @@ class MedicoDetailOut(BaseModel):
         return s
 
     @field_validator(
-        "fecha_recibido", "fecha_matricula", "fecha_nac",
+        "fecha_recibido", "fecha_matricula", "fecha_ingreso", "fecha_nac",
         "vencimiento_anssal", "vencimiento_malapraxis", "vencimiento_cobertura",
         mode="before"
     )
@@ -531,3 +613,119 @@ class AsignarEspecialidadIn(BaseModel):
     n_resolucion: Optional[str] = None
     fecha_resolucion: Optional[str] = None  # "YYYY-MM-DD" (texto; aceptamos None)
     adjunto_id: Optional[int] = None        # Documento.id (opcional)
+
+
+class MedicoPartialIn(BaseModel):
+    # Identificación
+    documentType: Optional[str] = None      # DNI, LE, LC, Pasaporte, etc.
+    documentNumber: Optional[str] = None
+    firstName: Optional[str] = None
+    lastName: Optional[str] = None
+    gender: Optional[str] = None            # 'M'/'F'/otro
+    birthDate: Optional[str] = None         # 'YYYY-MM-DD'
+
+    # Contacto
+    phone: Optional[str] = None
+    altPhone: Optional[str] = None
+    email: Optional[str] = None
+
+    # Domicilio
+    address: Optional[str] = None
+    addressNumber: Optional[str] = None
+    addressFloor: Optional[str] = None
+    addressDept: Optional[str] = None
+    province: Optional[str] = None
+    locality: Optional[str] = None
+    postalCode: Optional[str] = None
+
+    # Profesionales
+    matriculaProv: Optional[str] = None
+    matriculaNac: Optional[str] = None
+    joinDate: Optional[str] = None          # 'YYYY-MM-DD'
+
+    # Especialidades (admin puede cargar luego en su pestaña; acá lo dejamos opcional)
+    specialties: Optional[List[str]] = None
+
+    # Fiscales / Seguros
+    cuit: Optional[str] = None
+    taxCondition: Optional[str] = None      # RI/Monotrib/Exento/etc.
+    anssal: Optional[str] = None
+    anssalExpiry: Optional[str] = None      # 'YYYY-MM-DD'
+    malpracticeCompany: Optional[str] = None
+    malpracticeExpiry: Optional[str] = None # 'YYYY-MM-DD'
+    cbu: Optional[str] = None
+
+    # Otros
+    observations: Optional[str] = None
+
+class SaveContinueOut(BaseModel):
+    medico_id: int
+    ok: bool = True
+
+class ExisteIn(BaseModel):
+    existe: Literal["S", "N"]
+
+# class MedicoDetailOut(BaseModel):
+#     # Esquemita simple para GET; ajustá si necesitás más campos
+#     ID: int = Field(..., alias="id")
+#     DOCUMENTO: Optional[str] = None
+#     NOMBRE: Optional[str] = None
+#     nombre_: Optional[str] = None
+#     apellido: Optional[str] = None
+#     EMAIL: Optional[str] = None
+#     TELEFONO: Optional[str] = None
+#     DOMICILIO: Optional[str] = None
+#     LOCALIDAD: Optional[str] = None
+#     PROVINCIA: Optional[str] = None
+#     COD_POSTAL: Optional[str] = None
+#     MATRICULA_PROV: Optional[str] = None
+#     MATRICULA_NAC: Optional[str] = None
+#     FECHA_INGRESO: Optional[str] = None
+#     CUIT: Optional[str] = None
+#     COND_IMPOSITIVA: Optional[str] = None
+#     ANSSAL: Optional[str] = None
+#     ANSSAL_VENC: Optional[str] = None
+#     MALAPRACTICA_COMPANIA: Optional[str] = None
+#     MALAPRACTICA_VENC: Optional[str] = None
+#     CBU: Optional[str] = None
+#     OBSERVACIONES: Optional[str] = None
+#     SEXO: Optional[str] = None
+#     FECHA_NAC: Optional[str] = None
+#     EXISTE: Optional[str] = None    
+
+class AdminSaveContinueIn(BaseModel):
+    medico_id: Optional[int] = None
+    # todos los del público, opcionales:
+    documentType: Optional[str] = None
+    documentNumber: Optional[str] = None
+    firstName: Optional[str] = None
+    lastName: Optional[str] = None
+    gender: Optional[str] = None
+    birthDate: Optional[str] = None
+    address: Optional[str] = None
+    province: Optional[str] = None
+    locality: Optional[str] = None
+    postalCode: Optional[str] = None
+    phone: Optional[str] = None
+    mobile: Optional[str] = None
+    email: Optional[str] = None
+    officeAddress: Optional[str] = None
+    officePhone: Optional[str] = None
+    cuit: Optional[str] = None
+    observations: Optional[str] = None
+    anssal: Optional[str] = None
+    anssalExpiry: Optional[str] = None
+    malpracticeCompany: Optional[str] = None
+    malpracticeExpiry: Optional[str] = None
+    malpracticeCoverage: Optional[str] = None
+    provincialLicense: Optional[str] = None
+    provincialLicenseDate: Optional[str] = None
+    nationalLicense: Optional[str] = None
+    nationalLicenseDate: Optional[str] = None
+    graduationDate: Optional[str] = None
+    resolutionNumber: Optional[str] = None
+    resolutionDate: Optional[str] = None
+    specialty: Optional[str] = None
+    condicionImpositiva: Optional[str] = None
+    taxCondition: Optional[str] = None
+    cbu: Optional[str] = None

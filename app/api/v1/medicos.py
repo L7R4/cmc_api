@@ -1,5 +1,5 @@
 from collections import defaultdict
-from datetime import date, datetime
+from datetime import date, datetime,timedelta
 from decimal import Decimal
 import json
 from operator import and_
@@ -18,23 +18,23 @@ from app.utils.main import (
 from typing import Any, DefaultDict, Literal, Optional, Dict, List
 from fastapi import APIRouter, Body, Depends, File, Form, Query, HTTPException, Request, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import case, delete, desc, func, literal, select, or_, cast, String, update
+from sqlalchemy import case, delete, desc, func, literal, select, or_, cast, String, Integer, update
 from app.core.passwords import hash_password
 from app.db.database import get_db
 from app.db.models import (
-    DeduccionColegio, Descuentos, DetalleLiquidacion, Documento, Especialidad, Liquidacion, ListadoMedico,
+    Deduccion, Descuentos, DetalleLiquidacion, Documento, Especialidad, Liquidacion, ListadoMedico,
     DeduccionSaldo, DeduccionAplicacion, LiquidacionResumen, SolicitudRegistro
 )
 from app.schemas.deduccion_schema import CrearDeudaOut, NuevaDeudaIn
 from app.schemas.medicos_schema import (
-    AsignarEspecialidadIn, AsociarConceptoIn, CEAppOut, CEBundleOut, CEBundlePatchIn, CEStoreOut, ConceptRecordOut, ConceptoAplicacionOut, DoctorStatsPointOut, MedicoConceptoOut, MedicoDebtOut, MedicoDocOut, MedicoEspecialidadOut, MedicoListRow, MedicoDetailOut, MedicoUpdateIn, MedicoUpdateOut, PatchCEIn
+    DATE_KEYS, FIELD_MAP, AdminSaveContinueIn, AsignarEspecialidadIn, AsociarConceptoIn, CEAppOut, CEBundleOut, CEBundlePatchIn, CEStoreOut, ConceptRecordOut, ConceptoAplicacionOut, DoctorStatsPointOut, ExisteIn, MedicoBase, MedicoConceptoOut, MedicoDebtOut, MedicoDocOut, MedicoEspecialidadOut, MedicoListRow, MedicoDetailOut, MedicoPartialIn, MedicoUpdateIn, MedicoUpdateOut, PatchCEIn, SaveContinueOut, _coerce_existe, _coerce_sexo
 )
 from app.auth.deps import require_scope
 from app.schemas.registro_schema import RegisterIn, RegisterOut
 from app.services.email import send_email_resend
 from app.core.config import settings
 from app.utils.main import _parse_date
-from app.services.medicos_register_service import create_medico_and_solicitud
+from app.services.medicos_register_service import create_medico_and_solicitud, save_medico_admin_draft
 
 router = APIRouter()
 
@@ -49,6 +49,157 @@ def _parse_date_or_none(s: str | None) -> date | None:
         return date.fromisoformat(s)
     except Exception:
         return None
+
+def _parse_period_yyyymm(s: str | None) -> int | None:
+    if not s:
+        return None
+    raw = str(s).strip()
+    if not raw:
+        return None
+    if re.fullmatch(r"\d{6}", raw):
+        mm, yyyy = raw[:2], raw[2:]
+    elif re.fullmatch(r"\d{4}[-/]\d{2}", raw):
+        yyyy, mm = raw[:4], raw[5:7]
+    elif re.fullmatch(r"\d{4}\d{2}", raw):
+        yyyy, mm = raw[:4], raw[4:]
+    else:
+        return None
+    try:
+        return int(f"{yyyy}{mm}")
+    except Exception:
+        return None
+
+def _period_col_yyyymm(col):
+    raw = func.nullif(func.trim(col), "0")
+    yyyymm = func.concat(func.substr(raw, 3, 4), func.substr(raw, 1, 2))
+    return cast(func.nullif(yyyymm, "000000"), Integer)
+
+MEDICO_ALL_FIELDS = [
+    "id",
+    "nro_especialidad",
+    "nro_especialidad2",
+    "nro_especialidad3",
+    "nro_especialidad4",
+    "nro_especialidad5",
+    "nro_especialidad6",
+    "nro_socio",
+    "nombre",
+    "nombre_",
+    "apellido",
+    "domicilio_consulta",
+    "telefono_consulta",
+    "matricula_prov",
+    "matricula_nac",
+    "fecha_recibido",
+    "fecha_matricula",
+    "fecha_ingreso",
+    "domicilio_particular",
+    "tele_particular",
+    "celular_particular",
+    "mail_particular",
+    "sexo",
+    "tipo_doc",
+    "documento",
+    "fecha_nac",
+    "cuit",
+    "condicion_impositiva",
+    "anssal",
+    "vencimiento_anssal",
+    "malapraxis",
+    "vencimiento_malapraxis",
+    "monotributista",
+    "factura",
+    "cobertura",
+    "vencimiento_cobertura",
+    "provincia",
+    "localidad",
+    "codigo_postal",
+    "vitalicio",
+    "fecha_vitalicio",
+    "observacion",
+    "categoria",
+    "existe",
+    "excep_desde",
+    "excep_hasta",
+    "excep_desde2",
+    "excep_hasta2",
+    "excep_desde3",
+    "excep_hasta3",
+    "ingresar",
+    "cbu",
+    "nro_resolucion",
+    "fecha_resolucion",
+    "conceps_espec",
+    "attach_titulo",
+    "attach_matricula_nac",
+    "attach_matricula_prov",
+    "attach_resolucion",
+    "attach_habilitacion_municipal",
+    "attach_cuit",
+    "attach_condicion_impositiva",
+    "attach_anssal",
+    "attach_malapraxis",
+    "attach_cbu",
+    "attach_dni",
+    "titulo",
+]
+
+def _medico_col_for(field: str):
+    if hasattr(ListadoMedico, field):
+        return getattr(ListadoMedico, field)
+    upper = field.upper()
+    if hasattr(ListadoMedico, upper):
+        return getattr(ListadoMedico, upper)
+    return None
+
+MEDICO_COLUMNS = {field: _medico_col_for(field) for field in MEDICO_ALL_FIELDS}
+
+MEDICO_NUMERIC_FIELDS = {
+    "id",
+    "nro_especialidad",
+    "nro_especialidad2",
+    "nro_especialidad3",
+    "nro_especialidad4",
+    "nro_especialidad5",
+    "nro_especialidad6",
+    "nro_socio",
+    "matricula_prov",
+    "matricula_nac",
+    "anssal",
+    "cobertura",
+}
+
+MEDICO_DATE_FIELDS = {
+    "fecha_recibido",
+    "fecha_matricula",
+    "fecha_ingreso",
+    "fecha_nac",
+    "vencimiento_anssal",
+    "vencimiento_malapraxis",
+    "vencimiento_cobertura",
+    "fecha_vitalicio",
+    "fecha_resolucion",
+}
+
+MEDICO_TEXT_DATE_FIELDS = {
+    "excep_desde",
+    "excep_hasta",
+    "excep_desde2",
+    "excep_hasta2",
+    "excep_desde3",
+    "excep_hasta3",
+}
+
+MEDICO_EXACT_STRING_FIELDS = {
+    "existe",
+    "sexo",
+    "vitalicio",
+    "monotributista",
+    "factura",
+    "ingresar",
+    "categoria",
+    "tipo_doc",
+}
 
 @router.get(
     "",
@@ -155,6 +306,241 @@ async def listar_medicos(
     return out
 
 
+
+MEDICO_NUMERIC_FIELDS = {
+    "nro_socio", "matricula_prov"
+}
+
+MEDICO_DATE_FIELDS = {
+    # fechas DATE reales
+    "fecha_ingreso",
+    "vencimiento_anssal",
+    "vencimiento_malapraxis",
+    # si tenés otras, agregalas
+}
+
+# Fechas almacenadas como TEXTO con formato MMYYYY / YYYY-MM (si las tuvieras)
+MEDICO_TEXT_DATE_FIELDS = set()
+
+# Strings que deben matchear EXACTO (normalizados)
+MEDICO_EXACT_STRING_FIELDS = {"existe"}  # "S"/"N" o lo que uses
+
+def _parse_date(raw: str):
+    # acepta "YYYY-MM-DD" y "YYYY/MM/DD"
+    try:
+        raw = str(raw).strip().replace("/", "-")
+        y, m, d = raw.split("-")
+        return f"{int(y):04d}-{int(m):02d}-{int(d):02d}"
+    except Exception:
+        return None
+
+def _parse_period_yyyymm(raw: str):
+    # para MMYYYY / YYYY-MM, si lo necesitás
+    s = str(raw).strip().replace("/", "-")
+    if "-" in s:
+        y, m = s.split("-")[:2]
+    else:
+        # ej "122025" -> 2025-12
+        if len(s) != 6:
+            return None
+        m, y = s[:2], s[2:]
+    try:
+        return f"{int(y):04d}{int(m):02d}"
+    except Exception:
+        return None
+
+def _period_col_yyyymm(col):
+    # convierte columna de texto a clave YYYYMM (para comparar)
+    # si no usás "text dates", no lo vas a usar.
+    return func.concat(func.date_format(col, "%Y"), func.date_format(col, "%m"))
+
+@router.get("/all", response_model=List[MedicoBase], dependencies=[Depends(require_scope("medicos:leer"))])
+async def listar_medicos_full(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    skip: int = Query(0, ge=0),
+    limit: Optional[int] = Query(None, ge=1),
+    estado: Optional[Literal["todos", "activos", "inactivos"]] = Query(None),
+
+    # === NUEVO: flags de vencimientos ===
+    malapraxis_vencida: Optional[bool] = Query(None),
+    malapraxis_por_vencer: Optional[bool] = Query(None),
+    anssal_vencido: Optional[bool] = Query(None),
+    anssal_por_vencer: Optional[bool] = Query(None),
+    cobertura_vencida: Optional[bool] = Query(None),
+    cobertura_por_vencer: Optional[bool] = Query(None),
+
+    por_vencer_dias: Optional[int] = Query(30, ge=1, le=365),
+    vencimientos_desde: Optional[str] = Query(None),
+    vencimientos_hasta: Optional[str] = Query(None),
+):
+    params = request.query_params
+
+    # build select — casteos para campos “problemáticos”
+    select_cols = []
+    for field, col in MEDICO_COLUMNS.items():
+        if col is None:
+            continue
+        if field in ("documento", "codigo_postal"):
+            select_cols.append(cast(col, String).label(field))
+        else:
+            select_cols.append(col.label(field))
+
+    stmt = (
+        select(*select_cols)
+        .select_from(ListadoMedico)
+        .order_by(ListadoMedico.NOMBRE.asc())
+        .offset(skip)
+    )
+    if limit is not None:
+        stmt = stmt.limit(limit)
+
+    filters = []
+
+    if estado:
+        if estado == "activos":
+            filters.append(func.upper(func.trim(ListadoMedico.EXISTE)) == "S")
+        elif estado == "inactivos":
+            filters.append(func.upper(func.trim(ListadoMedico.EXISTE)) != "S")
+        # "todos" => sin filtro
+
+    # filtros iguales/like por campo (vienen del modal)
+    for field, col in MEDICO_COLUMNS.items():
+        if col is None:
+            continue
+        if field not in params:
+            continue
+        raw = params.get(field)
+        if raw is None or str(raw).strip() == "":
+            continue
+
+        if field in MEDICO_NUMERIC_FIELDS:
+            try:
+                num_val = int(str(raw).strip())
+            except Exception:
+                raise HTTPException(status_code=400, detail=f"Filtro invalido para {field}")
+            filters.append(col == num_val)
+            continue
+
+        if field in MEDICO_DATE_FIELDS:
+            # para date exacto (si alguien lo usa)
+            date_val = _parse_date(raw)
+            if date_val is None:
+                raise HTTPException(status_code=400, detail=f"Fecha invalida para {field}")
+            filters.append(col == date_val)
+            continue
+
+        if field in MEDICO_TEXT_DATE_FIELDS:
+            period_val = _parse_period_yyyymm(raw)
+            if period_val is None:
+                raise HTTPException(status_code=400, detail=f"Periodo invalido para {field}")
+            filters.append(_period_col_yyyymm(col) == period_val)
+            continue
+
+        # string exacto vs like
+        if field in MEDICO_EXACT_STRING_FIELDS:
+            filters.append(func.upper(func.trim(cast(col, String))) == str(raw).strip().upper())
+        else:
+            filters.append(cast(col, String).ilike(f"%{raw}%"))
+
+    # rangos para FECHAS reales (YYYY-MM-DD)
+    for field in MEDICO_DATE_FIELDS:
+        col = MEDICO_COLUMNS.get(field)
+        if col is None:
+            continue
+        desde = params.get(f"{field}_desde")
+        hasta = params.get(f"{field}_hasta")
+        if desde:
+            start = _parse_date(desde)
+            if start is None:
+                raise HTTPException(status_code=400, detail=f"Fecha invalida para {field}_desde")
+            filters.append(col >= start)
+        if hasta:
+            end = _parse_date(hasta)
+            if end is None:
+                raise HTTPException(status_code=400, detail=f"Fecha invalida para {field}_hasta")
+            filters.append(col <= end)
+
+    # rangos para fechas en TEXTO (si usás ese esquema)
+    for field in MEDICO_TEXT_DATE_FIELDS:
+        col = MEDICO_COLUMNS.get(field)
+        if col is None:
+            continue
+        desde = params.get(f"{field}_desde")
+        hasta = params.get(f"{field}_hasta")
+        if desde:
+            start = _parse_period_yyyymm(desde)
+            if start is None:
+                raise HTTPException(status_code=400, detail=f"Periodo invalido para {field}_desde")
+            filters.append(_period_col_yyyymm(col) >= start)
+        if hasta:
+            end = _parse_period_yyyymm(hasta)
+            if end is None:
+                raise HTTPException(status_code=400, detail=f"Periodo invalido para {field}_hasta")
+            filters.append(_period_col_yyyymm(col) <= end)
+
+    
+    # === VENCIMIENTOS ===
+    # columnas DATE (ajusta nombres si difieren en tu modelo)
+    col_mala = ListadoMedico.VENCIMIENTO_MALAPRAXIS
+    col_ans = ListadoMedico.VENCIMIENTO_ANSSAL
+    col_cob = ListadoMedico.VENCIMIENTO_COBERTURA
+
+    def _parse_date(s: Optional[str]):
+        if not s:
+            return None
+        try:
+            s = s.strip().replace("/", "-")
+            y, m, d = s.split("-")
+            return f"{int(y):04d}-{int(m):02d}-{int(d):02d}"
+        except Exception:
+            return None
+
+    today = date.today()
+    pv_to = today + timedelta(days=(por_vencer_dias or 30))
+
+    # rango global opcional para la sección vencimientos
+    v_desde = _parse_date(vencimientos_desde)
+    v_hasta = _parse_date(vencimientos_hasta)
+
+    def with_global(col, base):
+      cond = base
+      if v_desde:
+          cond = and_(cond, col >= v_desde)
+      if v_hasta:
+          cond = and_(cond, col <= v_hasta)
+      return cond
+
+    venc_group = []
+
+    # mala praxis
+    if malapraxis_vencida:
+        venc_group.append(with_global(col_mala, col_mala < today))
+    if malapraxis_por_vencer:
+        venc_group.append(with_global(col_mala, and_(col_mala >= today, col_mala <= pv_to)))
+
+    # anssal
+    if anssal_vencido:
+        venc_group.append(with_global(col_ans, col_ans < today))
+    if anssal_por_vencer:
+        venc_group.append(with_global(col_ans, and_(col_ans >= today, col_ans <= pv_to)))
+
+    # cobertura
+    if cobertura_vencida:
+        venc_group.append(with_global(col_cob, col_cob < today))
+    if cobertura_por_vencer:
+        venc_group.append(with_global(col_cob, and_(col_cob >= today, col_cob <= pv_to)))
+
+      # Si hay checks marcados, unimos por OR (cualquiera de los tildados)
+    if venc_group:
+        filters.append(or_(*venc_group))
+
+    if filters:
+        stmt = stmt.where(*filters)
+
+    rows = (await db.execute(stmt)).mappings().all()
+    return [dict(r) for r in rows]
+
 @router.get("/count", dependencies=[Depends(require_scope("medicos:leer"))])
 async def contar_medicos(
     q: Optional[str] = Query(None, description="Buscar por nombre, nro socio, matrículas o documento"),
@@ -231,6 +617,7 @@ async def obtener_medico(
             ListadoMedico.titulo.label("titulo"),
             ListadoMedico.FECHA_RECIBIDO.label("fecha_recibido"),
             ListadoMedico.FECHA_MATRICULA.label("fecha_matricula"),
+            ListadoMedico.FECHA_INGRESO.label("fecha_ingreso"),
             ListadoMedico.nro_resolucion.label("nro_resolucion"),
             ListadoMedico.fecha_resolucion.label("fecha_resolucion"),
             ListadoMedico.conceps_espec.label("conceps_espec"),
@@ -374,36 +761,51 @@ async def obtener_medico(
 
     return d
 
-@router.put("/{medico_id}", response_model=MedicoDetailOut)
+@router.put("/{medico_id}", status_code=204)
 async def update_medico(
     medico_id: int,
-    payload: MedicoUpdateIn = Body(default={}),   # ← clave: default={}
+    payload: MedicoUpdateIn = Body(default={}),
     db: AsyncSession = Depends(get_db),
 ):
     row = await db.get(ListadoMedico, medico_id)
     if not row:
         raise HTTPException(404, "Médico no encontrado")
-    
-    data = payload.model_dump(exclude_unset=True)
-    # (si querés ver qué llegó validado)
-    print("📝 PATCH payload normalizado:", data)
 
-    # normalización de fechas → date (tu código actual)
-    for k in [
-        "fecha_nac","fecha_recibido","fecha_matricula","fecha_resolucion",
-        "vencimiento_anssal","vencimiento_malapraxis","vencimiento_cobertura",
-    ]:
-        if k in data:
+    data = payload.model_dump(exclude_unset=True)
+    # normalizaciones puntuales
+    if "existe" in data:
+        data["existe"] = _coerce_existe(data["existe"])
+    if "sexo" in data:
+        data["sexo"] = _coerce_sexo(data["sexo"])
+
+    # fechas a date
+    for k in list(data.keys()):
+        if k in DATE_KEYS:
             data[k] = _parse_date_or_none(data[k])
 
-    for k, v in data.items():
-        if hasattr(row, k):
-            setattr(row, k, v)
+    # aplicar patch con mapping de claves API -> columnas reales
+    touched = []
+    for api_key, value in data.items():
+        attr = FIELD_MAP.get(api_key, api_key)
+        if not hasattr(row, attr):
+            # fallback por si alguna quedó mal mapeada
+            alt = attr.upper()
+            if hasattr(row, alt):
+                attr = alt
+            else:
+                # logueá para detectar errores de mapeo
+                print(f"⚠️  Campo ignorado (sin atributo en modelo): {api_key} -> {attr}")
+                continue
+
+        setattr(row, attr, value)
+        touched.append((api_key, attr, value))
+
+    print("✅ Campos seteados:", touched)
 
     await db.flush()
     await db.commit()
-    await db.refresh(row)
-    return MedicoUpdateOut.model_validate(row, from_attributes=True)
+    # 204: sin body
+    return
 
 
 # Deudas de medicos ===========================================
@@ -1067,7 +1469,7 @@ async def listar_conceptos_medico(
     # 4) Aplicaciones: por todos los ids del grupo, agregadas por nro
     apps_by_nro: DefaultDict[int, List[ConceptoAplicacionOut]] = defaultdict(list)
     if all_desc_ids:
-        DC, LR = DeduccionColegio, LiquidacionResumen
+        DC, LR = Deduccion, LiquidacionResumen
         apps = (await db.execute(
             select(
                 DC.descuento_id, DC.resumen_id, LR.anio, LR.mes,
@@ -1125,6 +1527,7 @@ LABEL_TO_FIELD = {
     "malapraxis":             "attach_malapraxis",
     "cbu":                    "attach_cbu",
     "documento":              "attach_dni",
+    "dni":                    "attach_dni",
 }
 
 @router.post("/register/{medico_id}/document")
@@ -1266,3 +1669,107 @@ async def admin_upload_document(medico_id: int,
         print("ADMIN_UPLOAD_EXC:", repr(e))
     return {"ok": True, "doc_id": doc.id}
 
+
+@router.post("/admin/save-continue", response_model=SaveContinueOut,
+             dependencies=[Depends(require_scope("medicos:agregar"))])
+async def admin_save_continue(body: AdminSaveContinueIn,
+                              db: AsyncSession = Depends(get_db)):
+    med = await save_medico_admin_draft(db, body, medico_id=body.medico_id)
+    return {"medico_id": int(med.ID), "ok": True}
+
+
+@router.patch("/{medico_id}/existe", dependencies=[Depends(require_scope("medicos:editar_perfil"))])
+async def set_existe(medico_id: int, body: ExisteIn, db: AsyncSession = Depends(get_db)):
+    med = await db.get(ListadoMedico, medico_id)
+    if not med:
+        raise HTTPException(404, "Médico no encontrado")
+    med.EXISTE = body.existe  # 'S' o 'N'
+    await db.flush()
+    await db.commit()
+    return {"ok": True, "medico_id": medico_id, "EXISTE": med.EXISTE}
+
+@router.delete("/{medico_id}", status_code=204,
+               dependencies=[Depends(require_scope("medicos:eliminar"))])
+async def delete_medico(medico_id: int, db: AsyncSession = Depends(get_db)):
+    med = await db.get(ListadoMedico, medico_id)
+    if not med:
+        raise HTTPException(404, "Médico no encontrado")
+    await db.delete(med)
+    await db.commit()
+
+
+def storage_path(doc: Documento) -> str:
+  # ajusta según cómo guardes
+  return doc.path  # ej: "/var/data/docs/xxx.pdf"
+
+@router.delete("/{medico_id}/documentos/{doc_id}", status_code=204)
+async def delete_documento(
+    medico_id: int,
+    doc_id: int,
+    db: AsyncSession = Depends(get_db),
+    _=Depends(require_scope("medicos:editar_perfil")),  # protege como corresponda
+):
+    doc = await db.get(Documento, doc_id)
+    if not doc or doc.medico_id != medico_id:
+        raise HTTPException(status_code=404, detail="Documento no encontrado")
+
+    # Si este doc está etiquetado con un tipo conocido, limpiamos el attach_*
+    label_norm = (doc.label or "").replace("attach_", "").lower()
+    attach_field = LABEL_TO_FIELD.get(label_norm)
+
+    if attach_field:
+        medico = await db.get(ListadoMedico, medico_id)
+        if medico:
+            setattr(medico, attach_field, None)
+            db.add(medico)
+
+    # borrar el archivo físico si existe
+    try:
+        path = storage_path(doc)
+        if path and os.path.exists(path):
+            os.remove(path)
+    except Exception:
+        pass  # no romper si no se puede borrar archivo
+
+    await db.delete(doc)
+    await db.commit()
+    return
+
+# (Opcional) endpoint para mapear attach_* a un doc_id
+from pydantic import BaseModel
+
+class AttachMapIn(BaseModel):
+    field: str  # "attach_titulo"
+    doc_id: int | None  # None para limpiar
+
+@router.patch("/{medico_id}/attach", status_code=204)
+async def map_attach(
+    medico_id: int,
+    body: AttachMapIn,
+    db: AsyncSession = Depends(get_db),
+    _=Depends(require_scope("medicos:editar_perfil")),
+):
+    # validar field permitido
+    field = body.field
+    if field not in LABEL_TO_FIELD.values():
+        raise HTTPException(status_code=400, detail="Campo attach_* no permitido")
+
+    # si doc_id no es None, validar que exista y pertenezca al médico
+    if body.doc_id is not None:
+        doc = await db.get(Documento, body.doc_id)
+        if not doc or doc.medico_id != medico_id:
+            raise HTTPException(status_code=404, detail="Documento inválido")
+        # opcional: forzar que el label del doc coincida con el field (titulo -> attach_titulo)
+        expected_norm = field.replace("attach_", "")
+        if (doc.label or "").replace("attach_", "").lower() != expected_norm:
+            # permitís o rechazás; acá advertimos
+            pass
+
+    medico = await db.get(ListadoMedico, medico_id)
+    if not medico:
+        raise HTTPException(status_code=404, detail="Médico no encontrado")
+
+    setattr(medico, field, body.doc_id)  # o url si tu modelo guarda url; ajusta acá
+    db.add(medico)
+    await db.commit()
+    return

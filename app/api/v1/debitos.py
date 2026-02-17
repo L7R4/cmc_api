@@ -8,8 +8,8 @@ from app.db.database import get_db
 from app.db.models import DetalleLiquidacion, Debito_Credito, GuardarAtencion, Liquidacion
 
 from app.schemas.debitos_creditos_schema import DebCreByDetalleIn, DebCreByDetalleOut, DebCreByDetalleRecalcOut, DebCreResumenOut, DebCreRowOut
-from app.services.liquidaciones import recomputar_totales_de_liquidacion, recomputar_totales_de_resumen
-from app.services.liquidaciones_calc import _calc_row_total, _dec
+from app.services.liquidaciones import recalcular_totales_de_liquidacion
+from app.services.liquidaciones import _calc_row_total, _dec
 router_dc = APIRouter()
 
 
@@ -53,8 +53,7 @@ async def upsert_by_detalle(
             if dc:
                 await db.delete(dc)
         det.debito_credito_id = None
-        await recomputar_totales_de_liquidacion(db, liq.id)
-        await recomputar_totales_de_resumen(db,liq.resumen_id)
+        await recalcular_totales_de_liquidacion(db, liq.id)
         
         await db.commit()
 
@@ -123,8 +122,7 @@ async def upsert_by_detalle(
         await db.flush()
         det.debito_credito_id = dc.id
 
-    await recomputar_totales_de_liquidacion(db, liq.id)
-    await recomputar_totales_de_resumen(db,liq.resumen_id)
+    await recalcular_totales_de_liquidacion(db, liq.id)
     
 
     await db.commit()
@@ -173,8 +171,7 @@ async def delete_by_detalle(detalle_id: int, db: AsyncSession = Depends(get_db))
             await db.delete(dc)
         det.debito_credito_id = None
 
-    await recomputar_totales_de_liquidacion(db, liq.id)
-    await recomputar_totales_de_resumen(db,liq.resumen_id)
+    await recalcular_totales_de_liquidacion(db, liq.id)
 
     await db.commit()
 
@@ -199,12 +196,5 @@ async def delete_by_detalle(detalle_id: int, db: AsyncSession = Depends(get_db))
             total_neto=_dec(liq.total_neto),
         ),
     )
-# Alias: POST hace lo mismo que PUT (upsert)
-# @router_dc.post("/by_detalle/{detalle_id}", response_model=DebCreByDetalleOut, status_code=201)
-# async def create_by_detalle(
-#     detalle_id: int,
-#     payload: DebCreByDetalleIn,
-#     db: AsyncSession = Depends(get_db),
-# ):
-#     return await upsert_by_detalle(detalle_id, payload, db)
+
 

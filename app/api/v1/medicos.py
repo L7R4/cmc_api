@@ -617,6 +617,7 @@ async def obtener_medico(
             ListadoMedico.titulo.label("titulo"),
             ListadoMedico.FECHA_RECIBIDO.label("fecha_recibido"),
             ListadoMedico.FECHA_MATRICULA.label("fecha_matricula"),
+            ListadoMedico.FECHA_INGRESO.label("fecha_ingreso"),
             ListadoMedico.nro_resolucion.label("nro_resolucion"),
             ListadoMedico.fecha_resolucion.label("fecha_resolucion"),
             ListadoMedico.conceps_espec.label("conceps_espec"),

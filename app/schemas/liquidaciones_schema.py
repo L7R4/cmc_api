@@ -66,7 +66,7 @@ class LiquidacionBase(BaseModel):
     obra_social_id: int
     mes_periodo: int = Field(ge=1, le=12)
     anio_periodo: int = Field(ge=1900)
-    nro_facutra: str
+    nro_factura: str
 
 
 class LiquidacionCreate(LiquidacionBase):
@@ -87,7 +87,7 @@ class LiquidacionRead(BaseModel):
     mes_periodo: int
     anio_periodo: int
     estado: str
-    nro_facutra: str
+    nro_factura: str
     total_bruto: Decimal
     total_debitos: Decimal
     total_neto: Decimal
@@ -115,6 +115,12 @@ class DetalleLiquidacionRead(BaseModel):
         from_attributes = True
 
 
+class DebitosCreditosRow(BaseModel):
+    tipo: Literal["C", "D"]
+    monto: float = 0
+    obs: Optional[str] = None
+
+
 class DetalleVistaRow(BaseModel):
     det_id: int
     socio: int | str
@@ -133,16 +139,13 @@ class DetalleVistaRow(BaseModel):
     importe: float
     pagado: float
 
-    # DEFAULTS solicitados 👇
-    tipo: Literal["N", "C", "D"] = "N"
-    monto: float = 0
-    obs: Optional[str] = None
+    debitos_creditos_list: List[DebitosCreditosRow] = Field(default_factory=list)
 
     total: float
 
 
 class RefacturarPayload(BaseModel):
     punto_venta: str
-    nro_facutra: str
+    nro_factura: str
 
 

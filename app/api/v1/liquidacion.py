@@ -1,12 +1,7 @@
 from decimal import Decimal
 
 from fastapi.responses import JSONResponse
-from app.services.liquidaciones import now_string, refacturar_service, recalcular_resumen_liquidacion, recomputar_todo_de_liquidacion, recomputar_totales_de_liquidacion, recomputar_totales_de_resumen
-from app.services.liquidaciones_calc import (
-    # calcular_version_y_formatear_nro,
-    # construir_detalles_y_totales,
-    vista_detalles_liquidacion
-    )
+from app.services.liquidaciones import _formatear_nro_factura, build_detalles_liquidacion, now_string, recalcular_totales_de_liquidacion, refacturar_service, recalcular_resumen_liquidacion, vista_detalles_liquidacion
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Path, Response
 from pydantic import BaseModel, Field
@@ -17,7 +12,7 @@ from app.db.database import get_db
 from sqlalchemy import select, update, delete, and_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
-from app.db.models import Debito_Credito, DetalleLiquidacion, LiquidacionResumen, Liquidacion, GuardarAtencion
+from app.db.models import Debito_Credito, DetalleLiquidacion, LiquidacionResumen, Liquidacion, GuardarAtencion, Periodos
 # from app.utils.main import normalizar_periodo
 from app.schemas.liquidaciones_schema import (
     DetalleLiquidacionRead, DetalleVistaRow, LiquidacionResumenCreate, LiquidacionResumenRead, LiquidacionResumenWithItems,
@@ -120,7 +115,6 @@ async def eliminar_resumen(resumen_id: int, db: AsyncSession = Depends(get_db)):
     return None
 
 
-
 # ================================================ 
 # GET: Obtiene un resumen por su ID 
 # ================================================
@@ -149,41 +143,47 @@ async def obtener_resumen(resumen_id: int, db: AsyncSession = Depends(get_db)):
 # ================================================
 # POST: Crea una liquidación por obra social
 # ================================================
-# @router.post("/liquidaciones_por_os/crear", response_model=LiquidacionRead, status_code=201)
-# async def crear_liquidacion(payload: LiquidacionCreate, db: AsyncSession = Depends(get_db)):
-#     exists_res = await db.execute(
-#         select(LiquidacionResumen.id).where(LiquidacionResumen.id == payload.resumen_id).limit(1)
-#     )
-#     if not exists_res.first():
-#         raise HTTPException(400, "resumen_id inválido")
+@router.post("/liquidaciones_por_os/crear", response_model=LiquidacionRead, status_code=201)
+async def crear_liquidacion(payload: LiquidacionCreate, db: AsyncSession = Depends(get_db)):
+    print("Crear liquidación con payload:", payload)
+    exists_res = await db.execute(
+        select(LiquidacionResumen.id).where(LiquidacionResumen.id == payload.resumen_id).limit(1)
+    )
+    if not exists_res.first():
+        raise HTTPException(400, "resumen_id inválido")
+    
+    periodo_stmt = select(Periodos).where(Periodos.MES == payload.mes_periodo, Periodos.ANIO == payload.anio_periodo, Periodos.NRO_OBRA_SOCIAL == payload.obra_social_id, Periodos.CERRADO == "C").limit(1)
+    res = await db.execute(periodo_stmt)
+    obj = res.scalars().first()
+    if not obj:
+        raise HTTPException(400, "Periodo inválido")
+    
 
-#     # calcular versión y formatear nro_factura
-#     version, nro_fmt = await calcular_version_y_formatear_nro(
-#         db, payload.obra_social_id, payload.anio_periodo, payload.mes_periodo, payload.nro_factura
-#     )
+    nro_factura = f"{obj.NRO_FACT_1}-{obj.NRO_FACT_2}"
+    print("Nro factura generado:", nro_factura)
+    # calcular versión y formatear nro_factura
+    # nro_factura_formated = await _formatear_nro_factura(payload.punto_venta, payload.nro_factura)
 
-#     obj = Liquidacion(
-#         resumen_id=payload.resumen_id,
-#         obra_social_id=payload.obra_social_id,
-#         mes_periodo=payload.mes_periodo,
-#         anio_periodo=payload.anio_periodo,
-#         version=version,
-#         nro_factura=nro_fmt,
-#         total_bruto=Decimal("0"),
-#         total_debitos=Decimal("0"),
-#         total_neto=Decimal("0"),
-#     )
-#     db.add(obj)
-#     await db.flush()  # para obtener obj.id
+    obj = Liquidacion(
+        resumen_id=payload.resumen_id,
+        obra_social_id=payload.obra_social_id,
+        mes_periodo=payload.mes_periodo,
+        anio_periodo=payload.anio_periodo,
+        nro_factura=nro_factura,
+        total_bruto=Decimal("0"),
+        total_debitos=Decimal("0"),
+        total_neto=Decimal("0"),
+    )
+    db.add(obj)
+    await db.flush()  # para obtener obj.id
 
-#     # construir detalles + actualizar totales
-#     await construir_detalles_y_totales(db, obj.id)
-#     await recomputar_totales_de_liquidacion(db, obj.id)
-#     await recomputar_totales_de_resumen(db,obj.resumen_id)
+    # construir detalles + actualizar totales
+    await build_detalles_liquidacion(db, obj.id)
+    await recalcular_totales_de_liquidacion(db, obj.id)
 
-#     await db.commit()
-#     await db.refresh(obj)
-#     return obj
+    await db.commit()
+    await db.refresh(obj)
+    return obj
 
 
 # ================================================
@@ -238,9 +238,108 @@ async def eliminar_liquidacion(liquidacion_id: int, db: AsyncSession = Depends(g
     
     await db.delete(obj)
     await db.flush()
-    await recomputar_totales_de_resumen(db,obj.resumen_id)
     await db.commit()
     return None
+
+
+
+# ================================================
+# GET: Obtener detalle vista liquidación por obra social con filtros
+# ================================================
+@router.get(
+    "/liquidaciones_por_os/{liquidacion_id}/detalles_vista",
+    response_model=list[DetalleVistaRow]
+)
+async def detalles_vista(
+    liquidacion_id: int,
+    medico_id: Optional[int] = Query(None),
+    search: Optional[str] = Query(None, description="Busca por NRO_SOCIO, NOMBRE (ListadoMedico) o CODIGO_PRESTACION"),
+    db: AsyncSession = Depends(get_db),
+    response: Response = None,
+):
+    items, total = await vista_detalles_liquidacion(
+        db=db,
+        liquidacion_id=liquidacion_id,
+        medico_id=medico_id,
+        search=search,
+    )
+
+    if response is not None:
+        response.headers["X-Total-Count"] = str(total)
+        response.headers["Content-Range"] = f"items 0-{max(total-1,0)}/{total}"
+
+    return items
+
+
+# ================================================
+# GET: Obtener débitos y créditos aplicados segun filtros
+# ================================================
+@router.get("/debitos_creditos")
+async def listar_debitos_creditos(
+    medico_id: Optional[int] = None,
+    obra_social_id: Optional[int] = None,
+    periodo: Optional[str] = Query(None, description="YYYY-MM"),
+    skip: int = Query(0, ge=0), limit: int = Query(1000, ge=1, le=5000),
+    db: AsyncSession = Depends(get_db),
+):
+    stmt = select(Debito_Credito)
+    if medico_id is not None:
+        # Si necesitás vincular por prestacion -> medico, esto se resuelve en una vista uniendo con DetalleLiquidacion.
+        # Aquí filtro sólo por atributos nativos del DC.
+        pass
+    if obra_social_id is not None:
+        stmt = stmt.where(Debito_Credito.obra_social_id == obra_social_id)
+    if periodo:
+        stmt = stmt.where(Debito_Credito.periodo == periodo)
+    stmt = stmt.offset(skip).limit(limit)
+    res = await db.execute(stmt)
+    return [dc.__dict__ for dc in res.scalars().all()]
+
+
+# ================================================
+# POST: Cerrar una liquidación por obra social
+# ================================================
+@router.post("/liquidaciones_por_os/{liquidacion_id}/cerrar", status_code=204)
+async def cerrar_liquidacion_endpoint(
+    liquidacion_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    liq = await db.get(Liquidacion, liquidacion_id)
+    if not liq:
+        raise HTTPException(404, "Liquidación no encontrada")
+    if liq.estado == "C":
+        raise HTTPException(409, "La liquidación ya está cerrada")
+
+    # 1) calcular pagados detalle por detalle con la lógica nueva
+    # await recomputar_todo_de_liquidacion(db, liquidacion_id)
+
+    # 2) sellar estado
+    liq.estado = "C"
+    liq.cierre_timestamp = now_string()
+    await db.commit()
+    return None
+
+
+# ================================================
+# POST: Refacturar una liquidación por obra social pasandole nuevo punto de venta y nro de factura
+# ================================================
+@router.post("/liquidaciones_por_os/{liquidacion_id}/refacturar", response_model=LiquidacionRead, status_code=201)
+async def refacturar(liquidacion_id: int, payload: RefacturarPayload, db: AsyncSession = Depends(get_db)):
+    nueva = await refacturar_service(db, liquidacion_id, payload.punto_venta, payload.nro_factura)
+    await db.commit()
+    # await db.refresh(nueva)
+    return JSONResponse({
+        "id": nueva.id,
+        "resumen_id": nueva.resumen_id,
+        "mes_periodo": nueva.mes_periodo,
+        "anio_periodo": nueva.anio_periodo,
+        "estado": nueva.estado,
+        "nro_factura": nueva.nro_factura,
+        "total_bruto": nueva.total_bruto,
+        "total_debitos": nueva.total_debitos,
+        "total_neto": nueva.total_neto,
+    })
+
 
 
 # ---------- PRESTACIONES (RAW) ya persistidas en DetalleLiquidacion ----------
@@ -248,7 +347,7 @@ async def eliminar_liquidacion(liquidacion_id: int, db: AsyncSession = Depends(g
     "/liquidaciones_por_os/{liquidacion_id}/detalles",
     response_model=List[DetalleLiquidacionRead],
 )
-async def listar_detalles_liquidacion(
+async def listar_detalles_bruto_liquidacion(
     liquidacion_id: int,
     medico_id: Optional[int] = Query(None),
     obra_social_id: Optional[int] = Query(None),
@@ -273,73 +372,6 @@ async def listar_detalles_liquidacion(
 
     res = await db.execute(stmt)
     return res.scalars().all()
-
-# Mantén el alias actual si ya lo usas en el front
-@router.get(
-    "/liquidaciones_por_os/{liquidacion_id}/detalles_vista",
-    response_model=List[DetalleVistaRow]
-)
-async def detalles_vista(
-    liquidacion_id: int,
-    medico_id: Optional[int] = Query(None),
-    db: AsyncSession = Depends(get_db),
-    response: Response = None,
-):
-    items, total = await vista_detalles_liquidacion(
-        db=db,
-        liquidacion_id=liquidacion_id,
-        medico_id=medico_id,
-    )
-
-    # Headers útiles para el front (opcional mantenerlos)
-    response.headers["X-Total-Count"] = str(total)
-    response.headers["Content-Range"] = f"items 0-{max(total-1,0)}/{total}"
-
-    return items
-
-# ---- Débitos/Créditos listado con filtros ----
-@router.get("/debitos_creditos")
-async def listar_debitos_creditos(
-    medico_id: Optional[int] = None,
-    obra_social_id: Optional[int] = None,
-    periodo: Optional[str] = Query(None, description="YYYY-MM"),
-    skip: int = Query(0, ge=0), limit: int = Query(1000, ge=1, le=5000),
-    db: AsyncSession = Depends(get_db),
-):
-    stmt = select(Debito_Credito)
-    if medico_id is not None:
-        # Si necesitás vincular por prestacion -> medico, esto se resuelve en una vista uniendo con DetalleLiquidacion.
-        # Aquí filtro sólo por atributos nativos del DC.
-        pass
-    if obra_social_id is not None:
-        stmt = stmt.where(Debito_Credito.obra_social_id == obra_social_id)
-    if periodo:
-        stmt = stmt.where(Debito_Credito.periodo == periodo)
-    stmt = stmt.offset(skip).limit(limit)
-    res = await db.execute(stmt)
-    return [dc.__dict__ for dc in res.scalars().all()]
-
-
-@router.post("/liquidaciones_por_os/{liquidacion_id}/cerrar", status_code=204)
-async def cerrar_liquidacion_endpoint(
-    liquidacion_id: int,
-    db: AsyncSession = Depends(get_db),
-):
-    liq = await db.get(Liquidacion, liquidacion_id)
-    if not liq:
-        raise HTTPException(404, "Liquidación no encontrada")
-    if liq.estado == "C":
-        raise HTTPException(409, "La liquidación ya está cerrada")
-
-    # 1) calcular pagados detalle por detalle con la lógica nueva
-    await recomputar_todo_de_liquidacion(db, liquidacion_id)
-
-    # 2) sellar estado
-    liq.estado = "C"
-    liq.cierre_timestamp = now_string()
-    await db.commit()
-    return None
-
 
 
 @router.post("/liquidaciones_por_os/{liquidacion_id}/reabrir", response_model=LiquidacionRead, status_code=200)
@@ -367,23 +399,3 @@ async def reabrir_simple_endpoint(liquidacion_id: int, db: AsyncSession = Depend
         "total_neto": str(liq.total_neto or 0),
     })
 
-
-# ================================================
-# POST: Refacturar una liquidación por obra social pasandole nuevo punto de venta y nro de factura
-# ================================================
-@router.post("/liquidaciones_por_os/{liquidacion_id}/refacturar", response_model=LiquidacionRead, status_code=201)
-async def refacturar(liquidacion_id: int, payload: RefacturarPayload, db: AsyncSession = Depends(get_db)):
-    nueva = await refacturar_service(db, liquidacion_id, payload.punto_venta, payload.nro_factura)
-    await db.commit()
-    # await db.refresh(nueva)
-    return JSONResponse({
-        "id": nueva.id,
-        "resumen_id": nueva.resumen_id,
-        "mes_periodo": nueva.mes_periodo,
-        "anio_periodo": nueva.anio_periodo,
-        "estado": nueva.estado,
-        "nro_factura": nueva.nro_factura,
-        "total_bruto": nueva.total_bruto,
-        "total_debitos": nueva.total_debitos,
-        "total_neto": nueva.total_neto,
-    })

@@ -925,26 +925,20 @@ class DetalleLiquidacion(AuditMixin,Base):
     obra_social_id: Mapped[int] = mapped_column(Integer, index=True)
     prestacion_id: Mapped[str] = mapped_column(String(16))
 
-    # NUEVO: encadenamiento con el detalle anterior de la misma prestación (si existió)
-    prev_detalle_id: Mapped[Optional[int]] = mapped_column(ForeignKey("detalle_liquidacion.id"), nullable=True)
-    prev_detalle: Mapped[Optional["DetalleLiquidacion"]] = relationship(remote_side="DetalleLiquidacion.id")
-
-    # vínculo opcional a un débito/crédito aplicado a ESTA fila (en esta liq/reliq)
     debito_credito_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("debito_credito.id", ondelete="SET NULL"),
         nullable=True,
         index=True
     )
 
-    # cuánto se paga en ESTA liquidación/reliquidación por esta prestación
     pagado: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default=Decimal("0"))
-
-    # renombraste a importe (perfecto)
     importe: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default=0)
 
-    liquidacion: Mapped["Liquidacion"] = relationship(back_populates="detalles")
-    debito_credito: Mapped["Debito_Credito"] = relationship(back_populates="detalles_liquidacion")
-
+    liquidacion: Mapped[Optional["Liquidacion"]] = relationship(back_populates="detalles")
+    debito_credito: Mapped[Optional["Debito_Credito"]] = relationship(
+        back_populates="detalles_liquidacion",
+        foreign_keys=[debito_credito_id],
+    )
     __table_args__ = (
         # Ahora se puede reliquidar la misma prestación en otra liquidación, pero NO duplicarla dentro de la misma
         UniqueConstraint("prestacion_id", "liquidacion_id", "medico_id", name="uq_det_prest_en_liq"),

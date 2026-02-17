@@ -312,6 +312,7 @@ class MedicoDetailOut(BaseModel):
     titulo: Optional[str] = None
     fecha_recibido: Optional[date] = None
     fecha_matricula: Optional[date] = None
+    fecha_ingreso: Optional[date] = None
     nro_resolucion: Optional[str] = None
     fecha_resolucion: Optional[date] = None
     especialidades: List[EspecialidadOut] = []
@@ -375,7 +376,7 @@ class MedicoDetailOut(BaseModel):
         return s
 
     @field_validator(
-        "fecha_recibido", "fecha_matricula", "fecha_nac",
+        "fecha_recibido", "fecha_matricula", "fecha_ingreso", "fecha_nac",
         "vencimiento_anssal", "vencimiento_malapraxis", "vencimiento_cobertura",
         mode="before"
     )

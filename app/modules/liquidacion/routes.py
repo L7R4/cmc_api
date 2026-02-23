@@ -33,15 +33,16 @@ from app.modules.liquidacion.schemas import (
     PreviewResponse,
     RefacturarPayload,
 )
-from app.services.liquidaciones import (
-    _formatear_nro_factura,
-    build_detalles_liquidacion,
-    now_string,
+
+from app.modules.liquidacion.service import(
     recalcular_resumen_liquidacion,
     recalcular_totales_de_liquidacion,
-    refacturar_service,
+    build_detalles_liquidacion,
     vista_detalles_liquidacion,
-)
+    refacturar_service,
+    _formatear_nro_factura,
+    now_string,
+) 
 
 router = APIRouter()
 

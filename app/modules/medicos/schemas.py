@@ -98,6 +98,8 @@ class UserOut(BaseModel):
     scopes: List[str] = []
     role: Optional[str] = None
 
+class UserEnvelope(BaseModel):
+    user: UserOut
 
 class MedicoBase(BaseModel):
     nro_especialidad: Optional[int] = Field(None)

@@ -13,8 +13,8 @@ import time, json, hmac, hashlib, base64, urllib.parse
 from fastapi import HTTPException
 import secrets
 from urllib.parse import urlparse
-from app.schemas.medicos_schema import UserEnvelope, UserOut
-from app.utils.main import get_effective_permission_codes
+from app.modules.medicos.schemas import UserEnvelope, UserOut
+from app.auth.permissions import get_effective_permission_codes
 from starlette.responses import RedirectResponse
 
 router = APIRouter(prefix="/auth", tags=["auth"])

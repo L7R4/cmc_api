@@ -438,28 +438,6 @@ class ValorNomencladorNacional(Base):
     FECHA_CAMBIO: Mapped[Optional[datetime.date]] = mapped_column(Date)
 
 
-class ValorPrestacion(Base):
-    __tablename__ = 'valor_prestacion'
-    __table_args__ = (
-        Index('CODIGOS', 'CODIGOS'),
-        Index('C_P_H_S', 'C_P_H_S'),
-        Index('FECHA_CAMBIO', 'FECHA_CAMBIO'),
-        Index('NRO_OBRASOCIAL', 'NRO_OBRASOCIAL')
-    )
-
-    ID: Mapped[int] = mapped_column(INTEGER(11), primary_key=True)
-    CODIGOS: Mapped[str] = mapped_column(String(8), nullable=False, server_default=text("'0'"))
-    NRO_OBRASOCIAL: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
-    HONORARIOS_A: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
-    HONORARIOS_B: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
-    HONORARIOS_C: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
-    GASTOS: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
-    AYUDANTE_A: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
-    AYUDANTE_B: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
-    AYUDANTE_C: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
-    C_P_H_S: Mapped[str] = mapped_column(String(1), nullable=False, server_default=text("'C'"))
-    FECHA_CAMBIO: Mapped[Optional[datetime.date]] = mapped_column(Date)
-
 
 class ValorPrestacion10(Base):
     __tablename__ = 'valor_prestacion_10'

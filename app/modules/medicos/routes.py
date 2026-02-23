@@ -36,7 +36,7 @@ from app.modules.medicos.schemas import (
 from app.auth.deps import require_scope
 from app.services.email import send_email_resend
 from app.core.config import settings
-from app.services.medicos_register_service import create_medico_and_solicitud, save_medico_admin_draft
+from app.modules.medicos.service import create_medico_and_solicitud, save_medico_admin_draft
 
 router = APIRouter()
 

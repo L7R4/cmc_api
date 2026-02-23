@@ -155,30 +155,8 @@ Todas las settings se cargan vía `app/core/config.py` → `Settings` (pydantic-
 
 ---
 
-<<<<<<< Updated upstream
-## Agregar un nuevo módulo de API
-
-1. Crear `app/modules/<dominio>/` con:
-   - `__init__.py` (vacío)
-   - `routes.py` — `router = APIRouter()` + endpoints
-   - `schemas.py` — modelos Pydantic del dominio
-   - `service.py` — solo si hay lógica de negocio no trivial
-2. Registrar el router en `app/api/routes.py`
-3. Si hay nuevas tablas, agregar modelos a `app/db/models.py` y ejecutar `alembic revision --autogenerate`
-
-### Convenciones
-| Elemento | Convención | Ejemplo |
-|---|---|---|
-| Variable de router | `router` (sin sufijo) | `router = APIRouter()` |
-| Schemas | `<Entidad><Acción>` | `MedicoCreate`, `LiquidacionRead` |
-| Servicios | verbos async, descriptivos | `async def calcular_liquidacion(...)` |
-| DB dependency | `db: AsyncSession = Depends(get_db)` | importar desde `app.db.database` |
-
-
-=======
 1. Crear `app/api/v1/<modulo>.py` con un `router = APIRouter()`
 2. Agregar la lógica de servicio en `app/services/<modulo>.py`
 3. Agregar schemas Pydantic en `app/schemas/<modulo>_schema.py`
 4. Registrar el router en `app/api/routes.py`
 5. Si se necesitan nuevas tablas en la DB, agregar modelos a `app/db/models.py` y ejecutar `alembic revision --autogenerate`
->>>>>>> Stashed changes

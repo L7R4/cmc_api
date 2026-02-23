@@ -1,79 +1,71 @@
-from datetime import date
-from typing import List, Literal, Optional
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.database import get_db
-from app.db.models import ObrasSociales, ValoresBoletin
-from app.modules.catalogs.schemas import ValoresBoletinOut
+from app.db.models import ObrasSociales, ValorPrestacion
+from app.modules.catalogs.schemas import ValorPrestacionOut
 
 router = APIRouter()
 
 
 @router.get(
     "/boletin",
-    response_model=List[ValoresBoletinOut],
-    summary="Listar valores de boletín con filtros",
+    response_model=List[ValorPrestacionOut],
+    summary="Listar valores de prestación (primero por código y obra social)",
 )
 async def listar_valores_boletin(
     db: AsyncSession = Depends(get_db),
-    nro_obrasocial: Optional[int] = Query(None, description="Nro de obra social"),
-    nivel: Optional[int] = Query(None, ge=0, description="Nivel"),
-    fecha_cambio: Optional[date] = Query(None, description="Fecha de cambio exacta (YYYY-MM-DD)"),
-    categoria: Optional[Literal["A", "B", "C", "a", "b", "c"]] = Query(None, description="Filtrar por categoría declarada (A/B/C)"),
+    nro_obra_social: Optional[int] = Query(None, description="Nro de obra social"),
+    codigo: Optional[str] = Query(None, description="Código de prestación"),
+    page: int = Query(1, ge=1, description="Número de página"),
+    size: int = Query(50, ge=1, le=500, description="Registros por página"),
 ):
-    os_num = getattr(ObrasSociales, "NRO_OBRASOCIAL", None)
-    os_name = getattr(ObrasSociales, "OBRA_SOCIAL", None)
+    # Por cada par (NRO_OBRASOCIAL, CODIGOS) puede haber duplicados; tomamos el de menor ID.
+    subq = (
+        select(func.min(ValorPrestacion.ID).label("min_id"))
+        .group_by(ValorPrestacion.NRO_OBRASOCIAL, ValorPrestacion.CODIGOS)
+        .subquery()
+    )
 
     stmt = (
         select(
-            ValoresBoletin.ID.label("id"),
-            ValoresBoletin.NRO_OBRASOCIAL.label("nro_obrasocial"),
-            os_name.label("obra_social"),
-            ValoresBoletin.NIVEL.label("nivel"),
-            ValoresBoletin.FECHA_CAMBIO.label("fecha_cambio"),
-            ValoresBoletin.CONSULTA.label("consulta"),
-            ValoresBoletin.GALENO_QUIRURGICO.label("galeno_quirurgico"),
-            ValoresBoletin.GASTOS_QUIRURGICOS.label("gastos_quirurgicos"),
-            ValoresBoletin.GALENO_PRACTICA.label("galeno_practica"),
-            ValoresBoletin.GALENO_RADIOLOGICO.label("galeno_radiologico"),
-            ValoresBoletin.GASTOS_RADIOLOGICO.label("gastos_radiologico"),
-            ValoresBoletin.GASTOS_BIOQUIMICOS.label("gastos_bioquimicos"),
-            ValoresBoletin.OTROS_GASTOS.label("otros_gastos"),
-            ValoresBoletin.GALENO_CIRUGIA_ADULTOS.label("galeno_cirugia_adultos"),
-            ValoresBoletin.GALENO_CIRUGIA_INFANTIL.label("galeno_cirugia_infantil"),
-            ValoresBoletin.CONSULTA_ESPECIAL.label("consulta_especial"),
-            ValoresBoletin.CATEGORIA_A.label("categoria_a"),
-            ValoresBoletin.CATEGORIA_B.label("categoria_b"),
-            ValoresBoletin.CATEGORIA_C.label("categoria_c"),
+            ValorPrestacion.ID.label("id"),
+            ValorPrestacion.CODIGOS.label("codigos"),
+            ValorPrestacion.NRO_OBRASOCIAL.label("nro_obrasocial"),
+            ObrasSociales.OBRA_SOCIAL.label("obra_social"),
+            ValorPrestacion.HONORARIOS_A.label("honorarios_a"),
+            ValorPrestacion.HONORARIOS_B.label("honorarios_b"),
+            ValorPrestacion.HONORARIOS_C.label("honorarios_c"),
+            ValorPrestacion.GASTOS.label("gastos"),
+            ValorPrestacion.AYUDANTE_A.label("ayudante_a"),
+            ValorPrestacion.AYUDANTE_B.label("ayudante_b"),
+            ValorPrestacion.AYUDANTE_C.label("ayudante_c"),
+            ValorPrestacion.C_P_H_S.label("c_p_h_s"),
+            ValorPrestacion.FECHA_CAMBIO.label("fecha_cambio"),
         )
-        .select_from(ValoresBoletin)
-        .join(ObrasSociales, os_num == ValoresBoletin.NRO_OBRASOCIAL, isouter=True)
+        .select_from(ValorPrestacion)
+        .join(subq, ValorPrestacion.ID == subq.c.min_id)
+        .join(
+            ObrasSociales,
+            ObrasSociales.NRO_OBRASOCIAL == ValorPrestacion.NRO_OBRASOCIAL,
+            isouter=True,
+        )
     )
 
-    if nro_obrasocial is not None:
-        stmt = stmt.where(ValoresBoletin.NRO_OBRASOCIAL == nro_obrasocial)
-    if nivel is not None:
-        stmt = stmt.where(ValoresBoletin.NIVEL == nivel)
-    if fecha_cambio is not None:
-        stmt = stmt.where(ValoresBoletin.FECHA_CAMBIO == fecha_cambio)
-    if categoria is not None:
-        cat = categoria.upper()
-        stmt = stmt.where(
-            or_(
-                func.upper(ValoresBoletin.CATEGORIA_A) == cat,
-                func.upper(ValoresBoletin.CATEGORIA_B) == cat,
-                func.upper(ValoresBoletin.CATEGORIA_C) == cat,
-            )
-        )
+    if nro_obra_social is not None:
+        stmt = stmt.where(ValorPrestacion.NRO_OBRASOCIAL == nro_obra_social)
+    if codigo is not None:
+        stmt = stmt.where(ValorPrestacion.CODIGOS == codigo)
 
-    stmt = stmt.order_by(
-        ValoresBoletin.NRO_OBRASOCIAL.asc(),
-        ValoresBoletin.NIVEL.asc(),
-        ValoresBoletin.FECHA_CAMBIO.asc(),
+    stmt = (
+        stmt
+        .order_by(ValorPrestacion.NRO_OBRASOCIAL.asc(), ValorPrestacion.CODIGOS.asc())
+        .offset((page - 1) * size)
+        .limit(size)
     )
 
     rows = (await db.execute(stmt)).mappings().all()
-    return [ValoresBoletinOut(**row) for row in rows]
+    return [ValorPrestacionOut(**row) for row in rows]

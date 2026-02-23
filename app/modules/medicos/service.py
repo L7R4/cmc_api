@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.db.models import ListadoMedico, SolicitudRegistro, Especialidad
 from app.core.passwords import hash_password
-from app.utils.main import _parse_date
+from app.common.dates import _parse_date
 
 def _int_or_zero(v: Optional[str]) -> int:
     try:

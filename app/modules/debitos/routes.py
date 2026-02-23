@@ -14,7 +14,7 @@ from app.modules.debitos.schemas import (
     DebCreResumenOut,
     DebCreRowOut,
 )
-from app.services.liquidaciones import _calc_row_total, _dec, recalcular_totales_de_liquidacion
+from app.modules.liquidacion.service import _calc_row_total, _dec, recalcular_totales_de_liquidacion
 
 router = APIRouter()
 

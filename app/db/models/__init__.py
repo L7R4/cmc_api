@@ -8,14 +8,14 @@ from app.db.models.legacy import (
     UnidadNomenclador, UnidadNomenclador10, UnidadNomenclador7,
     UnidadNomencladorInf, UsuarioColegio, ValidarUsuario,
     ValorFijo, ValorNomencladoFijo, ValorNomencladoSwiss,
-    ValorNomencladorNacional, ValorPrestacion, ValorPrestacion10,
+    ValorNomencladorNacional, ValorPrestacion10,
     ValorPrestacion7, ValorPrestacionInf,
 )
 
 from app.db.models.medico import ListadoMedico, Documento
 from app.db.models.liquidacion import GuardarAtencion, LiquidacionResumen, Liquidacion, DetalleLiquidacion
 from app.db.models.financiero import Debito_Credito, Descuentos, SocioDescuento, Deduccion, DeduccionSaldo, DeduccionAplicacion
-from app.db.models.catalogs import Especialidad, ObrasSociales, Periodos, PeriodosDoctor, ValoresBoletin, ValoresBoletinHistorial, ValoresObrasocial
+from app.db.models.catalogs import Especialidad, ObrasSociales, Periodos, ValorPrestacion, PeriodosDoctor, ValoresBoletin, ValoresBoletinHistorial, ValoresObrasocial
 from app.db.models.rbac import Role, Permission, UserRole, RolePermission, UserPermission
 from app.db.models.contenido import Noticia, DocumentoNoticias, PublicidadMedico
 from app.db.models.solicitud import SolicitudRegistro
@@ -30,7 +30,7 @@ __all__ = [
     "UnidadNomenclador", "UnidadNomenclador10", "UnidadNomenclador7",
     "UnidadNomencladorInf", "UsuarioColegio", "ValidarUsuario",
     "ValorFijo", "ValorNomencladoFijo", "ValorNomencladoSwiss",
-    "ValorNomencladorNacional", "ValorPrestacion", "ValorPrestacion10",
+    "ValorNomencladorNacional", "ValorPrestacion10",
     "ValorPrestacion7", "ValorPrestacionInf",
     # medico
     "ListadoMedico", "Documento",
@@ -39,7 +39,7 @@ __all__ = [
     # financiero
     "Debito_Credito", "Descuentos", "SocioDescuento", "Deduccion", "DeduccionSaldo", "DeduccionAplicacion",
     # catalogs
-    "Especialidad", "ObrasSociales", "Periodos", "PeriodosDoctor", "ValoresBoletin", "ValoresBoletinHistorial", "ValoresObrasocial",
+    "Especialidad", "ObrasSociales", "Periodos", "PeriodosDoctor", "ValoresBoletin", "ValoresBoletinHistorial", "ValoresObrasocial","ValorPrestacion",
     # rbac
     "Role", "Permission", "UserRole", "RolePermission", "UserPermission",
     # contenido

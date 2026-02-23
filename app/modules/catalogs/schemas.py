@@ -79,3 +79,58 @@ class ValoresBoletinOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+# ── Valor Fijo ───────────────────────────────────────────────────
+class ValorFijoOut(BaseModel):
+    id: int
+    nro_obra_social: int
+    obra_social: Optional[str] = None
+    codigo: str
+    nro_especialidad: int
+    fecha_cambio: str
+
+    categoria_a: Decimal
+    categoria_b: Decimal
+    categoria_c: Decimal
+    gastos: Decimal
+    ayudante_a: Decimal
+    ayudante_b: Decimal
+    ayudante_c: Decimal
+
+    @field_serializer(
+        "categoria_a", "categoria_b", "categoria_c",
+        "gastos", "ayudante_a", "ayudante_b", "ayudante_c",
+    )
+    def _ser_decimal(self, v: Decimal) -> float:
+        return float(v)
+
+    class Config:
+        from_attributes = True
+
+
+# ── Valor Prestación ─────────────────────────────────────────
+class ValorPrestacionOut(BaseModel):
+    id: int
+    codigos: str
+    nro_obrasocial: int
+    obra_social: Optional[str] = None
+    honorarios_a: Decimal
+    honorarios_b: Decimal
+    honorarios_c: Decimal
+    gastos: Decimal
+    ayudante_a: Decimal
+    ayudante_b: Decimal
+    ayudante_c: Decimal
+    c_p_h_s: str
+    fecha_cambio: Optional[date] = None
+
+    @field_serializer(
+        "honorarios_a", "honorarios_b", "honorarios_c",
+        "gastos", "ayudante_a", "ayudante_b", "ayudante_c",
+    )
+    def _ser_decimal(self, v: Decimal) -> float:
+        return float(v)
+
+    class Config:
+        from_attributes = True

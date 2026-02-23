@@ -155,6 +155,7 @@ Todas las settings se cargan vía `app/core/config.py` → `Settings` (pydantic-
 
 ---
 
+<<<<<<< Updated upstream
 ## Agregar un nuevo módulo de API
 
 1. Crear `app/modules/<dominio>/` con:
@@ -174,3 +175,10 @@ Todas las settings se cargan vía `app/core/config.py` → `Settings` (pydantic-
 | DB dependency | `db: AsyncSession = Depends(get_db)` | importar desde `app.db.database` |
 
 
+=======
+1. Crear `app/api/v1/<modulo>.py` con un `router = APIRouter()`
+2. Agregar la lógica de servicio en `app/services/<modulo>.py`
+3. Agregar schemas Pydantic en `app/schemas/<modulo>_schema.py`
+4. Registrar el router en `app/api/routes.py`
+5. Si se necesitan nuevas tablas en la DB, agregar modelos a `app/db/models.py` y ejecutar `alembic revision --autogenerate`
+>>>>>>> Stashed changes

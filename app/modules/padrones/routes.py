@@ -186,29 +186,29 @@ async def list_medicos_por_obra_social(
 ):
     padron_os_attr = _padron_number_attr()
 
+    LM = aliased(ListadoMedico)
+    OS = aliased(ObrasSociales)
+
     filters = [padron_os_attr == nro_os]
 
     if search:
         s = search.strip()
         if s.isdigit():
-            filters.append(MedicoObraSocial.NRO_SOCIO == int(s))
+            filters.append(LM.NRO_SOCIO == int(s))
         else:
-            filters.append(MedicoObraSocial.NOMBRE.like(f"%{s}%"))
-
-    LM = aliased(ListadoMedico)
-    OS = aliased(ObrasSociales)
+            filters.append(LM.NOMBRE.like(f"%{s}%"))
 
     esp_keys = ["ESP1", "ESP2", "ESP3", "ESP4", "ESP5", "ESP6"]
 
     stmt = (
         select(
             LM.ID.label("ID"),
-            MedicoObraSocial.NRO_SOCIO.label("NRO_SOCIO"),
-            MedicoObraSocial.NOMBRE.label("NOMBRE"),
-            MedicoObraSocial.MATRICULA_PROV.label("MATRICULA_PROV"),
-            MedicoObraSocial.MATRICULA_NAC.label("MATRICULA_NAC"),
-            MedicoObraSocial.CATEGORIA.label("CATEGORIA"),
-            MedicoObraSocial.TELEFONO_CONSULTA.label("TELEFONO_CONSULTA"),
+            LM.NRO_SOCIO.label("NRO_SOCIO"),
+            LM.NOMBRE.label("NOMBRE"),
+            LM.MATRICULA_PROV.label("MATRICULA_PROV"),
+            LM.MATRICULA_NAC.label("MATRICULA_NAC"),
+            LM.CATEGORIA.label("CATEGORIA"),
+            LM.TELEFONO_CONSULTA.label("TELEFONO_CONSULTA"),
             MedicoObraSocial.MARCA.label("MARCA"),
             OS.OBRA_SOCIAL.label("OBRA_SOCIAL"),
             LM.NRO_ESPECIALIDAD.label("ESP1"),
@@ -233,7 +233,7 @@ async def list_medicos_por_obra_social(
 
     offset = (page - 1) * size
     result = await db.execute(
-        stmt.order_by(MedicoObraSocial.NOMBRE.asc())
+        stmt.order_by(LM.NOMBRE.asc())
             .offset(offset)
             .limit(size)
     )

@@ -17,8 +17,27 @@ class Debito_Credito(AuditMixin, Base):
     obra_social_id: Mapped[int] = mapped_column(ForeignKey("obras_sociales.NRO_OBRASOCIAL"), index=True)
     observacion: Mapped[str] = mapped_column(String(255), nullable=True)
     monto: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default=0)
-    periodo: Mapped[str] = mapped_column(String(7), index=True)
-    detalles_liquidacion: Mapped[list["DetalleLiquidacion"]] = relationship(back_populates="debito_credito", passive_deletes=True)
+
+    # AGENT DO IT: reemplazar periodo: String(7) por anio + mes enteros
+    anio: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    mes: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+
+    # AGENT DO IT: FK al detalle (relación N DCs por 1 detalle, FK vive aquí)
+    detalle_liquidacion_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("detalle_liquidacion.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+
+    detalle: Mapped[Optional["DetalleLiquidacion"]] = relationship(
+        back_populates="debitos_creditos",
+        foreign_keys=[detalle_liquidacion_id],
+    )
+
+    __table_args__ = (
+        Index("idx_dc_anio_mes", "anio", "mes"),
+        Index("idx_dc_atencion_os", "id_atencion", "obra_social_id"),
+    )
 
 
 class Descuentos(AuditMixin, Base):
@@ -52,6 +71,14 @@ class Deduccion(AuditMixin, Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
 
     medico_id: Mapped[int] = mapped_column(ForeignKey("listado_medico.ID"), nullable=False, index=True)
+
+    # AGENT DO IT: ahora referencia al resumen en lugar de solo anio/mes
+    resumen_id: Mapped[int] = mapped_column(
+        ForeignKey("liquidacion_resumen.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    # Mantenemos anio/mes derivados del resumen para consultas sin join
     anio: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
     mes: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
 
@@ -64,9 +91,10 @@ class Deduccion(AuditMixin, Base):
     pagado: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
 
     __table_args__ = (
-        UniqueConstraint("medico_id", "anio", "mes", "descuento_id", name="uq_ded_med_per_desc"),
-        UniqueConstraint("medico_id", "descuento_id", "anio", "mes", name="uq_deducc_med_desc_period"),
+        # Unique por resumen + médico + descuento (reemplaza los dos uniques redundantes de anio/mes)
+        UniqueConstraint("resumen_id", "medico_id", "descuento_id", name="uq_ded_resumen_med_desc"),
         Index("idx_ded_med_per", "medico_id", "anio", "mes"),
+        Index("idx_ded_resumen_med", "resumen_id", "medico_id"),
     )
 
 
@@ -90,16 +118,27 @@ class DeduccionAplicacion(AuditMixin, Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
 
-    anio: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
-    mes: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    # AGENT DO IT: usar resumen_id en lugar de anio/mes para queries limpias
+    resumen_id: Mapped[int] = mapped_column(
+        ForeignKey("liquidacion_resumen.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
 
     medico_id: Mapped[int] = mapped_column(ForeignKey("listado_medico.ID"), nullable=False, index=True)
 
-    descuento_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    # AGENT DO IT: concepto_tipo + concepto_id (patrón polimórfico como DeduccionSaldo)
+    concepto_tipo: Mapped[Literal["desc","esp"]] = mapped_column(
+        Enum("desc","esp", name="ded_apl_tipo"),
+        nullable=False,
+        index=True,
+    )
+    concepto_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
 
     aplicado: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), nullable=False, default=Decimal("0.00"), server_default="0.00")
 
     __table_args__ = (
-        UniqueConstraint("anio", "mes", "medico_id", "descuento_id", name="uq_dedapli_med_desc_period"),
-        Index("idx_apl_per_med", "anio", "mes", "medico_id"),
+        UniqueConstraint("resumen_id", "medico_id", "concepto_tipo", "concepto_id", name="uq_dedapli_res_med_conc"),
+        Index("idx_apl_res_med", "resumen_id", "medico_id"),
+        Index("idx_apl_conc", "concepto_tipo", "concepto_id"),
     )

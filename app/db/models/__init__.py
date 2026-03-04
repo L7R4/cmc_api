@@ -13,9 +13,18 @@ from app.db.models.legacy import (
 )
 
 from app.db.models.medico import ListadoMedico, Documento
-from app.db.models.liquidacion import GuardarAtencion, LiquidacionResumen, Liquidacion, DetalleLiquidacion
-from app.db.models.financiero import Debito_Credito, Descuentos, SocioDescuento, Deduccion, DeduccionSaldo, DeduccionAplicacion
-from app.db.models.catalogs import Especialidad, ObrasSociales, Periodos, ValorPrestacion, PeriodosDoctor, ValoresBoletin, ValoresBoletinHistorial, ValoresObrasocial
+from app.db.models.liquidacion import (
+    GuardarAtencion, LiquidacionResumen, Liquidacion,
+    DetalleLiquidacion, LiquidacionMedico, Recibo, ReciboItem,
+)
+from app.db.models.financiero import (
+    Debito_Credito, Descuentos, SocioDescuento,
+    Deduccion, DeduccionSaldo, DeduccionAplicacion,
+)
+from app.db.models.catalogs import (
+    Especialidad, ObrasSociales, Periodos, ValorPrestacion,
+    PeriodosDoctor, ValoresBoletin, ValoresBoletinHistorial, ValoresObrasocial,
+)
 from app.db.models.rbac import Role, Permission, UserRole, RolePermission, UserPermission
 from app.db.models.contenido import Noticia, DocumentoNoticias, PublicidadMedico
 from app.db.models.solicitud import SolicitudRegistro
@@ -35,11 +44,14 @@ __all__ = [
     # medico
     "ListadoMedico", "Documento",
     # liquidacion
-    "GuardarAtencion", "LiquidacionResumen", "Liquidacion", "DetalleLiquidacion",
+    "GuardarAtencion", "LiquidacionResumen", "Liquidacion",
+    "DetalleLiquidacion", "LiquidacionMedico", "Recibo", "ReciboItem",
     # financiero
-    "Debito_Credito", "Descuentos", "SocioDescuento", "Deduccion", "DeduccionSaldo", "DeduccionAplicacion",
+    "Debito_Credito", "Descuentos", "SocioDescuento",
+    "Deduccion", "DeduccionSaldo", "DeduccionAplicacion",
     # catalogs
-    "Especialidad", "ObrasSociales", "Periodos", "PeriodosDoctor", "ValoresBoletin", "ValoresBoletinHistorial", "ValoresObrasocial","ValorPrestacion",
+    "Especialidad", "ObrasSociales", "Periodos", "PeriodosDoctor",
+    "ValoresBoletin", "ValoresBoletinHistorial", "ValoresObrasocial", "ValorPrestacion",
     # rbac
     "Role", "Permission", "UserRole", "RolePermission", "UserPermission",
     # contenido

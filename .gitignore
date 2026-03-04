@@ -24,3 +24,5 @@ uploads
 .idea/
 .vscode/
 .DS_Store
+
+/docs/api/*

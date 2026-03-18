@@ -8,35 +8,129 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import AuditMixin, Base
 
 
-class Debito_Credito(AuditMixin, Base):
-    __tablename__ = "debito_credito"
+class LoteAjuste(AuditMixin, Base):
+    """Agrupación de ajustes (antes debito_credito_snap) para una OS+período."""
+    __tablename__ = "lote_ajuste"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    tipo: Mapped[Literal["d","c"]] = mapped_column(Enum("d","c", name="debcre_tipo"))
-    id_atencion: Mapped[int] = mapped_column(ForeignKey("guardar_atencion.ID", ondelete="CASCADE"), index=True)
-    obra_social_id: Mapped[int] = mapped_column(ForeignKey("obras_sociales.NRO_OBRASOCIAL"), index=True)
-    observacion: Mapped[str] = mapped_column(String(255), nullable=True)
-    monto: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default=0)
 
-    # AGENT DO IT: reemplazar periodo: String(7) por anio + mes enteros
-    anio: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
-    mes: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    # Identifica a qué factura (OS+período) aplican estos ajustes
+    obra_social_id: Mapped[int] = mapped_column(
+        ForeignKey("obras_sociales.NRO_OBRASOCIAL"),
+        nullable=False,
+        index=True,
+    )
+    mes_periodo: Mapped[int] = mapped_column(Integer, nullable=False)
+    anio_periodo: Mapped[int] = mapped_column(Integer, nullable=False)
 
-    # AGENT DO IT: FK al detalle (relación N DCs por 1 detalle, FK vive aquí)
-    detalle_liquidacion_id: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("detalle_liquidacion.id", ondelete="CASCADE"),
+    tipo: Mapped[Literal["normal", "refacturacion"]] = mapped_column(
+        Enum("normal", "refacturacion", name="lote_tipo"),
+        nullable=False,
+        default="normal",
+        server_default="normal",
+    )
+
+    # Para refacturaciones: qué lote está siendo corregido por este
+    snap_origen_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("lote_ajuste.id"),
         nullable=True,
         index=True,
     )
 
-    detalle: Mapped[Optional["DetalleLiquidacion"]] = relationship(
-        back_populates="debitos_creditos",
-        foreign_keys=[detalle_liquidacion_id],
+    estado: Mapped[Literal["A", "C", "L"]] = mapped_column(
+        Enum("A", "C", "L", name="lote_estado"),
+        nullable=False,
+        default="A",
+        server_default="A",
+    )
+
+    # Se setea al "pasar a liquidaciones" — qué pago incluye este lote
+    pago_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("pago.id"),
+        nullable=True,
+        index=True,
+    )
+
+    total_debitos: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), default=0)
+    total_creditos: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), default=0)
+
+    pago: Mapped[Optional["Pago"]] = relationship(
+        back_populates="lotes",
+        foreign_keys=[pago_id],
+    )
+    origen: Mapped[Optional["LoteAjuste"]] = relationship(
+        foreign_keys="[LoteAjuste.snap_origen_id]",
+        primaryjoin="LoteAjuste.snap_origen_id == LoteAjuste.id",
+        remote_side="LoteAjuste.id",
+    )
+    ajustes: Mapped[list["Ajuste"]] = relationship(
+        back_populates="lote",
+        cascade="all, delete-orphan",
+        lazy="selectin",
     )
 
     __table_args__ = (
-        Index("idx_dc_anio_mes", "anio", "mes"),
-        Index("idx_dc_atencion_os", "id_atencion", "obra_social_id"),
+        UniqueConstraint("snap_origen_id", name="uq_lote_origen"),
+        Index("idx_lote_os_per", "obra_social_id", "mes_periodo", "anio_periodo"),
+        Index("idx_lote_pago", "pago_id"),
+    )
+
+
+class Ajuste(AuditMixin, Base):
+    """Ajuste individual dentro de un lote (antes Debito_Credito)."""
+    __tablename__ = "ajuste"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    lote_id: Mapped[int] = mapped_column(
+        ForeignKey("lote_ajuste.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    tipo: Mapped[Literal["d", "c"]] = mapped_column(
+        Enum("d", "c", name="ajuste_tipo"),
+        nullable=False,
+    )
+
+    # Prestación de origen (nullable: ajustes sin prestación específica)
+    id_atencion: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("guardar_atencion.ID", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    medico_id: Mapped[int] = mapped_column(
+        ForeignKey("listado_medico.ID"),
+        nullable=False,
+        index=True,
+    )
+    obra_social_id: Mapped[int] = mapped_column(
+        ForeignKey("obras_sociales.NRO_OBRASOCIAL"),
+        nullable=False,
+        index=True,
+    )
+
+    monto: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), nullable=False)
+    observacion: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+
+    # 'manual' = creado por operador, 'importado' = migración legacy
+    origen: Mapped[Literal["manual", "importado"]] = mapped_column(
+        Enum("manual", "importado", name="ajuste_origen"),
+        nullable=False,
+        default="manual",
+        server_default="manual",
+    )
+
+    # Para idempotencia en importaciones
+    ext_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+
+    lote: Mapped[Optional["LoteAjuste"]] = relationship(back_populates="ajustes")
+
+    __table_args__ = (
+        UniqueConstraint("ext_id", name="uq_ajuste_ext_id"),
+        Index("idx_ajuste_lote", "lote_id"),
+        Index("idx_ajuste_medico", "medico_id"),
     )
 
 
@@ -47,6 +141,7 @@ class Descuentos(AuditMixin, Base):
     nombre: Mapped[str] = mapped_column(String(200), nullable=False)
     precio: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default=0)
     porcentaje: Mapped[Decimal] = mapped_column(DECIMAL(10,2), default=0)
+    aplica_a_todos: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="0")
 
 
 class SocioDescuento(AuditMixin, Base):
@@ -72,15 +167,12 @@ class Deduccion(AuditMixin, Base):
 
     medico_id: Mapped[int] = mapped_column(ForeignKey("listado_medico.ID"), nullable=False, index=True)
 
-    # AGENT DO IT: ahora referencia al resumen en lugar de solo anio/mes
-    resumen_id: Mapped[int] = mapped_column(
-        ForeignKey("liquidacion_resumen.id", ondelete="RESTRICT"),
+    # Referencia al pago (antes resumen_id)
+    pago_id: Mapped[int] = mapped_column(
+        ForeignKey("pago.id", ondelete="RESTRICT"),
         nullable=False,
         index=True,
     )
-    # Mantenemos anio/mes derivados del resumen para consultas sin join
-    anio: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
-    mes: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
 
     descuento_id: Mapped[int | None] = mapped_column(ForeignKey("descuentos.id"), nullable=True, index=True)
 
@@ -91,10 +183,8 @@ class Deduccion(AuditMixin, Base):
     pagado: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
 
     __table_args__ = (
-        # Unique por resumen + médico + descuento (reemplaza los dos uniques redundantes de anio/mes)
-        UniqueConstraint("resumen_id", "medico_id", "descuento_id", name="uq_ded_resumen_med_desc"),
-        Index("idx_ded_med_per", "medico_id", "anio", "mes"),
-        Index("idx_ded_resumen_med", "resumen_id", "medico_id"),
+        UniqueConstraint("pago_id", "medico_id", "descuento_id", name="uq_ded_pago_med_desc"),
+        Index("idx_ded_pago_med", "pago_id", "medico_id"),
     )
 
 
@@ -118,16 +208,15 @@ class DeduccionAplicacion(AuditMixin, Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
 
-    # AGENT DO IT: usar resumen_id en lugar de anio/mes para queries limpias
-    resumen_id: Mapped[int] = mapped_column(
-        ForeignKey("liquidacion_resumen.id", ondelete="RESTRICT"),
+    # pago_id reemplaza resumen_id
+    pago_id: Mapped[int] = mapped_column(
+        ForeignKey("pago.id", ondelete="RESTRICT"),
         nullable=False,
         index=True,
     )
 
     medico_id: Mapped[int] = mapped_column(ForeignKey("listado_medico.ID"), nullable=False, index=True)
 
-    # AGENT DO IT: concepto_tipo + concepto_id (patrón polimórfico como DeduccionSaldo)
     concepto_tipo: Mapped[Literal["desc","esp"]] = mapped_column(
         Enum("desc","esp", name="ded_apl_tipo"),
         nullable=False,
@@ -138,7 +227,7 @@ class DeduccionAplicacion(AuditMixin, Base):
     aplicado: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), nullable=False, default=Decimal("0.00"), server_default="0.00")
 
     __table_args__ = (
-        UniqueConstraint("resumen_id", "medico_id", "concepto_tipo", "concepto_id", name="uq_dedapli_res_med_conc"),
-        Index("idx_apl_res_med", "resumen_id", "medico_id"),
+        UniqueConstraint("pago_id", "medico_id", "concepto_tipo", "concepto_id", name="uq_dedapli_pago_med_conc"),
+        Index("idx_apl_pago_med", "pago_id", "medico_id"),
         Index("idx_apl_conc", "concepto_tipo", "concepto_id"),
     )

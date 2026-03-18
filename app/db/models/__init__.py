@@ -14,11 +14,11 @@ from app.db.models.legacy import (
 
 from app.db.models.medico import ListadoMedico, Documento
 from app.db.models.liquidacion import (
-    GuardarAtencion, LiquidacionResumen, Liquidacion,
-    DetalleLiquidacion, LiquidacionMedico, Recibo, ReciboItem,
+    GuardarAtencion, Pago, Liquidacion,
+    DetalleLiquidacion, PagoMedico, Recibo,
 )
 from app.db.models.financiero import (
-    Debito_Credito, Descuentos, SocioDescuento,
+    LoteAjuste, Ajuste, Descuentos, SocioDescuento,
     Deduccion, DeduccionSaldo, DeduccionAplicacion,
 )
 from app.db.models.catalogs import (
@@ -44,10 +44,10 @@ __all__ = [
     # medico
     "ListadoMedico", "Documento",
     # liquidacion
-    "GuardarAtencion", "LiquidacionResumen", "Liquidacion",
-    "DetalleLiquidacion", "LiquidacionMedico", "Recibo", "ReciboItem",
+    "GuardarAtencion", "Pago", "Liquidacion",
+    "DetalleLiquidacion", "PagoMedico", "Recibo",
     # financiero
-    "Debito_Credito", "Descuentos", "SocioDescuento",
+    "LoteAjuste", "Ajuste", "Descuentos", "SocioDescuento",
     "Deduccion", "DeduccionSaldo", "DeduccionAplicacion",
     # catalogs
     "Especialidad", "ObrasSociales", "Periodos", "PeriodosDoctor",

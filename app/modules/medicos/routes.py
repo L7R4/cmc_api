@@ -24,7 +24,7 @@ from app.core.passwords import hash_password
 from app.db.database import get_db
 from app.db.models import (
     Deduccion, Descuentos, DetalleLiquidacion, Documento, Especialidad, Liquidacion, ListadoMedico,
-    DeduccionSaldo, DeduccionAplicacion, LiquidacionResumen, SolicitudRegistro
+    DeduccionSaldo, DeduccionAplicacion, Pago, SolicitudRegistro
 )
 from app.modules.medicos.schemas import (
     DATE_KEYS, FIELD_MAP, AdminSaveContinueIn, AsignarEspecialidadIn, AsociarConceptoIn,
@@ -110,17 +110,28 @@ def _medico_col_for(field: str):
 
 MEDICO_COLUMNS = {field: _medico_col_for(field) for field in MEDICO_ALL_FIELDS}
 
-MEDICO_NUMERIC_FIELDS = {"nro_socio", "matricula_prov"}
+MEDICO_NUMERIC_FIELDS = {
+    "id", "nro_socio", "matricula_prov", "matricula_nac",
+    "nro_especialidad", "nro_especialidad2", "nro_especialidad3",
+    "nro_especialidad4", "nro_especialidad5", "nro_especialidad6",
+    "anssal", "cobertura",
+}
 
 MEDICO_DATE_FIELDS = {
-    "fecha_ingreso",
-    "vencimiento_anssal",
-    "vencimiento_malapraxis",
+    "fecha_ingreso", "fecha_recibido", "fecha_matricula", "fecha_nac",
+    "fecha_vitalicio", "fecha_resolucion",
+    "vencimiento_anssal", "vencimiento_malapraxis", "vencimiento_cobertura",
 }
 
 MEDICO_TEXT_DATE_FIELDS: set = set()
 
-MEDICO_EXACT_STRING_FIELDS = {"existe"}
+MEDICO_EXACT_STRING_FIELDS = {
+    "existe", "sexo", "categoria", "ingresar", "vitalicio",
+    "monotributista", "factura", "tipo_doc", "condicion_impositiva",
+}
+
+# Campos con búsqueda parcial ILIKE (además del default)
+MEDICO_ILIKE_FIELDS = {"provincia", "localidad"}
 
 
 @router.get(
@@ -224,7 +235,9 @@ async def listar_medicos_full(
     db: AsyncSession = Depends(get_db),
     skip: int = Query(0, ge=0),
     limit: Optional[int] = Query(None, ge=1),
+    q: Optional[str] = Query(None, description="Búsqueda full-text sobre nombre, nro_socio, matricula_prov, documento"),
     estado: Optional[Literal["todos", "activos", "inactivos"]] = Query(None),
+    tiene_malapraxis: Optional[bool] = Query(None, description="True = tiene malapraxis cargada, False = sin malapraxis"),
     malapraxis_vencida: Optional[bool] = Query(None),
     malapraxis_por_vencer: Optional[bool] = Query(None),
     anssal_vencido: Optional[bool] = Query(None),
@@ -234,6 +247,7 @@ async def listar_medicos_full(
     por_vencer_dias: Optional[int] = Query(30, ge=1, le=365),
     vencimientos_desde: Optional[str] = Query(None),
     vencimientos_hasta: Optional[str] = Query(None),
+    especialidad_id: Optional[int] = Query(None, description="ID_COLEGIO_ESPE — busca en los 6 slots de especialidad"),
 ):
     params = request.query_params
 
@@ -250,12 +264,18 @@ async def listar_medicos_full(
         select(*select_cols)
         .select_from(ListadoMedico)
         .order_by(ListadoMedico.NOMBRE.asc())
-        .offset(skip)
     )
-    if limit is not None:
-        stmt = stmt.limit(limit)
 
     filters = []
+
+    if q:
+        like = f"%{q.strip()}%"
+        filters.append(or_(
+            ListadoMedico.NOMBRE.ilike(like),
+            cast(ListadoMedico.NRO_SOCIO, String).ilike(like),
+            cast(ListadoMedico.MATRICULA_PROV, String).ilike(like),
+            cast(ListadoMedico.DOCUMENTO, String).ilike(like),
+        ))
 
     if estado:
         if estado == "activos":
@@ -263,8 +283,60 @@ async def listar_medicos_full(
         elif estado == "inactivos":
             filters.append(func.upper(func.trim(ListadoMedico.EXISTE)) != "S")
 
+    if tiene_malapraxis is True:
+        filters.append(
+            ~(
+                or_(
+                    ListadoMedico.MALAPRAXIS.is_(None),
+                    func.trim(ListadoMedico.MALAPRAXIS) == "",
+                    func.upper(func.trim(ListadoMedico.MALAPRAXIS)) == "A",
+                )
+            )
+        )
+    elif tiene_malapraxis is False:
+        filters.append(
+            or_(
+                ListadoMedico.MALAPRAXIS.is_(None),
+                func.trim(ListadoMedico.MALAPRAXIS) == "",
+                func.upper(func.trim(ListadoMedico.MALAPRAXIS)) == "A",
+            )
+        )
+
+    def _filtrar_especialidad(val: int):
+        return or_(
+            ListadoMedico.NRO_ESPECIALIDAD  == val,
+            ListadoMedico.NRO_ESPECIALIDAD2 == val,
+            ListadoMedico.NRO_ESPECIALIDAD3 == val,
+            ListadoMedico.NRO_ESPECIALIDAD4 == val,
+            ListadoMedico.NRO_ESPECIALIDAD5 == val,
+            ListadoMedico.NRO_ESPECIALIDAD6 == val,
+        )
+
+    if especialidad_id is not None:
+        filters.append(_filtrar_especialidad(especialidad_id))
+
+    # nro_especialidad sin sufijo = busca en los 6 slots (alias de especialidad_id)
+    _nro_espec_raw = params.get("nro_especialidad")
+    if _nro_espec_raw and str(_nro_espec_raw).strip():
+        try:
+            filters.append(_filtrar_especialidad(int(str(_nro_espec_raw).strip())))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Filtro invalido para nro_especialidad")
+
+    # Parámetros reservados que NO deben procesarse en el loop genérico
+    _RESERVED_PARAMS = {
+        "skip", "limit", "q", "estado", "tiene_malapraxis", "especialidad_id",
+        "nro_especialidad",  # manejado arriba con OR en los 6 slots
+        "malapraxis_vencida", "malapraxis_por_vencer",
+        "anssal_vencido", "anssal_por_vencer",
+        "cobertura_vencida", "cobertura_por_vencer",
+        "por_vencer_dias", "vencimientos_desde", "vencimientos_hasta",
+    }
+
     for field, col in MEDICO_COLUMNS.items():
         if col is None:
+            continue
+        if field in _RESERVED_PARAMS:
             continue
         if field not in params:
             continue
@@ -358,6 +430,8 @@ async def listar_medicos_full(
 
     if filters:
         stmt = stmt.where(*filters)
+
+    stmt = stmt.offset(skip).limit(limit if limit is not None else 50)
 
     rows = (await db.execute(stmt)).mappings().all()
     return [dict(r) for r in rows]
@@ -597,11 +671,11 @@ async def deuda_medico(medico_id: int, db: AsyncSession = Depends(get_db)):
     total = Decimal(q_total.scalar_one() or 0)
 
     q_last = await db.execute(
-        select(LiquidacionResumen.anio, LiquidacionResumen.mes)
+        select(Pago.anio, Pago.mes)
         .select_from(DeduccionAplicacion)
-        .join(LiquidacionResumen, LiquidacionResumen.id == DeduccionAplicacion.resumen_id)
+        .join(Pago, Pago.id == DeduccionAplicacion.pago_id)
         .where(DeduccionAplicacion.medico_id == medico_id)
-        .order_by(desc(LiquidacionResumen.anio), desc(LiquidacionResumen.mes))
+        .order_by(desc(Pago.anio), desc(Pago.mes))
         .limit(1)
     )
     row = q_last.first()
@@ -1417,18 +1491,18 @@ async def listar_conceptos_medico(medico_id: int, db: AsyncSession = Depends(get
 
     apps_by_nro: DefaultDict[int, List[ConceptoAplicacionOut]] = defaultdict(list)
     if all_desc_ids:
-        DC, LR = Deduccion, LiquidacionResumen
+        DC, PG = Deduccion, Pago
         apps = (await db.execute(
             select(
-                DC.descuento_id, DC.resumen_id, LR.anio, LR.mes,
+                DC.descuento_id, DC.pago_id, PG.anio, PG.mes,
                 DC.monto_aplicado, DC.porcentaje_aplicado, DC.created_at
             )
-            .join(LR, LR.id == DC.resumen_id)
+            .join(PG, PG.id == DC.pago_id)
             .where(
                 DC.medico_id == medico_id,
                 DC.descuento_id.in_(all_desc_ids),
             )
-            .order_by(desc(LR.anio), desc(LR.mes), DC.created_at.desc())
+            .order_by(desc(PG.anio), desc(PG.mes), DC.created_at.desc())
         )).all()
 
         id_to_nro2: Dict[int, int] = {}
@@ -1436,12 +1510,12 @@ async def listar_conceptos_medico(medico_id: int, db: AsyncSession = Depends(get
             for i in ids:
                 id_to_nro2[i] = n
 
-        for descuento_id, resumen_id, anio, mes, monto, pct, created in apps:
+        for descuento_id, pago_id, anio, mes, monto, pct, created in apps:
             n = id_to_nro2.get(int(descuento_id))
             if n is None:
                 continue
             apps_by_nro[n].append(ConceptoAplicacionOut(
-                resumen_id=int(resumen_id),
+                resumen_id=int(pago_id),
                 periodo=f"{int(anio):04d}-{int(mes):02d}",
                 created_at=created,
                 monto_aplicado=Decimal(str(monto or 0)).quantize(Decimal("0.01")),

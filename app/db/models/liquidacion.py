@@ -87,59 +87,67 @@ class GuardarAtencion(Base):
     FECHA_CIRUGIA: Mapped[Optional[datetime.date]] = mapped_column(Date)
 
 
-class LiquidacionResumen(AuditMixin, Base):
-    __tablename__ = "liquidacion_resumen"
+class Pago(AuditMixin, Base):
+    """Corrida de liquidación global (antes LiquidacionResumen)."""
+    __tablename__ = "pago"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    mes: Mapped[int] = mapped_column(Integer)
-    anio: Mapped[int] = mapped_column(Integer)
-    liquidaciones: Mapped[list["Liquidacion"]] = relationship(
-        back_populates="resumen",
-        cascade="all, delete-orphan",
-        passive_deletes=True,
-        single_parent=True,
-        order_by="(Liquidacion.obra_social_id, Liquidacion.anio_periodo, Liquidacion.mes_periodo)",
-        lazy="selectin",
+    anio: Mapped[int] = mapped_column(Integer, nullable=False)
+    mes: Mapped[int] = mapped_column(Integer, nullable=False)
+    descripcion: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    estado: Mapped[Literal["A", "C"]] = mapped_column(
+        Enum("A", "C", name="pago_estado"), default="A", server_default="A"
+    )
+    cierre_timestamp: Mapped[Optional[datetime.datetime]] = mapped_column(
+        DateTime(timezone=False), nullable=True
     )
 
-    __table_args__ = (
-        UniqueConstraint("anio", "mes", name="uq_liqres_anio_mes"),
+    liquidaciones: Mapped[list["Liquidacion"]] = relationship(
+        back_populates="pago",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
     )
+    lotes: Mapped[list["LoteAjuste"]] = relationship(
+        back_populates="pago",
+        foreign_keys="[LoteAjuste.pago_id]",
+    )
+    recibos: Mapped[list["Recibo"]] = relationship(
+        back_populates="pago",
+    )
+    pagos_medico: Mapped[list["PagoMedico"]] = relationship(
+        back_populates="pago",
+        cascade="all, delete-orphan",
+    )
+
+    # SIN unique en (anio, mes) — múltiples pagos por período permitidos
 
 
 class Liquidacion(AuditMixin, Base):
     __tablename__ = "liquidacion"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    resumen_id: Mapped[int] = mapped_column(ForeignKey("liquidacion_resumen.id"), nullable=False)
+    pago_id: Mapped[int] = mapped_column(ForeignKey("pago.id"), nullable=False, index=True)
 
     obra_social_id: Mapped[int] = mapped_column(Integer, index=True)
     mes_periodo: Mapped[int] = mapped_column(Integer)
     anio_periodo: Mapped[int] = mapped_column(Integer)
 
-    estado: Mapped[Literal["A","C"]] = mapped_column(
-        Enum("A","C", name="liq_estado"), default="A", server_default="A", index=True
-    )
-
-    # AGENT DO IT: cierre_timestamp como DateTime real (no string)
-    cierre_timestamp: Mapped[Optional[datetime.datetime]] = mapped_column(
-        DateTime(timezone=False), nullable=True
-    )
-
     nro_factura: Mapped[Optional[str]] = mapped_column(String(30))
-    refacturado_from: Mapped[Optional[int]] = mapped_column(ForeignKey("liquidacion.id"), nullable=True, index=True)
 
-    total_bruto: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default=0)
-    total_debitos: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default=0)
-    total_neto: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default=0)
+    total_bruto: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), default=0)
+    total_debitos: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), default=0)
+    total_creditos: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), default=0)
+    total_neto: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), default=0)
 
-    resumen: Mapped[Optional["LiquidacionResumen"]] = relationship(back_populates="liquidaciones")
-    detalles: Mapped[list["DetalleLiquidacion"]] = relationship(back_populates="liquidacion", cascade="all, delete-orphan")
+    pago: Mapped[Optional["Pago"]] = relationship(back_populates="liquidaciones")
+    detalles: Mapped[list["DetalleLiquidacion"]] = relationship(
+        back_populates="liquidacion",
+        cascade="all, delete-orphan",
+    )
 
     __table_args__ = (
-        UniqueConstraint("resumen_id", "obra_social_id", "mes_periodo", "anio_periodo", name="uq_liq_res_os_per_v2"),
-        Index("idx_liq_res_os_per", "resumen_id", "obra_social_id", "mes_periodo", "anio_periodo"),
-        Index("idx_liq_os_per_version", "obra_social_id", "anio_periodo", "mes_periodo"),
+        UniqueConstraint("pago_id", "obra_social_id", "mes_periodo", "anio_periodo", name="uq_liq_pago_os_per"),
+        Index("idx_liq_pago_os_per", "pago_id", "obra_social_id", "mes_periodo", "anio_periodo"),
     )
 
 
@@ -152,43 +160,29 @@ class DetalleLiquidacion(AuditMixin, Base):
     medico_id: Mapped[int] = mapped_column(Integer, index=True)
     obra_social_id: Mapped[int] = mapped_column(Integer, index=True)
 
-    # AGENT DO IT: prestacion_id ahora es Integer FK a guardar_atencion.ID
     prestacion_id: Mapped[int] = mapped_column(
         ForeignKey("guardar_atencion.ID", ondelete="RESTRICT"),
         nullable=False,
         index=True,
     )
 
-    pagado: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default=Decimal("0"))
-    importe: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default=0)
+    pagado: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), default=Decimal("0"))
+    importe: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), default=0)
 
     liquidacion: Mapped[Optional["Liquidacion"]] = relationship(back_populates="detalles")
 
-    # AGENT DO IT: relación 1 detalle → N débitos/créditos (invertida: FK está en Debito_Credito)
-    debitos_creditos: Mapped[list["Debito_Credito"]] = relationship(
-        back_populates="detalle",
-        cascade="all, delete-orphan",
-        passive_deletes=True,
-        foreign_keys="[Debito_Credito.detalle_liquidacion_id]",
-    )
-
     __table_args__ = (
         UniqueConstraint("prestacion_id", "liquidacion_id", "medico_id", name="uq_det_prest_en_liq"),
-        Index("idx_det_os_liq_med", "obra_social_id", "liquidacion_id", "medico_id"),
-        Index("idx_det_prest", "prestacion_id"),
     )
 
 
-class LiquidacionMedico(AuditMixin, Base):
-    """
-    AGENT DO IT: Resumen por médico por corrida de liquidación.
-    Tabla 'congelada' con totales por médico para trazabilidad y emisión de recibos.
-    """
-    __tablename__ = "liquidacion_medico"
+class PagoMedico(AuditMixin, Base):
+    """Resumen por médico para una corrida de pago (antes LiquidacionMedico)."""
+    __tablename__ = "pago_medico"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    resumen_id: Mapped[int] = mapped_column(
-        ForeignKey("liquidacion_resumen.id", ondelete="CASCADE"),
+    pago_id: Mapped[int] = mapped_column(
+        ForeignKey("pago.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )
@@ -198,37 +192,35 @@ class LiquidacionMedico(AuditMixin, Base):
         index=True,
     )
 
-    bruto: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default=Decimal("0"), nullable=False)
-    debitos: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default=Decimal("0"), nullable=False)
-    creditos: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default=Decimal("0"), nullable=False)
-    reconocido: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default=Decimal("0"), nullable=False)
-    deducciones: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default=Decimal("0"), nullable=False)
-    neto_a_pagar: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default=Decimal("0"), nullable=False)
+    bruto: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), default=Decimal("0"))
+    debitos: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), default=Decimal("0"))
+    creditos: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), default=Decimal("0"))
+    reconocido: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), default=Decimal("0"))
+    deducciones: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), default=Decimal("0"))
+    neto_a_pagar: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), default=Decimal("0"))
 
-    estado: Mapped[Literal["pendiente","liquidado","pagado"]] = mapped_column(
-        Enum("pendiente","liquidado","pagado", name="liqmed_estado"),
+    estado: Mapped[Literal["pendiente", "liquidado", "pagado"]] = mapped_column(
+        Enum("pendiente", "liquidado", "pagado", name="pagomed_estado"),
         default="pendiente",
         server_default="pendiente",
         nullable=False,
     )
 
+    pago: Mapped[Optional["Pago"]] = relationship(back_populates="pagos_medico")
+
     __table_args__ = (
-        UniqueConstraint("resumen_id", "medico_id", name="uq_liqmed_res_med"),
-        Index("idx_liqmed_res_med", "resumen_id", "medico_id"),
+        UniqueConstraint("pago_id", "medico_id", name="uq_pagomed_pago_med"),
     )
 
 
 class Recibo(AuditMixin, Base):
-    """
-    AGENT DO IT: Recibo por médico emitido al cerrar la liquidación.
-    Solo se emite cuando la liquidación está cerrada.
-    """
+    """Recibo emitido a un médico para un pago."""
     __tablename__ = "recibo"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     nro_recibo: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
-    resumen_id: Mapped[int] = mapped_column(
-        ForeignKey("liquidacion_resumen.id", ondelete="RESTRICT"),
+    pago_id: Mapped[int] = mapped_column(
+        ForeignKey("pago.id", ondelete="RESTRICT"),
         nullable=False,
         index=True,
     )
@@ -238,46 +230,21 @@ class Recibo(AuditMixin, Base):
         index=True,
     )
 
-    total_neto: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default=Decimal("0"), nullable=False)
+    total_neto: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), default=Decimal("0"), nullable=False)
     emision_timestamp: Mapped[Optional[datetime.datetime]] = mapped_column(
         DateTime(timezone=False), nullable=True
     )
-    estado: Mapped[Literal["emitido","anulado","pagado"]] = mapped_column(
-        Enum("emitido","anulado","pagado", name="recibo_estado"),
+    estado: Mapped[Literal["emitido", "anulado", "pagado"]] = mapped_column(
+        Enum("emitido", "anulado", "pagado", name="recibo_estado"),
         default="emitido",
         server_default="emitido",
         nullable=False,
     )
 
-    items: Mapped[list["ReciboItem"]] = relationship(
-        back_populates="recibo",
-        cascade="all, delete-orphan",
-        passive_deletes=True,
-    )
+    pago: Mapped[Optional["Pago"]] = relationship(back_populates="recibos")
 
     __table_args__ = (
-        UniqueConstraint("resumen_id", "medico_id", name="uq_recibo_res_med"),
-        Index("idx_recibo_res", "resumen_id"),
+        UniqueConstraint("pago_id", "medico_id", name="uq_recibo_pago_med"),
+        Index("idx_recibo_pago", "pago_id"),
         Index("idx_recibo_med", "medico_id"),
     )
-
-
-class ReciboItem(AuditMixin, Base):
-    """Desglose del recibo por liquidación/OS."""
-    __tablename__ = "recibo_item"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    recibo_id: Mapped[int] = mapped_column(
-        ForeignKey("recibo.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    )
-    liquidacion_id: Mapped[int] = mapped_column(
-        ForeignKey("liquidacion.id", ondelete="RESTRICT"),
-        nullable=False,
-        index=True,
-    )
-    concepto: Mapped[str] = mapped_column(String(200), nullable=False, default="")
-    importe: Mapped[Decimal] = mapped_column(DECIMAL(14,2), default=Decimal("0"), nullable=False)
-
-    recibo: Mapped[Optional["Recibo"]] = relationship(back_populates="items")

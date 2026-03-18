@@ -1,89 +1,39 @@
 # app/modules/liquidacion/service.py
-from typing import Dict, Any, List, Optional, Set, Tuple
-from decimal import Decimal
+"""
+Servicios para el módulo de liquidaciones.
+"""
 import datetime
+import json
 import re
-from sqlalchemy import func, select, or_, and_, literal
-from sqlalchemy.ext.asyncio import AsyncSession
+from decimal import Decimal
+from typing import Any, Dict, List, Optional, Tuple
+
 from fastapi import HTTPException
+from sqlalchemy import and_, case, func, or_, select
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from app.db.models import (
-    DeduccionAplicacion, Deduccion,
-    GuardarAtencion, LiquidacionResumen,
-    ListadoMedico, DetalleLiquidacion, Debito_Credito,
-    Liquidacion, LiquidacionMedico, Recibo, ReciboItem,
+    Ajuste,
+    DeduccionAplicacion,
+    Deduccion,
+    Descuentos,
+    DetalleLiquidacion,
+    Especialidad,
+    GuardarAtencion,
+    ListadoMedico,
+    Liquidacion,
+    LoteAjuste,
+    ObrasSociales,
+    Pago,
+    PagoMedico,
+    Recibo,
 )
 
 
 # ==============================
-# Helpers (nivel módulo)
+# Helpers
 # ==============================
-
-_PERIODO_RX = re.compile(r"^\s*(\d{4})[-/](\d{1,2})\s*$")
-
-
-def normalizar_periodo_flexible(periodo_id: str | int):
-    s = str(periodo_id).strip()
-    m = re.fullmatch(r"(\d{4})-(\d{1,2})", s)
-    if m:
-        anio = int(m.group(1)); mes = int(m.group(2))
-        if 1 <= mes <= 12:
-            return anio, mes, f"{anio:04d}-{mes:02d}"
-    m = re.fullmatch(r"(\d{4})(\d{2})", s)
-    if m:
-        anio = int(m.group(1)); mes = int(m.group(2))
-        if 1 <= mes <= 12:
-            return anio, mes, f"{anio:04d}-{mes:02d}"
-    raise HTTPException(400, "periodo_id inválido; use 'YYYY-MM' o 'YYYYMM'")
-
-
-def separar_anio_mes(periodo_normalizado: str) -> Tuple[int, int]:
-    """'YYYY-MM' -> (YYYY, MM)"""
-    anio_str, mes_str = periodo_normalizado.split("-")
-    return int(anio_str), int(mes_str)
-
-
-def periodo_desde_fecha(fecha: Optional[datetime.date | str]) -> Optional[str]:
-    """date|str -> 'YYYY-MM' | None"""
-    if not fecha:
-        return None
-    if isinstance(fecha, datetime.date):
-        return f"{fecha.year:04d}-{fecha.month:02d}"
-    if isinstance(fecha, str) and len(fecha) >= 7:
-        return fecha[:7]
-    return None
-
-
-def to_int_id(value: Any) -> Optional[int]:
-    try:
-        i = int(value)
-        return i if i > 1 else None
-    except (TypeError, ValueError):
-        return None
-
-
-def to_decimal(value: Any) -> Decimal:
-    if value is None:
-        return Decimal("0")
-    if isinstance(value, Decimal):
-        return value
-    try:
-        return Decimal(str(value))
-    except Exception:
-        return Decimal("0")
-
-
-def to_dec(x) -> Decimal:
-    try:
-        return Decimal(str(x or "0")).quantize(Decimal("0.01"))
-    except Exception:
-        return Decimal("0")
-
-
-def period_str(anio: int, mes: int) -> str:
-    return f"{int(anio):04d}-{int(mes):02d}"
-
 
 def _dec(v) -> float:
     if v is None:
@@ -93,155 +43,11 @@ def _dec(v) -> float:
     return float(v)
 
 
-def now_datetime() -> datetime.datetime:
-    return datetime.datetime.now()
-
-
-# Mantener now_string() por compatibilidad legacy (si algo lo importa)
-def now_string() -> str:
-    return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-
-# ================================================
-# Helper: determinar si es refacturación
-# AGENT DO IT: usar refacturado_from en lugar de regex frágil sobre nro_factura
-# ================================================
-def _is_refacturacion(liq: Liquidacion) -> bool:
-    return bool(liq.refacturado_from)
-
-
-# ================================================
-# Helper: formatear número de factura
-# ================================================
-def _formatear_nro_factura(punto_venta: str, nro_factura: str) -> str:
-    return f"{(punto_venta or '').strip()}-{(nro_factura or '').strip()}"
-
-
-# ================================================
-# Helper: calcular total de fila considerando todos los DCs
-# ================================================
-async def _calc_row_total(db: AsyncSession, det: DetalleLiquidacion, liq: Liquidacion) -> float:
-    """
-    Total de la fila = base ± ajustes de TODOS los DCs asociados.
-    - Si es refacturación: base = det.pagado
-    - Si es liquidación inicial: base = det.importe
-    Ajuste: creditos - debitos
-    """
-    dcs = (await db.execute(
-        select(Debito_Credito.tipo, Debito_Credito.monto)
-        .where(Debito_Credito.detalle_liquidacion_id == det.id)
-    )).all()
-
-    sum_c = sum(Decimal(str(r.monto or 0)) for r in dcs if r.tipo == "c")
-    sum_d = sum(Decimal(str(r.monto or 0)) for r in dcs if r.tipo == "d")
-
-    if _is_refacturacion(liq):
-        base = Decimal(str(det.pagado or 0))
-    else:
-        base = Decimal(str(det.importe or 0))
-
-    return _dec(base + sum_c - sum_d)
-
-
-# ================================================
-# Helper: desdoblar una prestación en actores
-# ================================================
-def desdoblar_en_actores(row: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """
-    row: mapping con columnas de GuardarAtencion.
-    Devuelve piezas: {prestacion_id (int), medico_id, importe}
-    """
-    piezas: List[Dict[str, Any]] = []
-    factor = int(row.get("cantidad") or 1) * int(row.get("cantidad_tratamiento") or 1)
-
-    id_atencion = int(row["id_atencion"])  # prestacion_id ahora es Integer
-
-    # Médico principal (cirujano)
-    medico_id = row.get("medico_id")
-    if medico_id:
-        bruto = to_dec(row.get("valor_cirugia")) * factor
-        if bruto > 0:
-            piezas.append({
-                "prestacion_id": id_atencion,
-                "medico_id": int(medico_id),
-                "importe": bruto,
-            })
-
-    # Ayudante 1
-    ayud1 = row.get("nro_socio_ayudante")
-    if ayud1:
-        imp = to_dec(row.get("valor_ayudante"))
-        if imp > 0:
-            piezas.append({
-                "prestacion_id": id_atencion,
-                "medico_id": int(ayud1),
-                "importe": imp,
-            })
-
-    # Ayudante 2
-    ayud2 = row.get("nro_socio_ayudante_2")
-    if ayud2:
-        imp = to_dec(row.get("valor_ayudante_2"))
-        if imp > 0:
-            piezas.append({
-                "prestacion_id": id_atencion,
-                "medico_id": int(ayud2),
-                "importe": imp,
-            })
-
-    return piezas
-
-
-# ================================================
-# Reabrir liquidación (utilitario)
-# ================================================
-async def reabrir_liquidacion_simple(db: AsyncSession, liquidacion_id: int) -> Liquidacion:
-    liq = await db.get(Liquidacion, liquidacion_id)
-    if not liq:
-        raise HTTPException(404, "Liquidación no encontrada")
-    if liq.estado != "C":
-        raise HTTPException(409, "Solo se puede reabrir una liquidación cerrada")
-    liq.estado = "A"
-    liq.cierre_timestamp = None
-    await db.flush()
-    await db.refresh(liq)
-    return liq
-
-
-# ================================================
-# Servicio de refacturación
-# ================================================
-async def refacturar_service(
-    db: AsyncSession,
-    liquidacion_id: int,
-    punto_venta: str,
-    nro_factura: str,
-) -> Liquidacion:
-    old = await db.get(Liquidacion, liquidacion_id)
-    if not old:
-        raise HTTPException(404, "Liquidación no encontrada")
-    if old.estado != "C":
-        raise HTTPException(409, "Solo se puede refacturar una liquidación cerrada")
-
-    # AGENT DO IT: _formatear_nro_factura ya no requiere db
-    n_factura = _formatear_nro_factura(punto_venta, nro_factura)
-
-    new_liq = Liquidacion(
-        resumen_id=old.resumen_id,
-        obra_social_id=old.obra_social_id,
-        mes_periodo=old.mes_periodo,
-        anio_periodo=old.anio_periodo,
-        refacturado_from=old.id,
-        nro_factura=n_factura,
-        estado="A",
-        cierre_timestamp=None,
-        total_bruto=Decimal("0"),
-        total_debitos=Decimal("0"),
-        total_neto=Decimal("0"),
-    )
-    db.add(new_liq)
-    await db.flush()
-    return new_liq
+def to_dec(x) -> Decimal:
+    try:
+        return Decimal(str(x or "0")).quantize(Decimal("0.01"))
+    except Exception:
+        return Decimal("0")
 
 
 # ================================================
@@ -256,7 +62,6 @@ async def build_detalles_liquidacion(db: AsyncSession, liquidacion_id: int) -> N
 
     anio, mes, os_id = int(liq.anio_periodo), int(liq.mes_periodo), int(liq.obra_social_id)
 
-    # Traer atenciones del periodo (EXISTE='S' excluye eliminadas)
     rows = (await db.execute(
         select(
             GuardarAtencion.ID.label("id_atencion"),
@@ -280,7 +85,6 @@ async def build_detalles_liquidacion(db: AsyncSession, liquidacion_id: int) -> N
         )
     )).mappings().all()
 
-    # Obtener prestacion_ids ya cargados para idempotencia
     existing = set((await db.execute(
         select(DetalleLiquidacion.prestacion_id, DetalleLiquidacion.medico_id)
         .where(DetalleLiquidacion.liquidacion_id == liquidacion_id)
@@ -289,13 +93,12 @@ async def build_detalles_liquidacion(db: AsyncSession, liquidacion_id: int) -> N
     observados: list[dict] = []
 
     for r in rows:
-        piezas = desdoblar_en_actores(dict(r))
+        piezas = _desdoblar_en_actores(dict(r))
         for p in piezas:
             key = (p["prestacion_id"], p["medico_id"])
             if key in existing:
-                continue  # idempotencia
+                continue
 
-            # Validar importe
             if not p["importe"] or p["importe"] <= 0:
                 observados.append({
                     "atencion_id": p["prestacion_id"],
@@ -318,9 +121,45 @@ async def build_detalles_liquidacion(db: AsyncSession, liquidacion_id: int) -> N
     await db.flush()
 
     if observados:
-        # Log observaciones (no bloquea, solo registra)
-        import json
         print(f"[build_detalles] Observaciones en liq {liquidacion_id}: {json.dumps(observados)}")
+
+
+def _desdoblar_en_actores(row: Dict[str, Any]) -> List[Dict[str, Any]]:
+    piezas: List[Dict[str, Any]] = []
+    factor = int(row.get("cantidad") or 1) * int(row.get("cantidad_tratamiento") or 1)
+    id_atencion = int(row["id_atencion"])
+
+    medico_id = row.get("medico_id")
+    if medico_id:
+        bruto = to_dec(row.get("valor_cirugia")) * factor
+        if bruto > 0:
+            piezas.append({
+                "prestacion_id": id_atencion,
+                "medico_id": int(medico_id),
+                "importe": bruto,
+            })
+
+    ayud1 = row.get("nro_socio_ayudante")
+    if ayud1:
+        imp = to_dec(row.get("valor_ayudante"))
+        if imp > 0:
+            piezas.append({
+                "prestacion_id": id_atencion,
+                "medico_id": int(ayud1),
+                "importe": imp,
+            })
+
+    ayud2 = row.get("nro_socio_ayudante_2")
+    if ayud2:
+        imp = to_dec(row.get("valor_ayudante_2"))
+        if imp > 0:
+            piezas.append({
+                "prestacion_id": id_atencion,
+                "medico_id": int(ayud2),
+                "importe": imp,
+            })
+
+    return piezas
 
 
 # ================================================
@@ -340,65 +179,36 @@ async def recalcular_totales_de_liquidacion(db: AsyncSession, liquidacion_id: in
     )
     total_bruto = to_dec(bruto_res.scalar_one())
 
-    # AGENT DO IT: DCs ahora vienen vía detalle_liquidacion_id (N DCs por detalle)
+    # DCs de ajustes en lotes en estado='L' del pago, para esta OS+período
     dc_res = await db.execute(
         select(
-            Debito_Credito.tipo,
-            func.coalesce(func.sum(Debito_Credito.monto), 0),
+            func.coalesce(
+                func.sum(case((Ajuste.tipo == "d", Ajuste.monto), else_=0)), 0
+            ).label("debitos"),
+            func.coalesce(
+                func.sum(case((Ajuste.tipo == "c", Ajuste.monto), else_=0)), 0
+            ).label("creditos"),
         )
-        .join(DetalleLiquidacion, Debito_Credito.detalle_liquidacion_id == DetalleLiquidacion.id)
-        .where(DetalleLiquidacion.liquidacion_id == liquidacion_id)
-        .group_by(Debito_Credito.tipo)
+        .select_from(Ajuste)
+        .join(LoteAjuste, LoteAjuste.id == Ajuste.lote_id)
+        .where(
+            LoteAjuste.pago_id == liq.pago_id,
+            LoteAjuste.obra_social_id == liq.obra_social_id,
+            LoteAjuste.mes_periodo == liq.mes_periodo,
+            LoteAjuste.anio_periodo == liq.anio_periodo,
+            LoteAjuste.estado == "L",
+        )
     )
-
-    sum_debitos = Decimal("0")
-    sum_creditos = Decimal("0")
-    for tipo, total in dc_res.all():
-        if tipo == "d":
-            sum_debitos += to_dec(total)
-        elif tipo == "c":
-            sum_creditos += to_dec(total)
+    dc_row = dc_res.first()
+    sum_debitos = to_dec(dc_row.debitos if dc_row else 0)
+    sum_creditos = to_dec(dc_row.creditos if dc_row else 0)
 
     liq.total_bruto = total_bruto
     liq.total_debitos = sum_debitos
+    liq.total_creditos = sum_creditos
     liq.total_neto = total_bruto - sum_debitos + sum_creditos
 
     await db.flush()
-
-
-# ================================================
-# Recalcular totales de un resumen global
-# ================================================
-async def recalcular_resumen_liquidacion(db: AsyncSession, resumen_id: int) -> Dict[str, Decimal]:
-    resumen = await db.get(LiquidacionResumen, resumen_id)
-    if not resumen:
-        raise HTTPException(404, "LiquidacionResumen no encontrado")
-
-    sums = await db.execute(
-        select(
-            func.coalesce(func.sum(Liquidacion.total_bruto), 0).label("bruto"),
-            func.coalesce(func.sum(Liquidacion.total_debitos), 0).label("debitos"),
-        ).where(Liquidacion.resumen_id == resumen_id)
-    )
-    row = sums.first() or (0, 0)
-    total_bruto = Decimal(str(row.bruto or 0)).quantize(Decimal("0.01"))
-    total_debitos = Decimal(str(row.debitos or 0)).quantize(Decimal("0.01"))
-
-    # AGENT DO IT: usar resumen_id en DeduccionAplicacion (antes usaba created_at extraído)
-    qd = await db.execute(
-        select(func.coalesce(func.sum(DeduccionAplicacion.aplicado), 0))
-        .where(DeduccionAplicacion.resumen_id == resumen_id)
-    )
-    total_deduccion = Decimal(str(qd.scalar_one() or 0)).quantize(Decimal("0.01"))
-
-    total_neto = (total_bruto - (total_debitos + total_deduccion)).quantize(Decimal("0.01"))
-
-    return {
-        "total_bruto": total_bruto,
-        "total_debitos": total_debitos,
-        "total_deduccion": total_deduccion,
-        "total_neto": total_neto,
-    }
 
 
 # ================================================
@@ -410,9 +220,10 @@ async def vista_detalles_liquidacion(
     medico_id: Optional[int] = None,
     search: Optional[str] = None,
 ) -> Tuple[List[Dict[str, Any]], int]:
+    from sqlalchemy import literal
+
     DL = DetalleLiquidacion
     GA = GuardarAtencion
-    DC = Debito_Credito
     LM = aliased(ListadoMedico)
 
     NRO_AFILIADO = getattr(GA, "NRO_AFILIADO", literal(""))
@@ -446,7 +257,6 @@ async def vista_detalles_liquidacion(
                     )
                 )
 
-    # AGENT DO IT: prestacion_id ahora es Integer FK → no necesita cast BigInteger
     stmt_base = (
         select(
             DL.id.label("det_id"),
@@ -469,7 +279,7 @@ async def vista_detalles_liquidacion(
             DL.obra_social_id.label("obra_social_id"),
         )
         .select_from(DL)
-        .outerjoin(GA, DL.prestacion_id == GA.ID)  # FK directa, sin cast
+        .outerjoin(GA, DL.prestacion_id == GA.ID)
         .outerjoin(LM, LM.NRO_SOCIO == DL.medico_id)
         .where(and_(*filters))
         .order_by(DL.id)
@@ -479,38 +289,55 @@ async def vista_detalles_liquidacion(
     if not base_rows:
         return [], 0
 
-    # Obtener todos los DCs por detalle (N DCs por detalle)
-    det_ids = [int(r["det_id"]) for r in base_rows]
+    # Obtener la liquidación para saber pago_id, os, período
+    liq = (await db.execute(
+        select(Liquidacion).where(Liquidacion.id == liquidacion_id)
+    )).scalars().first()
 
-    dc_map: dict[int, list[dict[str, Any]]] = {}
-    if det_ids:
-        stmt_dc = (
+    # Ajustes de lotes en estado 'L' o 'C' del pago para ese OS+período
+    ajuste_map: dict[int, list[dict[str, Any]]] = {}
+    if liq and liq.pago_id:
+        stmt_aj = (
             select(
-                DC.id.label("dc_id"),
-                DC.detalle_liquidacion_id.label("det_id"),
-                DC.tipo.label("tipo"),
-                DC.monto.label("monto"),
-                DC.observacion.label("obs"),
+                Ajuste.id.label("ajuste_id"),
+                Ajuste.medico_id.label("medico_id"),
+                Ajuste.tipo.label("tipo"),
+                Ajuste.monto.label("monto"),
+                Ajuste.observacion.label("obs"),
             )
-            .where(DC.detalle_liquidacion_id.in_(det_ids))
-            .order_by(DC.id)
+            .select_from(Ajuste)
+            .join(LoteAjuste, LoteAjuste.id == Ajuste.lote_id)
+            .where(
+                LoteAjuste.pago_id == liq.pago_id,
+                LoteAjuste.obra_social_id == liq.obra_social_id,
+                LoteAjuste.mes_periodo == liq.mes_periodo,
+                LoteAjuste.anio_periodo == liq.anio_periodo,
+                LoteAjuste.estado.in_(["L", "C"]),
+            )
+            .order_by(Ajuste.id)
         )
+        aj_rows = (await db.execute(stmt_aj)).mappings().all()
 
-        dc_rows = (await db.execute(stmt_dc)).mappings().all()
-
-        for d in dc_rows:
-            det_id = int(d["det_id"])
-            tipo = (d["tipo"] or "").lower()
+        # Agrupar por medico_id para luego matchear con filas de detalles
+        med_ajuste_map: dict[int, list[dict]] = {}
+        for a in aj_rows:
+            med_id = int(a["medico_id"])
+            tipo = (a["tipo"] or "").lower()
             tipo_ui = "D" if tipo == "d" else "C" if tipo == "c" else None
             if not tipo_ui:
                 continue
-
-            dc_map.setdefault(det_id, []).append({
-                "dc_id": int(d["dc_id"]),
+            med_ajuste_map.setdefault(med_id, []).append({
+                "ajuste_id": int(a["ajuste_id"]),
                 "tipo": tipo_ui,
-                "monto": float(Decimal(str(d["monto"] or "0"))),
-                "obs": (d["obs"] or None),
+                "monto": float(Decimal(str(a["monto"] or "0"))),
+                "obs": a["obs"] or None,
             })
+
+        # Asignar por det_id agrupando por medico_id del detalle
+        for r in base_rows:
+            det_id = int(r["det_id"])
+            med_id = int(r["socio"])
+            ajuste_map[det_id] = med_ajuste_map.get(med_id, [])
 
     out: List[Dict[str, Any]] = []
     for r in base_rows:
@@ -522,10 +349,10 @@ async def vista_detalles_liquidacion(
         xCant = f"{cantidad}-{cant_trat}"
 
         det_id = int(r["det_id"])
-        dc_list = dc_map.get(det_id, [])
+        aj_list = ajuste_map.get(det_id, [])
 
-        sum_c = sum(Decimal(str(dc["monto"] or 0)) for dc in dc_list if dc["tipo"] == "C")
-        sum_d = sum(Decimal(str(dc["monto"] or 0)) for dc in dc_list if dc["tipo"] == "D")
+        sum_c = sum(Decimal(str(aj["monto"] or 0)) for aj in aj_list if aj["tipo"] == "C")
+        sum_d = sum(Decimal(str(aj["monto"] or 0)) for aj in aj_list if aj["tipo"] == "D")
 
         total = importe + sum_c - sum_d
 
@@ -546,7 +373,7 @@ async def vista_detalles_liquidacion(
             "coseguro": 0.0,
             "importe": float(importe),
             "pagado": float(pagado),
-            "debitos_creditos_list": dc_list,
+            "debitos_creditos_list": aj_list,
             "total": float(total),
         })
 
@@ -554,238 +381,197 @@ async def vista_detalles_liquidacion(
 
 
 # ================================================
-# Generar / recalcular LiquidacionMedico para un resumen
-# AGENT DO IT: tabla resumen por médico para trazabilidad y recibos
+# Detalle completo de un recibo/preview para un médico en un pago
 # ================================================
-async def generar_liquidacion_medico(db: AsyncSession, resumen_id: int) -> List[Dict[str, Any]]:
+async def detalle_recibo_medico(
+    db: AsyncSession,
+    pago_id: int,
+    medico_id: int,  # listado_medico.ID
+    recibo: Optional["Recibo"] = None,
+) -> Dict[str, Any]:
     """
-    Calcula y persiste/actualiza LiquidacionMedico para todos los médicos del resumen.
-    Fórmula: reconocido = bruto + creditos - debitos
-             neto_a_pagar = reconocido - deducciones
-    Si neto < 0 → neto = 0 (el exceso queda en saldo).
+    Desglose completo para un médico en un pago:
+    - Por cada liquidación del pago donde el médico tiene detalles: bruto, ajustes, reconocido
+    - Deducciones aplicadas
+    - Totales y neto a pagar
     """
-    resumen = await db.get(LiquidacionResumen, resumen_id)
-    if not resumen:
-        raise HTTPException(404, "Resumen no encontrado")
+    lm = await db.get(ListadoMedico, medico_id)
+    if not lm:
+        raise HTTPException(404, "Médico no encontrado")
+    nro_socio = int(lm.NRO_SOCIO)
 
-    # Bruto por médico
-    # DetalleLiquidacion.medico_id guarda NRO_SOCIO; resolvemos al ID real de listado_medico
-    # mediante JOIN para que la FK de LiquidacionMedico sea válida.
-    bruto_q = await db.execute(
-        select(
-            ListadoMedico.ID.label("medico_db_id"),
-            func.coalesce(func.sum(DetalleLiquidacion.importe), 0).label("bruto"),
+    pago_medico = (await db.execute(
+        select(PagoMedico).where(
+            PagoMedico.pago_id == pago_id,
+            PagoMedico.medico_id == medico_id,
         )
-        .select_from(DetalleLiquidacion)
-        .join(Liquidacion, Liquidacion.id == DetalleLiquidacion.liquidacion_id)
-        .join(ListadoMedico, ListadoMedico.NRO_SOCIO == DetalleLiquidacion.medico_id)
-        .where(Liquidacion.resumen_id == resumen_id)
-        .group_by(ListadoMedico.ID)
-    )
-    bruto_map = {int(m): to_dec(b) for m, b in bruto_q.all()}
+    )).scalars().first()
 
-    # Débitos y créditos por médico (via detalle → DC), resolviendo NRO_SOCIO → ID
-    dc_q = await db.execute(
-        select(
-            ListadoMedico.ID.label("medico_db_id"),
-            Debito_Credito.tipo,
-            func.coalesce(func.sum(Debito_Credito.monto), 0).label("total"),
-        )
-        .select_from(Debito_Credito)
-        .join(DetalleLiquidacion, Debito_Credito.detalle_liquidacion_id == DetalleLiquidacion.id)
-        .join(Liquidacion, Liquidacion.id == DetalleLiquidacion.liquidacion_id)
-        .join(ListadoMedico, ListadoMedico.NRO_SOCIO == DetalleLiquidacion.medico_id)
-        .where(Liquidacion.resumen_id == resumen_id)
-        .group_by(ListadoMedico.ID, Debito_Credito.tipo)
-    )
-    deb_map: dict[int, Decimal] = {}
-    cred_map: dict[int, Decimal] = {}
-    for med_id, tipo, total in dc_q.all():
-        med_id = int(med_id)
-        if tipo == "d":
-            deb_map[med_id] = deb_map.get(med_id, Decimal("0")) + to_dec(total)
-        elif tipo == "c":
-            cred_map[med_id] = cred_map.get(med_id, Decimal("0")) + to_dec(total)
-
-    # Deducciones aplicadas por médico en este resumen
-    ded_q = await db.execute(
-        select(
-            DeduccionAplicacion.medico_id,
-            func.coalesce(func.sum(DeduccionAplicacion.aplicado), 0).label("total"),
-        )
-        .where(DeduccionAplicacion.resumen_id == resumen_id)
-        .group_by(DeduccionAplicacion.medico_id)
-    )
-    ded_map = {int(m): to_dec(t) for m, t in ded_q.all()}
-
-    todos_medicos = set(bruto_map) | set(deb_map) | set(cred_map) | set(ded_map)
-
-    # Obtener NRO_SOCIO para mostrar en el front
-    nro_socio_map: dict[int, int] = {}
-    if todos_medicos:
-        ns_rows = (await db.execute(
-            select(ListadoMedico.ID, ListadoMedico.NRO_SOCIO)
-            .where(ListadoMedico.ID.in_(list(todos_medicos)))
-        )).all()
-        nro_socio_map = {int(r.ID): int(r.NRO_SOCIO) for r in ns_rows}
-
-    resultado = []
-
-    for med_id in todos_medicos:
-        bruto = bruto_map.get(med_id, Decimal("0"))
-        debitos = deb_map.get(med_id, Decimal("0"))
-        creditos = cred_map.get(med_id, Decimal("0"))
-        deducciones = ded_map.get(med_id, Decimal("0"))
-
-        reconocido = bruto + creditos - debitos
-        neto_raw = reconocido - deducciones
-        # Regla: neto negativo → neto = 0
-        neto_a_pagar = max(neto_raw, Decimal("0"))
-
-        # Upsert LiquidacionMedico
-        existing = (await db.execute(
-            select(LiquidacionMedico).where(
-                LiquidacionMedico.resumen_id == resumen_id,
-                LiquidacionMedico.medico_id == med_id,
-            )
-        )).scalars().first()
-
-        if existing:
-            existing.bruto = bruto
-            existing.debitos = debitos
-            existing.creditos = creditos
-            existing.reconocido = reconocido
-            existing.deducciones = deducciones
-            existing.neto_a_pagar = neto_a_pagar
-            existing.estado = "liquidado"
-        else:
-            lm = LiquidacionMedico(
-                resumen_id=resumen_id,
-                medico_id=med_id,
-                bruto=bruto,
-                debitos=debitos,
-                creditos=creditos,
-                reconocido=reconocido,
-                deducciones=deducciones,
-                neto_a_pagar=neto_a_pagar,
-                estado="liquidado",
-            )
-            db.add(lm)
-
-        resultado.append({
-            "medico_id": med_id,
-            "nro_socio": nro_socio_map.get(med_id),
-            "bruto": float(bruto),
-            "debitos": float(debitos),
-            "creditos": float(creditos),
-            "reconocido": float(reconocido),
-            "deducciones": float(deducciones),
-            "neto_a_pagar": float(neto_a_pagar),
-        })
-
-    await db.flush()
-    return resultado
-
-
-# ================================================
-# Emitir recibos para un resumen
-# AGENT DO IT: Recibo por médico, solo cuando liquidación está cerrada
-# ================================================
-async def emitir_recibos(db: AsyncSession, resumen_id: int) -> List[Dict[str, Any]]:
-    """
-    Genera (o regenera) recibos para todos los médicos del resumen.
-    Precondición: al menos una liquidación del resumen debe estar cerrada.
-    El nro_recibo se genera como '{resumen_id}-{medico_id}'.
-    """
-    resumen = await db.get(LiquidacionResumen, resumen_id)
-    if not resumen:
-        raise HTTPException(404, "Resumen no encontrado")
-
-    # Verificar que exista al menos una liquidación cerrada
-    closed = (await db.execute(
-        select(Liquidacion.id).where(
-            Liquidacion.resumen_id == resumen_id,
-            Liquidacion.estado == "C",
-        ).limit(1)
-    )).first()
-    if not closed:
-        raise HTTPException(
-            409,
-            "No hay liquidaciones cerradas en este resumen. Solo se emiten recibos cuando la liquidación está cerrada.",
-        )
-
-    # Obtener LiquidacionMedico del resumen
-    lm_rows = (await db.execute(
-        select(LiquidacionMedico).where(LiquidacionMedico.resumen_id == resumen_id)
-    )).scalars().all()
-
-    if not lm_rows:
-        raise HTTPException(
-            409,
-            "Ejecutar generar_liquidacion_medico antes de emitir recibos.",
-        )
-
-    # Obtener liquidaciones del resumen para los items del recibo
     liquidaciones = (await db.execute(
-        select(Liquidacion).where(Liquidacion.resumen_id == resumen_id)
+        select(Liquidacion).where(Liquidacion.pago_id == pago_id)
     )).scalars().all()
 
-    now = datetime.datetime.now()
-    resultado = []
+    os_ids = list({liq.obra_social_id for liq in liquidaciones})
+    os_rows = (await db.execute(
+        select(ObrasSociales.NRO_OBRASOCIAL, ObrasSociales.OBRA_SOCIAL)
+        .where(ObrasSociales.NRO_OBRASOCIAL.in_(os_ids))
+    )).all()
+    os_nombre_map = {r.NRO_OBRASOCIAL: r.OBRA_SOCIAL for r in os_rows}
 
-    for lm in lm_rows:
-        nro = f"{resumen_id:04d}-{lm.medico_id}"
-
-        # Verificar si ya existe recibo
-        existing = (await db.execute(
-            select(Recibo).where(
-                Recibo.resumen_id == resumen_id,
-                Recibo.medico_id == lm.medico_id,
+    liq_items = []
+    for liq in liquidaciones:
+        detalles = (await db.execute(
+            select(DetalleLiquidacion).where(
+                DetalleLiquidacion.liquidacion_id == liq.id,
+                DetalleLiquidacion.medico_id == nro_socio,
             )
-        )).scalars().first()
+        )).scalars().all()
 
-        if existing:
-            if existing.estado == "anulado":
-                existing.estado = "emitido"
-                existing.emision_timestamp = now
-                existing.total_neto = lm.neto_a_pagar
-            recibo = existing
-        else:
-            recibo = Recibo(
-                nro_recibo=nro,
-                resumen_id=resumen_id,
-                medico_id=lm.medico_id,
-                total_neto=lm.neto_a_pagar,
-                emision_timestamp=now,
-                estado="emitido",
+        if not detalles:
+            continue
+
+        bruto = sum(Decimal(str(d.importe or 0)) for d in detalles)
+
+        # Ajustes del lote en estado='L' del pago para esa OS+período y médico
+        aj_rows = (await db.execute(
+            select(
+                Ajuste.id.label("aj_id"),
+                Ajuste.tipo,
+                Ajuste.monto,
+                Ajuste.observacion,
+                Ajuste.id_atencion,
+                GuardarAtencion.CODIGO_PRESTACION.label("codigo"),
+                GuardarAtencion.FECHA_PRESTACION.label("fecha"),
             )
-            db.add(recibo)
-            await db.flush()
+            .select_from(Ajuste)
+            .join(LoteAjuste, LoteAjuste.id == Ajuste.lote_id)
+            .outerjoin(GuardarAtencion, GuardarAtencion.ID == Ajuste.id_atencion)
+            .where(
+                LoteAjuste.pago_id == pago_id,
+                LoteAjuste.obra_social_id == liq.obra_social_id,
+                LoteAjuste.mes_periodo == liq.mes_periodo,
+                LoteAjuste.anio_periodo == liq.anio_periodo,
+                LoteAjuste.estado == "L",
+                Ajuste.medico_id == medico_id,
+            )
+            .order_by(Ajuste.tipo, Ajuste.id)
+        )).mappings().all()
 
-            # Items del recibo: uno por liquidación donde el médico tiene detalles
-            for liq in liquidaciones:
-                sub = (await db.execute(
-                    select(func.coalesce(func.sum(DetalleLiquidacion.importe), 0))
-                    .where(
-                        DetalleLiquidacion.liquidacion_id == liq.id,
-                        DetalleLiquidacion.medico_id == lm.medico_id,
-                    )
-                )).scalar_one()
-                if sub and Decimal(str(sub)) > 0:
-                    item = ReciboItem(
-                        recibo_id=recibo.id,
-                        liquidacion_id=liq.id,
-                        concepto=f"OS {liq.obra_social_id} - {liq.anio_periodo}/{liq.mes_periodo:02d} - {liq.nro_factura or ''}",
-                        importe=to_dec(sub),
-                    )
-                    db.add(item)
+        debitos: list[dict] = []
+        creditos: list[dict] = []
+        total_d = Decimal("0")
+        total_c = Decimal("0")
 
-        resultado.append({
-            "medico_id": lm.medico_id,
-            "nro_recibo": recibo.nro_recibo if existing else nro,
-            "total_neto": float(lm.neto_a_pagar),
-            "estado": "emitido",
+        for aj in aj_rows:
+            monto = to_dec(aj["monto"])
+            entry = {
+                "ajuste_id": int(aj["aj_id"]),
+                "id_atencion": aj["id_atencion"],
+                "codigo_prestacion": aj["codigo"],
+                "fecha": str(aj["fecha"]) if aj["fecha"] else None,
+                "monto": float(monto),
+                "motivo": aj["observacion"],
+            }
+            if aj["tipo"] == "d":
+                debitos.append(entry)
+                total_d += monto
+            else:
+                creditos.append(entry)
+                total_c += monto
+
+        liq_items.append({
+            "liquidacion_id": liq.id,
+            "obra_social_id": liq.obra_social_id,
+            "obra_social_nombre": os_nombre_map.get(liq.obra_social_id, ""),
+            "mes_periodo": liq.mes_periodo,
+            "anio_periodo": liq.anio_periodo,
+            "nro_factura": liq.nro_factura,
+            "bruto": float(bruto),
+            "debitos": debitos,
+            "total_debitos": float(total_d),
+            "creditos": creditos,
+            "total_creditos": float(total_c),
+            "reconocido": float(bruto + total_c - total_d),
         })
 
-    await db.flush()
-    return resultado
+    # Deducciones aplicadas
+    apl_rows = (await db.execute(
+        select(
+            DeduccionAplicacion.concepto_tipo,
+            DeduccionAplicacion.concepto_id,
+            DeduccionAplicacion.aplicado,
+        ).where(
+            DeduccionAplicacion.pago_id == pago_id,
+            DeduccionAplicacion.medico_id == medico_id,
+        )
+    )).mappings().all()
+
+    desc_ids = [r["concepto_id"] for r in apl_rows if r["concepto_tipo"] == "desc"]
+    esp_ids  = [r["concepto_id"] for r in apl_rows if r["concepto_tipo"] == "esp"]
+
+    desc_nombres: dict[int, str] = {}
+    if desc_ids:
+        for r in (await db.execute(
+            select(Descuentos.id, Descuentos.nombre).where(Descuentos.id.in_(desc_ids))
+        )).all():
+            desc_nombres[r.id] = r.nombre
+
+    esp_nombres: dict[int, str] = {}
+    if esp_ids:
+        for r in (await db.execute(
+            select(Especialidad.ID, Especialidad.ESPECIALIDAD).where(Especialidad.ID.in_(esp_ids))
+        )).all():
+            esp_nombres[r.ID] = r.ESPECIALIDAD
+
+    deducciones: list[dict] = []
+    total_deducciones = Decimal("0")
+    for apl in apl_rows:
+        aplicado = to_dec(apl["aplicado"])
+        nombre = (
+            desc_nombres.get(apl["concepto_id"], f"Descuento #{apl['concepto_id']}")
+            if apl["concepto_tipo"] == "desc"
+            else esp_nombres.get(apl["concepto_id"], f"Especialidad #{apl['concepto_id']}")
+        )
+        deducciones.append({
+            "concepto_tipo": apl["concepto_tipo"],
+            "concepto_id": apl["concepto_id"],
+            "nombre": nombre,
+            "aplicado": float(aplicado),
+        })
+        total_deducciones += aplicado
+
+    # Totales
+    if pago_medico:
+        total_bruto      = float(pago_medico.bruto)
+        total_debitos    = float(pago_medico.debitos)
+        total_creditos   = float(pago_medico.creditos)
+        total_reconocido = float(pago_medico.reconocido)
+        neto_a_pagar     = float(pago_medico.neto_a_pagar)
+    else:
+        total_bruto      = sum(l["bruto"] for l in liq_items)
+        total_debitos    = sum(l["total_debitos"] for l in liq_items)
+        total_creditos   = sum(l["total_creditos"] for l in liq_items)
+        total_reconocido = total_bruto + total_creditos - total_debitos
+        neto_a_pagar     = max(0.0, total_reconocido - float(total_deducciones))
+
+    return {
+        "medico": {
+            "id": medico_id,
+            "nro_socio": nro_socio,
+            "nombre": lm.NOMBRE,
+        },
+        "recibo": {
+            "id": recibo.id if recibo else None,
+            "nro_recibo": recibo.nro_recibo if recibo else None,
+            "emision_timestamp": recibo.emision_timestamp if recibo else None,
+            "estado": recibo.estado if recibo else None,
+        },
+        "liquidaciones": liq_items,
+        "deducciones": deducciones,
+        "total_bruto": total_bruto,
+        "total_debitos": total_debitos,
+        "total_creditos": total_creditos,
+        "total_reconocido": total_reconocido,
+        "total_deducciones": float(total_deducciones),
+        "neto_a_pagar": neto_a_pagar,
+    }

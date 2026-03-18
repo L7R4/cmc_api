@@ -102,6 +102,7 @@ class UserEnvelope(BaseModel):
     user: UserOut
 
 class MedicoBase(BaseModel):
+    id: Optional[int] = Field(None)
     nro_especialidad: Optional[int] = Field(None)
     nro_especialidad2: Optional[int] = Field(None)
     nro_especialidad3: Optional[int] = Field(None)

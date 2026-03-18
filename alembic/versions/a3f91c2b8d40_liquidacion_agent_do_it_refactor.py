@@ -148,6 +148,10 @@ def upgrade() -> None:
         ),
     )
     op.create_index('idx_ded_resumen_med', 'deducciones', ['resumen_id', 'medico_id'])
+    try:
+        op.create_index('uq_ded_resumen_med_desc', 'deducciones', ['resumen_id', 'medico_id', 'descuento_id'], unique=True)
+    except Exception:
+        pass
 
     # Eliminar uniques redundantes anteriores
     try:
@@ -201,6 +205,10 @@ def upgrade() -> None:
     # Crear índices
     op.create_index('idx_apl_res_med', 'deduccion_aplicacion', ['resumen_id', 'medico_id'])
     op.create_index('idx_apl_conc', 'deduccion_aplicacion', ['concepto_tipo', 'concepto_id'])
+    try:
+        op.create_index('uq_apl_res_med_conc', 'deduccion_aplicacion', ['resumen_id', 'medico_id', 'concepto_tipo', 'concepto_id'], unique=True)
+    except Exception:
+        pass
 
     # Eliminar columnas antiguas de deduccion_aplicacion
     try:
@@ -328,6 +336,7 @@ def downgrade() -> None:
         "UPDATE deduccion_aplicacion SET descuento_id = concepto_id WHERE concepto_tipo = 'desc'"
     )
     try:
+        op.drop_index('uq_apl_res_med_conc', 'deduccion_aplicacion')
         op.drop_index('idx_apl_conc', 'deduccion_aplicacion')
         op.drop_index('idx_apl_res_med', 'deduccion_aplicacion')
         op.drop_column('deduccion_aplicacion', 'concepto_id')
@@ -338,6 +347,7 @@ def downgrade() -> None:
 
     # 5) Revertir Deduccion
     try:
+        op.drop_index('uq_ded_resumen_med_desc', 'deducciones')
         op.drop_index('idx_ded_resumen_med', 'deducciones')
         op.drop_column('deducciones', 'resumen_id')
     except Exception:

@@ -9,15 +9,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.database import get_db
 from app.db.models import (
-    Debito_Credito,
+    Ajuste,
     Deduccion,
     DeduccionAplicacion,
     DeduccionSaldo,
     Descuentos,
     DetalleLiquidacion,
     Liquidacion,
-    LiquidacionResumen,
     ListadoMedico,
+    LoteAjuste,
+    Pago,
     SocioDescuento,
 )
 
@@ -26,11 +27,13 @@ TWOPLACES = Decimal("0.01")
 
 
 # region Helpers
-async def _base_bruto_por_medico_en_resumen(
-    db: AsyncSession, resumen_id: int
+async def _base_bruto_por_medico_en_pago(
+    db: AsyncSession, pago_id: int
 ) -> dict[int, Decimal]:
-    # DetalleLiquidacion.medico_id guarda NRO_SOCIO; mapeamos a listado_medico.ID (PK real)
-    # para que los keys del dict sean comparables con SocioDescuento.medico_id (FK → ID).
+    """
+    Calcula el bruto por médico para un pago.
+    DetalleLiquidacion.medico_id guarda NRO_SOCIO; mapeamos a listado_medico.ID (PK real).
+    """
     q = await db.execute(
         select(
             ListadoMedico.ID.label("medico_db_id"),
@@ -39,7 +42,7 @@ async def _base_bruto_por_medico_en_resumen(
         .select_from(DetalleLiquidacion)
         .join(Liquidacion, Liquidacion.id == DetalleLiquidacion.liquidacion_id)
         .join(ListadoMedico, ListadoMedico.NRO_SOCIO == DetalleLiquidacion.medico_id)
-        .where(Liquidacion.resumen_id == resumen_id)
+        .where(Liquidacion.pago_id == pago_id)
         .group_by(ListadoMedico.ID)
     )
     out = {}
@@ -73,12 +76,13 @@ def _calc_monto(
     return (Decimal(0), None)
 
 
-async def _disponible_por_medico_en_resumen(
-    db: AsyncSession, resumen_id: int
+async def _disponible_por_medico_en_pago(
+    db: AsyncSession, pago_id: int
 ) -> dict[int, Decimal]:
-    # DetalleLiquidacion.medico_id guarda NRO_SOCIO; resolvemos a listado_medico.ID
-    # para que los keys sean comparables con DeduccionSaldo.medico_id (FK → ID).
-    bruto = await db.execute(
+    """
+    Calcula disponible por médico: bruto + créditos (de lotes='L') - débitos (de lotes='L').
+    """
+    bruto_q = await db.execute(
         select(
             ListadoMedico.ID.label("medico_db_id"),
             func.coalesce(func.sum(DetalleLiquidacion.importe), 0),
@@ -86,34 +90,29 @@ async def _disponible_por_medico_en_resumen(
         .select_from(DetalleLiquidacion)
         .join(Liquidacion, Liquidacion.id == DetalleLiquidacion.liquidacion_id)
         .join(ListadoMedico, ListadoMedico.NRO_SOCIO == DetalleLiquidacion.medico_id)
-        .where(Liquidacion.resumen_id == resumen_id)
+        .where(Liquidacion.pago_id == pago_id)
         .group_by(ListadoMedico.ID)
     )
-    bruto_map = {int(m): Decimal(v or 0) for m, v in bruto}
+    bruto_map = {int(m): Decimal(v or 0) for m, v in bruto_q}
 
-    # DCs via detalle_liquidacion_id (N DCs por detalle), resolviendo NRO_SOCIO → ID
-    qdc = await db.execute(
+    # Ajustes de lotes en estado='L' del pago
+    qaj = await db.execute(
         select(
-            ListadoMedico.ID.label("medico_db_id"),
+            Ajuste.medico_id,
             func.coalesce(
-                func.sum(case((Debito_Credito.tipo == "d", Debito_Credito.monto), else_=0)), 0
+                func.sum(case((Ajuste.tipo == "d", Ajuste.monto), else_=0)), 0
             ),
             func.coalesce(
-                func.sum(case((Debito_Credito.tipo == "c", Debito_Credito.monto), else_=0)), 0
+                func.sum(case((Ajuste.tipo == "c", Ajuste.monto), else_=0)), 0
             ),
         )
-        .select_from(DetalleLiquidacion)
-        .join(Liquidacion, Liquidacion.id == DetalleLiquidacion.liquidacion_id)
-        .join(ListadoMedico, ListadoMedico.NRO_SOCIO == DetalleLiquidacion.medico_id)
-        .outerjoin(
-            Debito_Credito,
-            Debito_Credito.detalle_liquidacion_id == DetalleLiquidacion.id,
-        )
-        .where(Liquidacion.resumen_id == resumen_id)
-        .group_by(ListadoMedico.ID)
+        .select_from(Ajuste)
+        .join(LoteAjuste, LoteAjuste.id == Ajuste.lote_id)
+        .where(LoteAjuste.pago_id == pago_id, LoteAjuste.estado == "L")
+        .group_by(Ajuste.medico_id)
     )
     deb_map, cred_map = {}, {}
-    for med, deb, cred in qdc:
+    for med, deb, cred in qaj:
         deb_map[int(med)] = Decimal(deb or 0)
         cred_map[int(med)] = Decimal(cred or 0)
 
@@ -131,29 +130,32 @@ async def _disponible_por_medico_en_resumen(
 # endregion
 
 
-@router.post("/{resumen_id}/colegio/bulk_generar_descuento/{desc_id}")
+@router.post("/{pago_id}/colegio/bulk_generar_descuento/{desc_id}")
 async def bulk_generar_descuento(
-    resumen_id: int, desc_id: int, db: AsyncSession = Depends(get_db)
+    pago_id: int, desc_id: int, db: AsyncSession = Depends(get_db)
 ):
     """
     Calcula y registra el monto a descontar para cada médico asignado al descuento.
-    Hace UPSERT en Deduccion (snapshot del resumen) y acumula en DeduccionSaldo.
+    Hace UPSERT en Deduccion (snapshot del pago) y acumula en DeduccionSaldo.
     """
-    # Verificar que el resumen existe
-    resumen = await db.get(LiquidacionResumen, resumen_id)
-    if not resumen:
-        raise HTTPException(404, "Resumen no encontrado")
+    pago = await db.get(Pago, pago_id)
+    if not pago:
+        raise HTTPException(404, "Pago no encontrado")
 
     try:
         desc = await _get_descuento(db, desc_id)
     except ValueError:
         raise HTTPException(404, "Descuento no encontrado")
 
-    med_ids = await _medicos_para_descuento(db, desc_id)
+    base_por_med = await _base_bruto_por_medico_en_pago(db, pago_id)
+
+    if getattr(desc, "aplica_a_todos", False):
+        med_ids = [mid for mid, bruto in base_por_med.items() if bruto > 0]
+    else:
+        med_ids = await _medicos_para_descuento(db, desc_id)
+
     if not med_ids:
         return {"generados": 0, "actualizados": 0, "cargado_total": 0}
-
-    base_por_med = await _base_bruto_por_medico_en_resumen(db, resumen_id)
 
     to_snapshot = []
     to_saldo = []
@@ -173,14 +175,11 @@ async def bulk_generar_descuento(
             TWOPLACES, rounding=ROUND_HALF_UP
         )
 
-        # AGENT DO IT: incluir resumen_id + anio/mes (de resumen) en Deduccion
         to_snapshot.append(
             {
-                "resumen_id": resumen_id,
+                "pago_id": pago_id,
                 "medico_id": mid,
                 "descuento_id": desc_id,
-                "anio": resumen.anio,
-                "mes": resumen.mes,
                 "calculado_total": monto,
                 "porcentaje_aplicado": porc_ap,
                 "monto_aplicado": Decimal("0.00"),
@@ -223,24 +222,24 @@ async def bulk_generar_descuento(
     }
 
 
-@router.post("/{resumen_id}/colegio/aplicar", status_code=status.HTTP_200_OK)
-async def aplicar_deducciones_resumen(
-    resumen_id: int,
+@router.post("/{pago_id}/colegio/aplicar", status_code=status.HTTP_200_OK)
+async def aplicar_deducciones_pago(
+    pago_id: int,
     desc_id: int | None = Query(None, description="Opcional: aplicar sólo este descuento"),
-    solo_generado_mes: bool = Query(True, description="True => sólo lo generado en este resumen"),
+    solo_generado_mes: bool = Query(True, description="True => sólo lo generado en este pago"),
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Aplica saldos de deducciones al disponible por médico en el resumen.
+    Aplica saldos de deducciones al disponible por médico en el pago.
     El disponible = bruto + créditos OS - débitos OS.
     Lo que no entra queda en DeduccionSaldo para períodos futuros.
     """
     async with db.begin():
-        res = await db.get(LiquidacionResumen, resumen_id)
-        if not res:
-            raise HTTPException(404, "Resumen no encontrado")
+        pago = await db.get(Pago, pago_id)
+        if not pago:
+            raise HTTPException(404, "Pago no encontrado")
 
-        disponible_por_med = await _disponible_por_medico_en_resumen(db, resumen_id)
+        disponible_por_med = await _disponible_por_medico_en_pago(db, pago_id)
 
         base = select(
             DeduccionSaldo.id,
@@ -250,13 +249,12 @@ async def aplicar_deducciones_resumen(
             DeduccionSaldo.saldo,
         ).where(DeduccionSaldo.concepto_tipo == "desc", DeduccionSaldo.saldo > 0)
 
-        # AGENT DO IT: join con Deduccion via resumen_id (antes era via anio/mes)
         if solo_generado_mes:
             base = base.join(
                 Deduccion,
                 and_(
                     Deduccion.medico_id == DeduccionSaldo.medico_id,
-                    Deduccion.resumen_id == resumen_id,
+                    Deduccion.pago_id == pago_id,
                     Deduccion.descuento_id == DeduccionSaldo.concepto_id,
                 ),
             )
@@ -269,7 +267,7 @@ async def aplicar_deducciones_resumen(
         ).all()
         if not rows:
             return {
-                "resumen_id": resumen_id,
+                "pago_id": pago_id,
                 "medicos_afectados": 0,
                 "aplicado_total": 0.0,
                 "nota": "No hay saldos para aplicar bajo los criterios actuales.",
@@ -314,17 +312,17 @@ async def aplicar_deducciones_resumen(
 
         if not updates_saldo:
             return {
-                "resumen_id": resumen_id,
+                "pago_id": pago_id,
                 "medicos_afectados": 0,
                 "aplicado_total": 0.0,
                 "nota": "No había disponible en el período para aplicar más débitos.",
             }
 
-        # AGENT DO IT: insertar en DeduccionAplicacion con resumen_id, concepto_tipo, concepto_id
+        # Insertar en DeduccionAplicacion con pago_id, concepto_tipo, concepto_id
         apl_tbl = DeduccionAplicacion.__table__
         apl_values = [
             {
-                "resumen_id": resumen_id,
+                "pago_id": pago_id,
                 "medico_id": med_id,
                 "concepto_tipo": conc_tipo,
                 "concepto_id": conc_id,
@@ -349,10 +347,8 @@ async def aplicar_deducciones_resumen(
         snap_tbl = Deduccion.__table__
         snap_values = [
             {
-                "resumen_id": resumen_id,
+                "pago_id": pago_id,
                 "medico_id": med_id,
-                "anio": res.anio,
-                "mes": res.mes,
                 "descuento_id": conc_id,
                 "monto_aplicado": monto,
                 "calculado_total": Decimal("0.00"),
@@ -369,16 +365,8 @@ async def aplicar_deducciones_resumen(
             )
             await db.execute(up_snap)
 
-        # Recalcular total_deduccion del resumen
-        qsum = await db.execute(
-            select(func.coalesce(func.sum(DeduccionAplicacion.aplicado), 0)).where(
-                DeduccionAplicacion.resumen_id == resumen_id
-            )
-        )
-        res.total_deduccion = Decimal(qsum.scalar_one() or 0).quantize(Decimal("0.01"))
-
     return {
-        "resumen_id": resumen_id,
+        "pago_id": pago_id,
         "medicos_afectados": len(medicos_afectados),
         "aplicado_total": float(aplicados_total),
         "nota": "Aplicado respetando el disponible por médico. Remanente queda en saldos.",

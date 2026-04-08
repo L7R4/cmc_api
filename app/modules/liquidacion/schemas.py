@@ -42,7 +42,9 @@ class DetalleLiquidacionRead(BaseModel):
     medico_id: int
     obra_social_id: int
     prestacion_id: int
-    importe: Decimal
+    honorarios: Decimal
+    gastos: Decimal
+    importe_total: Decimal
     pagado: Decimal
 
     class Config:
@@ -56,7 +58,9 @@ class AjusteVistaRow(BaseModel):
     """Ajuste dentro de la vista de detalles."""
     ajuste_id: int
     tipo: Literal["C", "D"]
-    monto: float = 0
+    honorarios: float = 0
+    gastos: float = 0
+    total: float = 0
     obs: Optional[str] = None
 
 
@@ -75,7 +79,7 @@ class DetalleVistaRow(BaseModel):
     honorarios: float
     gastos: float
     coseguro: float
-    importe: float
+    importe_total: float
     pagado: float
     debitos_creditos_list: List[AjusteVistaRow] = Field(default_factory=list)
     total: float

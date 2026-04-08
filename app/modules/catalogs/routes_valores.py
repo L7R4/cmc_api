@@ -23,9 +23,25 @@ async def listar_valores_boletin(
     page: int = Query(1, ge=1, description="Número de página"),
     size: int = Query(50, ge=1, le=500, description="Registros por página"),
 ):
-    # Por cada par (NRO_OBRASOCIAL, CODIGOS) puede haber duplicados; tomamos el de menor ID.
+    # Por cada par (NRO_OBRASOCIAL, CODIGOS) puede haber duplicados;
+    # tomamos el de FECHA_CAMBIO más reciente; en caso de empate, el de menor ID.
+    fecha_subq = (
+        select(
+            ValorPrestacion.NRO_OBRASOCIAL.label("nos"),
+            ValorPrestacion.CODIGOS.label("cod"),
+            func.max(ValorPrestacion.FECHA_CAMBIO).label("max_fecha"),
+        )
+        .group_by(ValorPrestacion.NRO_OBRASOCIAL, ValorPrestacion.CODIGOS)
+        .subquery()
+    )
     subq = (
         select(func.min(ValorPrestacion.ID).label("min_id"))
+        .join(
+            fecha_subq,
+            (ValorPrestacion.NRO_OBRASOCIAL == fecha_subq.c.nos)
+            & (ValorPrestacion.CODIGOS == fecha_subq.c.cod)
+            & (ValorPrestacion.FECHA_CAMBIO == fecha_subq.c.max_fecha),
+        )
         .group_by(ValorPrestacion.NRO_OBRASOCIAL, ValorPrestacion.CODIGOS)
         .subquery()
     )

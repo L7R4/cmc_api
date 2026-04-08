@@ -34,6 +34,8 @@ services:
       - "8080:80"
     env_file:
       - .env
+    environment:
+      UPLOAD_LIMIT: 100M
 
 volumes:
   mysql_data:

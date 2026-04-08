@@ -24,6 +24,7 @@ from app.db.models.financiero import (
 from app.db.models.catalogs import (
     Especialidad, ObrasSociales, Periodos, ValorPrestacion,
     PeriodosDoctor, ValoresBoletin, ValoresBoletinHistorial, ValoresObrasocial,
+    BoletinObservacion, BoletinObservacionPlantilla,
 )
 from app.db.models.rbac import Role, Permission, UserRole, RolePermission, UserPermission
 from app.db.models.contenido import Noticia, DocumentoNoticias, PublicidadMedico
@@ -52,6 +53,7 @@ __all__ = [
     # catalogs
     "Especialidad", "ObrasSociales", "Periodos", "PeriodosDoctor",
     "ValoresBoletin", "ValoresBoletinHistorial", "ValoresObrasocial", "ValorPrestacion",
+    "BoletinObservacion", "BoletinObservacionPlantilla",
     # rbac
     "Role", "Permission", "UserRole", "RolePermission", "UserPermission",
     # contenido

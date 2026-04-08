@@ -2,7 +2,7 @@ import datetime
 import decimal
 from typing import Optional
 
-from sqlalchemy import DECIMAL, Date, Index, Integer, String, text
+from sqlalchemy import DECIMAL, Date, Index, Integer, String, TIMESTAMP, text
 from sqlalchemy.dialects.mysql import INTEGER
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -155,6 +155,26 @@ class ValoresObrasocial(Base):
     OTROS_GASTOS: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
     GALENO_CIRUGIA_ADULTOS: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
     GALENO_CIRUGIA_INFANTIL: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
+
+class BoletinObservacion(Base):
+    __tablename__ = "boletin_observacion"
+
+    nro_obrasocial: Mapped[int] = mapped_column(INTEGER(11), primary_key=True)
+    texto: Mapped[str] = mapped_column(String(400), nullable=False, server_default=text("''"))
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        TIMESTAMP, nullable=False, server_default=text("CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP")
+    )
+
+
+class BoletinObservacionPlantilla(Base):
+    __tablename__ = "boletin_observacion_plantilla"
+
+    id: Mapped[int] = mapped_column(INTEGER(11), primary_key=True, autoincrement=True)
+    texto: Mapped[str] = mapped_column(String(400), nullable=False, unique=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        TIMESTAMP, nullable=False, server_default=text("CURRENT_TIMESTAMP")
+    )
+
 
 class ValorPrestacion(Base):
     __tablename__ = 'valor_prestacion'

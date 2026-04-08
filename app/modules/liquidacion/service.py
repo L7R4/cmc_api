@@ -69,7 +69,7 @@ async def build_detalles_liquidacion(db: AsyncSession, liquidacion_id: int) -> N
             GuardarAtencion.NRO_OBRA_SOCIAL.label("obra_social_id"),
             GuardarAtencion.CODIGO_PRESTACION.label("codigo_prestacion"),
             GuardarAtencion.FECHA_PRESTACION.label("fecha_prestacion"),
-            GuardarAtencion.VALOR_CIRUJIA.label("valor_cirugia"),
+            GuardarAtencion.IMPORTE_COLEGIO.label("importe_colegio"),
             GuardarAtencion.VALOR_AYUDANTE.label("valor_ayudante"),
             GuardarAtencion.VALOR_AYUDANTE_2.label("valor_ayudante_2"),
             GuardarAtencion.GASTOS.label("gastos"),
@@ -99,7 +99,7 @@ async def build_detalles_liquidacion(db: AsyncSession, liquidacion_id: int) -> N
             if key in existing:
                 continue
 
-            if not p["importe"] or p["importe"] <= 0:
+            if not p["importe_total"] or p["importe_total"] <= 0:
                 observados.append({
                     "atencion_id": p["prestacion_id"],
                     "medico_id": p["medico_id"],
@@ -113,7 +113,9 @@ async def build_detalles_liquidacion(db: AsyncSession, liquidacion_id: int) -> N
                 obra_social_id=os_id,
                 prestacion_id=p["prestacion_id"],
                 pagado=Decimal("0"),
-                importe=p["importe"],
+                honorarios=p["honorarios"],
+                gastos=p["gastos"],
+                importe_total=p["importe_total"],
             )
             db.add(detalle_item)
             existing.add(key)
@@ -131,32 +133,40 @@ def _desdoblar_en_actores(row: Dict[str, Any]) -> List[Dict[str, Any]]:
 
     medico_id = row.get("medico_id")
     if medico_id:
-        bruto = to_dec(row.get("valor_cirugia")) * factor
-        if bruto > 0:
+        honorarios = to_dec(row.get("importe_colegio")) * factor
+        gastos = to_dec(row.get("gastos")) * factor
+        importe_total = honorarios + gastos
+        if importe_total > 0:
             piezas.append({
                 "prestacion_id": id_atencion,
                 "medico_id": int(medico_id),
-                "importe": bruto,
+                "honorarios": honorarios,
+                "gastos": gastos,
+                "importe_total": importe_total,
             })
 
     ayud1 = row.get("nro_socio_ayudante")
     if ayud1:
-        imp = to_dec(row.get("valor_ayudante"))
-        if imp > 0:
+        honorarios = to_dec(row.get("valor_ayudante"))
+        if honorarios > 0:
             piezas.append({
                 "prestacion_id": id_atencion,
                 "medico_id": int(ayud1),
-                "importe": imp,
+                "honorarios": honorarios,
+                "gastos": Decimal("0"),
+                "importe_total": honorarios,
             })
 
     ayud2 = row.get("nro_socio_ayudante_2")
     if ayud2:
-        imp = to_dec(row.get("valor_ayudante_2"))
-        if imp > 0:
+        honorarios = to_dec(row.get("valor_ayudante_2"))
+        if honorarios > 0:
             piezas.append({
                 "prestacion_id": id_atencion,
                 "medico_id": int(ayud2),
-                "importe": imp,
+                "honorarios": honorarios,
+                "gastos": Decimal("0"),
+                "importe_total": honorarios,
             })
 
     return piezas
@@ -174,7 +184,7 @@ async def recalcular_totales_de_liquidacion(db: AsyncSession, liquidacion_id: in
 
     # Bruto: suma de importes de detalles
     bruto_res = await db.execute(
-        select(func.coalesce(func.sum(DetalleLiquidacion.importe), 0))
+        select(func.coalesce(func.sum(DetalleLiquidacion.importe_total), 0))
         .where(DetalleLiquidacion.liquidacion_id == liquidacion_id)
     )
     total_bruto = to_dec(bruto_res.scalar_one())
@@ -183,10 +193,10 @@ async def recalcular_totales_de_liquidacion(db: AsyncSession, liquidacion_id: in
     dc_res = await db.execute(
         select(
             func.coalesce(
-                func.sum(case((Ajuste.tipo == "d", Ajuste.monto), else_=0)), 0
+                func.sum(case((Ajuste.tipo == "d", Ajuste.honorarios + Ajuste.gastos), else_=0)), 0
             ).label("debitos"),
             func.coalesce(
-                func.sum(case((Ajuste.tipo == "c", Ajuste.monto), else_=0)), 0
+                func.sum(case((Ajuste.tipo == "c", Ajuste.honorarios + Ajuste.gastos), else_=0)), 0
             ).label("creditos"),
         )
         .select_from(Ajuste)
@@ -272,9 +282,9 @@ async def vista_detalles_liquidacion(
             GA.CANTIDAD.label("cantidad"),
             GA.CANT_TRATAMIENTO.label("cantidad_tratamiento"),
             GA.PORCENTAJE.label("porcentaje"),
-            GA.VALOR_CIRUJIA.label("honorarios"),
-            GA.GASTOS.label("gastos"),
-            func.coalesce(DL.importe, 0).label("importe"),
+            func.coalesce(DL.honorarios, 0).label("honorarios"),
+            func.coalesce(DL.gastos, 0).label("gastos"),
+            func.coalesce(DL.importe_total, 0).label("importe_total"),
             func.coalesce(DL.pagado, 0).label("pagado"),
             DL.obra_social_id.label("obra_social_id"),
         )
@@ -302,7 +312,9 @@ async def vista_detalles_liquidacion(
                 Ajuste.id.label("ajuste_id"),
                 Ajuste.medico_id.label("medico_id"),
                 Ajuste.tipo.label("tipo"),
-                Ajuste.monto.label("monto"),
+                Ajuste.honorarios.label("honorarios"),
+                Ajuste.gastos.label("gastos"),
+                (Ajuste.honorarios + Ajuste.gastos).label("total"),
                 Ajuste.observacion.label("obs"),
             )
             .select_from(Ajuste)
@@ -329,7 +341,9 @@ async def vista_detalles_liquidacion(
             med_ajuste_map.setdefault(med_id, []).append({
                 "ajuste_id": int(a["ajuste_id"]),
                 "tipo": tipo_ui,
-                "monto": float(Decimal(str(a["monto"] or "0"))),
+                "honorarios": float(Decimal(str(a["honorarios"] or "0"))),
+                "gastos": float(Decimal(str(a["gastos"] or "0"))),
+                "total": float(Decimal(str(a["total"] or "0"))),
                 "obs": a["obs"] or None,
             })
 
@@ -341,7 +355,7 @@ async def vista_detalles_liquidacion(
 
     out: List[Dict[str, Any]] = []
     for r in base_rows:
-        importe = Decimal(str(r["importe"] or "0"))
+        importe_total = Decimal(str(r["importe_total"] or "0"))
         pagado = Decimal(str(r["pagado"] or "0"))
 
         cantidad = int(r.get("cantidad") or 1)
@@ -351,10 +365,10 @@ async def vista_detalles_liquidacion(
         det_id = int(r["det_id"])
         aj_list = ajuste_map.get(det_id, [])
 
-        sum_c = sum(Decimal(str(aj["monto"] or 0)) for aj in aj_list if aj["tipo"] == "C")
-        sum_d = sum(Decimal(str(aj["monto"] or 0)) for aj in aj_list if aj["tipo"] == "D")
+        sum_c = sum(Decimal(str(aj["total"] or 0)) for aj in aj_list if aj["tipo"] == "C")
+        sum_d = sum(Decimal(str(aj["total"] or 0)) for aj in aj_list if aj["tipo"] == "D")
 
-        total = importe + sum_c - sum_d
+        total = importe_total + sum_c - sum_d
 
         out.append({
             "det_id": det_id,
@@ -371,7 +385,7 @@ async def vista_detalles_liquidacion(
             "honorarios": float(r["honorarios"] or 0),
             "gastos": float(r["gastos"] or 0),
             "coseguro": 0.0,
-            "importe": float(importe),
+            "importe_total": float(importe_total),
             "pagado": float(pagado),
             "debitos_creditos_list": aj_list,
             "total": float(total),
@@ -430,14 +444,16 @@ async def detalle_recibo_medico(
         if not detalles:
             continue
 
-        bruto = sum(Decimal(str(d.importe or 0)) for d in detalles)
+        bruto = sum(Decimal(str(d.importe_total or 0)) for d in detalles)
 
         # Ajustes del lote en estado='L' del pago para esa OS+período y médico
         aj_rows = (await db.execute(
             select(
                 Ajuste.id.label("aj_id"),
                 Ajuste.tipo,
-                Ajuste.monto,
+                Ajuste.honorarios,
+                Ajuste.gastos,
+                (Ajuste.honorarios + Ajuste.gastos).label("total"),
                 Ajuste.observacion,
                 Ajuste.id_atencion,
                 GuardarAtencion.CODIGO_PRESTACION.label("codigo"),
@@ -463,13 +479,15 @@ async def detalle_recibo_medico(
         total_c = Decimal("0")
 
         for aj in aj_rows:
-            monto = to_dec(aj["monto"])
+            total = to_dec(aj["total"])
             entry = {
                 "ajuste_id": int(aj["aj_id"]),
                 "id_atencion": aj["id_atencion"],
                 "codigo_prestacion": aj["codigo"],
                 "fecha": str(aj["fecha"]) if aj["fecha"] else None,
-                "monto": float(monto),
+                "honorarios": float(to_dec(aj["honorarios"])),
+                "gastos": float(to_dec(aj["gastos"])),
+                "total": float(total),
                 "motivo": aj["observacion"],
             }
             if aj["tipo"] == "d":

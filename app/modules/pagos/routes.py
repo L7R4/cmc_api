@@ -19,13 +19,34 @@ from app.modules.pagos.schemas import (
     PagoMedicoRead,
     PagoMedicoTotales,
     PagoRead,
+    PagoResumenRead,
     PagoUpdate,
+    PagoVistaPreviaRead,
+)
+from app.modules.deducciones.service import (
+    aplicar_deducciones_al_cierre,
+    auto_asignar_programas,
+    generar_programas_en_pago,
 )
 from app.modules.pagos.service import (
     emitir_recibos,
     generar_pago_medico,
     recalcular_totales_pago,
+    resumen_pago,
+    vista_previa_pago,
 )
+from app.services.deducciones_update import (
+    marcar_deducciones_aplicadas,
+    revertir_deducciones_al_reabrir,
+)
+from app.services.lote_ajuste_update import (
+    marcar_lotes_aplicados,
+    revertir_lotes_al_reabrir,
+    resumen_lotes_del_pago,
+)
+from app.services.deducciones_rollback import rollback_deducciones_pago
+from app.services.lote_ajuste_rollback import rollback_lotes_pago
+from app.services.liquidaciones_rollback import rollback_liquidaciones_pago, rollback_recibos_pago
 
 router = APIRouter()
 
@@ -100,6 +121,13 @@ async def crear_pago(payload: PagoCreate, db: AsyncSession = Depends(get_db)):
     await db.commit()
     await db.refresh(obj)
 
+    # Auto-asignar deducciones manuales pendientes del mismo mes/año → en_pago
+    asignados = await auto_asignar_programas(db, obj.id, obj.mes, obj.anio)
+    if asignados:
+        await db.commit()
+        # Auto-generar: carga saldo en DeduccionSaldo y marca aplicado
+        await generar_programas_en_pago(db, obj.id)
+
     totales = await recalcular_totales_pago(db, obj.id)
     return _enrich_pago(obj, totales)
 
@@ -145,20 +173,37 @@ async def eliminar_pago(pago_id: int, db: AsyncSession = Depends(get_db)):
     if not pago:
         raise HTTPException(404, "Pago no encontrado")
 
-    # 409 si tiene liquidaciones
-    liq_count = (await db.execute(
-        select(func.count(Liquidacion.id)).where(Liquidacion.pago_id == pago_id)
+    # Bloquear si hay recibos ya cobrados (representan pagos reales efectuados)
+    rec_pagados = (await db.execute(
+        select(func.count(Recibo.id)).where(
+            Recibo.pago_id == pago_id,
+            Recibo.estado == "pagado",
+        )
     )).scalar_one()
-    if liq_count > 0:
-        raise HTTPException(409, "No se puede eliminar un pago con liquidaciones asociadas")
+    if rec_pagados > 0:
+        raise HTTPException(
+            409,
+            detail={
+                "reason": "recibos_pagados",
+                "cantidad": rec_pagados,
+                "message": "No se puede eliminar un pago con recibos ya cobrados.",
+            },
+        )
 
-    # 409 si tiene recibos
-    rec_count = (await db.execute(
-        select(func.count(Recibo.id)).where(Recibo.pago_id == pago_id)
-    )).scalar_one()
-    if rec_count > 0:
-        raise HTTPException(409, "No se puede eliminar un pago con recibos emitidos")
+    # Rollback en orden respetando FK constraints:
+    # 1. Deducciones: elimina DeduccionAplicacion, limpia Deduccion.pago_id
+    await rollback_deducciones_pago(db, pago_id)
 
+    # 2. Lotes: desvincula LoteAjuste (L → C, pago_id → NULL)
+    await rollback_lotes_pago(db, pago_id)
+
+    # 3. Recibos (emitidos/pendientes): eliminar antes que Liquidacion por FK RESTRICT
+    await rollback_recibos_pago(db, pago_id)
+
+    # 4. Liquidaciones y sus detalles
+    await rollback_liquidaciones_pago(db, pago_id)
+
+    # 5. Eliminar Pago (PagoMedico se elimina por CASCADE automáticamente)
     await db.delete(pago)
     await db.commit()
     return None
@@ -175,12 +220,29 @@ async def cerrar_pago(pago_id: int, db: AsyncSession = Depends(get_db)):
     if pago.estado == "C":
         raise HTTPException(409, "El pago ya está cerrado")
 
+    # 1. Aplicar deducciones (greedy: mayor primero por médico) — marca aplicado/pendiente
+    await aplicar_deducciones_al_cierre(db, pago_id)
+
+    # 2. Red de seguridad: cualquier Deduccion en_pago que haya escapado el paso anterior
+    ded_extra = await marcar_deducciones_aplicadas(db, pago_id)
+
+    # 3. Marcar lotes: L → AP (Aplicado — inmutables desde ahora)
+    lotes_info = await marcar_lotes_aplicados(db, pago_id)
+
     pago.estado = "C"
     pago.cierre_timestamp = datetime.datetime.now()
     await db.commit()
     await db.refresh(pago)
     totales = await recalcular_totales_pago(db, pago_id)
-    return _enrich_pago(pago, totales)
+    result = _enrich_pago(pago, totales)
+    # Adjuntar info de cierre al response sin romper el schema
+    return {
+        **result.model_dump(),
+        "cierre_info": {
+            **lotes_info,
+            "deducciones_aplicadas_extra": ded_extra,
+        },
+    }
 
 
 # ================================================
@@ -210,6 +272,12 @@ async def reabrir_pago(pago_id: int, db: AsyncSession = Depends(get_db)):
     )).first()
     if otro_abierto:
         raise HTTPException(409, f"Ya existe otro pago abierto (id={otro_abierto[0]})")
+
+    # Revertir deducciones: aplicado → en_pago (re-evaluadas en el próximo cierre)
+    await revertir_deducciones_al_reabrir(db, pago_id)
+
+    # Revertir lotes: AP → L (vuelven a "En liquidaciones")
+    await revertir_lotes_al_reabrir(db, pago_id)
 
     pago.estado = "A"
     pago.cierre_timestamp = None
@@ -300,6 +368,34 @@ async def emitir_recibos_endpoint(pago_id: int, db: AsyncSession = Depends(get_d
     items = await emitir_recibos(db, pago_id)
     await db.commit()
     return {"pago_id": pago_id, "total_recibos": len(items), "recibos": items}
+
+
+# ================================================
+# GET /pagos/{pago_id}/resumen — Resumen completo del pago
+# ================================================
+@router.get("/{pago_id}/resumen", response_model=PagoResumenRead)
+async def resumen_pago_endpoint(pago_id: int, db: AsyncSession = Depends(get_db)):
+    """
+    Devuelve el resumen completo del pago:
+    - facturas (liquidaciones por OS) con sus totales de bruto, débitos, créditos y neto
+    - conceptos descontados agrupados con nombre resuelto y total aplicado
+    - totales globales del pago
+    """
+    return await resumen_pago(db, pago_id)
+
+
+# ================================================
+# GET /pagos/{pago_id}/vista_previa — Vista previa del pago
+# ================================================
+@router.get("/{pago_id}/vista_previa", response_model=PagoVistaPreviaRead)
+async def vista_previa_pago_endpoint(pago_id: int, db: AsyncSession = Depends(get_db)):
+    """
+    Vista previa resumida del pago con tres secciones:
+    - liquidaciones: facturas con totales (bruto, débitos, créditos, reconocido, neto) + grand-total
+    - deducciones: items en estado 'en_pago' (abierto) o 'aplicado' (cerrado) + grand-total
+    - lotes: ajustes vinculados con totales de débito/crédito + grand-total
+    """
+    return await vista_previa_pago(db, pago_id)
 
 
 # ================================================

@@ -33,7 +33,7 @@ class DebCreRowOut(BaseModel):
     tipo: Literal["N", "D", "C"]
     monto: float
     obs: Optional[str] = None
-    importe: float
+    importe_total: float
     pagado: float
     total: float
 
@@ -57,7 +57,7 @@ class DebCreItemOut(BaseModel):
 # Listado de DCs de un detalle
 class DebCreListOut(BaseModel):
     det_id: int
-    importe: float
+    importe_total: float
     pagado: float
     total: float
     items: List[DebCreItemOut] = Field(default_factory=list)

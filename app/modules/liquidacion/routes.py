@@ -95,6 +95,22 @@ async def crear_liquidacion(payload: LiquidacionCreate, db: AsyncSession = Depen
 
 
 # ================================================
+# GET: Lista liquidaciones por pago_id
+# ================================================
+@router.get("/liquidaciones_por_os/", response_model=List[LiquidacionRead])
+async def listar_liquidaciones_por_pago(
+    pago_id: int = Query(..., description="ID del pago"),
+    db: AsyncSession = Depends(get_db),
+):
+    res = await db.execute(
+        select(Liquidacion)
+        .where(Liquidacion.pago_id == pago_id)
+        .order_by(Liquidacion.obra_social_id)
+    )
+    return res.scalars().all()
+
+
+# ================================================
 # GET: Obtiene una liquidación por su ID
 # ================================================
 @router.get("/liquidaciones_por_os/{liquidacion_id}", response_model=LiquidacionRead)
@@ -122,21 +138,21 @@ async def eliminar_liquidacion(liquidacion_id: int, db: AsyncSession = Depends(g
         raise HTTPException(409, "No se puede eliminar una liquidación de un pago cerrado")
 
     # 409 si hay lotes en estado 'L' para esta OS+período en el mismo pago
-    lote_activo = (await db.execute(
-        select(LoteAjuste.id).where(
-            LoteAjuste.pago_id == obj.pago_id,
-            LoteAjuste.obra_social_id == obj.obra_social_id,
-            LoteAjuste.mes_periodo == obj.mes_periodo,
-            LoteAjuste.anio_periodo == obj.anio_periodo,
-            LoteAjuste.estado == "L",
-        ).limit(1)
-    )).first()
-    if lote_activo:
-        raise HTTPException(
-            409,
-            "Hay un lote de ajustes en estado 'En liquidaciones' para esta factura. "
-            "Quitá el lote del pago antes de eliminar la liquidación."
-        )
+    # lote_activo = (await db.execute(
+    #     select(LoteAjuste.id).where(
+    #         LoteAjuste.pago_id == obj.pago_id,
+    #         LoteAjuste.obra_social_id == obj.obra_social_id,
+    #         LoteAjuste.mes_periodo == obj.mes_periodo,
+    #         LoteAjuste.anio_periodo == obj.anio_periodo,
+    #         LoteAjuste.estado == "L",
+    #     ).limit(1)
+    # )).first()
+    # if lote_activo:
+    #     raise HTTPException(
+    #         409,
+    #         "Hay un lote de ajustes en estado 'En liquidaciones' para esta factura. "
+    #         "Quitá el lote del pago antes de eliminar la liquidación."
+    #     )
 
     await db.delete(obj)
     await db.commit()

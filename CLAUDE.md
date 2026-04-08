@@ -60,6 +60,7 @@ app/
 ## Conceptos y consideraciones claves segun modulo
 
 #### Medicos
+
 - **Modelo central**: `ListadoMedico` — `NRO_SOCIO` es la credencial pública (login), `ID` es la PK interna para FK.
 - **Especialidades**: Hay columnas `NRO_ESPECIALIDAD[1-6]` + campo JSON `conceps_espec` con metadatos `{conceps: [], espec: [{id_colegio, n_resolucion, fecha_resolucion, adjunto}]}`. El JSON y las 6 columnas tienen que estar sincronizadas, es decir, no puede existir una especialidad en una columna NRO_ESEPECIALIDAD y no el JSON, y viceversa.
 - **Documentos**: tabla `Documento` (label, path, content_type) + referencias a adjuntos dentro de `conceps_espec`. Eliminar un médico hace cascade delete de sus documentos.
@@ -70,6 +71,7 @@ app/
 - **Helpers**: `parse_conceps_espec()`, `SPECIALTY_SLOTS`, `_find_free_slot()` en `modules/medicos/helpers.py`. La lógica de registro vive en `services/medicos_register_service.py`.
 
 #### Debitos
+
 - **Un DC por detalle**: cada `DetalleLiquidacion` puede tener cero o un `Debito_Credito` vinculado por `debito_credito_id`.
 - **Tipo**: `"d"` = débito (resta al neto), `"c"` = crédito (suma al neto), `"n"` = quitar DC.
 - **Upsert**: `POST /by_detalle/{detalle_id}` crea o actualiza el DC del detalle; `tipo="n"` o `monto<=0` lo elimina.
@@ -78,6 +80,7 @@ app/
 - **`prestacion_id` como string**: la FK a `GuardarAtencion` se extrae con `_parse_atencion_id()` (toma dígitos iniciales del string).
 
 #### Deducciones
+
 - **Dos flujos**: (1) **descuentos** = catálogo configurado (`Descuentos`, precio/porcentaje + médicos asignados vía `SocioDescuento`); (2) **deducciones** = aplicación de esos descuentos al resumen de liquidación.
 - **`bulk_generar_descuento`**: calcula el monto para cada médico asignado al descuento en el resumen y hace UPSERT en `Deduccion` (snapshot del mes) y en `DeduccionSaldo` (saldo acumulado). Usa `INSERT ... ON DUPLICATE KEY UPDATE` de MySQL.
 - **`aplicar`**: descuenta del `DeduccionSaldo` respetando el "disponible por médico" (bruto − débitos + créditos). Lo que no entra queda en saldo. Registra en `DeduccionAplicacion`.
@@ -85,6 +88,7 @@ app/
 - **`resumen_id` en URL**: las rutas de aplicación dependen de que el `LiquidacionResumen` exista.
 
 #### Liquidacion
+
 - **Jerarquía**: `LiquidacionResumen` (mes+año) → `Liquidacion` (por obra social) → `DetalleLiquidacion` (por médico/prestación).
 - **Totales calculados on-the-fly**: `recalcular_resumen_liquidacion()` y `recalcular_totales_de_liquidacion()` corren en cada GET y en cada mutación, nunca se confía en los valores persistidos como fuente de verdad en pantalla.
 - **Estado A / C**: abierta / cerrada. Solo se pueden editar DCs y detalles en estado `"A"`. Cerrar sella `cierre_timestamp`.
@@ -93,6 +97,7 @@ app/
 - **Vista detalles**: `GET /detalles_vista` llama a `vista_detalles_liquidacion()` que hace un JOIN complejo y devuelve `DetalleVistaRow` con datos enriquecidos (nombre médico, afiliado, DCs anidados). Soporta búsqueda full-text por NRO_SOCIO / NOMBRE / CODIGO_PRESTACION.
 
 #### Padrones
+
 - **Modelo**: `MedicoObraSocial` (legacy UPPERCASE) vincula `ListadoMedico` con obra social + período.
 - **Asignaciones fusionadas**: las rutas de asignaciones de conceptos y especialidades a un médico se encuentran en este mismo módulo (`/{medico_id}/asignaciones/...`), montadas bajo el prefijo `/padrones`.
 - **`catalogo_obras_sociales`**: filtra obras sociales con `MARCA = "S"` (habilitadas para el padrón).
@@ -100,6 +105,7 @@ app/
 - **`_ensure_json()`**: helper que garantiza que el campo `conceps_espec` del médico sea un dict válido antes de mutar asignaciones.
 
 #### RBAC
+
 - **Tres niveles**: Role → Permission (many-to-many vía `RolePermission`) + override por usuario (`UserPermission` con `allow: bool`).
 - **Resolución efectiva**: `get_effective_permission_codes(user_id, db)` en `auth/permissions.py` calcula los códigos finales sumando role perms + overrides.
 - **Scopes en JWT**: los códigos de permiso se inyectan en el token al hacer login; `require_scope("codigo")` los valida como dependencia FastAPI.
@@ -107,6 +113,7 @@ app/
 - **Todos los endpoints requieren** scope `rbac:gestionar`.
 
 #### Solicitudes
+
 - **Estados**: `pendiente` → `aprobada` / `rechazada`. El campo `estado` es un string literal.
 - **Creación**: Se crea desde el flujo de registro público de médicos (`modules/medicos/routes.py → POST /register`).
 - **Aprobación**: `POST /{id}/approve` actualiza estado, asigna `aprobado_por` y dispara email vía `send_email_resend()`.
@@ -114,18 +121,19 @@ app/
 - **Timestamps**: `created_at` / `updated_at` con `timezone=True` (almacenados como UTC).
 
 #### Catalogos
+
 - **Especialidades** (`routes_especialidades.py`): Solo `GET /` — lista de `Especialidad` (campos `ID`, `ID_COLEGIO_ESPE`, `ESPECIALIDAD`). Es read-only; las especialidades son importadas del sistema legacy.
 - **Obras Sociales** (`routes_obras_sociales.py`): CRUD completo. `IntegrityError` en CREATE → 409. El campo clave es `NRO_OBRASOCIAL` (entero único).
 - **Periodos** (`routes_periodos.py`): `GET /disponibles?obra_social_id=X` devuelve períodos cerrados (`CERRADO="C"`) que aún no tienen `Liquidacion` creada — usado para poblar el selector al crear una liquidación.
 - **Valores Boletín** (`routes_valores.py`): Tabla de aranceles por nivel y obra social. Campos con `@field_serializer` para serializar `Decimal` como `float` en la respuesta.
 
 #### Contenido
+
 - **Noticias**: `Noticia` con adjuntos en `DocumentoNoticias`. Los archivos se guardan en `uploads/web_noticias/<uuid>.<ext>`. `selectinload` carga documentos junto a la noticia.
 - **Publicidad**: `PublicidadMedico` con un único adjunto por registro (imagen/video para el portal). Se guarda en `uploads/medicos_publicidad/`.
 - **Nombres de archivo**: se generan con `uuid4().hex + ext` para evitar colisiones. El nombre original se preserva en `adjunto_filename`.
 - **Eliminación de archivo físico**: al borrar o reemplazar un adjunto, se llama `.unlink(missing_ok=True)` sobre el path absoluto.
 - **Búsqueda de médicos**: `GET /medicos/buscar?q=` en publicidad hace LIKE sobre NOMBRE, NRO_SOCIO, MATRICULA_PROV y DOCUMENTO.
-
 
 ---
 

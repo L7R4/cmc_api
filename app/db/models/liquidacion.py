@@ -167,7 +167,9 @@ class DetalleLiquidacion(AuditMixin, Base):
     )
 
     pagado: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), default=Decimal("0"))
-    importe: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), default=0)
+    honorarios: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), default=Decimal("0"), server_default="0.00")
+    gastos: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), default=Decimal("0"), server_default="0.00")
+    importe_total: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), default=Decimal("0"), server_default="0.00")
 
     liquidacion: Mapped[Optional["Liquidacion"]] = relationship(back_populates="detalles")
 

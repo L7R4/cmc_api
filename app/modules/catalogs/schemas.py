@@ -1,8 +1,42 @@
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from typing import List, Optional
 
-from pydantic import BaseModel, Field, field_serializer
+from pydantic import BaseModel, Field, field_serializer, field_validator
+
+
+# ── Boletin Observaciones ────────────────────────────────────────
+class ObservacionIn(BaseModel):
+    texto: str = Field(..., max_length=400)
+
+    @field_validator("texto")
+    @classmethod
+    def trim_texto(cls, v: str) -> str:
+        return v.strip()
+
+
+class ObservacionOut(BaseModel):
+    nro_obrasocial: int
+    texto: str
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class PlantillaIn(BaseModel):
+    texto: str = Field(..., max_length=400)
+
+    @field_validator("texto")
+    @classmethod
+    def trim_texto(cls, v: str) -> str:
+        return v.strip()
+
+
+class PlantillaOut(BaseModel):
+    id: int
+    texto: str
+
+    model_config = {"from_attributes": True}
 
 
 # ── Especialidades ──────────────────────────────────────────────

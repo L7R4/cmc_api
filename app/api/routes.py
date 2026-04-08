@@ -3,6 +3,7 @@ from fastapi import APIRouter
 from app.modules.catalogs.routes_especialidades import router as especialidades_router
 from app.modules.catalogs.routes_obras_sociales import router as obras_social_router
 from app.modules.catalogs.routes_periodos import router as periodos_router
+from app.modules.catalogs.routes_observaciones import router as observaciones_boletin_router
 from app.modules.catalogs.routes_valores import router as valores_boletin_router
 from app.modules.contenido.routes_noticias import router as noticias_router
 from app.modules.contenido.routes_publicidad import router as publicidades_medico_router
@@ -25,6 +26,7 @@ api_router.include_router(obras_social_router, prefix="/obras_social", tags=["Ob
 api_router.include_router(especialidades_router, prefix="/especialidades", tags=["Especialidades"])
 api_router.include_router(periodos_router, prefix="/periodos", tags=["Periodos"])
 api_router.include_router(valores_boletin_router, prefix="/valores", tags=["ValoresBoletin"])
+api_router.include_router(observaciones_boletin_router, prefix="/boletin", tags=["BoletinObservaciones"])
 
 api_router.include_router(pagos_router, prefix="/pagos", tags=["Pagos"])
 api_router.include_router(lotes_router, prefix="/lotes", tags=["Lotes de Ajuste"])

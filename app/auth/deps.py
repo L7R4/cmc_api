@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.security import decode_token
 from app.db.database import get_db
 from app.db.models import ListadoMedico, Role, UserRole
-from app.utils.main import get_effective_permission_codes
+from app.auth.permissions import get_effective_permission_codes
 
 
 # cmc_api/app/auth/deps.py

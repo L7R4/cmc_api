@@ -18,6 +18,7 @@ from app.db.models import (
 from app.db.models.catalogs import ObrasSociales, Periodos
 from app.db.models.medico import ListadoMedico
 from app.modules.liquidacion.service import recalcular_totales_de_liquidacion
+from app.modules.deducciones.service import generar_y_recalcular_porcentuales
 from app.modules.lotes.schemas import (
     AjusteCreate,
     AjusteRead,
@@ -218,7 +219,6 @@ async def crear_lote_sin_factura(
 # ================================================
 # GET /snaps/por_os_periodo — Lista lotes por OS+período
 # ================================================
-# IMPORTANT: must be defined BEFORE /snaps/{lote_id} to avoid capture
 @router.get("/snaps/por_os_periodo", response_model=List[LoteAjusteRead])
 async def listar_lotes_por_os_periodo(
     obra_social_id: int = Query(...),
@@ -249,7 +249,7 @@ async def listar_lotes_por_os_periodo(
 # ================================================
 @router.get("/snaps/lista", response_model=List[LoteListaRow])
 async def listar_lotes_enriquecidos(
-    tipo: Optional[str] = Query(None, description="normal | refacturacion"),
+    tipo: Optional[str] = Query(None, description="normal | refacturacion | sin_factura"),
     mes: Optional[int] = Query(None, ge=1, le=12),
     anio: Optional[int] = Query(None, ge=1900),
     obra_social_id: Optional[int] = Query(None),
@@ -452,7 +452,7 @@ async def cambiar_estado_lote(
             "Válidas: A→C, C→A, C→L, L→C"
         )
 
-    # Recalcular totales de liquidaciones afectadas
+    # Recalcular totales de liquidaciones afectadas y regenerar porcentuales
     if pago_id_afectado:
         liqs = (await db.execute(
             select(Liquidacion).where(
@@ -464,6 +464,7 @@ async def cambiar_estado_lote(
         )).scalars().all()
         for liq in liqs:
             await recalcular_totales_de_liquidacion(db, liq.id)
+        await generar_y_recalcular_porcentuales(db, pago_id_afectado)
 
     await db.commit()
     lote_ret = await _get_lote_with_ajustes(db, lote_id)

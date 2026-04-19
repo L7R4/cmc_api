@@ -24,6 +24,8 @@ class LiquidacionRead(BaseModel):
     mes_periodo: int
     anio_periodo: int
     nro_factura: Optional[str] = None
+    total_honorarios: Decimal
+    total_gastos: Decimal
     total_bruto: Decimal
     total_debitos: Decimal
     total_creditos: Decimal

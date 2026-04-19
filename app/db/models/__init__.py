@@ -19,7 +19,7 @@ from app.db.models.liquidacion import (
 )
 from app.db.models.financiero import (
     LoteAjuste, Ajuste, Descuentos, SocioDescuento,
-    Deduccion, DeduccionSaldo, DeduccionAplicacion,
+    Deduccion, DeduccionAplicacion,
 )
 from app.db.models.catalogs import (
     Especialidad, ObrasSociales, Periodos, ValorPrestacion,
@@ -49,7 +49,7 @@ __all__ = [
     "DetalleLiquidacion", "PagoMedico", "Recibo",
     # financiero
     "LoteAjuste", "Ajuste", "Descuentos", "SocioDescuento",
-    "Deduccion", "DeduccionSaldo", "DeduccionAplicacion",
+    "Deduccion", "DeduccionAplicacion",
     # catalogs
     "Especialidad", "ObrasSociales", "Periodos", "PeriodosDoctor",
     "ValoresBoletin", "ValoresBoletinHistorial", "ValoresObrasocial", "ValorPrestacion",

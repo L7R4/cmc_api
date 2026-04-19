@@ -57,14 +57,20 @@ class AsignacionesOut(BaseModel):
 
 # ---- Deduccion (unified: manual + automatico) ----
 
+class CuotaConfig(BaseModel):
+    """Configuración individual de cada cuota al crear una deducción manual."""
+    paga_por_caja: bool = False
+
+
 class DeduccionCreate(BaseModel):
     medico_id: int
     descuento_id: int
     monto_total: Decimal = Field(..., gt=0)
-    cuotas: int = Field(1, ge=1)
     mes_inicio: int = Field(..., ge=1, le=12)
     anio_inicio: int = Field(..., ge=2000)
     pagador_medico_id: Optional[int] = None
+    # Cada elemento = una cuota. len(cuotas) determina la cantidad total.
+    cuotas: List[CuotaConfig] = Field(default_factory=lambda: [CuotaConfig()], min_length=1)
 
 
 # Keep alias for backward compat with existing route code
@@ -78,17 +84,18 @@ class DeduccionRead(BaseModel):
     descuento_nombre: str
     origen: str  # "manual" | "automatico"
     estado: str
+    paga_por_caja: bool = False
     monto_total: Optional[Decimal] = None
     monto_cuota: Optional[Decimal] = None
     calculado_total: Decimal
+    monto_aplicado: Decimal = Decimal("0.00")
     cuotas_total: Optional[int] = None
     cuota_nro: int
     cuotificado: Optional[bool] = None
-    grupo_id: Optional[int] = None
     mes_aplicar: Optional[int] = None
     anio_aplicar: Optional[int] = None
     pagador_medico_id: Optional[int] = None
-    pago_id: Optional[int] = None
+    generado_en_pago_id: Optional[int] = None
     created_at: Optional[datetime.datetime] = None
 
     class Config:
@@ -107,12 +114,11 @@ class DeduccionEstadoPayload(BaseModel):
 DeduccionProgramaEstadoPayload = DeduccionEstadoPayload
 
 
-class DeduccionGrupoUpdate(BaseModel):
-    monto_total: Decimal = Field(..., gt=0)
-
-
-# Keep alias
-DeduccionProgramaGrupoUpdate = DeduccionGrupoUpdate
+class DeduccionUpdate(BaseModel):
+    """Body para PATCH /deducciones/{id}. Enviar al menos uno de los campos."""
+    estado: Optional[Literal["pendiente", "en_pago", "cancelado", "aplicado"]] = None
+    monto: Optional[Decimal] = Field(None, gt=0)
+    paga_por_caja: Optional[bool] = None
 
 
 # ---- SocioDescuento ----
@@ -131,6 +137,7 @@ class SocioDescuentoRead(BaseModel):
     pagador_nro_socio: Optional[int] = None
     fecha_alta: Optional[datetime.date] = None
     fecha_baja: Optional[datetime.date] = None
+    paga_por_caja: bool = False
 
     class Config:
         from_attributes = True
@@ -142,6 +149,7 @@ class SocioDescuentoCreate(BaseModel):
     pagador_medico_id: Optional[int] = None
     fecha_alta: Optional[datetime.date] = None
     fecha_baja: Optional[datetime.date] = None
+    paga_por_caja: bool = False
 
 
 class SocioDescuentoUpdate(BaseModel):
@@ -152,6 +160,7 @@ class SocioDescuentoUpdate(BaseModel):
     descuento_id: Optional[int] = None
     pagador_medico_id: Optional[int] = None
     fecha_baja: Optional[datetime.date] = None
+    paga_por_caja: Optional[bool] = None
 
 
 class SocioDescuentoPagadorUpdate(BaseModel):
@@ -173,19 +182,20 @@ class DeduccionItemEliminarResponse(BaseModel):
 class DeduccionHistorialItem(BaseModel):
     id: int
     origen: Literal["manual", "automatico"]
+    paga_por_caja: bool = False
     medico_id: int
     medico_nombre: str
     descuento_id: Optional[int] = None
     descuento_nombre: str
     monto: Decimal
+    saldo_pendiente: Decimal = Decimal("0.00")
     mes_periodo: Optional[int] = None
     anio_periodo: Optional[int] = None
-    # estados: pendiente | en_pago | aplicado | cancelado | vencida
+    # estados: pendiente | en_pago | aplicado | cancelado | vencida | eliminado
     estado: str
-    pago_id: Optional[int] = None
     cuota_nro: int
     cuotas_total: Optional[int] = None
-    grupo_id: Optional[int] = None
+    generado_en_pago_id: Optional[int] = None
     created_at: datetime.datetime
 
     class Config:
@@ -225,3 +235,22 @@ class DeshacerDescuentosResponse(BaseModel):
     pago_id: int
     eliminadas: int
     monto_revertido: Decimal
+
+
+# ---- Deducciones aplicadas por pago ----
+
+class DeduccionAplicadaItem(BaseModel):
+    medico_id: int
+    medico_nombre: str
+    medico_nro_socio: int
+    descuento_id: Optional[int]
+    descuento_nombre: str
+    monto_aplicado: Decimal
+
+
+class DeduccionesAplicadasResponse(BaseModel):
+    pago_id: int
+    pago_estado: str
+    total_items: int
+    total_aplicado: Decimal
+    items: List[DeduccionAplicadaItem]

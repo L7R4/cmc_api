@@ -70,18 +70,22 @@ async def build_detalles_liquidacion(db: AsyncSession, liquidacion_id: int) -> N
             GuardarAtencion.CODIGO_PRESTACION.label("codigo_prestacion"),
             GuardarAtencion.FECHA_PRESTACION.label("fecha_prestacion"),
             GuardarAtencion.IMPORTE_COLEGIO.label("importe_colegio"),
+            GuardarAtencion.VALOR_CIRUJIA.label("valor_cirujia"),
             GuardarAtencion.VALOR_AYUDANTE.label("valor_ayudante"),
             GuardarAtencion.VALOR_AYUDANTE_2.label("valor_ayudante_2"),
             GuardarAtencion.GASTOS.label("gastos"),
+            GuardarAtencion.COSEGURO.label("coseguro"),
             GuardarAtencion.CANTIDAD.label("cantidad"),
             GuardarAtencion.CANT_TRATAMIENTO.label("cantidad_tratamiento"),
             GuardarAtencion.AYUDANTE.label("nro_socio_ayudante"),
             GuardarAtencion.AYUDANTE_2.label("nro_socio_ayudante_2"),
+            GuardarAtencion.CON_HONO_SANA.label("con_hono_sana"),
         ).where(
             GuardarAtencion.NRO_OBRA_SOCIAL == os_id,
             GuardarAtencion.ANIO_PERIODO == anio,
             GuardarAtencion.MES_PERIODO == mes,
             GuardarAtencion.EXISTE == "S",
+            GuardarAtencion.NRO_CONSULTA != "0",
         )
     )).mappings().all()
 
@@ -127,15 +131,30 @@ async def build_detalles_liquidacion(db: AsyncSession, liquidacion_id: int) -> N
 
 
 def _desdoblar_en_actores(row: Dict[str, Any]) -> List[Dict[str, Any]]:
-    piezas: List[Dict[str, Any]] = []
-    factor = int(row.get("cantidad") or 1) * int(row.get("cantidad_tratamiento") or 1)
-    id_atencion = int(row["id_atencion"])
+    """
+    Convierte una fila de guardar_atencion en 1..N entradas de detalle.
 
+    - Filas H/S (honorarios cirugía / sanatorio):
+        cirujano → VALOR_CIRUJIA
+        ayudantes → VALOR_AYUDANTE / VALOR_AYUDANTE_2 (entradas separadas)
+    - Filas C/P (consultas / prácticas individuales):
+        medico → (IMPORTE_COLEGIO + GASTOS) * CANTIDAD * CANT_TRATAMIENTO − COSEGURO
+        (sin entradas de ayudante; estas filas no tienen cirugía)
+    """
+    piezas: List[Dict[str, Any]] = []
+    id_atencion = int(row["id_atencion"])
     medico_id = row.get("medico_id")
-    if medico_id:
-        honorarios = to_dec(row.get("importe_colegio")) * factor
-        gastos = to_dec(row.get("gastos")) * factor
-        importe_total = honorarios + gastos
+    if not medico_id:
+        return piezas
+
+    con_hono_sana = (row.get("con_hono_sana") or "C").upper()
+    es_hono_sana = con_hono_sana in ("H", "S")
+
+    if es_hono_sana:
+        # Cirugía u honorario en sanatorio: usar VALOR_CIRUJIA para el actor principal
+        honorarios = to_dec(row.get("valor_cirujia"))
+        gastos = Decimal("0")
+        importe_total = honorarios
         if importe_total > 0:
             piezas.append({
                 "prestacion_id": id_atencion,
@@ -145,28 +164,47 @@ def _desdoblar_en_actores(row: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "importe_total": importe_total,
             })
 
-    ayud1 = row.get("nro_socio_ayudante")
-    if ayud1:
-        honorarios = to_dec(row.get("valor_ayudante"))
-        if honorarios > 0:
-            piezas.append({
-                "prestacion_id": id_atencion,
-                "medico_id": int(ayud1),
-                "honorarios": honorarios,
-                "gastos": Decimal("0"),
-                "importe_total": honorarios,
-            })
+        # Ayudantes como entradas separadas
+        ayud1 = row.get("nro_socio_ayudante")
+        if ayud1:
+            val = to_dec(row.get("valor_ayudante"))
+            if val > 0:
+                piezas.append({
+                    "prestacion_id": id_atencion,
+                    "medico_id": int(ayud1),
+                    "honorarios": val,
+                    "gastos": Decimal("0"),
+                    "importe_total": val,
+                })
 
-    ayud2 = row.get("nro_socio_ayudante_2")
-    if ayud2:
-        honorarios = to_dec(row.get("valor_ayudante_2"))
-        if honorarios > 0:
+        ayud2 = row.get("nro_socio_ayudante_2")
+        if ayud2:
+            val = to_dec(row.get("valor_ayudante_2"))
+            if val > 0:
+                piezas.append({
+                    "prestacion_id": id_atencion,
+                    "medico_id": int(ayud2),
+                    "honorarios": val,
+                    "gastos": Decimal("0"),
+                    "importe_total": val,
+                })
+    else:
+        # Consulta / práctica individual (C o P):
+        # (IMPORTE_COLEGIO + GASTOS) × sesion × cant_trata − COSEGURO
+        sesion = max(1, int(row.get("cantidad") or 1))
+        cant_trata = max(1, int(row.get("cantidad_tratamiento") or 1))
+        factor = sesion * cant_trata
+        honorarios = to_dec(row.get("importe_colegio")) * factor
+        gastos = to_dec(row.get("gastos")) * factor
+        coseguro = to_dec(row.get("coseguro"))
+        importe_total = honorarios + gastos - coseguro
+        if importe_total > 0:
             piezas.append({
                 "prestacion_id": id_atencion,
-                "medico_id": int(ayud2),
+                "medico_id": int(medico_id),
                 "honorarios": honorarios,
-                "gastos": Decimal("0"),
-                "importe_total": honorarios,
+                "gastos": gastos,
+                "importe_total": importe_total,
             })
 
     return piezas
@@ -182,12 +220,19 @@ async def recalcular_totales_de_liquidacion(db: AsyncSession, liquidacion_id: in
     if not liq:
         return
 
-    # Bruto: suma de importes de detalles
+    # Bruto: suma de importes de detalles (y desglose honorarios/gastos)
     bruto_res = await db.execute(
-        select(func.coalesce(func.sum(DetalleLiquidacion.importe_total), 0))
+        select(
+            func.coalesce(func.sum(DetalleLiquidacion.importe_total), 0).label("bruto"),
+            func.coalesce(func.sum(DetalleLiquidacion.honorarios), 0).label("honorarios"),
+            func.coalesce(func.sum(DetalleLiquidacion.gastos), 0).label("gastos"),
+        )
         .where(DetalleLiquidacion.liquidacion_id == liquidacion_id)
     )
-    total_bruto = to_dec(bruto_res.scalar_one())
+    bruto_row = bruto_res.first()
+    total_bruto = to_dec(bruto_row.bruto)
+    total_honorarios = to_dec(bruto_row.honorarios)
+    total_gastos = to_dec(bruto_row.gastos)
 
     # DCs de ajustes en lotes en estado='L' del pago, para esta OS+período
     dc_res = await db.execute(
@@ -213,6 +258,8 @@ async def recalcular_totales_de_liquidacion(db: AsyncSession, liquidacion_id: in
     sum_debitos = to_dec(dc_row.debitos if dc_row else 0)
     sum_creditos = to_dec(dc_row.creditos if dc_row else 0)
 
+    liq.total_honorarios = total_honorarios
+    liq.total_gastos = total_gastos
     liq.total_bruto = total_bruto
     liq.total_debitos = sum_debitos
     liq.total_creditos = sum_creditos
@@ -492,10 +539,10 @@ async def detalle_recibo_medico(
             }
             if aj["tipo"] == "d":
                 debitos.append(entry)
-                total_d += monto
+                total_d += total
             else:
                 creditos.append(entry)
-                total_c += monto
+                total_c += total
 
         liq_items.append({
             "liquidacion_id": liq.id,

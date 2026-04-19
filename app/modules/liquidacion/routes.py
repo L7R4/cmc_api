@@ -30,6 +30,7 @@ from app.modules.liquidacion.service import (
     recalcular_totales_de_liquidacion,
     vista_detalles_liquidacion,
 )
+from app.modules.deducciones.service import generar_y_recalcular_porcentuales
 
 router = APIRouter()
 
@@ -78,6 +79,8 @@ async def crear_liquidacion(payload: LiquidacionCreate, db: AsyncSession = Depen
         mes_periodo=payload.mes_periodo,
         anio_periodo=payload.anio_periodo,
         nro_factura=nro_factura,
+        total_honorarios=Decimal("0"),
+        total_gastos=Decimal("0"),
         total_bruto=Decimal("0"),
         total_debitos=Decimal("0"),
         total_creditos=Decimal("0"),
@@ -88,6 +91,8 @@ async def crear_liquidacion(payload: LiquidacionCreate, db: AsyncSession = Depen
 
     await build_detalles_liquidacion(db, liq.id)
     await recalcular_totales_de_liquidacion(db, liq.id)
+    await db.flush()
+    await generar_y_recalcular_porcentuales(db, payload.pago_id)
 
     await db.commit()
     await db.refresh(liq)
@@ -154,7 +159,10 @@ async def eliminar_liquidacion(liquidacion_id: int, db: AsyncSession = Depends(g
     #         "Quitá el lote del pago antes de eliminar la liquidación."
     #     )
 
+    pago_id_del = obj.pago_id
     await db.delete(obj)
+    await db.flush()
+    await generar_y_recalcular_porcentuales(db, pago_id_del)
     await db.commit()
     return None
 

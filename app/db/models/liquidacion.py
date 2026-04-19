@@ -3,7 +3,7 @@ import decimal
 from decimal import Decimal
 from typing import Literal, Optional
 
-from sqlalchemy import DECIMAL, Date, DateTime, Enum, ForeignKey, Index, Integer, String, UniqueConstraint, text
+from sqlalchemy import DECIMAL, JSON, Boolean, Date, DateTime, Enum, ForeignKey, Index, Integer, String, UniqueConstraint, text
 from sqlalchemy.dialects.mysql import INTEGER
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -101,6 +101,10 @@ class Pago(AuditMixin, Base):
     cierre_timestamp: Mapped[Optional[datetime.datetime]] = mapped_column(
         DateTime(timezone=False), nullable=True
     )
+    # Flag: algún cambio en liquidaciones/ajustes ocurrió desde el último refresco de deducciones
+    deducciones_dirty: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="0"
+    )
 
     liquidaciones: Mapped[list["Liquidacion"]] = relationship(
         back_populates="pago",
@@ -134,6 +138,8 @@ class Liquidacion(AuditMixin, Base):
 
     nro_factura: Mapped[Optional[str]] = mapped_column(String(30))
 
+    total_honorarios: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), default=0, server_default="0.00")
+    total_gastos: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), default=0, server_default="0.00")
     total_bruto: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), default=0)
     total_debitos: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), default=0)
     total_creditos: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), default=0)
@@ -194,6 +200,8 @@ class PagoMedico(AuditMixin, Base):
         index=True,
     )
 
+    honorarios: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), default=Decimal("0"), server_default="0.00")
+    gastos: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), default=Decimal("0"), server_default="0.00")
     bruto: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), default=Decimal("0"))
     debitos: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), default=Decimal("0"))
     creditos: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), default=Decimal("0"))
@@ -207,8 +215,10 @@ class PagoMedico(AuditMixin, Base):
         server_default="pendiente",
         nullable=False,
     )
+    detalle_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
     pago: Mapped[Optional["Pago"]] = relationship(back_populates="pagos_medico")
+    recibos: Mapped[list["Recibo"]] = relationship(back_populates="pago_medico")
 
     __table_args__ = (
         UniqueConstraint("pago_id", "medico_id", name="uq_pagomed_pago_med"),
@@ -232,18 +242,26 @@ class Recibo(AuditMixin, Base):
         index=True,
     )
 
+    pago_medico_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("pago_medico.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
     total_neto: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), default=Decimal("0"), nullable=False)
+    detalle_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     emision_timestamp: Mapped[Optional[datetime.datetime]] = mapped_column(
         DateTime(timezone=False), nullable=True
     )
-    estado: Mapped[Literal["emitido", "anulado", "pagado"]] = mapped_column(
-        Enum("emitido", "anulado", "pagado", name="recibo_estado"),
-        default="emitido",
-        server_default="emitido",
+    estado: Mapped[Literal["en_revision", "liquidado", "emitido", "anulado", "pagado"]] = mapped_column(
+        Enum("en_revision", "liquidado", "emitido", "anulado", "pagado", name="recibo_estado"),
+        default="en_revision",
+        server_default="en_revision",
         nullable=False,
     )
 
     pago: Mapped[Optional["Pago"]] = relationship(back_populates="recibos")
+    pago_medico: Mapped[Optional["PagoMedico"]] = relationship(back_populates="recibos")
 
     __table_args__ = (
         UniqueConstraint("pago_id", "medico_id", name="uq_recibo_pago_med"),

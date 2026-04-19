@@ -24,7 +24,7 @@ from app.core.passwords import hash_password
 from app.db.database import get_db
 from app.db.models import (
     Deduccion, Descuentos, DetalleLiquidacion, Documento, Especialidad, Liquidacion, ListadoMedico,
-    DeduccionSaldo, DeduccionAplicacion, Pago, SolicitudRegistro
+    DeduccionAplicacion, Pago, SolicitudRegistro
 )
 from app.modules.medicos.schemas import (
     DATE_KEYS, FIELD_MAP, AdminSaveContinueIn, AsignarEspecialidadIn, AsociarConceptoIn,
@@ -665,16 +665,24 @@ async def update_medico(
 
 @router.get("/{medico_id}/deuda", response_model=MedicoDebtOut)
 async def deuda_medico(medico_id: int, db: AsyncSession = Depends(get_db)):
+    # Saldo = SUM(calculado_total - monto_aplicado) para deducciones pendientes/en_pago
     q_total = await db.execute(
-        select(func.coalesce(func.sum(DeduccionSaldo.saldo), 0)).where(DeduccionSaldo.medico_id == medico_id)
+        select(func.coalesce(
+            func.sum(Deduccion.calculado_total - Deduccion.monto_aplicado), 0
+        )).where(
+            Deduccion.medico_id == medico_id,
+            Deduccion.estado.in_(["pendiente", "en_pago"]),
+        )
     )
     total = Decimal(q_total.scalar_one() or 0)
 
+    # Último pago en que se aplicó algo para este médico
     q_last = await db.execute(
         select(Pago.anio, Pago.mes)
         .select_from(DeduccionAplicacion)
+        .join(Deduccion, Deduccion.id == DeduccionAplicacion.deduccion_id)
         .join(Pago, Pago.id == DeduccionAplicacion.pago_id)
-        .where(DeduccionAplicacion.medico_id == medico_id)
+        .where(Deduccion.medico_id == medico_id)
         .order_by(desc(Pago.anio), desc(Pago.mes))
         .limit(1)
     )
@@ -697,38 +705,25 @@ async def crear_deuda_manual(
 ):
     total = payload.amount if payload.mode == "full" else sum(Decimal(str(q.amount)) for q in (payload.installments or []))
 
-    async with db.begin():
-        saldo = (await db.execute(
-            select(DeduccionSaldo)
-            .where(
-                DeduccionSaldo.medico_id == medico_id,
-                DeduccionSaldo.concepto_tipo == "manual",
-                DeduccionSaldo.concepto_id == 0,
-            )
-            .with_for_update()
-        )).scalars().first()
-
-        if saldo:
-            saldo.saldo = (Decimal(str(saldo.saldo or 0)) + total).quantize(Decimal("0.01"))
-        else:
-            db.add(DeduccionSaldo(
-                medico_id=medico_id,
-                concepto_tipo="manual",
-                concepto_id=0,
-                saldo=total.quantize(Decimal("0.01")),
-            ))
-
-        q_total = await db.execute(
-            select(func.coalesce(func.sum(DeduccionSaldo.saldo), 0)).where(DeduccionSaldo.medico_id == medico_id)
+    # Este endpoint creaba deuda manual via DeduccionSaldo (eliminado).
+    # Ahora simplemente calcula el saldo existente — crear deudas manuales
+    # se hace via POST /deducciones/programas con origen='manual'.
+    q_total = await db.execute(
+        select(func.coalesce(
+            func.sum(Deduccion.calculado_total - Deduccion.monto_aplicado), 0
+        )).where(
+            Deduccion.medico_id == medico_id,
+            Deduccion.estado.in_(["pendiente", "en_pago"]),
         )
-        total_out = Decimal(q_total.scalar_one() or 0).quantize(Decimal("0.01"))
+    )
+    total_out = Decimal(q_total.scalar_one() or 0).quantize(Decimal("0.01"))
 
-        return {
-            "has_debt": total_out > 0,
-            "amount": total_out,
-            "last_invoice": None,
-            "since": None,
-        }
+    return {
+        "has_debt": total_out > 0,
+        "amount": total_out,
+        "last_invoice": None,
+        "since": None,
+    }
 
 
 @router.get("/{medico_id}/especialidades", response_model=List[MedicoEspecialidadOut])
@@ -1471,13 +1466,18 @@ async def listar_conceptos_medico(medico_id: int, db: AsyncSession = Depends(get
 
     saldo_by_nro: Dict[int, Decimal] = {n: Decimal("0.00") for n in nro_list}
     if all_desc_ids:
+        # Saldo = SUM(calculado_total - monto_aplicado) agrupado por descuento_id
         sal_rows = (await db.execute(
-            select(DeduccionSaldo.concepto_id, DeduccionSaldo.saldo)
-            .where(
-                DeduccionSaldo.medico_id == medico_id,
-                DeduccionSaldo.concepto_tipo == "desc",
-                DeduccionSaldo.concepto_id.in_(all_desc_ids),
+            select(
+                Deduccion.descuento_id,
+                func.coalesce(func.sum(Deduccion.calculado_total - Deduccion.monto_aplicado), 0),
             )
+            .where(
+                Deduccion.medico_id == medico_id,
+                Deduccion.descuento_id.in_(all_desc_ids),
+                Deduccion.estado.in_(["pendiente", "en_pago"]),
+            )
+            .group_by(Deduccion.descuento_id)
         )).all()
         id_to_nro: Dict[int, int] = {}
         for n, ids in ids_by_nro.items():

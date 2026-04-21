@@ -1,10 +1,11 @@
 import datetime
 import decimal
-from typing import Optional
+from typing import List, Optional
 
-from sqlalchemy import DECIMAL, Date, Index, Integer, String, TIMESTAMP, text
+from sqlalchemy import DECIMAL, Date, Enum, ForeignKey, Index, Integer, String, TIMESTAMP, text
 from sqlalchemy.dialects.mysql import INTEGER
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.sql import func
 
 from app.db.base import Base
 
@@ -34,6 +35,96 @@ class ObrasSociales(Base):
     OBRA_SOCIAL: Mapped[str] = mapped_column(String(45, 'utf8_spanish2_ci'), nullable=False, server_default=text("'a'"))
     MARCA: Mapped[str] = mapped_column(String(1, 'utf8_spanish2_ci'), nullable=False, server_default=text("'N'"))
     VER_VALOR: Mapped[str] = mapped_column(String(1, 'utf8_spanish2_ci'), nullable=False, server_default=text("'N'"))
+
+    # Extended fields
+    cuit: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    direccion_real: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    condicion_iva: Mapped[Optional[str]] = mapped_column(
+        Enum('responsable_inscripto', 'exento', name='condicion_iva_enum'), nullable=True
+    )
+    plazo_vencimiento: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    fecha_alta_convenio: Mapped[Optional[datetime.date]] = mapped_column(Date, nullable=True)
+    obra_social_principal_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey('obras_sociales.ID', ondelete='SET NULL'), nullable=True, index=True
+    )
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        TIMESTAMP, nullable=False, server_default=text("CURRENT_TIMESTAMP")
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        TIMESTAMP, nullable=False,
+        server_default=text("CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP")
+    )
+
+    contactos: Mapped[List["ObraSocialContacto"]] = relationship(
+        "ObraSocialContacto",
+        back_populates="obra_social",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        lazy="selectin",
+    )
+    direcciones: Mapped[List["ObraSocialDireccion"]] = relationship(
+        "ObraSocialDireccion",
+        back_populates="obra_social",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        lazy="selectin",
+    )
+    documentos: Mapped[List["ObraSocialDocumento"]] = relationship(
+        "ObraSocialDocumento",
+        back_populates="obra_social",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        lazy="selectin",
+    )
+
+
+class ObraSocialContacto(Base):
+    __tablename__ = 'obras_sociales_contactos'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    obra_social_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey('obras_sociales.ID', ondelete='CASCADE'), nullable=False, index=True
+    )
+    tipo: Mapped[str] = mapped_column(Enum('email', 'telefono', name='contacto_tipo_enum'), nullable=False)
+    valor: Mapped[str] = mapped_column(String(200), nullable=False)
+    etiqueta: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
+
+    obra_social: Mapped["ObrasSociales"] = relationship("ObrasSociales", back_populates="contactos")
+
+
+class ObraSocialDireccion(Base):
+    __tablename__ = 'obras_sociales_direccion'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    obra_social_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey('obras_sociales.ID', ondelete='CASCADE'), nullable=False, index=True
+    )
+    provincia: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    localidad: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    direccion: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    codigo_postal: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+    horario: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
+
+    obra_social: Mapped["ObrasSociales"] = relationship("ObrasSociales", back_populates="direcciones")
+
+
+class ObraSocialDocumento(Base):
+    __tablename__ = 'obras_sociales_documentos'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    obra_social_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey('obras_sociales.ID', ondelete='CASCADE'), nullable=False, index=True
+    )
+    tipo: Mapped[str] = mapped_column(
+        Enum('convenio', 'normas', 'valores_convenidos', 'otros', name='documento_tipo_enum'), nullable=False
+    )
+    url: Mapped[str] = mapped_column(String(300), nullable=False)
+    nombre_custom: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        TIMESTAMP, nullable=False, server_default=text("CURRENT_TIMESTAMP")
+    )
+
+    obra_social: Mapped["ObrasSociales"] = relationship("ObrasSociales", back_populates="documentos")
 
 
 class Periodos(Base):

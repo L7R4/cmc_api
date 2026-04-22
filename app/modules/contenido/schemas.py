@@ -13,6 +13,7 @@ class NoticiaCreateIn(BaseModel):
     publicada: Optional[bool] = True
     tipo: TipoPublicacion = "Noticia"
     autor: Optional[str] = None
+    badge: Optional[str] = None
 
 
 class NoticiaUpdateIn(BaseModel):
@@ -23,6 +24,7 @@ class NoticiaUpdateIn(BaseModel):
     tipo: Optional[TipoPublicacion] = None
     autor: Optional[str] = None
     portada: Optional[str] = None
+    badge: Optional[str] = None
 
 
 class NoticiaOut(BaseModel):
@@ -34,6 +36,7 @@ class NoticiaOut(BaseModel):
     publicada: bool
     tipo: Optional[str] = None
     portada: Optional[str] = None
+    badge: Optional[str] = None
     fechaCreacion: datetime = Field(..., alias="fecha_creacion")
     fechaActualizacion: datetime = Field(..., alias="fecha_actualizacion")
 

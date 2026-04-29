@@ -606,6 +606,73 @@ async def refrescar_todos_medicos(db: AsyncSession, pago_id: int, pago: Pago) ->
     return result
 
 
+async def informe_pago(db: AsyncSession, pago_id: int, tipo: str) -> dict:
+    """
+    Devuelve médicos que participaron en el pago filtrados por tipo de informe:
+    - santander:    cuenta_bancaria == 'santander'
+    - otros_bancos: cuenta_bancaria == 'otro_banco'
+    - cuit_30:      CUIT comienza con '30'
+    - cheques:      cuenta_bancaria == 'cheque'
+    """
+    from sqlalchemy import and_
+
+    pago = await db.get(Pago, pago_id)
+    if not pago:
+        raise HTTPException(404, "Pago no encontrado")
+
+    stmt = (
+        select(
+            ListadoMedico.ID.label("medico_id"),
+            ListadoMedico.NRO_SOCIO.label("nro_socio"),
+            ListadoMedico.NOMBRE.label("nombre"),
+            ListadoMedico.CUIT.label("cuit"),
+            ListadoMedico.cbu.label("cbu"),
+            ListadoMedico.cuenta_bancaria.label("cuenta_bancaria"),
+            PagoMedico.neto_a_pagar.label("neto_a_pagar"),
+        )
+        .select_from(PagoMedico)
+        .join(ListadoMedico, ListadoMedico.ID == PagoMedico.medico_id)
+        .where(PagoMedico.pago_id == pago_id)
+    )
+
+    if tipo == "santander":
+        stmt = stmt.where(ListadoMedico.cuenta_bancaria == "santander")
+    elif tipo == "otros_bancos":
+        stmt = stmt.where(ListadoMedico.cuenta_bancaria == "otro_banco")
+    elif tipo == "cheques":
+        stmt = stmt.where(ListadoMedico.cuenta_bancaria == "cheque")
+    elif tipo == "cuit_30":
+        stmt = stmt.where(ListadoMedico.CUIT.like("30%"))
+    else:
+        raise HTTPException(400, f"Tipo de informe inválido: {tipo}")
+
+    stmt = stmt.order_by(ListadoMedico.NOMBRE)
+    rows = (await db.execute(stmt)).mappings().all()
+
+    medicos = [
+        {
+            "medico_id": r["medico_id"],
+            "nro_socio": r["nro_socio"],
+            "nombre": r["nombre"],
+            "cuit": r["cuit"],
+            "cbu": r["cbu"],
+            "cuenta_bancaria": r["cuenta_bancaria"],
+            "neto_a_pagar": _to_dec(r["neto_a_pagar"]),
+        }
+        for r in rows
+    ]
+
+    total_neto = sum((m["neto_a_pagar"] for m in medicos), Decimal("0")).quantize(Decimal("0.01"))
+
+    return {
+        "pago_id": pago_id,
+        "tipo": tipo,
+        "total_neto": total_neto,
+        "cantidad": len(medicos),
+        "medicos": medicos,
+    }
+
+
 async def generar_todos_recibos(
     db: AsyncSession,
     pago_id: int,

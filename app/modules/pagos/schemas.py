@@ -179,3 +179,31 @@ class PagoVistaPreviaRead(BaseModel):
     liquidaciones: VistaPreviaLiqSection
     deducciones: VistaPreviewDedSection
     lotes: VistaPreviewLoteSection
+
+
+# ================================================
+# Informe por tipo de pago
+# ================================================
+
+TipoInforme = Literal["santander", "otros_bancos", "cuit_30", "cheques"]
+
+
+class InformeMedicoRow(BaseModel):
+    medico_id: int
+    nro_socio: int
+    nombre: str
+    cuit: Optional[str]
+    cbu: Optional[str]
+    cuenta_bancaria: Optional[str]
+    neto_a_pagar: Decimal
+
+    class Config:
+        from_attributes = True
+
+
+class InformePagoRead(BaseModel):
+    pago_id: int
+    tipo: str
+    total_neto: Decimal
+    cantidad: int
+    medicos: List[InformeMedicoRow]

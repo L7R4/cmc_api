@@ -113,15 +113,15 @@ async def bulk_generar_descuento(
     precio = Decimal(str(getattr(desc, "precio", 0) or 0))
     porcentaje = Decimal(str(getattr(desc, "porcentaje", 0) or 0))
 
-    # ── Paso 1: Enrolar pendientes con period <= pago (solo para no aplica_a_todos) ──
+    # ── Paso 1: Enrolar pendientes con period <= pago — solo médicos en el pago ──
     enrolados = 0
     if not getattr(desc, "aplica_a_todos", False):
-        med_ids_false = [mid for mid, paga_caja in med_tuples if not paga_caja]
-        if med_ids_false:
+        med_ids_false_en_pago = [mid for mid, paga_caja in med_tuples if not paga_caja and mid in base_por_med]
+        if med_ids_false_en_pago:
             rows_a_enrolar = (await db.execute(
                 select(Deduccion).where(
                     Deduccion.descuento_id == desc_id,
-                    Deduccion.medico_id.in_(med_ids_false),
+                    Deduccion.medico_id.in_(med_ids_false_en_pago),
                     Deduccion.estado == "pendiente",
                     Deduccion.paga_por_caja == False,
                     or_(
@@ -145,7 +145,8 @@ async def bulk_generar_descuento(
                 enrolados = len(rows_a_enrolar)
                 await db.flush()
 
-    # ── Paso 2: Calcular nuevas inserciones para el período actual ──
+    # ── Paso 2: Crear nuevas deducciones para el período actual (todos los médicos)
+    # luego enrolar solo los que participan en el pago (mid in base_por_med) ──
     to_insert = []
     for mid, paga_caja in med_tuples:
         base = base_por_med.get(mid, Decimal(0))
@@ -153,6 +154,7 @@ async def bulk_generar_descuento(
         if monto <= 0:
             continue
 
+        en_pago_ahora = not paga_caja and mid in base_por_med
         porc_ap = (porc_usado if porc_usado else Decimal("0")).quantize(
             TWOPLACES, rounding=ROUND_HALF_UP
         )
@@ -164,11 +166,11 @@ async def bulk_generar_descuento(
             "monto_aplicado": Decimal("0.00"),
             "origen": "automatico",
             "paga_por_caja": paga_caja,
-            "estado": "pendiente" if paga_caja else "en_pago",
+            "estado": "en_pago" if en_pago_ahora else "pendiente",
             "cuota_nro": 0,
             "mes_aplicar": pago.mes,
             "anio_aplicar": pago.anio,
-            "generado_en_pago_id": None if paga_caja else pago_id,
+            "generado_en_pago_id": pago_id if en_pago_ahora else None,
         })
 
     # Omitir médicos que ya tienen deducción activa para este descuento+período actual.

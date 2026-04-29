@@ -1,7 +1,7 @@
 import datetime
 from typing import Optional
 
-from sqlalchemy import JSON, Column, Date, DateTime, ForeignKey, Index, Integer, String, text
+from sqlalchemy import JSON, Boolean, Column, Date, DateTime, ForeignKey, Index, Integer, String, text
 from sqlalchemy.dialects.mysql import INTEGER
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
@@ -76,6 +76,10 @@ class ListadoMedico(Base):
         default=lambda: {"conceps": [], "espec": []}
     )
     cbu: Mapped[str] = mapped_column(String(50, 'utf8_spanish2_ci'), nullable=True)
+    es_organizacion: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
+    cuenta_bancaria: Mapped[Optional[str]] = mapped_column(String(20, 'utf8_spanish2_ci'), nullable=True)
+    adherente: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
+    interior: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
     nro_resolucion: Mapped[str] = mapped_column(String(70, 'utf8_spanish2_ci'), nullable=True)
     fecha_resolucion:Mapped[Optional[datetime.date]] = mapped_column(Date)
     apellido:  Mapped[str] = mapped_column(String(70, 'utf8_spanish2_ci'), nullable=True)

@@ -16,19 +16,21 @@ from app.modules.pagos.schemas import (
     EditarEstadoRecibosPayload,
     EliminarRecibosPayload,
     GenerarRecibosPayload,
+    InformePagoRead,
     PagoCreate,
     PagoRead,
     PagoUpdate,
     PagoVistaPreviaRead,
     ReciboRead,
+    TipoInforme,
 )
 from app.modules.deducciones.service import (
     aplicar_deducciones_al_cierre,
-    refrescar_deducciones_pago,
 )
 from app.modules.pagos.service import (
     generar_recibo_medico,
     generar_todos_recibos,
+    informe_pago,
     recalcular_totales_pago,
     refrescar_detalle_medico,
     refrescar_todos_medicos,
@@ -119,9 +121,6 @@ async def crear_pago(payload: PagoCreate, db: AsyncSession = Depends(get_db)):
     db.add(obj)
     await db.commit()
     await db.refresh(obj)
-
-    # Enrolar pendientes + generar porcentuales + calcular preview monto_aplicado
-    await refrescar_deducciones_pago(db, obj)
 
     totales = await recalcular_totales_pago(db, obj.id)
     return _enrich_pago(obj, totales)
@@ -462,3 +461,22 @@ async def eliminar_recibos(
         await db.delete(recibo)
     await db.commit()
     return {"eliminados": eliminados, "total": len(eliminados)}
+
+
+# ================================================
+# GET /pagos/{pago_id}/informe/{tipo} — Informe por tipo de pago
+# ================================================
+@router.get("/{pago_id}/informe/{tipo}", response_model=InformePagoRead)
+async def informe_pago_endpoint(
+    pago_id: int,
+    tipo: TipoInforme,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Retorna los médicos que participaron en el pago filtrados por tipo:
+    - santander:    CBU empieza con 072
+    - otros_bancos: tiene CBU pero no empieza con 072
+    - cheques:      sin CBU (se paga por cheque)
+    - cuit_30:      CUIT comienza con 30 (personas jurídicas)
+    """
+    return await informe_pago(db, pago_id, tipo)

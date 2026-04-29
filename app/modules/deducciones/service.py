@@ -58,27 +58,76 @@ TWOPLACES = Decimal("0.01")
 # =============================================================================
 async def auto_enrolar_pendientes(db: AsyncSession, pago: Pago) -> dict:
     """
-    Marca como en_pago todas las deducciones (manual + automático) con
-    paga_por_caja=False que estén pendientes y cuyo período <= pago.mes/anio.
-    Devuelve {"cantidad": int, "ids": list[int]}.
+    Sincroniza el enrolamiento de deducciones pendientes según los médicos que
+    participan en el pago (tienen detalles en liquidaciones del pago).
+
+    - Enrola (pendiente → en_pago): paga_por_caja=False, period <= pago,
+      medico_id o pagador_medico_id está en el pago. No toca generado_en_pago_id.
+    - Desenrola (en_pago → pendiente): generado_en_pago_id IS NULL,
+      paga_por_caja=False, ni medico_id ni pagador_medico_id está en el pago.
     """
-    filtro = and_(
-        Deduccion.paga_por_caja == False,
-        Deduccion.estado == "pendiente",
-        or_(
-            Deduccion.anio_aplicar < pago.anio,
-            and_(
-                Deduccion.anio_aplicar == pago.anio,
-                Deduccion.mes_aplicar <= pago.mes,
-            ),
-        ),
+    medicos_en_pago: set[int] = set(
+        (await db.execute(
+            select(ListadoMedico.ID)
+            .select_from(DetalleLiquidacion)
+            .join(Liquidacion, Liquidacion.id == DetalleLiquidacion.liquidacion_id)
+            .join(ListadoMedico, ListadoMedico.NRO_SOCIO == DetalleLiquidacion.medico_id)
+            .where(Liquidacion.pago_id == pago.id)
+            .distinct()
+        )).scalars().all()
     )
-    ids: list[int] = list((await db.execute(select(Deduccion.id).where(filtro))).scalars().all())
+
+    # Desenrolar auto-enroladas cuyo médico/pagador ya no participa en el pago
+    if medicos_en_pago:
+        filtro_desenrolar = and_(
+            Deduccion.estado == "en_pago",
+            Deduccion.paga_por_caja == False,
+            Deduccion.generado_en_pago_id.is_(None),
+            ~Deduccion.medico_id.in_(medicos_en_pago),
+            or_(
+                Deduccion.pagador_medico_id.is_(None),
+                ~Deduccion.pagador_medico_id.in_(medicos_en_pago),
+            ),
+        )
+    else:
+        # Sin médicos en el pago → desenrolar todas las auto-enroladas
+        filtro_desenrolar = and_(
+            Deduccion.estado == "en_pago",
+            Deduccion.paga_por_caja == False,
+            Deduccion.generado_en_pago_id.is_(None),
+        )
+    await db.execute(update(Deduccion).where(filtro_desenrolar).values(estado="pendiente"))
+
+    if not medicos_en_pago:
+        return {"cantidad": 0, "ids": []}
+
+    # Enrolar pendientes cuyo médico o pagador está en el pago
+    ids: list[int] = list(
+        (await db.execute(
+            select(Deduccion.id).where(
+                and_(
+                    Deduccion.paga_por_caja == False,
+                    Deduccion.estado == "pendiente",
+                    or_(
+                        Deduccion.anio_aplicar < pago.anio,
+                        and_(
+                            Deduccion.anio_aplicar == pago.anio,
+                            Deduccion.mes_aplicar <= pago.mes,
+                        ),
+                    ),
+                    or_(
+                        Deduccion.medico_id.in_(medicos_en_pago),
+                        Deduccion.pagador_medico_id.in_(medicos_en_pago),
+                    ),
+                )
+            )
+        )).scalars().all()
+    )
     if ids:
         await db.execute(
             update(Deduccion)
             .where(Deduccion.id.in_(ids))
-            .values(estado="en_pago", generado_en_pago_id=pago.id)
+            .values(estado="en_pago")
         )
     return {"cantidad": len(ids), "ids": ids}
 
@@ -231,7 +280,6 @@ async def _recalcular_montos_aplicados_en_pago(db: AsyncSession, pago_id: int) -
         update(Deduccion)
         .where(
             Deduccion.estado == "en_pago",
-            Deduccion.generado_en_pago_id == pago_id,
         )
         .values(monto_aplicado=Decimal("0.00"))
     )
@@ -244,7 +292,6 @@ async def _recalcular_montos_aplicados_en_pago(db: AsyncSession, pago_id: int) -
         select(Deduccion)
         .where(
             Deduccion.estado == "en_pago",
-            Deduccion.generado_en_pago_id == pago_id,
         )
         .execution_options(populate_existing=True)
     )).scalars().all()

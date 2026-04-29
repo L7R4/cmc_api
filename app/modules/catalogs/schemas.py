@@ -2,6 +2,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import List, Optional
 
+
 from pydantic import BaseModel, Field, field_serializer, field_validator
 
 
@@ -54,27 +55,102 @@ class AsignacionesOut(BaseModel):
 
 
 # ── Obras Sociales ───────────────────────────────────────────────
-class ObraSocialBase(BaseModel):
-    NRO_OBRASOCIAL: int = Field(..., description="Número identificador de la obra social", example=0)
-    OBRA_SOCIAL: str = Field(..., description="Nombre de la obra social", example="OSDE")
-    MARCA: str = Field(..., description="Marca (1 char)", example="N")
-    VER_VALOR: str = Field(..., description="Indicador ver valor (1 char)", example="N")
+
+class ContactoIn(BaseModel):
+    tipo: str = Field(..., pattern="^(email|telefono)$")
+    valor: str = Field(..., max_length=200)
+    etiqueta: Optional[str] = Field(None, max_length=80)
 
 
-class ObraSocialCreate(ObraSocialBase):
-    pass
+class ContactoSimpleOut(BaseModel):
+    valor: str
+    etiqueta: Optional[str] = None
+
+
+class DireccionIn(BaseModel):
+    provincia: Optional[str] = Field(None, max_length=100)
+    localidad: Optional[str] = Field(None, max_length=100)
+    direccion: Optional[str] = Field(None, max_length=200)
+    codigo_postal: Optional[str] = Field(None, max_length=10)
+    horario: Optional[str] = Field(None, max_length=150)
+
+
+class DireccionOut(BaseModel):
+    id: int
+    provincia: Optional[str] = None
+    localidad: Optional[str] = None
+    direccion: Optional[str] = None
+    codigo_postal: Optional[str] = None
+    horario: Optional[str] = None
+
+
+class DocumentoOut(BaseModel):
+    id: int
+    tipo: str
+    nombre_custom: Optional[str] = None
+    url: str
+    created_at: datetime
+
+
+class ObraSocialSimpleOut(BaseModel):
+    id: int
+    nro_obra_social: int
+    nombre: str
+    denominacion: str
+
+
+class ObraSocialCreate(BaseModel):
+    nro_obra_social: int = Field(..., description="Número identificador de la obra social")
+    nombre: str = Field(..., max_length=45, description="Nombre de la obra social")
+    marca: str = Field("N", max_length=1)
+    ver_valor: str = Field("N", max_length=1)
+    cuit: Optional[str] = Field(None, max_length=20)
+    direccion_real: Optional[str] = Field(None, max_length=200)
+    condicion_iva: Optional[str] = Field(None, pattern="^(responsable_inscripto|exento)$")
+    plazo_vencimiento: Optional[int] = None
+    fecha_alta_convenio: Optional[date] = None
+    obra_social_principal_id: Optional[int] = None
+    contactos: List[ContactoIn] = Field(default_factory=list)
+    direcciones: List[DireccionIn] = Field(default_factory=list)
 
 
 class ObraSocialUpdate(BaseModel):
-    NRO_OBRASOCIAL: Optional[int] = None
-    OBRA_SOCIAL: Optional[str] = None
-    MARCA: Optional[str] = None
-    VER_VALOR: Optional[str] = None
+    nro_obra_social: Optional[int] = None
+    nombre: Optional[str] = Field(None, max_length=45)
+    marca: Optional[str] = Field(None, max_length=1)
+    ver_valor: Optional[str] = Field(None, max_length=1)
+    cuit: Optional[str] = Field(None, max_length=20)
+    direccion_real: Optional[str] = Field(None, max_length=200)
+    condicion_iva: Optional[str] = Field(None, pattern="^(responsable_inscripto|exento)$")
+    plazo_vencimiento: Optional[int] = None
+    fecha_alta_convenio: Optional[date] = None
+    obra_social_principal_id: Optional[int] = None
+    # Si se provee, reemplaza la lista completa
+    contactos: Optional[List[ContactoIn]] = None
+    direcciones: Optional[List[DireccionIn]] = None
 
 
-class ObraSocialOut(ObraSocialBase):
-    ID: int = Field(..., description="PK en la tabla obras_sociales")
-    model_config = {"from_attributes": True}
+class ObraSocialOut(BaseModel):
+    id: int
+    nro_obra_social: int
+    nombre: str
+    denominacion: str
+    marca: str
+    ver_valor: str
+    cuit: Optional[str] = None
+    direccion_real: Optional[str] = None
+    condicion_iva: Optional[str] = None
+    plazo_vencimiento: Optional[int] = None
+    fecha_alta_convenio: Optional[date] = None
+    obra_social_principal_id: Optional[int] = None
+    emails: List[ContactoSimpleOut] = Field(default_factory=list)
+    telefonos: List[ContactoSimpleOut] = Field(default_factory=list)
+    obra_social_principal: Optional[ObraSocialSimpleOut] = None
+    asociadas: List[ObraSocialSimpleOut] = Field(default_factory=list)
+    direccion: List[DireccionOut] = Field(default_factory=list)
+    documentos: List[DocumentoOut] = Field(default_factory=list)
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
 
 
 # ── Valores Boletín ──────────────────────────────────────────────

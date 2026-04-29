@@ -62,6 +62,7 @@ def _to_out(row: NoticiaModel, docs: Optional[List[DocNoticiaModel]] = None) -> 
         fecha_creacion=row.fecha_creacion,
         fecha_actualizacion=row.fecha_actualizacion,
         portada=row.portada,
+        badge=row.badge,
         documentos=[_to_doc_out(d) for d in (docs or row.documentos or [])],
     )
 
@@ -104,6 +105,7 @@ async def list_noticias(
             fecha_creacion=n.fecha_creacion,
             fecha_actualizacion=n.fecha_actualizacion,
             portada=n.portada,
+            badge=n.badge,
         )
         for n in res.scalars().all()
     ]
@@ -126,6 +128,7 @@ async def crear_noticia(
     tipo: str = Form(...),
     publicada: bool = Form(True),
     autor: Optional[str] = Form(None),
+    badge: Optional[str] = Form(None),
     portada: Optional[UploadFile] = File(None),
     adjuntos: Optional[List[UploadFile]] = File(None),
     user=Depends(get_current_user),
@@ -138,6 +141,7 @@ async def crear_noticia(
         tipo=tipo,
         publicada=publicada,
         autor=autor.strip() if autor else "Colegio Médico de Corrientes",
+        badge=badge.strip() if badge else None,
     )
 
     if portada:
@@ -179,6 +183,7 @@ async def actualizar_noticia(
     publicada: Optional[bool] = Form(None),
     autor: Optional[str] = Form(None),
     portada: Optional[UploadFile] = File(None),
+    badge: Optional[str] = Form(None),
     limpiar_portada: Optional[bool] = Form(False),
     adjuntos: Optional[List[UploadFile]] = File(None),
     eliminar_documento_ids: Optional[str] = Form(None),
@@ -199,6 +204,8 @@ async def actualizar_noticia(
         n.publicada = publicada
     if autor is not None:
         n.autor = autor.strip() or n.autor
+    if badge is not None:
+        n.badge = badge.strip() or None
 
     if limpiar_portada:
         n.portada = None

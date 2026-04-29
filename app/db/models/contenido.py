@@ -18,6 +18,7 @@ class Noticia(Base):
     publicada        = Column(Boolean, nullable=False, server_default="1")
     tipo: Mapped[str] = mapped_column(String(10, 'utf8_spanish2_ci'), nullable=False, server_default=text("'Noticia'"))
     portada          = Column(String(500), nullable=True)
+    badge            = Column(String(80), nullable=True)
 
     fecha_creacion   = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     fecha_actualizacion = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)

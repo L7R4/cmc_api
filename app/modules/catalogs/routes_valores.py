@@ -5,8 +5,8 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.database import get_db
-from app.db.models import ObrasSociales, ValorPrestacion
-from app.modules.catalogs.schemas import ValorPrestacionOut
+from app.db.models import ObrasSociales, ValorPrestacion, ValoresBoletin
+from app.modules.catalogs.schemas import ValorPrestacionOut, ValoresBoletinOut
 
 router = APIRouter()
 
@@ -85,3 +85,61 @@ async def listar_valores_boletin(
 
     rows = (await db.execute(stmt)).mappings().all()
     return [ValorPrestacionOut(**row) for row in rows]
+
+
+@router.get(
+    "/galenos",
+    response_model=List[ValoresBoletinOut],
+    summary="Listar valores galeno por obra social y nivel",
+)
+async def listar_valores_galenos(
+    db: AsyncSession = Depends(get_db),
+    nro_obra_social: Optional[int] = Query(None, description="Nro de obra social"),
+    nivel: Optional[int] = Query(None, description="Nivel"),
+    page: int = Query(1, ge=1),
+    size: int = Query(50, ge=1, le=500),
+):
+    stmt = (
+        select(
+            ValoresBoletin.ID.label("id"),
+            ValoresBoletin.NRO_OBRASOCIAL.label("nro_obrasocial"),
+            ObrasSociales.OBRA_SOCIAL.label("obra_social"),
+            ValoresBoletin.NIVEL.label("nivel"),
+            ValoresBoletin.FECHA_CAMBIO.label("fecha_cambio"),
+            ValoresBoletin.CONSULTA.label("consulta"),
+            ValoresBoletin.GALENO_QUIRURGICO.label("galeno_quirurgico"),
+            ValoresBoletin.GASTOS_QUIRURGICOS.label("gastos_quirurgicos"),
+            ValoresBoletin.GALENO_PRACTICA.label("galeno_practica"),
+            ValoresBoletin.GALENO_RADIOLOGICO.label("galeno_radiologico"),
+            ValoresBoletin.GASTOS_RADIOLOGICO.label("gastos_radiologico"),
+            ValoresBoletin.GASTOS_BIOQUIMICOS.label("gastos_bioquimicos"),
+            ValoresBoletin.OTROS_GASTOS.label("otros_gastos"),
+            ValoresBoletin.GALENO_CIRUGIA_ADULTOS.label("galeno_cirugia_adultos"),
+            ValoresBoletin.GALENO_CIRUGIA_INFANTIL.label("galeno_cirugia_infantil"),
+            ValoresBoletin.CONSULTA_ESPECIAL.label("consulta_especial"),
+            ValoresBoletin.CATEGORIA_A.label("categoria_a"),
+            ValoresBoletin.CATEGORIA_B.label("categoria_b"),
+            ValoresBoletin.CATEGORIA_C.label("categoria_c"),
+        )
+        .select_from(ValoresBoletin)
+        .join(
+            ObrasSociales,
+            ObrasSociales.NRO_OBRASOCIAL == ValoresBoletin.NRO_OBRASOCIAL,
+            isouter=True,
+        )
+    )
+
+    if nro_obra_social is not None:
+        stmt = stmt.where(ValoresBoletin.NRO_OBRASOCIAL == nro_obra_social)
+    if nivel is not None:
+        stmt = stmt.where(ValoresBoletin.NIVEL == nivel)
+
+    stmt = (
+        stmt
+        .order_by(ValoresBoletin.NRO_OBRASOCIAL.asc(), ValoresBoletin.NIVEL.asc())
+        .offset((page - 1) * size)
+        .limit(size)
+    )
+
+    rows = (await db.execute(stmt)).mappings().all()
+    return [ValoresBoletinOut(**row) for row in rows]

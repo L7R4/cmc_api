@@ -220,6 +220,22 @@ class ValorFijoOut(BaseModel):
 
 
 # ── Valor Prestación ─────────────────────────────────────────
+class ValorPrestacionIn(BaseModel):
+    codigos: str
+    nro_obrasocial: int
+    obra_social: Optional[str] = None
+    c_p_h_s: Optional[str] = ""
+    honorarios_a: Decimal = Decimal("0")
+    honorarios_b: Decimal = Decimal("0")
+    honorarios_c: Decimal = Decimal("0")
+    gastos: Decimal = Decimal("0")
+    ayudante_a: Decimal = Decimal("0")
+    ayudante_b: Decimal = Decimal("0")
+    ayudante_c: Decimal = Decimal("0")
+    fecha_cambio: Optional[date] = None
+    fecha_vigencia: Optional[date] = None
+
+
 class ValorPrestacionOut(BaseModel):
     id: int
     codigos: str
@@ -234,6 +250,7 @@ class ValorPrestacionOut(BaseModel):
     ayudante_c: Decimal
     c_p_h_s: str
     fecha_cambio: Optional[date] = None
+    fecha_vigencia: Optional[date] = None
 
     @field_serializer(
         "honorarios_a", "honorarios_b", "honorarios_c",
@@ -241,6 +258,35 @@ class ValorPrestacionOut(BaseModel):
     )
     def _ser_decimal(self, v: Decimal) -> float:
         return float(v)
+
+    class Config:
+        from_attributes = True
+
+
+# ── Valor Nomenclado Swiss ───────────────────────────────────
+class ValorNomencladoSwissOut(BaseModel):
+    id: int
+    codigo: str
+    c_p_h_s: Optional[str] = None
+    descripcion: Optional[str] = None
+    honorarios_a: Decimal
+    gastos: Decimal
+    ayudante_a: Decimal
+
+    @field_serializer("honorarios_a", "gastos", "ayudante_a")
+    def _ser_decimal(self, v: Decimal) -> float:
+        return float(v)
+
+    class Config:
+        from_attributes = True
+
+
+# ── Valores Éticos ────────────────────────────────────────────
+class ValoresEticosOut(BaseModel):
+    id: int
+    pdf_path: Optional[str] = None
+    observaciones: Optional[str] = None
+    fecha_update: Optional[datetime] = None
 
     class Config:
         from_attributes = True

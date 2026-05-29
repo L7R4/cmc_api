@@ -1,12 +1,13 @@
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth.deps import get_current_user
 from app.db.database import get_db
-from app.db.models import ObrasSociales, ValorPrestacion, ValoresBoletin
-from app.modules.catalogs.schemas import ValorPrestacionOut, ValoresBoletinOut
+from app.db.models import Codigoprestacionswiss, ObrasSociales, ValorNomencladoSwiss, ValorPrestacion, ValoresBoletin
+from app.modules.catalogs.schemas import ValorNomencladoSwissOut, ValorPrestacionIn, ValorPrestacionOut, ValoresBoletinOut
 
 router = APIRouter()
 
@@ -61,6 +62,7 @@ async def listar_valores_boletin(
             ValorPrestacion.AYUDANTE_C.label("ayudante_c"),
             ValorPrestacion.C_P_H_S.label("c_p_h_s"),
             ValorPrestacion.FECHA_CAMBIO.label("fecha_cambio"),
+            ValorPrestacion.FECHA_VIGENCIA.label("fecha_vigencia"),
         )
         .select_from(ValorPrestacion)
         .join(subq, ValorPrestacion.ID == subq.c.min_id)
@@ -85,6 +87,76 @@ async def listar_valores_boletin(
 
     rows = (await db.execute(stmt)).mappings().all()
     return [ValorPrestacionOut(**row) for row in rows]
+
+
+@router.post(
+    "/boletin",
+    response_model=ValorPrestacionOut,
+    status_code=status.HTTP_201_CREATED,
+    summary="Insertar nuevo valor de prestación (boletin)",
+)
+async def crear_valor_boletin(
+    body: ValorPrestacionIn,
+    db: AsyncSession = Depends(get_db),
+):
+    row = ValorPrestacion(
+        CODIGOS=body.codigos,
+        NRO_OBRASOCIAL=body.nro_obrasocial,
+        HONORARIOS_A=body.honorarios_a,
+        HONORARIOS_B=body.honorarios_b,
+        HONORARIOS_C=body.honorarios_c,
+        GASTOS=body.gastos,
+        AYUDANTE_A=body.ayudante_a,
+        AYUDANTE_B=body.ayudante_b,
+        AYUDANTE_C=body.ayudante_c,
+        C_P_H_S=body.c_p_h_s or "",
+        FECHA_CAMBIO=body.fecha_cambio,
+        FECHA_VIGENCIA=body.fecha_vigencia,
+    )
+    db.add(row)
+    await db.commit()
+    await db.refresh(row)
+
+    obra_social_name: str | None = None
+    if body.obra_social:
+        obra_social_name = body.obra_social
+    else:
+        os_row = await db.get(ObrasSociales, row.NRO_OBRASOCIAL)
+        if os_row:
+            obra_social_name = os_row.OBRA_SOCIAL
+
+    return ValorPrestacionOut(
+        id=row.ID,
+        codigos=row.CODIGOS,
+        nro_obrasocial=row.NRO_OBRASOCIAL,
+        obra_social=obra_social_name,
+        honorarios_a=row.HONORARIOS_A,
+        honorarios_b=row.HONORARIOS_B,
+        honorarios_c=row.HONORARIOS_C,
+        gastos=row.GASTOS,
+        ayudante_a=row.AYUDANTE_A,
+        ayudante_b=row.AYUDANTE_B,
+        ayudante_c=row.AYUDANTE_C,
+        c_p_h_s=row.C_P_H_S,
+        fecha_cambio=row.FECHA_CAMBIO,
+        fecha_vigencia=row.FECHA_VIGENCIA,
+    )
+
+
+@router.delete(
+    "/boletin/{id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Eliminar un valor de prestación por ID",
+)
+async def eliminar_valor_boletin(
+    id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    row = await db.get(ValorPrestacion, id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Valor no encontrado")
+    await db.delete(row)
+    await db.commit()
 
 
 @router.get(
@@ -143,3 +215,45 @@ async def listar_valores_galenos(
 
     rows = (await db.execute(stmt)).mappings().all()
     return [ValoresBoletinOut(**row) for row in rows]
+
+
+@router.get(
+    "/nomenclado-swiss",
+    response_model=List[ValorNomencladoSwissOut],
+    summary="Listar valores del nomenclador Swiss",
+)
+async def listar_nomenclado_swiss(
+    db: AsyncSession = Depends(get_db),
+    codigo: Optional[str] = Query(None, description="Código de prestación"),
+    c_p_h_s: Optional[str] = Query(None, description="Tipo C/P/H/S"),
+    page: int = Query(1, ge=1),
+    size: int = Query(50, ge=1, le=500),
+    _=Depends(get_current_user),
+):
+    stmt = (
+        select(
+            ValorNomencladoSwiss.ID.label("id"),
+            ValorNomencladoSwiss.CODIGO.label("codigo"),
+            ValorNomencladoSwiss.C_P_H_S.label("c_p_h_s"),
+            Codigoprestacionswiss.DESCRIPCION.label("descripcion"),
+            ValorNomencladoSwiss.HONORARIOS_A.label("honorarios_a"),
+            ValorNomencladoSwiss.GASTOS.label("gastos"),
+            ValorNomencladoSwiss.AYUDANTE_A.label("ayudante_a"),
+        )
+        .select_from(ValorNomencladoSwiss)
+        .join(
+            Codigoprestacionswiss,
+            Codigoprestacionswiss.CODIGO == ValorNomencladoSwiss.CODIGO,
+            isouter=True,
+        )
+    )
+
+    if codigo is not None:
+        stmt = stmt.where(ValorNomencladoSwiss.CODIGO == codigo)
+    if c_p_h_s is not None:
+        stmt = stmt.where(ValorNomencladoSwiss.C_P_H_S == c_p_h_s)
+
+    stmt = stmt.order_by(ValorNomencladoSwiss.CODIGO.asc()).offset((page - 1) * size).limit(size)
+
+    rows = (await db.execute(stmt)).mappings().all()
+    return [ValorNomencladoSwissOut(**row) for row in rows]

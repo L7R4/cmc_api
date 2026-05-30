@@ -1,7 +1,7 @@
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func, select
+from sqlalchemy import collate, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.deps import get_current_user
@@ -243,7 +243,7 @@ async def listar_nomenclado_swiss(
         .select_from(ValorNomencladoSwiss)
         .join(
             Codigoprestacionswiss,
-            Codigoprestacionswiss.CODIGO == ValorNomencladoSwiss.CODIGO,
+            collate(Codigoprestacionswiss.CODIGO, "utf8_general_ci") == ValorNomencladoSwiss.CODIGO,
             isouter=True,
         )
     )

@@ -264,6 +264,12 @@ class ValorPrestacionOut(BaseModel):
 
 
 # ── Valor Nomenclado Swiss ───────────────────────────────────
+class ValorNomencladoSwissUpdate(BaseModel):
+    honorarios_a: Optional[Decimal] = None
+    gastos: Optional[Decimal] = None
+    ayudante_a: Optional[Decimal] = None
+
+
 class ValorNomencladoSwissOut(BaseModel):
     id: int
     codigo: str

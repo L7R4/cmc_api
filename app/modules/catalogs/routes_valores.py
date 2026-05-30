@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.deps import get_current_user
 from app.db.database import get_db
 from app.db.models import Codigoprestacionswiss, ObrasSociales, ValorNomencladoSwiss, ValorPrestacion, ValoresBoletin
-from app.modules.catalogs.schemas import ValorNomencladoSwissOut, ValorPrestacionIn, ValorPrestacionOut, ValoresBoletinOut
+from app.modules.catalogs.schemas import ValorNomencladoSwissOut, ValorNomencladoSwissUpdate, ValorPrestacionIn, ValorPrestacionOut, ValoresBoletinOut
 
 router = APIRouter()
 
@@ -257,3 +257,61 @@ async def listar_nomenclado_swiss(
 
     rows = (await db.execute(stmt)).mappings().all()
     return [ValorNomencladoSwissOut(**row) for row in rows]
+
+
+@router.patch(
+    "/nomenclado-swiss/{id}",
+    response_model=ValorNomencladoSwissOut,
+    summary="Actualizar precios de un valor nomenclado Swiss",
+)
+async def actualizar_nomenclado_swiss(
+    id: int,
+    body: ValorNomencladoSwissUpdate,
+    db: AsyncSession = Depends(get_db),
+    _=Depends(get_current_user),
+):
+    row = await db.get(ValorNomencladoSwiss, id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Valor no encontrado")
+
+    if body.honorarios_a is not None:
+        row.HONORARIOS_A = body.honorarios_a
+    if body.gastos is not None:
+        row.GASTOS = body.gastos
+    if body.ayudante_a is not None:
+        row.AYUDANTE_A = body.ayudante_a
+
+    await db.commit()
+    await db.refresh(row)
+
+    desc_row = await db.execute(
+        select(Codigoprestacionswiss.DESCRIPCION).where(Codigoprestacionswiss.CODIGO == row.CODIGO)
+    )
+    descripcion = desc_row.scalar_one_or_none()
+
+    return ValorNomencladoSwissOut(
+        id=row.ID,
+        codigo=row.CODIGO,
+        c_p_h_s=row.C_P_H_S,
+        descripcion=descripcion,
+        honorarios_a=row.HONORARIOS_A,
+        gastos=row.GASTOS,
+        ayudante_a=row.AYUDANTE_A,
+    )
+
+
+@router.delete(
+    "/nomenclado-swiss/{id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Eliminar un valor nomenclado Swiss",
+)
+async def eliminar_nomenclado_swiss(
+    id: int,
+    db: AsyncSession = Depends(get_db),
+    _=Depends(get_current_user),
+):
+    row = await db.get(ValorNomencladoSwiss, id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Valor no encontrado")
+    await db.delete(row)
+    await db.commit()

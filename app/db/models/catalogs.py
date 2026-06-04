@@ -288,3 +288,13 @@ class ValorPrestacion(Base):
     AYUDANTE_C: Mapped[decimal.Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, server_default=text("'0.00'"))
     C_P_H_S: Mapped[str] = mapped_column(String(1), nullable=False, server_default=text("'C'"))
     FECHA_CAMBIO: Mapped[Optional[datetime.date]] = mapped_column(Date)
+    FECHA_VIGENCIA: Mapped[Optional[datetime.date]] = mapped_column(Date)
+
+
+class ValoresEticos(Base):
+    __tablename__ = "valores_eticos"
+
+    id: Mapped[int] = mapped_column(INTEGER(11), primary_key=True, autoincrement=True)
+    pdf_path: Mapped[Optional[str]] = mapped_column(String(500))
+    observaciones: Mapped[Optional[str]] = mapped_column(String(1000))
+    fecha_update: Mapped[Optional[datetime.datetime]] = mapped_column(TIMESTAMP)

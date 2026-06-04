@@ -62,7 +62,7 @@ async def listar_valores_boletin(
             ValorPrestacion.AYUDANTE_C.label("ayudante_c"),
             ValorPrestacion.C_P_H_S.label("c_p_h_s"),
             ValorPrestacion.FECHA_CAMBIO.label("fecha_cambio"),
-            ValorPrestacion.FECHA_VIGENCIA.label("fecha_vigencia"),
+            ValorPrestacion.FECHA_FINAL.label("fecha_final"),
         )
         .select_from(ValorPrestacion)
         .join(subq, ValorPrestacion.ID == subq.c.min_id)
@@ -111,7 +111,7 @@ async def crear_valor_boletin(
         AYUDANTE_C=body.ayudante_c,
         C_P_H_S=body.c_p_h_s or "",
         FECHA_CAMBIO=body.fecha_cambio,
-        FECHA_VIGENCIA=body.fecha_vigencia,
+        FECHA_FINAL=body.fecha_final,
     )
     db.add(row)
     await db.commit()
@@ -139,7 +139,7 @@ async def crear_valor_boletin(
         ayudante_c=row.AYUDANTE_C,
         c_p_h_s=row.C_P_H_S,
         fecha_cambio=row.FECHA_CAMBIO,
-        fecha_vigencia=row.FECHA_VIGENCIA,
+        fecha_final=row.FECHA_FINAL,
     )
 
 

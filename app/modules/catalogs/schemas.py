@@ -233,7 +233,7 @@ class ValorPrestacionIn(BaseModel):
     ayudante_b: Decimal = Decimal("0")
     ayudante_c: Decimal = Decimal("0")
     fecha_cambio: Optional[date] = None
-    fecha_vigencia: Optional[date] = None
+    fecha_final: Optional[date] = None
 
 
 class ValorPrestacionOut(BaseModel):
@@ -250,7 +250,7 @@ class ValorPrestacionOut(BaseModel):
     ayudante_c: Decimal
     c_p_h_s: str
     fecha_cambio: Optional[date] = None
-    fecha_vigencia: Optional[date] = None
+    fecha_final: Optional[date] = None
 
     @field_serializer(
         "honorarios_a", "honorarios_b", "honorarios_c",

@@ -92,7 +92,8 @@ MEDICO_ALL_FIELDS = [
     "vitalicio", "fecha_vitalicio", "observacion", "categoria", "existe",
     "excep_desde", "excep_hasta", "excep_desde2", "excep_hasta2",
     "excep_desde3", "excep_hasta3", "ingresar", "cbu", "nro_resolucion",
-    "fecha_resolucion", "conceps_espec", "attach_titulo", "attach_matricula_nac",
+    "fecha_resolucion", "es_organizacion", "adherente", "interior",
+    "conceps_espec", "attach_titulo", "attach_matricula_nac",
     "attach_matricula_prov", "attach_resolucion", "attach_habilitacion_municipal",
     "attach_cuit", "attach_condicion_impositiva", "attach_anssal",
     "attach_malapraxis", "attach_cbu", "attach_dni", "titulo",
@@ -129,6 +130,8 @@ MEDICO_EXACT_STRING_FIELDS = {
     "existe", "sexo", "categoria", "ingresar", "vitalicio",
     "monotributista", "factura", "tipo_doc", "condicion_impositiva",
 }
+
+MEDICO_BOOL_FIELDS = {"es_organizacion", "adherente", "interior"}
 
 # Campos con búsqueda parcial ILIKE (además del default)
 MEDICO_ILIKE_FIELDS = {"provincia", "localidad"}
@@ -359,7 +362,10 @@ async def listar_medicos_full(
             filters.append(col == date_val)
             continue
 
-        if field in MEDICO_EXACT_STRING_FIELDS:
+        if field in MEDICO_BOOL_FIELDS:
+            bool_val = str(raw).strip().lower() in ("1", "true", "yes", "s")
+            filters.append(col == bool_val)
+        elif field in MEDICO_EXACT_STRING_FIELDS:
             filters.append(func.upper(func.trim(cast(col, String))) == str(raw).strip().upper())
         else:
             filters.append(cast(col, String).ilike(f"%{raw}%"))
@@ -524,6 +530,9 @@ async def obtener_medico(medico_id: int, db: AsyncSession = Depends(get_db)):
             ListadoMedico.attach_malapraxis.label("attach_malapraxis"),
             ListadoMedico.attach_cbu.label("attach_cbu"),
             ListadoMedico.attach_dni.label("attach_dni"),
+            ListadoMedico.es_organizacion.label("es_organizacion"),
+            ListadoMedico.adherente.label("adherente"),
+            ListadoMedico.interior.label("interior"),
         )
         .where(ListadoMedico.ID == medico_id)
     )

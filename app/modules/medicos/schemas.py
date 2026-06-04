@@ -156,6 +156,9 @@ class MedicoBase(BaseModel):
     cbu: Optional[str] = Field(None)
     nro_resolucion: Optional[str] = Field(None)
     fecha_resolucion: Optional[date] = Field(None)
+    es_organizacion: Optional[bool] = Field(None)
+    adherente: Optional[bool] = Field(None)
+    interior: Optional[bool] = Field(None)
     conceps_espec: Optional[Dict[str, Any]] = Field(None)
     attach_titulo: Optional[str] = Field(None)
     attach_matricula_nac: Optional[str] = Field(None)
@@ -283,6 +286,9 @@ class MedicoDetailOut(BaseModel):
     vencimiento_cobertura: Optional[date] = None
     cbu: Optional[str] = None
     observacion: Optional[str] = None
+    es_organizacion: Optional[bool] = None
+    adherente: Optional[bool] = None
+    interior: Optional[bool] = None
     attach_titulo: Optional[str] = None
     attach_matricula_nac: Optional[str] = None
     attach_matricula_prov: Optional[str] = None
@@ -367,6 +373,9 @@ class MedicoUpdateIn(BaseModel):
     vencimiento_cobertura: Optional[str] = None
     cbu: Optional[str] = None
     observacion: Optional[str] = None
+    es_organizacion: Optional[bool] = None
+    adherente: Optional[bool] = None
+    interior: Optional[bool] = None
 
     model_config = ConfigDict(extra="ignore")
 

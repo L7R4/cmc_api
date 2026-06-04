@@ -19,7 +19,7 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     op.add_column('valor_prestacion',
-        sa.Column('FECHA_VIGENCIA', sa.Date(), nullable=True))
+        sa.Column('FECHA_FINAL', sa.Date(), nullable=True))
 
     op.create_table(
         'valores_eticos',
@@ -32,4 +32,4 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_table('valores_eticos')
-    op.drop_column('valor_prestacion', 'FECHA_VIGENCIA')
+    op.drop_column('valor_prestacion', 'FECHA_FINAL')

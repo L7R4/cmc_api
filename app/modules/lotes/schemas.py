@@ -41,19 +41,22 @@ class AjusteCreate(BaseModel):
     id_atencion: Optional[int] = None  # Si se provee, deriva medico_id y obra_social_id automáticamente
 
 
-class AtencionSearchRow(BaseModel):
-    """Fila de resultado de búsqueda en guardar_atencion."""
+class PrestacionCMCSearchRow(BaseModel):
+    """Fila de resultado de búsqueda en detalle_facturacion (CMC)."""
     id: int
-    nro_socio: int
-    nombre_prestador: str
-    nombre_afiliado: str
-    nro_consulta: str
-    codigo_prestacion: str
-    fecha_prestacion: Optional[str] = None
-    valor_cirujia: Decimal
-    mes_periodo: int
-    anio_periodo: int
-    nro_obra_social: int
+    cod_med: str
+    medico_nombre: Optional[str] = None
+    nom_ape_p: Optional[str] = None
+    cod_nom: Optional[str] = None
+    tpo_funcion: Optional[str] = None
+    fecha_practica: Optional[str] = None
+    nro_orden: Optional[str] = None
+    honorarios: Optional[Decimal] = None
+    gastos: Optional[Decimal] = None
+    ayudante: Optional[Decimal] = None
+    importe_total: Optional[Decimal] = None
+    periodo: str
+    cod_obr: str
 
 
 class AjusteUpdate(BaseModel):
@@ -79,7 +82,7 @@ class AjusteRead(BaseModel):
     nombre_prestador: Optional[str] = None
     nro_socio: Optional[int] = None
     nro_consulta: Optional[str] = None
-    valor_cirujia: Optional[Decimal] = None
+    tpo_funcion: Optional[str] = None
     codigo_prestacion: Optional[str] = None
     fecha_prestacion: Optional[str] = None
 

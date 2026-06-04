@@ -166,16 +166,34 @@ class DetalleLiquidacion(AuditMixin, Base):
     medico_id: Mapped[int] = mapped_column(Integer, index=True)
     obra_social_id: Mapped[int] = mapped_column(Integer, index=True)
 
-    prestacion_id: Mapped[int] = mapped_column(
-        ForeignKey("guardar_atencion.ID", ondelete="RESTRICT"),
+    # FK a guardar_atencion solo para registros con fuente='ga'. NULL para fuente='cmc'.
+    prestacion_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+
+    # Fuente del registro: 'ga' = GuardarAtencion (interno), 'cmc' = detalle_facturacion CMC
+    fuente: Mapped[Literal["ga", "cmc"]] = mapped_column(
+        Enum("ga", "cmc", name="detliq_fuente"),
         nullable=False,
-        index=True,
+        default="ga",
+        server_default="ga",
     )
+
+    # ID original en detalle_facturacion para registros con fuente='cmc'
+    cmc_detalle_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
 
     pagado: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), default=Decimal("0"))
     honorarios: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), default=Decimal("0"), server_default="0.00")
     gastos: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), default=Decimal("0"), server_default="0.00")
     importe_total: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), default=Decimal("0"), server_default="0.00")
+
+    # Datos de enriquecimiento para registros CMC (NULL en registros GA)
+    fecha_practica: Mapped[Optional[datetime.date]] = mapped_column(Date, nullable=True)
+    codigo_prestacion_cmc: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    nro_orden_cmc: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    paciente_nombre_cmc: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    paciente_nro_afiliado_cmc: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    sesion_cmc: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    cantidad_cmc: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    porcentaje_cmc: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
     liquidacion: Mapped[Optional["Liquidacion"]] = relationship(back_populates="detalles")
 

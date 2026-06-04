@@ -155,6 +155,7 @@ Todas las settings se cargan vía `app/core/config.py` → `Settings` (pydantic-
 
 ## Base de datos
 
+- La base de datos esta dockerizada en mi red cmc_api. Las credenciales las tienes en el .env
 - MySQL 5.7, driver async `aiomysql`
 - Los modelos ORM viven en `app/db/models.py` con el estilo SQLAlchemy 2.0 `Mapped`/`mapped_column`
 - `Base` y `AuditMixin` se definen en `app/db/base.py`; todos los modelos importan desde ahí

@@ -5,46 +5,57 @@ from sqlalchemy import not_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.database import get_db
-from app.db.models import Liquidacion, Periodos, LoteAjuste
+from app.db.models import FacturacionCMC, Liquidacion, LoteAjuste
 
 router = APIRouter()
 
 
 @router.get("/disponibles_lotes_ajustes")
-async def periodos_disponibles(
+async def periodos_disponibles_lotes(
     obra_social_id: int = Query(..., alias="obra_social_id"),
     anio: Optional[int] = Query(None),
     db: AsyncSession = Depends(get_db),
 ):
+    """Períodos con facturación CMC cerrada que aún no tienen lote 'normal' creado."""
     subq = (
         select(LoteAjuste.id)
         .where(
             LoteAjuste.obra_social_id == obra_social_id,
-            LoteAjuste.anio_periodo == Periodos.ANIO,
-            LoteAjuste.mes_periodo == Periodos.MES,
+            LoteAjuste.anio_periodo == FacturacionCMC.periodo.op("DIV")(100),
+            LoteAjuste.mes_periodo == FacturacionCMC.periodo.op("%")(100),
             LoteAjuste.tipo == "normal",
         )
         .limit(1)
     )
     stmt = (
         select(
-            Periodos.ANIO.label("ANIO"),
-            Periodos.MES.label("MES"),
-            Periodos.NRO_FACT_1.label("NRO_FACT_1"),
-            Periodos.NRO_FACT_2.label("NRO_FACT_2"),
-            Periodos.CERRADO.label("CERRADO"),
+            FacturacionCMC.periodo,
+            FacturacionCMC.nro_factura,
+            FacturacionCMC.tipo_factura,
+            FacturacionCMC.estado,
         )
         .where(
-            Periodos.NRO_OBRA_SOCIAL == obra_social_id,
-            Periodos.CERRADO == "C",
+            FacturacionCMC.cod_obr == str(obra_social_id),
+            FacturacionCMC.estado.in_(["L", "LC"]),
             not_(subq.exists()),
         )
-        .order_by(Periodos.ANIO.desc(), Periodos.MES.asc())
+        .distinct()
+        .order_by(FacturacionCMC.periodo.desc())
     )
     if anio is not None:
-        stmt = stmt.where(Periodos.ANIO == anio)
+        stmt = stmt.where(FacturacionCMC.periodo.startswith(str(anio)))
     rows = (await db.execute(stmt)).mappings().all()
-    return [dict(r) for r in rows]
+    return [
+        {
+            "ANIO": int(r["periodo"][:4]),
+            "MES": int(r["periodo"][4:]),
+            "NRO_FACTURA": r["nro_factura"],
+            "TIPO_FACTURA": r["tipo_factura"],
+            "ESTADO": r["estado"],
+            "PERIODO": r["periodo"],
+        }
+        for r in rows
+    ]
 
 
 @router.get("/disponibles")
@@ -53,31 +64,42 @@ async def periodos_disponibles(
     anio: Optional[int] = Query(None),
     db: AsyncSession = Depends(get_db),
 ):
+    """Períodos con facturación CMC cerrada que aún no tienen liquidación creada."""
     subq = (
         select(Liquidacion.id)
         .where(
             Liquidacion.obra_social_id == obra_social_id,
-            Liquidacion.anio_periodo == Periodos.ANIO,
-            Liquidacion.mes_periodo == Periodos.MES,
+            Liquidacion.anio_periodo == FacturacionCMC.periodo.op("DIV")(100),
+            Liquidacion.mes_periodo == FacturacionCMC.periodo.op("%")(100),
         )
         .limit(1)
     )
     stmt = (
         select(
-            Periodos.ANIO.label("ANIO"),
-            Periodos.MES.label("MES"),
-            Periodos.NRO_FACT_1.label("NRO_FACT_1"),
-            Periodos.NRO_FACT_2.label("NRO_FACT_2"),
-            Periodos.CERRADO.label("CERRADO"),
+            FacturacionCMC.periodo,
+            FacturacionCMC.nro_factura,
+            FacturacionCMC.tipo_factura,
+            FacturacionCMC.estado,
         )
         .where(
-            Periodos.NRO_OBRA_SOCIAL == obra_social_id,
-            Periodos.CERRADO == "C",
+            FacturacionCMC.cod_obr == str(obra_social_id),
+            FacturacionCMC.estado.in_(["L", "LC"]),
             not_(subq.exists()),
         )
-        .order_by(Periodos.ANIO.desc(), Periodos.MES.asc())
+        .distinct()
+        .order_by(FacturacionCMC.periodo.desc())
     )
     if anio is not None:
-        stmt = stmt.where(Periodos.ANIO == anio)
+        stmt = stmt.where(FacturacionCMC.periodo.startswith(str(anio)))
     rows = (await db.execute(stmt)).mappings().all()
-    return [dict(r) for r in rows]
+    return [
+        {
+            "ANIO": int(r["periodo"][:4]),
+            "MES": int(r["periodo"][4:]),
+            "NRO_FACTURA": r["nro_factura"],
+            "TIPO_FACTURA": r["tipo_factura"],
+            "ESTADO": r["estado"],
+            "PERIODO": r["periodo"],
+        }
+        for r in rows
+    ]

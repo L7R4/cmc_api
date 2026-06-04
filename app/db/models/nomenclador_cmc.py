@@ -1,0 +1,400 @@
+"""
+Modelos del sistema de nomenclador, valores y precios del CMC.
+
+Todas las tablas usan prefijo nm_ para evitar conflicto con la tabla
+legacy 'nomenclador' (app/db/models/legacy.py).
+"""
+import datetime
+from decimal import Decimal
+from typing import List, Optional
+
+from sqlalchemy import (
+    JSON, DECIMAL, Boolean, Date, DateTime, Enum, ForeignKey,
+    Index, Integer, String, Text, UniqueConstraint,
+)
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.sql import func
+
+from app.db.base import Base
+
+
+class NomencladorCMC(Base):
+    """Catálogo operativo del Colegio. Raíces + variantes por técnica (proviene_de_id)."""
+    __tablename__ = "nm_nomenclador"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    codigo: Mapped[str] = mapped_column(String(20), nullable=False, unique=True)
+    proviene_de_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("nm_nomenclador.id"), nullable=True, index=True
+    )
+    descripcion: Mapped[str] = mapped_column(String(255), nullable=False)
+    categoria: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    complejidad: Mapped[Optional[str]] = mapped_column(
+        Enum("baja", "media", "alta", name="nm_complejidad_enum"), nullable=True
+    )
+    # True → exime de la validación nomenclador_especialidad
+    sin_restriccion_especialidad: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="0"
+    )
+    activo: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="1")
+    observacion: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    variantes: Mapped[List["NomencladorCMC"]] = relationship(
+        "NomencladorCMC",
+        foreign_keys=[proviene_de_id],
+        back_populates="raiz",
+        lazy="raise",
+    )
+    raiz: Mapped[Optional["NomencladorCMC"]] = relationship(
+        "NomencladorCMC",
+        remote_side="NomencladorCMC.id",
+        foreign_keys=[proviene_de_id],
+        back_populates="variantes",
+        lazy="raise",
+    )
+    especialidades: Mapped[List["NomencladorEspecialidad"]] = relationship(
+        back_populates="nomenclador", cascade="all, delete-orphan", lazy="selectin"
+    )
+    habilitaciones_medico: Mapped[List["MedicoCodigoHabilitado"]] = relationship(
+        back_populates="nomenclador", cascade="all, delete-orphan"
+    )
+    valores: Mapped[List["Valor"]] = relationship(back_populates="nomenclador")
+
+    __table_args__ = (
+        Index("ix_nm_nomenclador_codigo", "codigo"),
+        Index("ix_nm_nomenclador_complejidad", "complejidad"),
+    )
+
+
+class NomencladorEspecialidad(Base):
+    """Habilitación general de un código para una especialidad."""
+    __tablename__ = "nm_nomenclador_especialidad"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    nomenclador_id: Mapped[int] = mapped_column(
+        ForeignKey("nm_nomenclador.id"), nullable=False
+    )
+    # FK lógica — no FK real porque ID_COLEGIO_ESPE no es PK
+    especialidad_id_colegio: Mapped[int] = mapped_column(Integer, nullable=False)
+    activo: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="1")
+    observacion: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    nomenclador: Mapped["NomencladorCMC"] = relationship(back_populates="especialidades")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "nomenclador_id", "especialidad_id_colegio", name="uq_nm_nom_esp"
+        ),
+        Index("ix_nm_nom_esp_especialidad", "especialidad_id_colegio"),
+    )
+
+
+class MedicoCodigoHabilitado(Base):
+    """Excepciones individuales por médico sobre habilitación de códigos."""
+    __tablename__ = "nm_medico_codigo_habilitado"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    medico_id: Mapped[int] = mapped_column(
+        ForeignKey("listado_medico.ID"), nullable=False
+    )
+    nomenclador_id: Mapped[int] = mapped_column(
+        ForeignKey("nm_nomenclador.id"), nullable=False
+    )
+    tipo: Mapped[str] = mapped_column(
+        Enum("habilita", "inhabilita", name="nm_tipo_habilitacion_enum"), nullable=False
+    )
+    vigencia_desde: Mapped[Optional[datetime.date]] = mapped_column(Date, nullable=True)
+    vigencia_hasta: Mapped[Optional[datetime.date]] = mapped_column(Date, nullable=True)
+    motivo: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    observacion: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    activo: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="1")
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    nomenclador: Mapped["NomencladorCMC"] = relationship(back_populates="habilitaciones_medico")
+
+    __table_args__ = (
+        Index("ix_nm_mch_medico_nom", "medico_id", "nomenclador_id"),
+        Index("ix_nm_mch_tipo", "tipo"),
+        Index("ix_nm_mch_vigencia", "vigencia_desde", "vigencia_hasta"),
+    )
+
+
+class Homologador(Base):
+    """Mapeo codigo_origen (de la OS) → NomencladorCMC."""
+    __tablename__ = "nm_homologador"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # FK lógica a obras_sociales.NRO_OBRASOCIAL (entero, no es PK real en esa tabla)
+    obra_social_nro: Mapped[int] = mapped_column(Integer, nullable=False)
+    codigo_origen: Mapped[str] = mapped_column(String(50), nullable=False)
+    nomenclador_id: Mapped[int] = mapped_column(
+        ForeignKey("nm_nomenclador.id"), nullable=False
+    )
+    descripcion_origen: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    observacion: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    activo: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="1")
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    nomenclador: Mapped["NomencladorCMC"] = relationship()
+
+    __table_args__ = (
+        UniqueConstraint(
+            "obra_social_nro", "codigo_origen", name="uq_nm_homologador_os_origen"
+        ),
+        Index("ix_nm_homologador_os_origen", "obra_social_nro", "codigo_origen"),
+        Index("ix_nm_homologador_nomenclador", "nomenclador_id"),
+    )
+
+
+class Convenio(Base):
+    """Acuerdo contractual entre el Colegio y una obra social. Máximo 1 activo por OS."""
+    __tablename__ = "nm_convenios"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    obra_social_nro: Mapped[int] = mapped_column(Integer, nullable=False)
+    nombre: Mapped[str] = mapped_column(String(200), nullable=False)
+    fecha_inicio: Mapped[datetime.date] = mapped_column(Date, nullable=False)
+    fecha_fin: Mapped[Optional[datetime.date]] = mapped_column(Date, nullable=True)
+    estado: Mapped[str] = mapped_column(
+        Enum("activo", "cerrado", name="nm_estado_convenio_enum"),
+        nullable=False,
+        default="activo",
+        server_default="activo",
+    )
+    observacion: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    galenos: Mapped[List["Galeno"]] = relationship(back_populates="convenio")
+    valores: Mapped[List["Valor"]] = relationship(back_populates="convenio")
+
+    __table_args__ = (
+        Index("ix_nm_convenios_os_estado", "obra_social_nro", "estado"),
+    )
+
+
+class Tecnica(Base):
+    """Catálogo descriptivo de técnicas de realización de prácticas."""
+    __tablename__ = "nm_tecnicas"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    codigo: Mapped[str] = mapped_column(String(50), nullable=False, unique=True)
+    nombre: Mapped[str] = mapped_column(String(100), nullable=False)
+    descripcion: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    activo: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="1")
+
+
+class Galeno(Base):
+    """Precio histórico de galenos/gastos/módulos por OS + convenio + vigencia."""
+    __tablename__ = "nm_galenos"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    obra_social_nro: Mapped[int] = mapped_column(Integer, nullable=False)
+    convenio_id: Mapped[int] = mapped_column(
+        ForeignKey("nm_convenios.id"), nullable=False
+    )
+    # Identifica el tipo: 'galeno_quirurgico', 'gasto_quirurgico', etc.
+    codigo: Mapped[str] = mapped_column(String(100), nullable=False)
+    nombre: Mapped[str] = mapped_column(String(200), nullable=False)
+    tipo: Mapped[str] = mapped_column(
+        Enum("galeno", "gasto", "modulo", "otro", name="nm_tipo_galeno_enum"),
+        nullable=False,
+    )
+    vigencia_desde: Mapped[datetime.date] = mapped_column(Date, nullable=False)
+    vigencia_hasta: Mapped[Optional[datetime.date]] = mapped_column(Date, nullable=True)
+    valor_unitario: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), nullable=False)
+    activo: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="1")
+    observacion: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    convenio: Mapped["Convenio"] = relationship(back_populates="galenos")
+    componentes: Mapped[List["ValorComponente"]] = relationship(back_populates="galeno")
+
+    __table_args__ = (
+        Index("ix_nm_galenos_os_conv_codigo", "obra_social_nro", "convenio_id", "codigo"),
+        Index("ix_nm_galenos_vigencia", "vigencia_desde", "vigencia_hasta"),
+        Index("ix_nm_galenos_tipo", "tipo"),
+    )
+
+
+class Valor(Base):
+    """Regla de cálculo de precio para un código+OS+convenio+vigencia."""
+    __tablename__ = "nm_valores"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    obra_social_nro: Mapped[int] = mapped_column(Integer, nullable=False)
+    convenio_id: Mapped[int] = mapped_column(
+        ForeignKey("nm_convenios.id"), nullable=False
+    )
+    nomenclador_id: Mapped[int] = mapped_column(
+        ForeignKey("nm_nomenclador.id"), nullable=False
+    )
+    # Snapshot denormalizado del codigo para consultas rápidas
+    codigo: Mapped[str] = mapped_column(String(20), nullable=False)
+    descripcion: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    # Nivel numérico que asigna esta OS al código (independiente de complejidad del nomenclador)
+    nivel: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    vigencia_desde: Mapped[datetime.date] = mapped_column(Date, nullable=False)
+    vigencia_hasta: Mapped[Optional[datetime.date]] = mapped_column(Date, nullable=True)
+    estado: Mapped[str] = mapped_column(
+        Enum("activo", "cerrado", name="nm_estado_valor_enum"),
+        nullable=False,
+        default="activo",
+        server_default="activo",
+    )
+    observacion: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    convenio: Mapped["Convenio"] = relationship(back_populates="valores")
+    nomenclador: Mapped["NomencladorCMC"] = relationship(back_populates="valores")
+    componentes: Mapped[List["ValorComponente"]] = relationship(
+        back_populates="valor", cascade="all, delete-orphan", lazy="selectin"
+    )
+
+    __table_args__ = (
+        Index("ix_nm_valores_os_conv_nom", "obra_social_nro", "convenio_id", "nomenclador_id"),
+        Index("ix_nm_valores_codigo", "codigo"),
+        Index("ix_nm_valores_vigencia", "vigencia_desde", "vigencia_hasta"),
+        Index("ix_nm_valores_nivel", "nivel"),
+        Index("ix_nm_valores_estado", "estado"),
+    )
+
+
+class ValorComponente(Base):
+    """Fórmula de cálculo de un Valor: componentes fijos y calculables por galeno."""
+    __tablename__ = "nm_valor_componentes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    valor_id: Mapped[int] = mapped_column(ForeignKey("nm_valores.id"), nullable=False)
+    concepto: Mapped[str] = mapped_column(
+        Enum("Honorarios", "Ayudante", "Gastos", name="nm_concepto_componente_enum"),
+        nullable=False,
+    )
+    # Non-null si cantidad > 0 (calculable). Null si precio fijo (cantidad = 0).
+    galeno_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("nm_galenos.id"), nullable=True
+    )
+    # 0 = precio fijo; > 0 = unidades del galeno a multiplicar
+    cantidad: Mapped[Decimal] = mapped_column(
+        DECIMAL(10, 4), nullable=False, default=Decimal("0"), server_default="0"
+    )
+    # Solo se usa cuando galeno_id IS NULL (precio fijo embebido)
+    valor_unitario: Mapped[Optional[Decimal]] = mapped_column(DECIMAL(14, 2), nullable=True)
+    # Si True, no se incluye en el precio base; el operador lo activa al facturar
+    opcional: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
+    orden: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    activo: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="1")
+    observacion: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    valor: Mapped["Valor"] = relationship(back_populates="componentes")
+    galeno: Mapped[Optional["Galeno"]] = relationship(back_populates="componentes", lazy="joined")
+
+    __table_args__ = (
+        Index("ix_nm_vc_valor_id", "valor_id"),
+        Index("ix_nm_vc_galeno_id", "galeno_id"),
+    )
+
+
+class HistorialPrecioCodigo(Base):
+    """
+    Tabla operativa materializada. Se consulta con lookup O(1) al cargar prestaciones.
+    Se escribe SOLO por el motor de service.py; nunca manualmente.
+    precio_total = suma de componentes obligatorios (sin opcionales).
+    """
+    __tablename__ = "nm_historial_precio_codigo"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    nomenclador_id: Mapped[int] = mapped_column(
+        ForeignKey("nm_nomenclador.id"), nullable=False
+    )
+    obra_social_nro: Mapped[int] = mapped_column(Integer, nullable=False)
+    convenio_id: Mapped[int] = mapped_column(
+        ForeignKey("nm_convenios.id"), nullable=False
+    )
+    vigencia_desde: Mapped[datetime.date] = mapped_column(Date, nullable=False)
+    vigencia_hasta: Mapped[Optional[datetime.date]] = mapped_column(Date, nullable=True)
+    precio_total: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), nullable=False)
+    valores_id: Mapped[int] = mapped_column(ForeignKey("nm_valores.id"), nullable=False)
+    # JSON con desglose: [{concepto, tipo, galeno_codigo, cantidad, valor_unitario, subtotal, opcional}]
+    componentes_snapshot: Mapped[dict] = mapped_column(JSON, nullable=False)
+    motivo_cambio: Mapped[str] = mapped_column(
+        Enum(
+            "carga_inicial",
+            "galeno_actualizado",
+            "valor_fijo_actualizado",
+            "valores_estructura",
+            "convenio_nuevo",
+            "migracion_legacy",
+            name="nm_motivo_cambio_enum",
+        ),
+        nullable=False,
+    )
+    # ID del galeno / valores / convenio que disparó este cambio
+    referencia_cambio_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # Cuándo se registró el cambio en el sistema (≠ vigencia_desde)
+    fecha_cambio: Mapped[datetime.datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+
+    nomenclador: Mapped["NomencladorCMC"] = relationship()
+    convenio: Mapped["Convenio"] = relationship()
+    valores: Mapped["Valor"] = relationship()
+
+    __table_args__ = (
+        UniqueConstraint(
+            "nomenclador_id", "obra_social_nro", "convenio_id", "vigencia_desde",
+            name="uq_nm_historial_precio",
+        ),
+        Index(
+            "ix_nm_historial_nom_os_vigencia",
+            "nomenclador_id", "obra_social_nro", "vigencia_desde", "vigencia_hasta",
+        ),
+        Index("ix_nm_historial_os_vigencia", "obra_social_nro", "vigencia_desde"),
+        Index("ix_nm_historial_motivo", "motivo_cambio"),
+        Index("ix_nm_historial_fecha_cambio", "fecha_cambio"),
+    )

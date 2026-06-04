@@ -10,10 +10,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.database import get_db
 from app.db.models import (
     DetalleLiquidacion,
+    FacturacionCMC,
     Liquidacion,
     LoteAjuste,
     Pago,
-    Periodos,
     Recibo,
 )
 from app.modules.liquidacion.schemas import (
@@ -25,7 +25,7 @@ from app.modules.liquidacion.schemas import (
     ReciboRead,
 )
 from app.modules.liquidacion.service import (
-    build_detalles_liquidacion,
+    build_detalles_from_cmc,
     detalle_recibo_medico,
     recalcular_totales_de_liquidacion,
     vista_detalles_liquidacion,
@@ -47,21 +47,7 @@ async def crear_liquidacion(payload: LiquidacionCreate, db: AsyncSession = Depen
     if pago.estado != "A":
         raise HTTPException(409, "No se puede crear una liquidación en un pago cerrado")
 
-    # Buscar período cerrado
-    periodo_stmt = select(Periodos).where(
-        Periodos.MES == payload.mes_periodo,
-        Periodos.ANIO == payload.anio_periodo,
-        Periodos.NRO_OBRA_SOCIAL == payload.obra_social_id,
-        Periodos.CERRADO == "C",
-    ).limit(1)
-    res = await db.execute(periodo_stmt)
-    periodo_obj = res.scalars().first()
-    if not periodo_obj:
-        raise HTTPException(400, "Periodo inválido o no cerrado")
-
-    nro_factura = f"{periodo_obj.NRO_FACT_1}-{periodo_obj.NRO_FACT_2}"
-
-    # Verificar unicidad
+    # Verificar unicidad antes de crear
     existing = (await db.execute(
         select(Liquidacion.id).where(
             Liquidacion.pago_id == payload.pago_id,
@@ -72,6 +58,19 @@ async def crear_liquidacion(payload: LiquidacionCreate, db: AsyncSession = Depen
     )).first()
     if existing:
         raise HTTPException(409, "Ya existe una liquidación con esos datos en el pago")
+    else:
+        print("Creando nueva liquidación", payload)
+
+    periodo = f"{payload.anio_periodo}{payload.mes_periodo:02d}"
+
+    fac_cmc = (await db.execute(
+        select(FacturacionCMC).where(
+            FacturacionCMC.cod_obr == str(payload.obra_social_id),
+            FacturacionCMC.periodo == periodo,
+            FacturacionCMC.estado.in_(["L", "LC"]),
+        ).order_by(FacturacionCMC.id_prestaciones.desc()).limit(1)
+    )).scalars().first()
+    nro_factura = fac_cmc.nro_factura if fac_cmc else None
 
     liq = Liquidacion(
         pago_id=payload.pago_id,
@@ -89,7 +88,7 @@ async def crear_liquidacion(payload: LiquidacionCreate, db: AsyncSession = Depen
     db.add(liq)
     await db.flush()
 
-    await build_detalles_liquidacion(db, liq.id)
+    await build_detalles_from_cmc(db, liq.id)
     await recalcular_totales_de_liquidacion(db, liq.id)
     await db.flush()
     await generar_y_recalcular_porcentuales(db, payload.pago_id)

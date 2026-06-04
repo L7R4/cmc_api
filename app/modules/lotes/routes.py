@@ -2,7 +2,7 @@ from decimal import Decimal
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import case, func, select
+from sqlalchemy import String, case, cast, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -10,12 +10,13 @@ from sqlalchemy.orm import selectinload
 from app.db.database import get_db
 from app.db.models import (
     Ajuste,
-    GuardarAtencion,
+    DetalleFacturacionCMC,
+    FacturacionCMC,
     Liquidacion,
     LoteAjuste,
     Pago,
 )
-from app.db.models.catalogs import ObrasSociales, Periodos
+from app.db.models.catalogs import ObrasSociales
 from app.db.models.medico import ListadoMedico
 from app.modules.liquidacion.service import recalcular_totales_de_liquidacion
 from app.modules.deducciones.service import generar_y_recalcular_porcentuales
@@ -23,13 +24,13 @@ from app.modules.lotes.schemas import (
     AjusteCreate,
     AjusteRead,
     AjusteUpdate,
-    AtencionSearchRow,
     LoteAjusteCreate,
     LoteAjusteRead,
     LoteCambiarEstadoPayload,
     LoteListaRow,
     LoteRefacturacionCreate,
     LoteSinFacturaCreate,
+    PrestacionCMCSearchRow,
 )
 
 router = APIRouter()
@@ -53,7 +54,7 @@ async def recalcular_totales_lote(db: AsyncSession, lote_id: int) -> None:
     await db.flush()
 
 
-def _build_ajuste_read(ajuste: Ajuste, atencion=None, medico=None) -> AjusteRead:
+def _build_ajuste_read(ajuste: Ajuste, cmc_det=None, medico=None) -> AjusteRead:
     return AjusteRead(
         id=ajuste.id,
         lote_id=ajuste.lote_id,
@@ -66,20 +67,19 @@ def _build_ajuste_read(ajuste: Ajuste, atencion=None, medico=None) -> AjusteRead
         observacion=ajuste.observacion,
         id_atencion=ajuste.id_atencion,
         origen=ajuste.origen,
-        nombre_afiliado=atencion.NOMBRE_AFILIADO if atencion else None,
-        # Para sin_factura (id_atencion=NULL) se usa ListadoMedico como fallback
-        nombre_prestador=atencion.NOMBRE_PRESTADOR if atencion else (medico.NOMBRE if medico else None),
-        nro_socio=atencion.NRO_SOCIO if atencion else (medico.NRO_SOCIO if medico else None),
-        nro_consulta=atencion.NRO_CONSULTA if atencion else None,
-        valor_cirujia=atencion.VALOR_CIRUJIA if atencion else None,
-        codigo_prestacion=atencion.CODIGO_PRESTACION if atencion else None,
-        fecha_prestacion=str(atencion.FECHA_PRESTACION) if atencion and atencion.FECHA_PRESTACION else None,
+        nombre_afiliado=cmc_det.nom_ape_p if cmc_det else None,
+        nombre_prestador=medico.NOMBRE if medico else None,
+        nro_socio=medico.NRO_SOCIO if medico else None,
+        nro_consulta=cmc_det.nro_orden if cmc_det else None,
+        tpo_funcion=cmc_det.tpo_funcion if cmc_det else None,
+        codigo_prestacion=cmc_det.cod_nom if cmc_det else None,
+        fecha_prestacion=str(cmc_det.fecha_practica) if cmc_det and cmc_det.fecha_practica else None,
     )
 
 
 def _lote_with_ajustes(lote: LoteAjuste, ajuste_rows=None) -> LoteAjusteRead:
     if ajuste_rows is not None:
-        ajustes = [_build_ajuste_read(a, ga, med) for a, ga, med in ajuste_rows]
+        ajustes = [_build_ajuste_read(a, cmc, med) for a, cmc, med in ajuste_rows]
     else:
         ajustes = [AjusteRead.model_validate(a) for a in (lote.ajustes or [])]
     return LoteAjusteRead(
@@ -98,10 +98,11 @@ def _lote_with_ajustes(lote: LoteAjuste, ajuste_rows=None) -> LoteAjusteRead:
 
 
 async def _get_enriched_ajuste_rows(db: AsyncSession, lote_id: int):
-    """Devuelve lista de (Ajuste, GuardarAtencion | None, ListadoMedico | None) para un lote."""
+    """Devuelve lista de (Ajuste, DetalleFacturacionCMC | None, ListadoMedico | None) para un lote."""
     stmt = (
-        select(Ajuste, GuardarAtencion, ListadoMedico)
-        .outerjoin(GuardarAtencion, Ajuste.id_atencion == GuardarAtencion.ID)
+        select(Ajuste, DetalleFacturacionCMC, ListadoMedico)
+        .outerjoin(DetalleFacturacionCMC,
+                   DetalleFacturacionCMC.id_detalle_prestaciones == Ajuste.id_atencion)
         .outerjoin(ListadoMedico, Ajuste.medico_id == ListadoMedico.ID)
         .where(Ajuste.lote_id == lote_id)
     )
@@ -199,8 +200,7 @@ async def crear_lote_sin_factura(
     payload: LoteSinFacturaCreate,
     db: AsyncSession = Depends(get_db),
 ):
-    """Crea un lote tipo='sin_factura'. No requiere período cerrado en Periodos.
-    Sin restricción de cantidad por OS+período. Los ajustes deben incluir medico_id explícito."""
+    """Crea un lote tipo='sin_factura'. Los ajustes deben incluir medico_id explícito."""
     lote = LoteAjuste(
         obra_social_id=payload.obra_social_id,
         mes_periodo=payload.mes_periodo,
@@ -245,7 +245,7 @@ async def listar_lotes_por_os_periodo(
 
 
 # ================================================
-# GET /snaps/lista — Listado enriquecido (con OS + nro_factura)
+# GET /snaps/lista — Listado enriquecido (con OS + nro_factura desde FacturacionCMC)
 # ================================================
 @router.get("/snaps/lista", response_model=List[LoteListaRow])
 async def listar_lotes_enriquecidos(
@@ -256,6 +256,10 @@ async def listar_lotes_enriquecidos(
     estado: Optional[str] = Query(None, description="A | C | L"),
     db: AsyncSession = Depends(get_db),
 ):
+    periodo_expr = func.concat(
+        LoteAjuste.anio_periodo,
+        func.lpad(cast(LoteAjuste.mes_periodo, String), 2, "0"),
+    )
     stmt = (
         select(
             LoteAjuste.id,
@@ -268,15 +272,14 @@ async def listar_lotes_enriquecidos(
             LoteAjuste.total_debitos,
             LoteAjuste.total_creditos,
             ObrasSociales.OBRA_SOCIAL.label("obra_social_nombre"),
-            Periodos.NRO_FACT_1.label("nro_fact_1"),
-            Periodos.NRO_FACT_2.label("nro_fact_2"),
+            FacturacionCMC.nro_factura.label("nro_factura"),
         )
         .join(ObrasSociales, ObrasSociales.NRO_OBRASOCIAL == LoteAjuste.obra_social_id)
         .outerjoin(
-            Periodos,
-            (Periodos.NRO_OBRA_SOCIAL == LoteAjuste.obra_social_id)
-            & (Periodos.MES == LoteAjuste.mes_periodo)
-            & (Periodos.ANIO == LoteAjuste.anio_periodo),
+            FacturacionCMC,
+            (cast(FacturacionCMC.cod_obr, String) == cast(LoteAjuste.obra_social_id, String))
+            & (FacturacionCMC.periodo == periodo_expr)
+            & (FacturacionCMC.estado.in_(["L", "LC"])),
         )
     )
 
@@ -299,12 +302,8 @@ async def listar_lotes_enriquecidos(
 
     rows = (await db.execute(stmt)).all()
 
-    result = []
-    for row in rows:
-        nro_factura = None
-        if row.nro_fact_1 and row.nro_fact_2:
-            nro_factura = f"{row.nro_fact_1}-{row.nro_fact_2}"
-        result.append(LoteListaRow(
+    return [
+        LoteListaRow(
             id=row.id,
             tipo=row.tipo,
             estado=row.estado,
@@ -313,65 +312,72 @@ async def listar_lotes_enriquecidos(
             pago_id=row.pago_id,
             obra_social_id=row.obra_social_id,
             obra_social_nombre=row.obra_social_nombre,
-            nro_factura=nro_factura,
+            nro_factura=row.nro_factura,
             total_debitos=row.total_debitos,
             total_creditos=row.total_creditos,
-        ))
-
-    return result
+        )
+        for row in rows
+    ]
 
 
 # ================================================
-# GET /snaps/buscar_atenciones — Buscar en guardar_atencion
+# GET /snaps/buscar_atenciones — Buscar en detalle_facturacion (CMC)
 # ================================================
-@router.get("/snaps/buscar_atenciones", response_model=List[AtencionSearchRow])
+@router.get("/snaps/buscar_atenciones", response_model=List[PrestacionCMCSearchRow])
 async def buscar_atenciones(
     obra_social_id: int = Query(...),
     mes_periodo: int = Query(..., ge=1, le=12),
     anio_periodo: int = Query(..., ge=1900, le=3000),
-    q: Optional[str] = Query(None, description="Buscar por NOMBRE_PRESTADOR, NRO_SOCIO o NRO_CONSULTA"),
+    q: Optional[str] = Query(None, description="Buscar por cod_med, nom_ape_p o cod_nom"),
     limit: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    Busca prestaciones en guardar_atencion por OS + período.
-    El parámetro `q` filtra opcionalmente por nombre del prestador, nro socio o nro de orden/consulta.
-    """
-    stmt = select(GuardarAtencion).where(
-        GuardarAtencion.NRO_OBRA_SOCIAL == obra_social_id,
-        GuardarAtencion.MES_PERIODO == mes_periodo,
-        GuardarAtencion.ANIO_PERIODO == anio_periodo,
-        GuardarAtencion.EXISTE == "S",
+    """Busca prestaciones en detalle_facturacion (CMC) por OS + período."""
+    periodo = f"{anio_periodo}{mes_periodo:02d}"
+    cod_obr = str(obra_social_id)
+
+    stmt = (
+        select(DetalleFacturacionCMC, ListadoMedico.NOMBRE.label("medico_nombre"))
+        .outerjoin(
+            ListadoMedico,
+            ListadoMedico.NRO_SOCIO == cast(DetalleFacturacionCMC.cod_med, String),
+        )
+        .where(
+            DetalleFacturacionCMC.cod_obr == cod_obr,
+            DetalleFacturacionCMC.periodo == periodo,
+            DetalleFacturacionCMC.estado == "L",
+        )
     )
 
     if q and q.strip():
         term = f"%{q.strip()}%"
-        from sqlalchemy import or_, cast
-        from sqlalchemy import String as SAString
         stmt = stmt.where(
             or_(
-                GuardarAtencion.NOMBRE_PRESTADOR.ilike(term),
-                cast(GuardarAtencion.NRO_SOCIO, SAString).like(term),
-                GuardarAtencion.NRO_CONSULTA.like(term),
+                DetalleFacturacionCMC.cod_med.like(term),
+                DetalleFacturacionCMC.nom_ape_p.ilike(term),
+                DetalleFacturacionCMC.cod_nom.like(term),
             )
         )
 
-    stmt = stmt.order_by(GuardarAtencion.FECHA_PRESTACION.desc()).limit(limit)
-    rows = (await db.execute(stmt)).scalars().all()
+    stmt = stmt.order_by(DetalleFacturacionCMC.fecha_practica.desc()).limit(limit)
+    rows = (await db.execute(stmt)).all()
 
     return [
-        AtencionSearchRow(
-            id=r.ID,
-            nro_socio=r.NRO_SOCIO,
-            nombre_prestador=r.NOMBRE_PRESTADOR,
-            nombre_afiliado=r.NOMBRE_AFILIADO,
-            nro_consulta=r.NRO_CONSULTA,
-            codigo_prestacion=r.CODIGO_PRESTACION,
-            fecha_prestacion=str(r.FECHA_PRESTACION) if r.FECHA_PRESTACION else None,
-            valor_cirujia=r.VALOR_CIRUJIA,
-            mes_periodo=r.MES_PERIODO,
-            anio_periodo=r.ANIO_PERIODO,
-            nro_obra_social=r.NRO_OBRA_SOCIAL,
+        PrestacionCMCSearchRow(
+            id=r.DetalleFacturacionCMC.id_detalle_prestaciones,
+            cod_med=r.DetalleFacturacionCMC.cod_med,
+            medico_nombre=r.medico_nombre,
+            nom_ape_p=r.DetalleFacturacionCMC.nom_ape_p,
+            cod_nom=r.DetalleFacturacionCMC.cod_nom,
+            tpo_funcion=r.DetalleFacturacionCMC.tpo_funcion,
+            fecha_practica=str(r.DetalleFacturacionCMC.fecha_practica) if r.DetalleFacturacionCMC.fecha_practica else None,
+            nro_orden=r.DetalleFacturacionCMC.nro_orden,
+            honorarios=r.DetalleFacturacionCMC.honorarios,
+            gastos=r.DetalleFacturacionCMC.gastos,
+            ayudante=r.DetalleFacturacionCMC.ayudante,
+            importe_total=r.DetalleFacturacionCMC.importe_total,
+            periodo=r.DetalleFacturacionCMC.periodo,
+            cod_obr=r.DetalleFacturacionCMC.cod_obr,
         )
         for r in rows
     ]
@@ -402,9 +408,6 @@ async def cambiar_estado_lote(
       C → A : reabrir
       C → L : pasar al pago abierto (asigna pago_id automáticamente)
       L → C : quitar del pago (limpia pago_id)
-
-    Tras cualquier cambio que afecte un pago recalcula los totales de las
-    liquidaciones de esa OS+período en el pago involucrado.
     """
     lote = await _get_lote_with_ajustes(db, lote_id)
     nuevo = payload.estado
@@ -452,7 +455,6 @@ async def cambiar_estado_lote(
             "Válidas: A→C, C→A, C→L, L→C"
         )
 
-    # Recalcular totales de liquidaciones afectadas y regenerar porcentuales
     if pago_id_afectado:
         liqs = (await db.execute(
             select(Liquidacion).where(
@@ -517,24 +519,23 @@ async def crear_ajuste(
     obra_social_id = lote.obra_social_id
 
     if lote.tipo == "sin_factura":
-        # Lotes sin factura: medico_id siempre requerido; id_atencion no aplica
         if medico_id is None:
             raise HTTPException(422, "Para lotes sin_factura se requiere medico_id explícito")
     else:
-        # Si se provee id_atencion sin medico_id, derivar medico_id y obra_social_id desde guardar_atencion
         if medico_id is None:
             if payload.id_atencion is None:
                 raise HTTPException(422, "Se requiere medico_id o id_atencion")
-            atencion = await db.get(GuardarAtencion, payload.id_atencion)
-            if not atencion:
-                raise HTTPException(404, f"Atención {payload.id_atencion} no encontrada")
+            cmc_det = await db.get(DetalleFacturacionCMC, payload.id_atencion)
+            if not cmc_det:
+                raise HTTPException(404, f"Detalle CMC {payload.id_atencion} no encontrado")
             medico_row = (await db.execute(
-                select(ListadoMedico.ID).where(ListadoMedico.NRO_SOCIO == atencion.NRO_SOCIO).limit(1)
+                select(ListadoMedico.ID).where(
+                    ListadoMedico.NRO_SOCIO == int(cmc_det.cod_med)
+                ).limit(1)
             )).scalar_one_or_none()
             if medico_row is None:
-                raise HTTPException(404, f"No se encontró médico con NRO_SOCIO={atencion.NRO_SOCIO}")
+                raise HTTPException(404, f"Médico con cod_med={cmc_det.cod_med} no encontrado")
             medico_id = medico_row
-            obra_social_id = atencion.NRO_OBRA_SOCIAL
 
     ajuste = Ajuste(
         lote_id=lote_id,
@@ -552,9 +553,9 @@ async def crear_ajuste(
     await recalcular_totales_lote(db, lote_id)
     await db.commit()
     await db.refresh(ajuste)
-    atencion = await db.get(GuardarAtencion, ajuste.id_atencion) if ajuste.id_atencion else None
-    medico = await db.get(ListadoMedico, ajuste.medico_id) if not atencion else None
-    return _build_ajuste_read(ajuste, atencion, medico)
+    cmc_det = await db.get(DetalleFacturacionCMC, ajuste.id_atencion) if ajuste.id_atencion else None
+    medico = await db.get(ListadoMedico, ajuste.medico_id)
+    return _build_ajuste_read(ajuste, cmc_det, medico)
 
 
 # ================================================
@@ -592,9 +593,9 @@ async def actualizar_ajuste(
     await recalcular_totales_lote(db, lote_id)
     await db.commit()
     await db.refresh(ajuste)
-    atencion = await db.get(GuardarAtencion, ajuste.id_atencion) if ajuste.id_atencion else None
-    medico = await db.get(ListadoMedico, ajuste.medico_id) if not atencion else None
-    return _build_ajuste_read(ajuste, atencion, medico)
+    cmc_det = await db.get(DetalleFacturacionCMC, ajuste.id_atencion) if ajuste.id_atencion else None
+    medico = await db.get(ListadoMedico, ajuste.medico_id)
+    return _build_ajuste_read(ajuste, cmc_det, medico)
 
 
 # ================================================

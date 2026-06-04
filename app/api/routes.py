@@ -1,5 +1,12 @@
 from fastapi import APIRouter
 
+from app.modules.nomenclador.routes_nomenclador import router as nomenclador_router
+from app.modules.nomenclador.routes_homologador import router as homologador_router
+from app.modules.nomenclador.routes_convenios import router as convenios_router
+from app.modules.nomenclador.routes_galenos import router as galenos_router
+from app.modules.nomenclador.routes_valores import router as valores_nm_router
+from app.modules.nomenclador.routes_reportes import router as reportes_nm_router
+
 from app.modules.catalogs.routes_especialidades import router as especialidades_router
 from app.modules.catalogs.routes_obras_sociales import router as obras_social_router
 from app.modules.catalogs.routes_periodos import router as periodos_router
@@ -40,3 +47,11 @@ api_router.include_router(publicidades_medico_router, prefix="/publicidad-medico
 api_router.include_router(exports_router, prefix="/exports", tags=["exports"])
 
 api_router.include_router(rbac_router, prefix="/admin/rbac", tags=["Rbac"])
+
+# ── Nomenclador y Valores ─────────────────────────────────────────────────────
+api_router.include_router(nomenclador_router,  prefix="/nomenclador",     tags=["Nomenclador"])
+api_router.include_router(homologador_router,  prefix="/homologador",     tags=["Homologador"])
+api_router.include_router(convenios_router,    prefix="/convenios",       tags=["Convenios"])
+api_router.include_router(galenos_router,      prefix="/galenos",         tags=["Galenos"])
+api_router.include_router(valores_nm_router,   prefix="/valores_nm",      tags=["Valores"])
+api_router.include_router(reportes_nm_router,  prefix="/reportes_nm",     tags=["Reportes Valores"])

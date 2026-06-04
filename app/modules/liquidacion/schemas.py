@@ -43,7 +43,9 @@ class DetalleLiquidacionRead(BaseModel):
     liquidacion_id: int
     medico_id: int
     obra_social_id: int
-    prestacion_id: int
+    prestacion_id: Optional[int] = None
+    fuente: str = "ga"
+    cmc_detalle_id: Optional[int] = None
     honorarios: Decimal
     gastos: Decimal
     importe_total: Decimal

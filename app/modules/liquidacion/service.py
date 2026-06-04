@@ -19,8 +19,8 @@ from app.db.models import (
     Deduccion,
     Descuentos,
     DetalleLiquidacion,
+    DetalleFacturacionCMC,
     Especialidad,
-    GuardarAtencion,
     ListadoMedico,
     Liquidacion,
     LoteAjuste,
@@ -51,9 +51,9 @@ def to_dec(x) -> Decimal:
 
 
 # ================================================
-# Poblar detalles de liquidación desde guardar_atencion
+# Poblar detalles de liquidación desde detalle_facturacion (CMC)
 # ================================================
-async def build_detalles_liquidacion(db: AsyncSession, liquidacion_id: int) -> None:
+async def build_detalles_from_cmc(db: AsyncSession, liquidacion_id: int) -> None:
     liq = (await db.execute(
         select(Liquidacion).where(Liquidacion.id == liquidacion_id)
     )).scalars().first()
@@ -61,153 +61,108 @@ async def build_detalles_liquidacion(db: AsyncSession, liquidacion_id: int) -> N
         return
 
     anio, mes, os_id = int(liq.anio_periodo), int(liq.mes_periodo), int(liq.obra_social_id)
+    periodo = f"{anio}{mes:02d}"
+    cod_obr = str(os_id)
 
-    rows = (await db.execute(
-        select(
-            GuardarAtencion.ID.label("id_atencion"),
-            GuardarAtencion.NRO_SOCIO.label("medico_id"),
-            GuardarAtencion.NRO_OBRA_SOCIAL.label("obra_social_id"),
-            GuardarAtencion.CODIGO_PRESTACION.label("codigo_prestacion"),
-            GuardarAtencion.FECHA_PRESTACION.label("fecha_prestacion"),
-            GuardarAtencion.IMPORTE_COLEGIO.label("importe_colegio"),
-            GuardarAtencion.VALOR_CIRUJIA.label("valor_cirujia"),
-            GuardarAtencion.VALOR_AYUDANTE.label("valor_ayudante"),
-            GuardarAtencion.VALOR_AYUDANTE_2.label("valor_ayudante_2"),
-            GuardarAtencion.GASTOS.label("gastos"),
-            GuardarAtencion.COSEGURO.label("coseguro"),
-            GuardarAtencion.CANTIDAD.label("cantidad"),
-            GuardarAtencion.CANT_TRATAMIENTO.label("cantidad_tratamiento"),
-            GuardarAtencion.AYUDANTE.label("nro_socio_ayudante"),
-            GuardarAtencion.AYUDANTE_2.label("nro_socio_ayudante_2"),
-            GuardarAtencion.CON_HONO_SANA.label("con_hono_sana"),
-        ).where(
-            GuardarAtencion.NRO_OBRA_SOCIAL == os_id,
-            GuardarAtencion.ANIO_PERIODO == anio,
-            GuardarAtencion.MES_PERIODO == mes,
-            GuardarAtencion.EXISTE == "S",
-            GuardarAtencion.NRO_CONSULTA != "0",
+    cmc_rows = (await db.execute(
+        select(DetalleFacturacionCMC).where(
+            DetalleFacturacionCMC.cod_obr == cod_obr,
+            DetalleFacturacionCMC.periodo == periodo,
+            DetalleFacturacionCMC.estado == "L",
         )
-    )).mappings().all()
+    )).scalars().all()
 
-    existing = set((await db.execute(
-        select(DetalleLiquidacion.prestacion_id, DetalleLiquidacion.medico_id)
-        .where(DetalleLiquidacion.liquidacion_id == liquidacion_id)
-    )).all())
+    if not cmc_rows:
+        return
+
+    # Cargar de una vez todos los médicos involucrados para evitar N+1
+    cod_meds = {r.cod_med for r in cmc_rows}
+    medico_map: dict[str, int] = {}
+    lm_rows = (await db.execute(
+        select(ListadoMedico.NRO_SOCIO, ListadoMedico.ID).where(
+            ListadoMedico.NRO_SOCIO.in_([int(c) for c in cod_meds if c is not None])
+        )
+    )).all()
+    for nro_socio, lm_id in lm_rows:
+        medico_map[str(nro_socio)] = lm_id
+
+    # Set de (cmc_detalle_id,) para detectar duplicados
+    existing_cmc = set((await db.execute(
+        select(DetalleLiquidacion.cmc_detalle_id)
+        .where(
+            DetalleLiquidacion.liquidacion_id == liquidacion_id,
+            DetalleLiquidacion.cmc_detalle_id.isnot(None),
+        )
+    )).scalars().all())
 
     observados: list[dict] = []
 
-    for r in rows:
-        piezas = _desdoblar_en_actores(dict(r))
-        for p in piezas:
-            key = (p["prestacion_id"], p["medico_id"])
-            if key in existing:
-                continue
+    for df in cmc_rows:
+        if df.id_detalle_prestaciones in existing_cmc:
+            continue
 
-            if not p["importe_total"] or p["importe_total"] <= 0:
-                observados.append({
-                    "atencion_id": p["prestacion_id"],
-                    "medico_id": p["medico_id"],
-                    "razon": "importe_cero_o_negativo",
-                })
-                continue
+        medico_id = medico_map.get(df.cod_med)
+        if medico_id is None:
+            observados.append({
+                "cmc_detalle_id": df.id_detalle_prestaciones,
+                "cod_med": df.cod_med,
+                "razon": "medico_no_encontrado",
+            })
+            continue
 
-            detalle_item = DetalleLiquidacion(
-                liquidacion_id=liq.id,
-                medico_id=p["medico_id"],
-                obra_social_id=os_id,
-                prestacion_id=p["prestacion_id"],
-                pagado=Decimal("0"),
-                honorarios=p["honorarios"],
-                gastos=p["gastos"],
-                importe_total=p["importe_total"],
-            )
-            db.add(detalle_item)
-            existing.add(key)
+        funcion = (df.tpo_funcion or "H").upper()
+        if funcion == "H":
+            honorarios = to_dec(df.honorarios)
+            gastos = Decimal("0")
+        elif funcion == "HG":
+            honorarios = to_dec(df.honorarios)
+            gastos = to_dec(df.gastos)
+        elif funcion == "G":
+            honorarios = Decimal("0")
+            gastos = to_dec(df.gastos)
+        elif funcion == "A":
+            honorarios = to_dec(df.ayudante)
+            gastos = Decimal("0")
+        else:
+            honorarios = to_dec(df.honorarios)
+            gastos = Decimal("0")
+
+        importe_total = to_dec(df.importe_total)
+        if importe_total <= 0:
+            observados.append({
+                "cmc_detalle_id": df.id_detalle_prestaciones,
+                "cod_med": df.cod_med,
+                "razon": "importe_cero_o_negativo",
+            })
+            continue
+
+        detalle_item = DetalleLiquidacion(
+            liquidacion_id=liq.id,
+            medico_id=medico_id,
+            obra_social_id=os_id,
+            prestacion_id=None,
+            fuente="cmc",
+            cmc_detalle_id=df.id_detalle_prestaciones,
+            pagado=Decimal("0"),
+            honorarios=honorarios,
+            gastos=gastos,
+            importe_total=importe_total,
+            fecha_practica=df.fecha_practica,
+            codigo_prestacion_cmc=df.cod_nom,
+            nro_orden_cmc=df.nro_orden,
+            paciente_nombre_cmc=df.nom_ape_p,
+            paciente_nro_afiliado_cmc=df.dni_p,
+            sesion_cmc=df.sesion or 1,
+            cantidad_cmc=df.cantidad or 1,
+            porcentaje_cmc=df.porc or 100,
+        )
+        db.add(detalle_item)
+        existing_cmc.add(df.id_detalle_prestaciones)
 
     await db.flush()
 
     if observados:
-        print(f"[build_detalles] Observaciones en liq {liquidacion_id}: {json.dumps(observados)}")
-
-
-def _desdoblar_en_actores(row: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """
-    Convierte una fila de guardar_atencion en 1..N entradas de detalle.
-
-    - Filas H/S (honorarios cirugía / sanatorio):
-        cirujano → VALOR_CIRUJIA
-        ayudantes → VALOR_AYUDANTE / VALOR_AYUDANTE_2 (entradas separadas)
-    - Filas C/P (consultas / prácticas individuales):
-        medico → (IMPORTE_COLEGIO + GASTOS) * CANTIDAD * CANT_TRATAMIENTO − COSEGURO
-        (sin entradas de ayudante; estas filas no tienen cirugía)
-    """
-    piezas: List[Dict[str, Any]] = []
-    id_atencion = int(row["id_atencion"])
-    medico_id = row.get("medico_id")
-    if not medico_id:
-        return piezas
-
-    con_hono_sana = (row.get("con_hono_sana") or "C").upper()
-    es_hono_sana = con_hono_sana in ("H", "S")
-
-    if es_hono_sana:
-        # Cirugía u honorario en sanatorio: usar VALOR_CIRUJIA para el actor principal
-        honorarios = to_dec(row.get("valor_cirujia"))
-        gastos = Decimal("0")
-        importe_total = honorarios
-        if importe_total > 0:
-            piezas.append({
-                "prestacion_id": id_atencion,
-                "medico_id": int(medico_id),
-                "honorarios": honorarios,
-                "gastos": gastos,
-                "importe_total": importe_total,
-            })
-
-        # Ayudantes como entradas separadas
-        ayud1 = row.get("nro_socio_ayudante")
-        if ayud1:
-            val = to_dec(row.get("valor_ayudante"))
-            if val > 0:
-                piezas.append({
-                    "prestacion_id": id_atencion,
-                    "medico_id": int(ayud1),
-                    "honorarios": val,
-                    "gastos": Decimal("0"),
-                    "importe_total": val,
-                })
-
-        ayud2 = row.get("nro_socio_ayudante_2")
-        if ayud2:
-            val = to_dec(row.get("valor_ayudante_2"))
-            if val > 0:
-                piezas.append({
-                    "prestacion_id": id_atencion,
-                    "medico_id": int(ayud2),
-                    "honorarios": val,
-                    "gastos": Decimal("0"),
-                    "importe_total": val,
-                })
-    else:
-        # Consulta / práctica individual (C o P):
-        # (IMPORTE_COLEGIO + GASTOS) × sesion × cant_trata − COSEGURO
-        sesion = max(1, int(row.get("cantidad") or 1))
-        cant_trata = max(1, int(row.get("cantidad_tratamiento") or 1))
-        factor = sesion * cant_trata
-        honorarios = to_dec(row.get("importe_colegio")) * factor
-        gastos = to_dec(row.get("gastos")) * factor
-        coseguro = to_dec(row.get("coseguro"))
-        importe_total = honorarios + gastos - coseguro
-        if importe_total > 0:
-            piezas.append({
-                "prestacion_id": id_atencion,
-                "medico_id": int(medico_id),
-                "honorarios": honorarios,
-                "gastos": gastos,
-                "importe_total": importe_total,
-            })
-
-    return piezas
+        print(f"[build_detalles_from_cmc] Observaciones en liq {liquidacion_id}: {json.dumps(observados)}")
 
 
 # ================================================
@@ -277,16 +232,8 @@ async def vista_detalles_liquidacion(
     medico_id: Optional[int] = None,
     search: Optional[str] = None,
 ) -> Tuple[List[Dict[str, Any]], int]:
-    from sqlalchemy import literal
-
     DL = DetalleLiquidacion
-    GA = GuardarAtencion
     LM = aliased(ListadoMedico)
-
-    NRO_AFILIADO = getattr(GA, "NRO_AFILIADO", literal(""))
-    NOMBRE_AFILIADO = getattr(GA, "NOMBRE_AFILIADO", literal(""))
-    MATRICULA = getattr(GA, "MATRICULA", GA.NRO_SOCIO)
-    NOMBRE_SOCIO = func.coalesce(GA.NOMBRE_PRESTADOR, LM.NOMBRE).label("nombreSocio")
 
     filters = [DL.liquidacion_id == liquidacion_id]
 
@@ -302,7 +249,7 @@ async def vista_detalles_liquidacion(
                     or_(
                         LM.NRO_SOCIO == n,
                         DL.medico_id == n,
-                        GA.CODIGO_PRESTACION == s,
+                        DL.codigo_prestacion_cmc == s,
                     )
                 )
             else:
@@ -310,7 +257,7 @@ async def vista_detalles_liquidacion(
                 filters.append(
                     or_(
                         LM.NOMBRE.like(like),
-                        GA.CODIGO_PRESTACION.like(like),
+                        DL.codigo_prestacion_cmc.like(like),
                     )
                 )
 
@@ -318,17 +265,16 @@ async def vista_detalles_liquidacion(
         select(
             DL.id.label("det_id"),
             DL.medico_id.label("socio"),
-            NOMBRE_SOCIO,
-            MATRICULA.label("matri"),
-            DL.prestacion_id.label("nroOrden"),
-            GA.ID.label("atencion_id"),
-            GA.FECHA_PRESTACION.label("fecha"),
-            GA.CODIGO_PRESTACION.label("codigo"),
-            NRO_AFILIADO.label("nroAfiliado"),
-            NOMBRE_AFILIADO.label("afiliado"),
-            GA.CANTIDAD.label("cantidad"),
-            GA.CANT_TRATAMIENTO.label("cantidad_tratamiento"),
-            GA.PORCENTAJE.label("porcentaje"),
+            LM.NOMBRE.label("nombreSocio"),
+            LM.NRO_SOCIO.label("matri"),
+            DL.nro_orden_cmc.label("nroOrden_cmc"),
+            DL.fecha_practica.label("fecha_cmc"),
+            DL.codigo_prestacion_cmc.label("codigo_cmc"),
+            DL.paciente_nro_afiliado_cmc.label("nroAfiliado_cmc"),
+            DL.paciente_nombre_cmc.label("afiliado_cmc"),
+            DL.sesion_cmc.label("sesion_cmc"),
+            DL.cantidad_cmc.label("cantidad_cmc"),
+            DL.porcentaje_cmc.label("porcentaje_cmc"),
             func.coalesce(DL.honorarios, 0).label("honorarios"),
             func.coalesce(DL.gastos, 0).label("gastos"),
             func.coalesce(DL.importe_total, 0).label("importe_total"),
@@ -336,7 +282,6 @@ async def vista_detalles_liquidacion(
             DL.obra_social_id.label("obra_social_id"),
         )
         .select_from(DL)
-        .outerjoin(GA, DL.prestacion_id == GA.ID)
         .outerjoin(LM, LM.NRO_SOCIO == DL.medico_id)
         .where(and_(*filters))
         .order_by(DL.id)
@@ -405,10 +350,16 @@ async def vista_detalles_liquidacion(
         importe_total = Decimal(str(r["importe_total"] or "0"))
         pagado = Decimal(str(r["pagado"] or "0"))
 
-        cantidad = int(r.get("cantidad") or 1)
-        cant_trat = int(r.get("cantidad_tratamiento") or 1)
-        xCant = f"{cantidad}-{cant_trat}"
+        fecha = str(r["fecha_cmc"]) if r["fecha_cmc"] is not None else ""
+        codigo = r["codigo_cmc"] or ""
+        nroAfiliado = r.get("nroAfiliado_cmc") or None
+        afiliado = r.get("afiliado_cmc") or None
+        nroOrden = r.get("nroOrden_cmc")
+        cantidad = int(r.get("sesion_cmc") or 1)
+        cant_trat = int(r.get("cantidad_cmc") or 1)
+        porcentaje = float(r.get("porcentaje_cmc") or 100)
 
+        xCant = f"{cantidad}-{cant_trat}"
         det_id = int(r["det_id"])
         aj_list = ajuste_map.get(det_id, [])
 
@@ -422,13 +373,13 @@ async def vista_detalles_liquidacion(
             "socio": r["socio"],
             "nombreSocio": (r["nombreSocio"] or "").strip(),
             "matri": r["matri"],
-            "nroOrden": r["nroOrden"],
-            "fecha": str(r["fecha"]) if r["fecha"] is not None else "",
-            "codigo": r["codigo"] if r["codigo"] is not None else "",
-            "nroAfiliado": (r.get("nroAfiliado") or None),
-            "afiliado": (r.get("afiliado") or None),
+            "nroOrden": nroOrden,
+            "fecha": fecha,
+            "codigo": codigo,
+            "nroAfiliado": nroAfiliado,
+            "afiliado": afiliado,
             "xCant": xCant,
-            "porcentaje": float(r["porcentaje"] or 0),
+            "porcentaje": porcentaje,
             "honorarios": float(r["honorarios"] or 0),
             "gastos": float(r["gastos"] or 0),
             "coseguro": 0.0,
@@ -503,12 +454,13 @@ async def detalle_recibo_medico(
                 (Ajuste.honorarios + Ajuste.gastos).label("total"),
                 Ajuste.observacion,
                 Ajuste.id_atencion,
-                GuardarAtencion.CODIGO_PRESTACION.label("codigo"),
-                GuardarAtencion.FECHA_PRESTACION.label("fecha"),
+                DetalleFacturacionCMC.cod_nom.label("codigo"),
+                DetalleFacturacionCMC.fecha_practica.label("fecha"),
             )
             .select_from(Ajuste)
             .join(LoteAjuste, LoteAjuste.id == Ajuste.lote_id)
-            .outerjoin(GuardarAtencion, GuardarAtencion.ID == Ajuste.id_atencion)
+            .outerjoin(DetalleFacturacionCMC,
+                       DetalleFacturacionCMC.id_detalle_prestaciones == Ajuste.id_atencion)
             .where(
                 LoteAjuste.pago_id == pago_id,
                 LoteAjuste.obra_social_id == liq.obra_social_id,

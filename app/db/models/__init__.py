@@ -30,6 +30,12 @@ from app.db.models.catalogs import (
 from app.db.models.rbac import Role, Permission, UserRole, RolePermission, UserPermission
 from app.db.models.contenido import Noticia, DocumentoNoticias, PublicidadMedico
 from app.db.models.solicitud import SolicitudRegistro
+from app.db.models.cmc_facturacion import DetalleFacturacionCMC, FacturacionCMC
+from app.db.models.nomenclador_cmc import (
+    NomencladorCMC, NomencladorEspecialidad, MedicoCodigoHabilitado,
+    Homologador, Convenio, Tecnica, Galeno, Valor, ValorComponente,
+    HistorialPrecioCodigo,
+)
 
 __all__ = [
     "Base", "AuditMixin",
@@ -62,4 +68,10 @@ __all__ = [
     "Noticia", "DocumentoNoticias", "PublicidadMedico",
     # solicitud
     "SolicitudRegistro",
+    # cmc_facturacion (read-only, importadas desde CMC)
+    "DetalleFacturacionCMC", "FacturacionCMC",
+    # nomenclador / valores (sistema nuevo)
+    "NomencladorCMC", "NomencladorEspecialidad", "MedicoCodigoHabilitado",
+    "Homologador", "Convenio", "Tecnica", "Galeno", "Valor", "ValorComponente",
+    "HistorialPrecioCodigo",
 ]

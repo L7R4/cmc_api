@@ -94,9 +94,9 @@ class Ajuste(AuditMixin, Base):
         nullable=False,
     )
 
-    # Prestación de origen (nullable: ajustes sin prestación específica)
+    # En sistema CMC: almacena id_detalle_prestaciones de detalle_facturacion (nullable)
     id_atencion: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("guardar_atencion.ID", ondelete="SET NULL"),
+        Integer,
         nullable=True,
         index=True,
     )

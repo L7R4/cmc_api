@@ -97,16 +97,43 @@ async def regenerar_historial_por_valores(
     fecha_corte: Optional[datetime.date],
     db: AsyncSession,
     motivo: str = "carga_inicial",
+    nueva_vigencia_desde: Optional[datetime.date] = None,
 ) -> None:
     """
     Regla B §28: cierra la fila vigente del historial para el mismo
     (nomenclador_id, obra_social_nro, convenio_id) e inserta una nueva.
+
+    Si ya existe una fila con la misma vigencia_desde (ej: actualización de galeno
+    en la misma fecha que la vigencia del valor), actualiza esa fila en lugar de
+    intentar insertar un duplicado.
     """
     nuevo_valor = await db.get(Valor, nuevo_valor_id)
     if not nuevo_valor:
         return
 
     precio_total, snapshot = await calcular_precio_total(nuevo_valor_id, db)
+    vigencia_nueva = nueva_vigencia_desde or nuevo_valor.vigencia_desde
+
+    # Si ya existe una fila para esa vigencia_desde, actualizarla en lugar de close+insert
+    result = await db.execute(
+        select(HistorialPrecioCodigo).where(
+            HistorialPrecioCodigo.nomenclador_id == nuevo_valor.nomenclador_id,
+            HistorialPrecioCodigo.obra_social_nro == nuevo_valor.obra_social_nro,
+            HistorialPrecioCodigo.convenio_id == nuevo_valor.convenio_id,
+            HistorialPrecioCodigo.vigencia_desde == vigencia_nueva,
+        )
+    )
+    fila_existente = result.scalar_one_or_none()
+
+    if fila_existente:
+        fila_existente.precio_total = precio_total
+        fila_existente.componentes_snapshot = snapshot
+        fila_existente.motivo_cambio = motivo
+        fila_existente.vigencia_hasta = None
+        fila_existente.valores_id = nuevo_valor_id
+        fila_existente.fecha_cambio = datetime.datetime.utcnow()
+        await db.flush()
+        return
 
     # Cerrar fila vigente anterior (si existe y hay fecha de corte)
     if fecha_corte:
@@ -125,7 +152,7 @@ async def regenerar_historial_por_valores(
         nomenclador_id=nuevo_valor.nomenclador_id,
         obra_social_nro=nuevo_valor.obra_social_nro,
         convenio_id=nuevo_valor.convenio_id,
-        vigencia_desde=nuevo_valor.vigencia_desde,
+        vigencia_desde=vigencia_nueva,
         vigencia_hasta=None,
         precio_total=precio_total,
         valores_id=nuevo_valor_id,
@@ -187,7 +214,8 @@ async def regenerar_historial_por_galeno(
     fecha_corte = vigencia_desde - datetime.timedelta(days=1)
     for valor_id in valor_ids_afectados:
         await regenerar_historial_por_valores(
-            valor_id, fecha_corte, db, motivo="galeno_actualizado"
+            valor_id, fecha_corte, db, motivo="galeno_actualizado",
+            nueva_vigencia_desde=vigencia_desde,
         )
         # Actualizar la nueva fila con referencia al nuevo galeno
         # (ya fue seteada en regenerar_historial_por_valores con referencia_cambio_id=valor_id)

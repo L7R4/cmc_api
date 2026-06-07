@@ -18,7 +18,15 @@ class NomencladorCreate(BaseModel):
     categoria: Optional[str] = None
     complejidad: Optional[Literal["baja", "media", "alta"]] = None
     sin_restriccion_especialidad: bool = False
+    unidades_honorarios: Optional[Decimal] = None
+    unidades_ayudante: Optional[Decimal] = None
+    unidades_gastos: Optional[Decimal] = None
     observacion: Optional[str] = None
+
+    @field_validator("proviene_de_id", mode="before")
+    @classmethod
+    def coerce_zero_to_none(cls, v: object) -> Optional[int]:
+        return None if v == 0 else v
 
 
 class NomencladorUpdate(BaseModel):
@@ -26,6 +34,9 @@ class NomencladorUpdate(BaseModel):
     categoria: Optional[str] = None
     complejidad: Optional[Literal["baja", "media", "alta"]] = None
     sin_restriccion_especialidad: Optional[bool] = None
+    unidades_honorarios: Optional[Decimal] = None
+    unidades_ayudante: Optional[Decimal] = None
+    unidades_gastos: Optional[Decimal] = None
     activo: Optional[bool] = None
     observacion: Optional[str] = None
 
@@ -38,6 +49,9 @@ class NomencladorOut(BaseModel):
     categoria: Optional[str]
     complejidad: Optional[str]
     sin_restriccion_especialidad: bool
+    unidades_honorarios: Optional[Decimal]
+    unidades_ayudante: Optional[Decimal]
+    unidades_gastos: Optional[Decimal]
     activo: bool
     observacion: Optional[str]
     created_at: datetime.datetime
@@ -188,24 +202,6 @@ class ConvenioOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Tecnica
-# ─────────────────────────────────────────────────────────────────────────────
-
-class TecnicaCreate(BaseModel):
-    codigo: str
-    nombre: str
-    descripcion: Optional[str] = None
-
-
-class TecnicaOut(BaseModel):
-    id: int
-    codigo: str
-    nombre: str
-    descripcion: Optional[str]
-    activo: bool
-
-    model_config = {"from_attributes": True}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -268,8 +264,8 @@ class ValorComponenteIn(BaseModel):
     def check_galeno_or_fijo(self) -> "ValorComponenteIn":
         if self.cantidad > 0 and self.galeno_id is None:
             raise ValueError("cantidad > 0 requiere galeno_id")
-        if self.cantidad == 0 and self.valor_unitario is None:
-            raise ValueError("cantidad = 0 requiere valor_unitario (precio fijo)")
+        if self.cantidad == 0 and self.galeno_id is None and self.valor_unitario is None:
+            raise ValueError("cantidad = 0 sin galeno_id requiere valor_unitario (precio fijo)")
         return self
 
 
@@ -294,6 +290,7 @@ class ValorCreate(BaseModel):
     nomenclador_id: int
     descripcion: Optional[str] = None
     nivel: Optional[int] = None
+    complejidad: Optional[Literal["baja", "media", "alta"]] = None
     vigencia_desde: datetime.date
     observacion: Optional[str] = None
     componentes: List[ValorComponenteIn]
@@ -302,6 +299,7 @@ class ValorCreate(BaseModel):
 class ValorUpdate(BaseModel):
     descripcion: Optional[str] = None
     nivel: Optional[int] = None
+    complejidad: Optional[Literal["baja", "media", "alta"]] = None
     observacion: Optional[str] = None
 
 
@@ -310,6 +308,7 @@ class ValorCerrarYCrearIn(BaseModel):
     componentes: List[ValorComponenteIn]
     descripcion: Optional[str] = None
     nivel: Optional[int] = None
+    complejidad: Optional[Literal["baja", "media", "alta"]] = None
     observacion: Optional[str] = None
 
 
@@ -321,6 +320,7 @@ class ValorOut(BaseModel):
     codigo: str
     descripcion: Optional[str]
     nivel: Optional[int]
+    complejidad: Optional[str]
     vigencia_desde: datetime.date
     vigencia_hasta: Optional[datetime.date]
     estado: str

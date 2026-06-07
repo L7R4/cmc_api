@@ -39,6 +39,12 @@ from app.modules.nomenclador.service import LookupError
 
 router = APIRouter()
 
+_UNIDADES_MAP: dict[str, str] = {
+    "Honorarios": "unidades_honorarios",
+    "Ayudante":   "unidades_ayudante",
+    "Gastos":     "unidades_gastos",
+}
+
 
 # ─── helpers ─────────────────────────────────────────────────────────────────
 
@@ -51,6 +57,7 @@ async def _crear_valor_con_componentes(
     componentes_in: list,
     descripcion: Optional[str],
     nivel: Optional[int],
+    complejidad: Optional[str],
     observacion: Optional[str],
 ) -> Valor:
     nom = await db.get(NomencladorCMC, nomenclador_id)
@@ -64,6 +71,7 @@ async def _crear_valor_con_componentes(
         codigo=nom.codigo,
         descripcion=descripcion or nom.descripcion,
         nivel=nivel,
+        complejidad=complejidad,
         vigencia_desde=vigencia_desde,
         vigencia_hasta=None,
         estado="activo",
@@ -73,9 +81,37 @@ async def _crear_valor_con_componentes(
     await db.flush()
 
     for comp_in in componentes_in:
+        if comp_in.galeno_id is not None:
+            galeno = await db.get(Galeno, comp_in.galeno_id)
+            if not galeno:
+                raise HTTPException(404, f"Galeno {comp_in.galeno_id} no encontrado")
+            if not galeno.activo:
+                raise HTTPException(
+                    409,
+                    f"El galeno {comp_in.galeno_id} ('{galeno.nombre}') está inactivo — "
+                    f"usá el galeno vigente para '{galeno.codigo}'"
+                )
+
+        cantidad = comp_in.cantidad
+        if comp_in.galeno_id is not None and cantidad == 0:
+            attr = _UNIDADES_MAP[comp_in.concepto]
+            default = getattr(nom, attr, None)
+            if not default:
+                raise HTTPException(
+                    422,
+                    f"El componente '{comp_in.concepto}' requiere cantidad explícita o "
+                    f"que el código tenga '{attr}' configurado"
+                )
+            cantidad = default
         comp = ValorComponente(
             valor_id=valor.id,
-            **comp_in.model_dump(),
+            concepto=comp_in.concepto,
+            galeno_id=comp_in.galeno_id,
+            cantidad=cantidad,
+            valor_unitario=comp_in.valor_unitario,
+            opcional=comp_in.opcional,
+            orden=comp_in.orden,
+            observacion=comp_in.observacion,
         )
         db.add(comp)
     await db.flush()
@@ -131,6 +167,7 @@ async def create_valor(body: ValorCreate, db: AsyncSession = Depends(get_db)):
         componentes_in=body.componentes,
         descripcion=body.descripcion,
         nivel=body.nivel,
+        complejidad=body.complejidad,
         observacion=body.observacion,
     )
 
@@ -162,8 +199,8 @@ async def update_valor_metadata(id: int, body: ValorUpdate, db: AsyncSession = D
     return obj
 
 
-@router.post("/{id}/cerrar_y_crear", response_model=ValorOut)
-async def cerrar_y_crear_valor(
+@router.post("/{id}/actualizar", response_model=ValorOut)
+async def actualizar_valor(
     id: int, body: ValorCerrarYCrearIn, db: AsyncSession = Depends(get_db)
 ):
     """Cierra el valor actual y crea uno nuevo con la nueva fórmula de componentes."""
@@ -187,6 +224,7 @@ async def cerrar_y_crear_valor(
         componentes_in=body.componentes,
         descripcion=body.descripcion or anterior.descripcion,
         nivel=body.nivel if body.nivel is not None else anterior.nivel,
+        complejidad=body.complejidad if body.complejidad is not None else anterior.complejidad,
         observacion=body.observacion or anterior.observacion,
     )
 
@@ -472,33 +510,6 @@ async def lookup_precio(body: LookupPrecioIn, db: AsyncSession = Depends(get_db)
         raise HTTPException(e.status_code, e.message)
 
 
-@router.get("/precio_a_fecha", response_model=LookupPrecioOut)
-async def precio_a_fecha(
-    codigo: str = Query(...),
-    obra_social_nro: int = Query(...),
-    fecha: datetime.date = Query(...),
-    medico_id: int = Query(...),
-    db: AsyncSession = Depends(get_db),
-):
-    stmt = select(NomencladorCMC).where(
-        NomencladorCMC.codigo == codigo, NomencladorCMC.activo == True
-    )
-    nom = (await db.execute(stmt)).scalar_one_or_none()
-    if not nom:
-        raise HTTPException(404, f"Código '{codigo}' no encontrado")
-    try:
-        return await service.lookup_precio(
-            nomenclador_id=nom.id,
-            obra_social_nro=obra_social_nro,
-            fecha=fecha,
-            medico_id=medico_id,
-            opcionales_activos=[],
-            db=db,
-        )
-    except LookupError as e:
-        raise HTTPException(e.status_code, e.message)
-
-
 # ─── Historial ────────────────────────────────────────────────────────────────
 
 @router.get("/historial", response_model=List[HistorialPrecioOut])
@@ -611,7 +622,7 @@ async def importar_valores_csv(
                 valor_unitario = Decimal(valor_unitario_str) if valor_unitario_str else None
 
                 galeno_id = None
-                if galeno_codigo and cantidad > 0:
+                if galeno_codigo:
                     stmt_g = select(Galeno).where(
                         Galeno.obra_social_nro == obra_social_nro,
                         Galeno.convenio_id == convenio_id,
@@ -620,14 +631,26 @@ async def importar_valores_csv(
                         Galeno.activo == True,
                     )
                     galeno = (await db.execute(stmt_g)).scalar_one_or_none()
-                    if galeno:
-                        galeno_id = galeno.id
-                    else:
+                    if not galeno:
                         errores.append({
                             "fila": data["fila_inicio"] + idx,
                             "motivo": f"Galeno '{galeno_codigo}' no encontrado vigente"
                         })
                         continue
+                    galeno_id = galeno.id
+                    # Intentar resolver cantidad desde defaults del nomenclador
+                    if cantidad == 0:
+                        attr = _UNIDADES_MAP.get(concepto)
+                        cantidad = (attr and getattr(nom, attr, None)) or Decimal("0")
+                        if cantidad == 0:
+                            errores.append({
+                                "fila": data["fila_inicio"] + idx,
+                                "motivo": (
+                                    f"Componente '{concepto}' tiene galeno pero sin cantidad "
+                                    f"y el código no tiene unidades por defecto para ese concepto"
+                                ),
+                            })
+                            continue
 
                 db.add(ValorComponente(
                     valor_id=nuevo.id,

@@ -34,7 +34,7 @@ async def list_nomenclador(
     q: Optional[str] = Query(None),
     categoria: Optional[str] = Query(None),
     complejidad: Optional[str] = Query(None),
-    activo: Optional[bool] = Query(None),
+    activo: Optional[bool] = Query(True),
     page: int = Query(1, ge=1),
     size: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
@@ -57,7 +57,7 @@ async def list_nomenclador(
 
 @router.post("/", response_model=NomencladorOut, status_code=201)
 async def create_nomenclador(body: NomencladorCreate, db: AsyncSession = Depends(get_db)):
-    if body.proviene_de_id:
+    if body.proviene_de_id is not None:
         raiz = await db.get(NomencladorCMC, body.proviene_de_id)
         if not raiz:
             raise HTTPException(404, "Código raíz no encontrado")
@@ -93,27 +93,32 @@ async def update_nomenclador(id: int, body: NomencladorUpdate, db: AsyncSession 
     return obj
 
 
+@router.patch("/{id}/activar", response_model=NomencladorOut)
+async def toggle_activo_nomenclador(
+    id: int, activo: bool, db: AsyncSession = Depends(get_db)
+):
+    obj = await db.get(NomencladorCMC, id)
+    if not obj:
+        raise HTTPException(404, "Código no encontrado")
+    obj.activo = activo
+    await db.commit()
+    await db.refresh(obj)
+    return obj
+
+
 @router.delete("/{id}", status_code=204)
 async def delete_nomenclador(id: int, db: AsyncSession = Depends(get_db)):
     obj = await db.get(NomencladorCMC, id)
     if not obj:
         raise HTTPException(404, "Código no encontrado")
-    # Verificar que no tenga valores activos
     stmt = select(Valor).where(Valor.nomenclador_id == id, Valor.estado == "activo").limit(1)
     if (await db.execute(stmt)).scalar_one_or_none():
         raise HTTPException(409, "El código tiene valores activos; ciérrelos antes de eliminarlo")
-    obj.activo = False
+    stmt_variantes = select(NomencladorCMC).where(NomencladorCMC.proviene_de_id == id).limit(1)
+    if (await db.execute(stmt_variantes)).scalar_one_or_none():
+        raise HTTPException(409, "El código tiene variantes; elimínelas primero")
+    await db.delete(obj)
     await db.commit()
-
-
-@router.get("/{id}/variantes", response_model=List[NomencladorOut])
-async def get_variantes(id: int, db: AsyncSession = Depends(get_db)):
-    obj = await db.get(NomencladorCMC, id)
-    if not obj:
-        raise HTTPException(404, "Código no encontrado")
-    stmt = select(NomencladorCMC).where(NomencladorCMC.proviene_de_id == id)
-    result = await db.execute(stmt)
-    return result.scalars().all()
 
 
 # ── Especialidades habilitadas ────────────────────────────────────────────────
@@ -158,17 +163,33 @@ async def add_especialidad(
     return ne
 
 
-@router.delete("/{id}/especialidades/{esp_id}", status_code=204)
-async def remove_especialidad(id: int, esp_id: int, db: AsyncSession = Depends(get_db)):
+@router.patch("/{id}/especialidades/{esp_id}/activar", response_model=NomencladorEspecialidadOut)
+async def toggle_especialidad(
+    id: int, esp_id: int, activo: bool, db: AsyncSession = Depends(get_db)
+):
     stmt = select(NomencladorEspecialidad).where(
         NomencladorEspecialidad.nomenclador_id == id,
         NomencladorEspecialidad.especialidad_id_colegio == esp_id,
-        NomencladorEspecialidad.activo == True,
     )
     obj = (await db.execute(stmt)).scalar_one_or_none()
     if not obj:
         raise HTTPException(404, "Habilitación no encontrada")
-    obj.activo = False
+    obj.activo = activo
+    await db.commit()
+    await db.refresh(obj)
+    return obj
+
+
+@router.delete("/{id}/especialidades/{esp_id}", status_code=204)
+async def delete_especialidad(id: int, esp_id: int, db: AsyncSession = Depends(get_db)):
+    stmt = select(NomencladorEspecialidad).where(
+        NomencladorEspecialidad.nomenclador_id == id,
+        NomencladorEspecialidad.especialidad_id_colegio == esp_id,
+    )
+    obj = (await db.execute(stmt)).scalar_one_or_none()
+    if not obj:
+        raise HTTPException(404, "Habilitación no encontrada")
+    await db.delete(obj)
     await db.commit()
 
 
@@ -216,10 +237,23 @@ async def update_habilitacion_medico(
     return obj
 
 
+@router.patch("/{id}/habilitaciones_medico/{hab_id}/activar", response_model=MedicoHabilitacionOut)
+async def toggle_habilitacion_medico(
+    id: int, hab_id: int, activo: bool, db: AsyncSession = Depends(get_db)
+):
+    obj = await db.get(MedicoCodigoHabilitado, hab_id)
+    if not obj or obj.nomenclador_id != id:
+        raise HTTPException(404, "Habilitación no encontrada")
+    obj.activo = activo
+    await db.commit()
+    await db.refresh(obj)
+    return obj
+
+
 @router.delete("/{id}/habilitaciones_medico/{hab_id}", status_code=204)
 async def delete_habilitacion_medico(id: int, hab_id: int, db: AsyncSession = Depends(get_db)):
     obj = await db.get(MedicoCodigoHabilitado, hab_id)
     if not obj or obj.nomenclador_id != id:
         raise HTTPException(404, "Habilitación no encontrada")
-    obj.activo = False
+    await db.delete(obj)
     await db.commit()

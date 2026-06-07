@@ -36,6 +36,10 @@ class NomencladorCMC(Base):
     sin_restriccion_especialidad: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="0"
     )
+    # Unidades por defecto al crear ValorComponente calculable sin cantidad explícita
+    unidades_honorarios: Mapped[Optional[Decimal]] = mapped_column(DECIMAL(10, 2), nullable=True)
+    unidades_ayudante: Mapped[Optional[Decimal]] = mapped_column(DECIMAL(10, 2), nullable=True)
+    unidades_gastos: Mapped[Optional[Decimal]] = mapped_column(DECIMAL(10, 2), nullable=True)
     activo: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="1")
     observacion: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime.datetime] = mapped_column(
@@ -199,17 +203,6 @@ class Convenio(Base):
     )
 
 
-class Tecnica(Base):
-    """Catálogo descriptivo de técnicas de realización de prácticas."""
-    __tablename__ = "nm_tecnicas"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    codigo: Mapped[str] = mapped_column(String(50), nullable=False, unique=True)
-    nombre: Mapped[str] = mapped_column(String(100), nullable=False)
-    descripcion: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    activo: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="1")
-
-
 class Galeno(Base):
     """Precio histórico de galenos/gastos/módulos por OS + convenio + vigencia."""
     __tablename__ = "nm_galenos"
@@ -265,6 +258,10 @@ class Valor(Base):
     descripcion: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     # Nivel numérico que asigna esta OS al código (independiente de complejidad del nomenclador)
     nivel: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # Override de complejidad por OS; NULL → hereda NomencladorCMC.complejidad
+    complejidad: Mapped[Optional[str]] = mapped_column(
+        Enum("baja", "media", "alta", name="nm_valor_complejidad_enum"), nullable=True
+    )
     vigencia_desde: Mapped[datetime.date] = mapped_column(Date, nullable=False)
     vigencia_hasta: Mapped[Optional[datetime.date]] = mapped_column(Date, nullable=True)
     estado: Mapped[str] = mapped_column(
@@ -292,6 +289,7 @@ class Valor(Base):
         Index("ix_nm_valores_codigo", "codigo"),
         Index("ix_nm_valores_vigencia", "vigencia_desde", "vigencia_hasta"),
         Index("ix_nm_valores_nivel", "nivel"),
+        Index("ix_nm_valores_complejidad", "complejidad"),
         Index("ix_nm_valores_estado", "estado"),
     )
 

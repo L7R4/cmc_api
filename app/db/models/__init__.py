@@ -34,7 +34,7 @@ from app.db.models.solicitud import SolicitudRegistro
 from app.db.models.cmc_facturacion import DetalleFacturacionCMC, FacturacionCMC
 from app.db.models.nomenclador_cmc import (
     NomencladorCMC, NomencladorEspecialidad, MedicoCodigoHabilitado,
-    Homologador, Convenio, Galeno, Valor, ValorComponente,
+    Homologador, Galeno, Valor, ValorComponente,
     HistorialPrecioCodigo,
 )
 
@@ -74,6 +74,6 @@ __all__ = [
     "DetalleFacturacionCMC", "FacturacionCMC",
     # nomenclador / valores (sistema nuevo)
     "NomencladorCMC", "NomencladorEspecialidad", "MedicoCodigoHabilitado",
-    "Homologador", "Convenio", "Galeno", "Valor", "ValorComponente",
+    "Homologador", "Galeno", "Valor", "ValorComponente",
     "HistorialPrecioCodigo",
 ]

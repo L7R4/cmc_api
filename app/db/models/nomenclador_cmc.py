@@ -9,7 +9,7 @@ from decimal import Decimal
 from typing import List, Optional
 
 from sqlalchemy import (
-    JSON, DECIMAL, Boolean, Date, DateTime, Enum, ForeignKey,
+    JSON, DECIMAL, Boolean, Computed, Date, DateTime, Enum, ForeignKey,
     Index, Integer, String, Text, UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -172,52 +172,25 @@ class Homologador(Base):
     )
 
 
-class Convenio(Base):
-    """Acuerdo contractual entre el Colegio y una obra social. Máximo 1 activo por OS."""
-    __tablename__ = "nm_convenios"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    obra_social_nro: Mapped[int] = mapped_column(Integer, nullable=False)
-    nombre: Mapped[str] = mapped_column(String(200), nullable=False)
-    fecha_inicio: Mapped[datetime.date] = mapped_column(Date, nullable=False)
-    fecha_fin: Mapped[Optional[datetime.date]] = mapped_column(Date, nullable=True)
-    estado: Mapped[str] = mapped_column(
-        Enum("activo", "cerrado", name="nm_estado_convenio_enum"),
-        nullable=False,
-        default="activo",
-        server_default="activo",
-    )
-    observacion: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime.datetime] = mapped_column(
-        DateTime, nullable=False, server_default=func.now()
-    )
-    updated_at: Mapped[datetime.datetime] = mapped_column(
-        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
-    )
-
-    galenos: Mapped[List["Galeno"]] = relationship(back_populates="convenio")
-    valores: Mapped[List["Valor"]] = relationship(back_populates="convenio")
-
-    __table_args__ = (
-        Index("ix_nm_convenios_os_estado", "obra_social_nro", "estado"),
-    )
-
-
 class Galeno(Base):
-    """Precio histórico de galenos/gastos/módulos por OS + convenio + vigencia."""
+    """
+    Precio unitario histórico de galenos/gastos/módulos pactado con cada OS.
+    Identidad natural: (obra_social_nro, codigo, nivel, vigencia_desde).
+    nivel NULL → el galeno no está nivelado (un único precio unitario).
+    nivel N    → una fila por nivel; cada nivel puede tener su propio valor_unitario.
+    """
     __tablename__ = "nm_galenos"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     obra_social_nro: Mapped[int] = mapped_column(Integer, nullable=False)
-    convenio_id: Mapped[int] = mapped_column(
-        ForeignKey("nm_convenios.id"), nullable=False
-    )
-    # Identifica el tipo: 'galeno_quirurgico', 'gasto_quirurgico', etc.
+    # Clave-identidad slug derivada del nombre: 'galeno_quirurgico', 'gasto_quirurgico', etc.
     codigo: Mapped[str] = mapped_column(String(100), nullable=False)
     nombre: Mapped[str] = mapped_column(String(200), nullable=False)
-    tipo: Mapped[str] = mapped_column(
-        Enum("galeno", "gasto", "modulo", "otro", name="nm_tipo_galeno_enum"),
-        nullable=False,
+    # Nivel del galeno (ej: cirugía adulto niveles 1-7). NULL = sin niveles.
+    nivel: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # Columna generada para poder declarar la unique con nivel NULL (-1 = sin nivel)
+    nivel_key: Mapped[int] = mapped_column(
+        Integer, Computed("coalesce(nivel, -1)", persisted=True), nullable=False
     )
     vigencia_desde: Mapped[datetime.date] = mapped_column(Date, nullable=False)
     vigencia_hasta: Mapped[Optional[datetime.date]] = mapped_column(Date, nullable=True)
@@ -231,25 +204,31 @@ class Galeno(Base):
         DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
     )
 
-    convenio: Mapped["Convenio"] = relationship(back_populates="galenos")
     componentes: Mapped[List["ValorComponente"]] = relationship(back_populates="galeno")
 
     __table_args__ = (
-        Index("ix_nm_galenos_os_conv_codigo", "obra_social_nro", "convenio_id", "codigo"),
+        UniqueConstraint(
+            "obra_social_nro", "codigo", "nivel_key", "vigencia_desde",
+            name="uq_nm_galenos_os_codigo_nivel_vig",
+        ),
+        Index("ix_nm_galenos_os_codigo_nivel", "obra_social_nro", "codigo", "nivel"),
         Index("ix_nm_galenos_vigencia", "vigencia_desde", "vigencia_hasta"),
-        Index("ix_nm_galenos_tipo", "tipo"),
     )
 
 
 class Valor(Base):
-    """Regla de cálculo de precio para un código+OS+convenio+vigencia."""
+    """
+    Variante de precio para un código+OS+vigencia.
+    especialidad_id_colegio define la identidad de la variante:
+      NULL → variante base (cualquier médico habilitado la cobra)
+      N    → variante que exige esa especialidad (precio pactado para especialistas)
+    El lookup elige la variante de mayor cumplimiento (match de especialidad > base).
+    Máximo un activo por (obra_social_nro, nomenclador_id, especialidad_id_colegio) — app-level.
+    """
     __tablename__ = "nm_valores"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     obra_social_nro: Mapped[int] = mapped_column(Integer, nullable=False)
-    convenio_id: Mapped[int] = mapped_column(
-        ForeignKey("nm_convenios.id"), nullable=False
-    )
     nomenclador_id: Mapped[int] = mapped_column(
         ForeignKey("nm_nomenclador.id"), nullable=False
     )
@@ -261,6 +240,10 @@ class Valor(Base):
     # Override de complejidad por OS; NULL → hereda NomencladorCMC.complejidad
     complejidad: Mapped[Optional[str]] = mapped_column(
         Enum("baja", "media", "alta", name="nm_valor_complejidad_enum"), nullable=True
+    )
+    # FK lógica a especialidad.ID_COLEGIO_ESPE — variante de precio por especialidad
+    especialidad_id_colegio: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True
     )
     vigencia_desde: Mapped[datetime.date] = mapped_column(Date, nullable=False)
     vigencia_hasta: Mapped[Optional[datetime.date]] = mapped_column(Date, nullable=True)
@@ -278,14 +261,14 @@ class Valor(Base):
         DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
     )
 
-    convenio: Mapped["Convenio"] = relationship(back_populates="valores")
     nomenclador: Mapped["NomencladorCMC"] = relationship(back_populates="valores")
     componentes: Mapped[List["ValorComponente"]] = relationship(
         back_populates="valor", cascade="all, delete-orphan", lazy="selectin"
     )
 
     __table_args__ = (
-        Index("ix_nm_valores_os_conv_nom", "obra_social_nro", "convenio_id", "nomenclador_id"),
+        Index("ix_nm_valores_os_nom", "obra_social_nro", "nomenclador_id"),
+        Index("ix_nm_valores_especialidad", "especialidad_id_colegio"),
         Index("ix_nm_valores_codigo", "codigo"),
         Index("ix_nm_valores_vigencia", "vigencia_desde", "vigencia_hasta"),
         Index("ix_nm_valores_nivel", "nivel"),
@@ -348,8 +331,12 @@ class HistorialPrecioCodigo(Base):
         ForeignKey("nm_nomenclador.id"), nullable=False
     )
     obra_social_nro: Mapped[int] = mapped_column(Integer, nullable=False)
-    convenio_id: Mapped[int] = mapped_column(
-        ForeignKey("nm_convenios.id"), nullable=False
+    # Variante del valor al que pertenece esta fila (NULL = variante base)
+    especialidad_id_colegio: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # Columna generada para la unique con NULL (-1 = variante base)
+    especialidad_key: Mapped[int] = mapped_column(
+        Integer, Computed("coalesce(especialidad_id_colegio, -1)", persisted=True),
+        nullable=False,
     )
     vigencia_desde: Mapped[datetime.date] = mapped_column(Date, nullable=False)
     vigencia_hasta: Mapped[Optional[datetime.date]] = mapped_column(Date, nullable=True)
@@ -363,13 +350,14 @@ class HistorialPrecioCodigo(Base):
             "galeno_actualizado",
             "valor_fijo_actualizado",
             "valores_estructura",
-            "convenio_nuevo",
+            "replicacion",
+            "reversion",
             "migracion_legacy",
             name="nm_motivo_cambio_enum",
         ),
         nullable=False,
     )
-    # ID del galeno / valores / convenio que disparó este cambio
+    # ID del galeno / valores que disparó este cambio
     referencia_cambio_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     # Cuándo se registró el cambio en el sistema (≠ vigencia_desde)
     fecha_cambio: Mapped[datetime.datetime] = mapped_column(
@@ -380,12 +368,11 @@ class HistorialPrecioCodigo(Base):
     )
 
     nomenclador: Mapped["NomencladorCMC"] = relationship()
-    convenio: Mapped["Convenio"] = relationship()
     valores: Mapped["Valor"] = relationship()
 
     __table_args__ = (
         UniqueConstraint(
-            "nomenclador_id", "obra_social_nro", "convenio_id", "vigencia_desde",
+            "nomenclador_id", "obra_social_nro", "especialidad_key", "vigencia_desde",
             name="uq_nm_historial_precio",
         ),
         Index(

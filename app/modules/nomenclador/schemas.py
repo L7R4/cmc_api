@@ -352,13 +352,17 @@ class ValorCreate(BaseModel):
     complejidad: Optional[Literal["baja", "media", "alta"]] = None
     # Identidad de la variante: NULL = base, N = exige esa especialidad
     especialidad_id_colegio: Optional[int] = None
+    # True → código por presupuesto: se ignora la ecuación, los componentes H/G/A
+    # se guardan en 0 y el monto lo informa la OS al facturar (modo manual)
+    por_presupuesto: bool = False
     vigencia_desde: datetime.date
     observacion: Optional[str] = None
-    componentes: List[ValorComponenteIn]
+    componentes: List[ValorComponenteIn] = []
 
     @model_validator(mode="after")
     def check_componentes(self) -> "ValorCreate":
-        validar_lista_componentes(self.componentes)
+        if not self.por_presupuesto:
+            validar_lista_componentes(self.componentes)
         return self
 
 
@@ -373,7 +377,8 @@ class ValorUpdate(BaseModel):
 class ValorCerrarYCrearIn(BaseModel):
     # La variante (especialidad_id_colegio) se conserva del valor que se cierra
     vigencia_desde: datetime.date
-    componentes: List[ValorComponenteIn]
+    componentes: List[ValorComponenteIn] = []
+    por_presupuesto: bool = False
     descripcion: Optional[str] = None
     nivel: Optional[int] = None
     complejidad: Optional[Literal["baja", "media", "alta"]] = None
@@ -381,7 +386,8 @@ class ValorCerrarYCrearIn(BaseModel):
 
     @model_validator(mode="after")
     def check_componentes(self) -> "ValorCerrarYCrearIn":
-        validar_lista_componentes(self.componentes)
+        if not self.por_presupuesto:
+            validar_lista_componentes(self.componentes)
         return self
 
 
@@ -394,6 +400,7 @@ class ValorOut(BaseModel):
     nivel: Optional[int]
     complejidad: Optional[str]
     especialidad_id_colegio: Optional[int]
+    por_presupuesto: bool = False
     vigencia_desde: datetime.date
     vigencia_hasta: Optional[datetime.date]
     estado: str
@@ -507,6 +514,8 @@ class LookupPrecioOut(BaseModel):
     nivel: Optional[int]
     # Variante elegida: NULL = variante base, N = variante por especialidad N
     variante_especialidad_id: Optional[int] = None
+    # True → código por presupuesto: precio 0, el monto lo carga el operador a mano
+    por_presupuesto: bool = False
     fecha_practica: datetime.date
     precio_base: Decimal            # solo componentes obligatorios
     precio_total: Decimal           # base + opcionales activados
@@ -573,6 +582,7 @@ class BoletinItemOut(BaseModel):
     codigo: str
     descripcion: Optional[str]
     nivel: Optional[int]
+    por_presupuesto: bool = False
     precio_total: Decimal
     componentes: List[BoletinComponenteOut]
     vigencia_desde: datetime.date
@@ -590,6 +600,7 @@ class TablaValoresItem(BaseModel):
     codigo: str
     descripcion: Optional[str]
     nivel: Optional[int]
+    por_presupuesto: bool = False
     precio_total: Decimal
     vigencia_desde: datetime.date
     vigencia_hasta: Optional[datetime.date]

@@ -44,6 +44,28 @@ _UNIDADES_MAP: dict[str, str] = {
     "Gastos":     "unidades_gastos",
 }
 
+# Conceptos generados en 0 para un valor "por presupuesto"
+_CONCEPTOS_PRESUPUESTO = ("Honorarios", "Gastos", "Ayudante")
+
+
+def _componentes_presupuesto_cero() -> list[dict]:
+    """Los 3 componentes estándar como fijos en 0, para un Valor por presupuesto.
+
+    El precio_total resultante es 0; el monto real lo informa la OS al facturar.
+    """
+    return [
+        {
+            "concepto": concepto,
+            "galeno_id": None,
+            "cantidad": Decimal("0"),
+            "valor_unitario": Decimal("0"),
+            "opcional": False,
+            "orden": orden,
+            "observacion": None,
+        }
+        for orden, concepto in enumerate(_CONCEPTOS_PRESUPUESTO)
+    ]
+
 
 # ─── helpers ─────────────────────────────────────────────────────────────────
 
@@ -120,6 +142,7 @@ async def _crear_valor_con_componentes(
     complejidad: Optional[str],
     especialidad_id_colegio: Optional[int],
     observacion: Optional[str],
+    por_presupuesto: bool = False,
 ) -> Valor:
     nom = await db.get(NomencladorCMC, nomenclador_id)
     if not nom:
@@ -133,6 +156,7 @@ async def _crear_valor_con_componentes(
         nivel=nivel,
         complejidad=complejidad,
         especialidad_id_colegio=especialidad_id_colegio,
+        por_presupuesto=por_presupuesto,
         vigencia_desde=vigencia_desde,
         vigencia_hasta=None,
         estado="activo",
@@ -140,6 +164,13 @@ async def _crear_valor_con_componentes(
     )
     db.add(valor)
     await db.flush()
+
+    # Por presupuesto: se ignora la ecuación entrante y se guardan los 3 conceptos en 0
+    if por_presupuesto:
+        for datos in _componentes_presupuesto_cero():
+            db.add(ValorComponente(valor_id=valor.id, **datos))
+        await db.flush()
+        return valor
 
     for comp_in in componentes_in:
         cantidad = comp_in.cantidad
@@ -298,6 +329,7 @@ async def create_valor(body: ValorCreate, db: AsyncSession = Depends(get_db)):
         complejidad=body.complejidad,
         especialidad_id_colegio=body.especialidad_id_colegio,
         observacion=body.observacion,
+        por_presupuesto=body.por_presupuesto,
     )
 
     await service.regenerar_historial_por_valores(valor.id, None, db, motivo="carga_inicial")
@@ -371,6 +403,7 @@ async def actualizar_valor(
         complejidad=body.complejidad if body.complejidad is not None else anterior.complejidad,
         especialidad_id_colegio=anterior.especialidad_id_colegio,
         observacion=body.observacion or anterior.observacion,
+        por_presupuesto=body.por_presupuesto,
     )
 
     await service.regenerar_historial_por_valores(
@@ -814,9 +847,11 @@ async def importar_valores_csv(
 ):
     """
     CSV esperado (una fila por componente):
-    codigo_colegio,descripcion,valor_unitario,nivel,especialidad,concepto,galeno_codigo,cantidad
+    codigo_colegio,descripcion,valor_unitario,nivel,especialidad,concepto,galeno_codigo,cantidad,presupuesto
 
     - `especialidad` (opcional): variante del valor; vacío = variante base.
+    - `presupuesto` (opcional, truthy: 1/true/si/x): el grupo es "por presupuesto";
+      se ignora la ecuación de las filas y se guardan los 3 conceptos (H/G/A) en 0.
     - Cada (codigo_colegio, especialidad) agrupa sus filas en un solo Valor.
     - Modalidad homogénea por grupo: todas las filas con galeno_codigo o ninguna.
     - Si galeno_codigo tiene valor → el galeno se resuelve por (OS, galeno_codigo,
@@ -836,15 +871,19 @@ async def importar_valores_csv(
             continue
         esp_str = row.get("especialidad", "").strip()
         especialidad = int(esp_str) if esp_str else None
+        presupuesto = row.get("presupuesto", "").strip().lower() in {"1", "true", "si", "sí", "x"}
         clave = (codigo, especialidad)
         if clave not in grupos:
             grupos[clave] = {
                 "descripcion": row.get("descripcion", "").strip() or None,
                 "nivel": int(row["nivel"]) if row.get("nivel", "").strip() else None,
                 "especialidad": especialidad,
+                "por_presupuesto": presupuesto,
                 "componentes": [],
                 "fila_inicio": i,
             }
+        # Si cualquier fila del grupo marca presupuesto, el grupo es por presupuesto
+        grupos[clave]["por_presupuesto"] = grupos[clave]["por_presupuesto"] or presupuesto
         grupos[clave]["componentes"].append(row)
 
     procesados = 0
@@ -861,11 +900,14 @@ async def importar_valores_csv(
                 continue
 
             nivel_valor = data["nivel"]
+            por_presupuesto = data["por_presupuesto"]
 
-            # Resolver TODOS los componentes antes de tocar nada (todo o nada)
             componentes_resueltos = []
             error_grupo = None
-            for idx, row in enumerate(data["componentes"]):
+
+            # Por presupuesto: se ignora la ecuación del CSV; los 3 conceptos van en 0
+            filas = [] if por_presupuesto else data["componentes"]
+            for idx, row in enumerate(filas):
                 concepto = row.get("concepto", "").strip()
                 galeno_codigo = row.get("galeno_codigo", "").strip()
                 cantidad_str = row.get("cantidad", "0").strip()
@@ -916,7 +958,9 @@ async def importar_valores_csv(
                     "orden": idx,
                 })
 
-            if error_grupo is None:
+            if por_presupuesto:
+                componentes_resueltos = _componentes_presupuesto_cero()
+            elif error_grupo is None:
                 motivo_invalido = _validar_homogeneidad_datos(componentes_resueltos)
                 if motivo_invalido:
                     error_grupo = {"fila": data["fila_inicio"], "motivo": motivo_invalido}
@@ -939,6 +983,7 @@ async def importar_valores_csv(
                 nivel=nivel_valor,
                 complejidad=prev.complejidad if prev else None,
                 especialidad_id_colegio=especialidad,
+                por_presupuesto=por_presupuesto,
                 vigencia_desde=vigencia_desde,
                 vigencia_hasta=None,
                 estado="activo",

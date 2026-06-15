@@ -522,6 +522,7 @@ async def lookup_precio(
         obra_social_nro=obra_social_nro,
         nivel=valor.nivel if valor else None,
         variante_especialidad_id=historial.especialidad_id_colegio,
+        por_presupuesto=bool(valor and valor.por_presupuesto),
         fecha_practica=fecha,
         precio_base=precio_base,
         precio_total=precio_total,

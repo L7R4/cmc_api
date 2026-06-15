@@ -2,14 +2,18 @@ import datetime
 from decimal import Decimal
 from typing import Optional
 
-from sqlalchemy import DECIMAL, Date, Integer, String, Text
+from sqlalchemy import DECIMAL, JSON, Date, DateTime, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
 
 
 class DetalleFacturacionCMC(Base):
-    """Tabla detalle_facturacion importada desde CMC. Solo lectura."""
+    """Tabla detalle_facturacion (co-propiedad con CMC).
+
+    Lectura para las filas importadas de CMC; lectura **y escritura** para las
+    prestaciones que carga el Colegio desde el módulo `facturacion`.
+    """
     __tablename__ = "detalle_facturacion"
 
     id_detalle_prestaciones: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -45,6 +49,8 @@ class DetalleFacturacionCMC(Base):
     estado: Mapped[Optional[str]] = mapped_column(String(2))
     usuario: Mapped[Optional[str]] = mapped_column(String(30))
     id_especialidad: Mapped[Optional[int]] = mapped_column(Integer)
+    # Desglose del cálculo del lookup (modo automático). NULL en CMC y modo manual.
+    calculo_snapshot: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
 
 class FacturacionCMC(Base):
@@ -68,3 +74,17 @@ class FacturacionCMC(Base):
     afip: Mapped[Optional[str]] = mapped_column(String(1))
     usuario: Mapped[Optional[str]] = mapped_column(String(30))
     estado: Mapped[Optional[str]] = mapped_column(String(2))
+
+
+class Afiliado(Base):
+    """Padrón de afiliados/pacientes. DNI único; el nombre se desnormaliza en
+    `detalle_facturacion.nom_ape_p` al cargar una prestación."""
+    __tablename__ = "afiliado"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    dni: Mapped[str] = mapped_column(String(15), nullable=False, unique=True, index=True)
+    nombre: Mapped[str] = mapped_column(String(100), nullable=False)
+    usuario: Mapped[str] = mapped_column(String(30), nullable=False)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )

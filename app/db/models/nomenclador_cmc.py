@@ -245,6 +245,12 @@ class Valor(Base):
     especialidad_id_colegio: Mapped[Optional[int]] = mapped_column(
         Integer, nullable=True
     )
+    # True → el código se factura "por presupuesto": no hay precio pactado en el
+    # sistema, la OS informa el importe por fuera. Los componentes H/G/A quedan en 0
+    # y el operador carga el monto a mano al facturar (modo manual).
+    por_presupuesto: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="0"
+    )
     vigencia_desde: Mapped[datetime.date] = mapped_column(Date, nullable=False)
     vigencia_hasta: Mapped[Optional[datetime.date]] = mapped_column(Date, nullable=True)
     estado: Mapped[str] = mapped_column(
@@ -274,6 +280,7 @@ class Valor(Base):
         Index("ix_nm_valores_nivel", "nivel"),
         Index("ix_nm_valores_complejidad", "complejidad"),
         Index("ix_nm_valores_estado", "estado"),
+        Index("ix_nm_valores_por_presupuesto", "por_presupuesto"),
     )
 
 

@@ -28,3 +28,6 @@ uploads
 /docs/api/*
 scripts/*
 .claude/*
+valoresNOSUBIR/
+socios_por_tipo.xlsx
+CLAUDE.md

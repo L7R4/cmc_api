@@ -97,6 +97,8 @@ class UserOut(BaseModel):
     nombre: Optional[str] = None
     scopes: List[str] = []
     role: Optional[str] = None
+    es_organizacion: bool = False
+    adherente: bool = False
 
 class UserEnvelope(BaseModel):
     user: UserOut

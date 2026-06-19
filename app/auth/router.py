@@ -231,6 +231,8 @@ async def legacy_sso_link(
         "nombre": getattr(user, "NOMBRE", None),
         "scopes": scopes,
         "role": role,
+        "es_organizacion": int(getattr(user, "es_organizacion", 0) or 0),
+        "adherente": bool(getattr(user, "adherente", False)),
         "iat": now,
         "exp": exp,
     }

@@ -89,6 +89,8 @@ async def login(body: LoginIn, res: Response, db: AsyncSession = Depends(get_db)
             "nombre": medico.NOMBRE,
             "scopes": scopes,
             "role": role,
+            "es_organizacion": medico.es_organizacion,
+            "adherente": medico.adherente,
         },
     }
 
@@ -152,6 +154,8 @@ async def refresh_token(
             "nombre": getattr(medico, "NOMBRE", None),
             "scopes": scopes,
             "role": role,
+            "es_organizacion": medico.es_organizacion,
+            "adherente": medico.adherente,
         },
     }
 
@@ -201,7 +205,9 @@ async def get_me(dep = Depends(get_current_user_with_scopes_and_role)):
         nro_socio=user.NRO_SOCIO,
         nombre=getattr(user, "NOMBRE", None),
         scopes=scopes,
-        role=role,          
+        role=role,
+        es_organizacion=getattr(user, "es_organizacion", False),
+        adherente=getattr(user, "adherente", False),
     )
     return {"user": out}
 
@@ -225,6 +231,8 @@ async def legacy_sso_link(
         "nombre": getattr(user, "NOMBRE", None),
         "scopes": scopes,
         "role": role,
+        "es_organizacion": int(getattr(user, "es_organizacion", 0) or 0),
+        "adherente": bool(getattr(user, "adherente", False)),
         "iat": now,
         "exp": exp,
     }

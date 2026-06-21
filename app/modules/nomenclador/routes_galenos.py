@@ -63,10 +63,21 @@ async def _rotar_precio_galeno(
     y regenera el historial de todos los códigos afectados (Regla A).
     No comitea: corre dentro de la transacción del caller.
     """
+    if vigencia_desde == galeno_anterior.vigencia_desde:
+        galeno_anterior.valor_unitario = nuevo_valor_unitario
+        await db.flush()
+        await service.regenerar_historial_por_galeno(
+            galeno_id_anterior=galeno_anterior.id,
+            nuevo_galeno_id=galeno_anterior.id,
+            vigencia_desde=vigencia_desde,
+            db=db,
+        )
+        return galeno_anterior
+
     fecha_corte = vigencia_desde - datetime.timedelta(days=1)
     if galeno_anterior.vigencia_desde > fecha_corte:
         raise HTTPException(
-            409,
+            422,
             f"vigencia_desde ({vigencia_desde}) debe ser posterior a la vigencia "
             f"actual del galeno ({galeno_anterior.vigencia_desde})",
         )

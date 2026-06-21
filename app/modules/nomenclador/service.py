@@ -30,6 +30,26 @@ from app.modules.nomenclador.schemas import (
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Origen / prioridad (fuente de verdad de la prioridad — vive en código, no en DB)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Índice 0 = máxima prioridad. Para sumar un origen: agregarlo al enum
+# schemas.Origen y a esta tupla en la posición que corresponda. Sin migración.
+ORIGEN_PRIORIDAD: tuple[str, ...] = ("NE", "NNE", "NN")
+
+# Rank para orígenes desconocidos: pierden contra cualquier origen conocido (fail-safe).
+_PRIORIDAD_DESCONOCIDA = len(ORIGEN_PRIORIDAD)
+
+
+def prioridad_origen(origen: str) -> int:
+    """Menor = mayor prioridad. Origen desconocido → último (fail-safe)."""
+    try:
+        return ORIGEN_PRIORIDAD.index(origen)
+    except ValueError:
+        return _PRIORIDAD_DESCONOCIDA
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Cálculo de precio
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -96,11 +116,15 @@ async def calcular_precio_total(
 # Motor de historial — Regla B: nuevo valores (valor fijo o estructura)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _cond_variante(especialidad_id: Optional[int]):
-    """Condición de pertenencia a una variante en el historial (NULL = base)."""
+def _cond_variante(origen: str, especialidad_id: Optional[int]):
+    """Condición de pertenencia a una variante del historial.
+
+    La variante es (origen, especialidad_id_colegio); NULL en especialidad = sin perfil.
+    """
+    cond = HistorialPrecioCodigo.origen == origen
     if especialidad_id is None:
-        return HistorialPrecioCodigo.especialidad_id_colegio.is_(None)
-    return HistorialPrecioCodigo.especialidad_id_colegio == especialidad_id
+        return and_(cond, HistorialPrecioCodigo.especialidad_id_colegio.is_(None))
+    return and_(cond, HistorialPrecioCodigo.especialidad_id_colegio == especialidad_id)
 
 
 async def regenerar_historial_por_valores(
@@ -125,13 +149,14 @@ async def regenerar_historial_por_valores(
     precio_total, snapshot = await calcular_precio_total(nuevo_valor_id, db)
     vigencia_nueva = nueva_vigencia_desde or nuevo_valor.vigencia_desde
     variante = nuevo_valor.especialidad_id_colegio
+    origen = nuevo_valor.origen
 
     # Si ya existe una fila para esa vigencia_desde, actualizarla en lugar de close+insert
     result = await db.execute(
         select(HistorialPrecioCodigo).where(
             HistorialPrecioCodigo.nomenclador_id == nuevo_valor.nomenclador_id,
             HistorialPrecioCodigo.obra_social_nro == nuevo_valor.obra_social_nro,
-            _cond_variante(variante),
+            _cond_variante(origen, variante),
             HistorialPrecioCodigo.vigencia_desde == vigencia_nueva,
         )
     )
@@ -154,7 +179,7 @@ async def regenerar_historial_por_valores(
             .where(
                 HistorialPrecioCodigo.nomenclador_id == nuevo_valor.nomenclador_id,
                 HistorialPrecioCodigo.obra_social_nro == nuevo_valor.obra_social_nro,
-                _cond_variante(variante),
+                _cond_variante(origen, variante),
                 HistorialPrecioCodigo.vigencia_hasta.is_(None),
             )
             .values(vigencia_hasta=fecha_corte)
@@ -163,6 +188,7 @@ async def regenerar_historial_por_valores(
     historial = HistorialPrecioCodigo(
         nomenclador_id=nuevo_valor.nomenclador_id,
         obra_social_nro=nuevo_valor.obra_social_nro,
+        origen=origen,
         especialidad_id_colegio=variante,
         vigencia_desde=vigencia_nueva,
         vigencia_hasta=None,
@@ -454,25 +480,40 @@ async def lookup_precio(
     if not filas:
         raise LookupError("Sin precio registrado para ese código, obra social y fecha")
 
+    # Una fila por variante (origen, especialidad): la más reciente (filas viene desc)
     por_variante: dict = {}
     for fila in filas:
-        por_variante.setdefault(fila.especialidad_id_colegio, fila)
+        por_variante.setdefault((fila.origen, fila.especialidad_id_colegio), fila)
 
-    # Selección por mayor cumplimiento: variante de la especialidad del médico
-    # (respetando el orden de slots: NRO_ESPECIALIDAD = principal) > variante base
+    # Perfil del médico: orden de slots (NRO_ESPECIALIDAD principal = índice 0)
     especialidades = _especialidades_medico(medico)
-    historial = None
-    for esp in especialidades:
-        if esp in por_variante:
-            historial = por_variante[esp]
-            break
-    if historial is None:
-        historial = por_variante.get(None)
-    if historial is None:
+    slot_rank = {esp: i for i, esp in enumerate(especialidades)}
+    # Las variantes sin especialidad pierden contra un match dentro del mismo origen
+    _SLOT_SIN_ESP = len(especialidades) + 1
+
+    def _aplicable(fila) -> bool:
+        if fila.especialidad_id_colegio is None:
+            return True
+        return fila.especialidad_id_colegio in slot_rank
+
+    candidatas = [f for f in por_variante.values() if _aplicable(f)]
+    if not candidatas:
         raise LookupError(
             "Sin precio para el perfil del médico: las variantes vigentes exigen "
-            "una especialidad que no posee y no hay variante base"
+            "una especialidad que no posee y no hay variante sin especialidad"
         )
+
+    def _orden(fila):
+        # Menor gana: prioridad de origen (NE>NNE>NN) → match de especialidad por
+        # orden de slots → vigencia más reciente como desempate final.
+        rank = (
+            slot_rank.get(fila.especialidad_id_colegio, _SLOT_SIN_ESP)
+            if fila.especialidad_id_colegio is not None
+            else _SLOT_SIN_ESP
+        )
+        return (prioridad_origen(fila.origen), rank, -fila.vigencia_desde.toordinal())
+
+    historial = min(candidatas, key=_orden)
 
     valor = await db.get(Valor, historial.valores_id)
 
@@ -521,6 +562,7 @@ async def lookup_precio(
         descripcion=valor.descripcion if valor else None,
         obra_social_nro=obra_social_nro,
         nivel=valor.nivel if valor else None,
+        origen=historial.origen,
         variante_especialidad_id=historial.especialidad_id_colegio,
         por_presupuesto=bool(valor and valor.por_presupuesto),
         fecha_practica=fecha,

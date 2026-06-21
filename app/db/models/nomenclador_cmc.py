@@ -24,6 +24,10 @@ class NomencladorCMC(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     codigo: Mapped[str] = mapped_column(String(20), nullable=False, unique=True)
+    # Código del Nomenclador Nacional al que corresponde este código del Colegio.
+    # NULL = no identificado como nacional (código propio del Colegio o sin match).
+    # Se cargó por comparación contra el extracto del PDF (ver scripts/compare_nomenclador.py).
+    codigo_nacional: Mapped[Optional[str]] = mapped_column(String(20), nullable=True, index=True)
     proviene_de_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("nm_nomenclador.id"), nullable=True, index=True
     )
@@ -219,11 +223,15 @@ class Galeno(Base):
 class Valor(Base):
     """
     Variante de precio para un código+OS+vigencia.
-    especialidad_id_colegio define la identidad de la variante:
-      NULL → variante base (cualquier médico habilitado la cobra)
-      N    → variante que exige esa especialidad (precio pactado para especialistas)
-    El lookup elige la variante de mayor cumplimiento (match de especialidad > base).
-    Máximo un activo por (obra_social_nro, nomenclador_id, especialidad_id_colegio) — app-level.
+    La identidad de la variante es (origen, especialidad_id_colegio):
+      origen → categoría/procedencia de la regla de precio; fija la PRIORIDAD del
+               lookup (NE > NNE > NN). La prioridad NO vive en DB: es la posición en
+               ORIGEN_PRIORIDAD (service.py). El String permite sumar orígenes sin migrar.
+      especialidad_id_colegio → NULL = sin perfil · N = exige esa especialidad.
+               Solo lo usa NE (NNE/NN siempre van NULL).
+    El lookup elige por mayor prioridad de origen y, dentro del origen, match de
+    especialidad (orden de slots del médico) > sin especialidad.
+    Máximo un activo por (obra_social_nro, nomenclador_id, origen, especialidad_id_colegio) — app-level.
     """
     __tablename__ = "nm_valores"
 
@@ -232,6 +240,10 @@ class Valor(Base):
     nomenclador_id: Mapped[int] = mapped_column(
         ForeignKey("nm_nomenclador.id"), nullable=False
     )
+    # Categoría/procedencia del valor: 'NE' | 'NNE' | 'NN' (validado en código contra
+    # schemas.Origen / service.ORIGEN_PRIORIDAD). NO es ENUM de DB para poder sumar
+    # orígenes sin migración. La prioridad de lookup se deriva en código.
+    origen: Mapped[str] = mapped_column(String(10), nullable=False)
     # Snapshot denormalizado del codigo para consultas rápidas
     codigo: Mapped[str] = mapped_column(String(20), nullable=False)
     descripcion: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
@@ -275,6 +287,7 @@ class Valor(Base):
     __table_args__ = (
         Index("ix_nm_valores_os_nom", "obra_social_nro", "nomenclador_id"),
         Index("ix_nm_valores_especialidad", "especialidad_id_colegio"),
+        Index("ix_nm_valores_origen", "origen"),
         Index("ix_nm_valores_codigo", "codigo"),
         Index("ix_nm_valores_vigencia", "vigencia_desde", "vigencia_hasta"),
         Index("ix_nm_valores_nivel", "nivel"),
@@ -338,7 +351,9 @@ class HistorialPrecioCodigo(Base):
         ForeignKey("nm_nomenclador.id"), nullable=False
     )
     obra_social_nro: Mapped[int] = mapped_column(Integer, nullable=False)
-    # Variante del valor al que pertenece esta fila (NULL = variante base)
+    # Categoría/procedencia del valor (NE|NNE|NN) — parte de la identidad de la variante
+    origen: Mapped[str] = mapped_column(String(10), nullable=False)
+    # Variante del valor al que pertenece esta fila (NULL = sin especialidad)
     especialidad_id_colegio: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     # Columna generada para la unique con NULL (-1 = variante base)
     especialidad_key: Mapped[int] = mapped_column(
@@ -379,7 +394,7 @@ class HistorialPrecioCodigo(Base):
 
     __table_args__ = (
         UniqueConstraint(
-            "nomenclador_id", "obra_social_nro", "especialidad_key", "vigencia_desde",
+            "nomenclador_id", "obra_social_nro", "origen", "especialidad_key", "vigencia_desde",
             name="uq_nm_historial_precio",
         ),
         Index(

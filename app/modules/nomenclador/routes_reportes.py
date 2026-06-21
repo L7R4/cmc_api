@@ -118,6 +118,7 @@ async def boletin(
         valor = await db.get(Valor, h.valores_id)
         items.append(BoletinItemOut(
             codigo=nom.codigo if nom else str(h.nomenclador_id),
+            origen=h.origen,
             descripcion=valor.descripcion if valor else None,
             nivel=valor.nivel if valor else None,
             por_presupuesto=bool(valor and valor.por_presupuesto),
@@ -171,6 +172,7 @@ async def tabla_valores(
         items.append(TablaValoresItem(
             nomenclador_id=h.nomenclador_id,
             codigo=nom.codigo if nom else str(h.nomenclador_id),
+            origen=h.origen,
             descripcion=valor.descripcion if valor else None,
             nivel=valor.nivel if valor else None,
             por_presupuesto=bool(valor and valor.por_presupuesto),

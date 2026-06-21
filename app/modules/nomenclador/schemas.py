@@ -1,12 +1,29 @@
 from __future__ import annotations
 
 import datetime
+import enum
 import re
 import unicodedata
 from decimal import Decimal
 from typing import List, Literal, Optional
 
 from pydantic import BaseModel, field_validator, model_validator
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Origen / categoría del valor
+# ─────────────────────────────────────────────────────────────────────────────
+
+class Origen(str, enum.Enum):
+    """Procedencia de la regla de precio. Fija la prioridad del lookup.
+
+    La PRIORIDAD no vive acá: se deriva de la posición en
+    ``service.ORIGEN_PRIORIDAD`` (índice 0 = máxima). Sumar un origen = agregar el
+    miembro acá + insertarlo en esa tupla; no requiere migración de base.
+    """
+    NE = "NE"    # Nomenclador Específico (OS + ente de la especialidad)
+    NNE = "NNE"  # Nomenclador Negociado (OS)
+    NN = "NN"    # Nomenclador Nacional (siempre calculado: unidades × VU pactado)
 
 
 def slugify_codigo(nombre: str) -> str:
@@ -329,6 +346,34 @@ def validar_lista_componentes(componentes: List[ValorComponenteIn]) -> None:
         raise ValueError(f"Concepto repetido: {', '.join(sorted(repetidos))} (máximo uno por concepto)")
 
 
+def validar_reglas_origen(
+    origen: str,
+    especialidad_id_colegio: Optional[int],
+    por_presupuesto: bool,
+    es_galeno: Optional[bool],
+) -> None:
+    """
+    Reglas transversales por origen (válidas tanto en Pydantic como server-side):
+    - especialidad_id_colegio solo lo admite NE (NNE/NN van sin perfil).
+    - NN es siempre calculado: exige modalidad galeno y no puede ser por_presupuesto.
+
+    `es_galeno`: True si la modalidad es calculable (galeno), False si fija, None si
+    no aplica/desconocida (p.ej. por_presupuesto, donde no hay ecuación que evaluar).
+    """
+    if especialidad_id_colegio is not None and origen != Origen.NE.value:
+        raise ValueError(
+            "especialidad_id_colegio solo es válido para origen NE; "
+            "NNE y NN deben ir sin especialidad"
+        )
+    if origen == Origen.NN.value:
+        if por_presupuesto:
+            raise ValueError("El origen NN es siempre calculado: no admite 'por_presupuesto'")
+        if es_galeno is False:
+            raise ValueError(
+                "El origen NN exige modalidad galeno (todos los componentes calculables)"
+            )
+
+
 class ValorComponenteOut(BaseModel):
     id: int
     valor_id: int
@@ -347,10 +392,13 @@ class ValorComponenteOut(BaseModel):
 class ValorCreate(BaseModel):
     obra_social_nro: int
     nomenclador_id: int
+    # Categoría/procedencia: fija la prioridad del lookup (NE > NNE > NN)
+    origen: Origen
     descripcion: Optional[str] = None
     nivel: Optional[int] = None
     complejidad: Optional[Literal["baja", "media", "alta"]] = None
-    # Identidad de la variante: NULL = base, N = exige esa especialidad
+    # Perfil que cobra esta variante: NULL = sin especialidad; N = exige esa especialidad.
+    # Solo lo admite NE (NNE/NN van NULL).
     especialidad_id_colegio: Optional[int] = None
     # True → código por presupuesto: se ignora la ecuación, los componentes H/G/A
     # se guardan en 0 y el monto lo informa la OS al facturar (modo manual)
@@ -361,8 +409,13 @@ class ValorCreate(BaseModel):
 
     @model_validator(mode="after")
     def check_componentes(self) -> "ValorCreate":
+        es_galeno = None
         if not self.por_presupuesto:
             validar_lista_componentes(self.componentes)
+            es_galeno = any(c.galeno_id is not None for c in self.componentes)
+        validar_reglas_origen(
+            self.origen.value, self.especialidad_id_colegio, self.por_presupuesto, es_galeno
+        )
         return self
 
 
@@ -395,6 +448,7 @@ class ValorOut(BaseModel):
     id: int
     obra_social_nro: int
     nomenclador_id: int
+    origen: str
     codigo: str
     descripcion: Optional[str]
     nivel: Optional[int]
@@ -417,6 +471,7 @@ class ValorOut(BaseModel):
 
 class ActualizarPorcentajeIn(BaseModel):
     obra_social_nro: int
+    origen: Origen                               # scope: solo valores de este origen
     porcentaje: Decimal  # ej. 15.5 → +15,5%
     vigencia_desde: datetime.date
     filtro_codigos: Optional[List[str]] = None   # None = todos
@@ -431,6 +486,7 @@ class ActualizarPorCodigosItem(BaseModel):
 
 class ActualizarPorCodigosIn(BaseModel):
     obra_social_nro: int
+    origen: Origen                               # scope: variante (origen, sin especialidad)
     vigencia_desde: datetime.date
     items: List[ActualizarPorCodigosItem]
 
@@ -470,6 +526,36 @@ class ReplicarEstructuraIn(BaseModel):
     destinos: List[ReplicarDestinoItem]
     vigencia_desde: datetime.date
     usar_unidades_nomenclador: bool = True
+
+
+class ReplicarObrasSocialesIn(BaseModel):
+    """
+    Replica la configuración de un Valor (mismo código CMC, mismo origen, misma
+    especialidad, mismo nivel y misma ecuación/unidades) hacia varias obras sociales.
+
+    El precio NO se copia tal cual entre OS:
+    - Modalidad galeno: se referencia el galeno propio de cada OS (codigo+nivel); el
+      VU pactado de esa OS es "lo único que cambia". Si la OS destino no tiene el galeno
+      vigente, ese destino queda en `errores`.
+    - Modalidad fija: con `incluir_precio_fijo=True` se copia el `valor_unitario`; con
+      False el destino queda en `errores` (un valor fijo sin precio no es válido).
+
+    `modo`:
+      - "subset" → `obras_sociales` son los destinos.
+      - "todas"  → todas las OS habilitadas (MARCA="S") MENOS `obras_sociales` (exclusiones).
+    """
+    origen_valor_id: int
+    modo: Literal["subset", "todas"] = "subset"
+    obras_sociales: List[int] = []   # subset: destinos · todas: exclusiones
+    vigencia_desde: datetime.date
+    usar_unidades_nomenclador: bool = False
+    incluir_precio_fijo: bool = True
+
+    @model_validator(mode="after")
+    def check_modo(self) -> "ReplicarObrasSocialesIn":
+        if self.modo == "subset" and not self.obras_sociales:
+            raise ValueError("modo 'subset' requiere al menos una obra social destino")
+        return self
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -512,7 +598,9 @@ class LookupPrecioOut(BaseModel):
     descripcion: Optional[str]
     obra_social_nro: int
     nivel: Optional[int]
-    # Variante elegida: NULL = variante base, N = variante por especialidad N
+    # Origen de la variante elegida (NE|NNE|NN) — la de mayor prioridad aplicable
+    origen: str
+    # Variante elegida: NULL = sin especialidad, N = variante por especialidad N
     variante_especialidad_id: Optional[int] = None
     # True → código por presupuesto: precio 0, el monto lo carga el operador a mano
     por_presupuesto: bool = False
@@ -530,6 +618,7 @@ class HistorialPrecioOut(BaseModel):
     id: int
     nomenclador_id: int
     obra_social_nro: int
+    origen: str
     especialidad_id_colegio: Optional[int] = None
     vigencia_desde: datetime.date
     vigencia_hasta: Optional[datetime.date]
@@ -580,6 +669,7 @@ class BoletinComponenteOut(BaseModel):
 
 class BoletinItemOut(BaseModel):
     codigo: str
+    origen: str
     descripcion: Optional[str]
     nivel: Optional[int]
     por_presupuesto: bool = False
@@ -598,6 +688,7 @@ class BoletinOut(BaseModel):
 class TablaValoresItem(BaseModel):
     nomenclador_id: int
     codigo: str
+    origen: str
     descripcion: Optional[str]
     nivel: Optional[int]
     por_presupuesto: bool = False

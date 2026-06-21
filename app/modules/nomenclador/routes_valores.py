@@ -9,6 +9,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.database import get_db
+from app.db.models.catalogs import ObrasSociales
 from app.db.models.nomenclador_cmc import (
     Galeno,
     HistorialPrecioCodigo,
@@ -26,13 +27,16 @@ from app.modules.nomenclador.schemas import (
     ImportarCSVResult,
     LookupPrecioIn,
     LookupPrecioOut,
+    Origen,
     ReplicarEstructuraIn,
+    ReplicarObrasSocialesIn,
     RevertirActualizacionIn,
     ValorCerrarYCrearIn,
     ValorComponenteOut,
     ValorCreate,
     ValorOut,
     ValorUpdate,
+    validar_reglas_origen,
 )
 from app.modules.nomenclador.service import LookupError, NivelInconsistenteError
 
@@ -69,23 +73,25 @@ def _componentes_presupuesto_cero() -> list[dict]:
 
 # ─── helpers ─────────────────────────────────────────────────────────────────
 
-def _cond_variante_valor(especialidad_id: Optional[int]):
+def _cond_variante_valor(origen: str, especialidad_id: Optional[int]):
+    cond = Valor.origen == origen
     if especialidad_id is None:
-        return Valor.especialidad_id_colegio.is_(None)
-    return Valor.especialidad_id_colegio == especialidad_id
+        return cond & Valor.especialidad_id_colegio.is_(None)
+    return cond & (Valor.especialidad_id_colegio == especialidad_id)
 
 
 async def _buscar_valor_activo(
     db: AsyncSession,
     obra_social_nro: int,
     nomenclador_id: int,
+    origen: str,
     especialidad_id: Optional[int],
 ) -> Optional[Valor]:
-    """Valor activo de una variante específica (especialidad_id None = base)."""
+    """Valor activo de una variante específica (origen + especialidad; None = sin especialidad)."""
     stmt = select(Valor).where(
         Valor.obra_social_nro == obra_social_nro,
         Valor.nomenclador_id == nomenclador_id,
-        _cond_variante_valor(especialidad_id),
+        _cond_variante_valor(origen, especialidad_id),
         Valor.estado == "activo",
     )
     return (await db.execute(stmt)).scalars().first()
@@ -135,6 +141,7 @@ async def _crear_valor_con_componentes(
     db: AsyncSession,
     obra_social_nro: int,
     nomenclador_id: int,
+    origen: str,
     vigencia_desde: datetime.date,
     componentes_in: list,
     descripcion: Optional[str],
@@ -151,6 +158,7 @@ async def _crear_valor_con_componentes(
     valor = Valor(
         obra_social_nro=obra_social_nro,
         nomenclador_id=nomenclador_id,
+        origen=origen,
         codigo=nom.codigo,
         descripcion=descripcion or nom.descripcion,
         nivel=nivel,
@@ -225,6 +233,7 @@ async def _clonar_valor(
     nuevo = Valor(
         obra_social_nro=origen.obra_social_nro,
         nomenclador_id=origen.nomenclador_id,
+        origen=origen.origen,
         codigo=origen.codigo,
         descripcion=origen.descripcion,
         nivel=nivel if nivel is not None else origen.nivel,
@@ -305,23 +314,25 @@ async def list_valores(
 @router.post("/", response_model=ValorOut, status_code=201)
 async def create_valor(body: ValorCreate, db: AsyncSession = Depends(get_db)):
     existente = await _buscar_valor_activo(
-        db, body.obra_social_nro, body.nomenclador_id, body.especialidad_id_colegio
+        db, body.obra_social_nro, body.nomenclador_id, body.origen.value,
+        body.especialidad_id_colegio,
     )
     if existente:
         variante = (
-            f"variante especialidad {body.especialidad_id_colegio}"
-            if body.especialidad_id_colegio is not None else "variante base"
+            f"especialidad {body.especialidad_id_colegio}"
+            if body.especialidad_id_colegio is not None else "sin especialidad"
         )
         raise HTTPException(
             409,
-            f"Ya existe un valor activo (id {existente.id}) para este código, OS y "
-            f"{variante} — use POST /valores_nm/{existente.id}/actualizar",
+            f"Ya existe un valor activo (id {existente.id}) para este código, OS, "
+            f"origen {body.origen.value} ({variante}) — use POST /valores_nm/{existente.id}/actualizar",
         )
 
     valor = await _crear_valor_con_componentes(
         db=db,
         obra_social_nro=body.obra_social_nro,
         nomenclador_id=body.nomenclador_id,
+        origen=body.origen.value,
         vigencia_desde=body.vigencia_desde,
         componentes_in=body.componentes,
         descripcion=body.descripcion,
@@ -388,6 +399,20 @@ async def actualizar_valor(
     if anterior.estado == "cerrado":
         raise HTTPException(409, "El valor ya está cerrado")
 
+    # El origen se conserva del valor que se cierra; revalidar las reglas del origen
+    # contra la nueva ecuación (NN exige galeno y no admite por_presupuesto).
+    es_galeno = (
+        None if body.por_presupuesto
+        else any(c.galeno_id is not None for c in body.componentes)
+    )
+    try:
+        validar_reglas_origen(
+            anterior.origen, anterior.especialidad_id_colegio,
+            body.por_presupuesto, es_galeno,
+        )
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+
     fecha_corte = body.vigencia_desde - datetime.timedelta(days=1)
     _cerrar_valor(anterior, fecha_corte)
     await db.flush()
@@ -396,6 +421,7 @@ async def actualizar_valor(
         db=db,
         obra_social_nro=anterior.obra_social_nro,
         nomenclador_id=anterior.nomenclador_id,
+        origen=anterior.origen,
         vigencia_desde=body.vigencia_desde,
         componentes_in=body.componentes,
         descripcion=body.descripcion or anterior.descripcion,
@@ -519,7 +545,7 @@ async def replicar_estructura(body: ReplicarEstructuraIn, db: AsyncSession = Dep
             # Cerrar valor activo previo del destino (misma variante que el origen)
             previo = await _buscar_valor_activo(
                 db, origen.obra_social_nro, destino.nomenclador_id,
-                origen.especialidad_id_colegio,
+                origen.origen, origen.especialidad_id_colegio,
             )
             if previo:
                 if previo.id == origen.id:
@@ -532,6 +558,7 @@ async def replicar_estructura(body: ReplicarEstructuraIn, db: AsyncSession = Dep
             nuevo = Valor(
                 obra_social_nro=origen.obra_social_nro,
                 nomenclador_id=destino.nomenclador_id,
+                origen=origen.origen,
                 codigo=nom_dest.codigo,
                 descripcion=nom_dest.descripcion,
                 nivel=nivel_destino,
@@ -558,6 +585,139 @@ async def replicar_estructura(body: ReplicarEstructuraIn, db: AsyncSession = Dep
     return ActualizacionMasivaResult(actualizados=actualizados, errores=errores)
 
 
+# ─── Replicación cross-OS ─────────────────────────────────────────────────────
+
+@router.post("/replicar_a_obras_sociales", response_model=ActualizacionMasivaResult)
+async def replicar_a_obras_sociales(
+    body: ReplicarObrasSocialesIn, db: AsyncSession = Depends(get_db)
+):
+    """
+    Replica la config de un Valor (mismo código CMC, origen, especialidad, nivel y
+    ecuación/unidades) hacia varias obras sociales. El precio NO se copia entre OS:
+    - galeno → cada OS usa su propio galeno vigente (codigo+nivel); si no lo tiene,
+      ese destino queda en `errores`.
+    - fijo   → con incluir_precio_fijo se copia el valor_unitario; si no, va a `errores`.
+    """
+    origen = await db.get(Valor, body.origen_valor_id)
+    if not origen:
+        raise HTTPException(404, "Valor origen no encontrado")
+
+    comps_origen = await _componentes_activos(db, origen.id)
+    if not comps_origen:
+        raise HTTPException(422, "El valor origen no tiene componentes activos")
+
+    nom = await db.get(NomencladorCMC, origen.nomenclador_id)
+
+    # Resolver obras sociales destino (siempre se excluye la OS del origen)
+    if body.modo == "todas":
+        habilitadas = (
+            await db.execute(
+                select(ObrasSociales.NRO_OBRASOCIAL).where(ObrasSociales.MARCA == "S")
+            )
+        ).scalars().all()
+        exclusiones = set(body.obras_sociales) | {origen.obra_social_nro}
+        destinos_os = [os for os in habilitadas if os not in exclusiones]
+    else:
+        destinos_os = [os for os in body.obras_sociales if os != origen.obra_social_nro]
+
+    fecha_corte = body.vigencia_desde - datetime.timedelta(days=1)
+    actualizados = 0
+    errores = []
+
+    for os_dest in destinos_os:
+        try:
+            componentes_destino = []
+            error_os = None
+            for c in comps_origen:
+                galeno_id = None
+                cantidad = c.cantidad
+                valor_unitario = c.valor_unitario
+                if c.galeno_id is not None:
+                    galeno_origen = await db.get(Galeno, c.galeno_id)
+                    if galeno_origen is None:
+                        error_os = f"Componente {c.id} del origen apunta a un galeno inexistente"
+                        break
+                    galeno_dest = await service.buscar_galeno_vigente(
+                        db, os_dest, galeno_origen.codigo, galeno_origen.nivel
+                    )
+                    if not galeno_dest:
+                        error_os = (
+                            f"Galeno '{galeno_origen.codigo}' nivel {galeno_origen.nivel} "
+                            f"no vigente en OS {os_dest}; cargá su precio primero"
+                        )
+                        break
+                    galeno_id = galeno_dest.id
+                    if body.usar_unidades_nomenclador and nom is not None:
+                        attr = _UNIDADES_MAP[c.concepto]
+                        default = getattr(nom, attr, None)
+                        if not default:
+                            error_os = (
+                                f"El código no tiene '{attr}' para re-resolver la "
+                                f"cantidad del componente '{c.concepto}'"
+                            )
+                            break
+                        cantidad = default
+                elif not body.incluir_precio_fijo:
+                    error_os = (
+                        "Modalidad fija sin incluir_precio_fijo: no hay precio para "
+                        "replicar (cargá el valor por OS)"
+                    )
+                    break
+
+                componentes_destino.append({
+                    "concepto": c.concepto,
+                    "galeno_id": galeno_id,
+                    "cantidad": cantidad,
+                    "valor_unitario": valor_unitario,
+                    "opcional": c.opcional,
+                    "orden": c.orden,
+                    "observacion": c.observacion,
+                })
+
+            if error_os is None:
+                error_os = _validar_homogeneidad_datos(componentes_destino)
+            if error_os:
+                errores.append({"obra_social_nro": os_dest, "motivo": error_os})
+                continue
+
+            previo = await _buscar_valor_activo(
+                db, os_dest, origen.nomenclador_id, origen.origen,
+                origen.especialidad_id_colegio,
+            )
+            if previo:
+                _cerrar_valor(previo, fecha_corte)
+                await db.flush()
+
+            nuevo = Valor(
+                obra_social_nro=os_dest,
+                nomenclador_id=origen.nomenclador_id,
+                origen=origen.origen,
+                codigo=origen.codigo,
+                descripcion=origen.descripcion,
+                nivel=origen.nivel,
+                complejidad=None,
+                especialidad_id_colegio=origen.especialidad_id_colegio,
+                vigencia_desde=body.vigencia_desde,
+                vigencia_hasta=None,
+                estado="activo",
+            )
+            db.add(nuevo)
+            await db.flush()
+            for datos in componentes_destino:
+                db.add(ValorComponente(valor_id=nuevo.id, **datos))
+            await db.flush()
+
+            await service.regenerar_historial_por_valores(
+                nuevo.id, fecha_corte if previo else None, db, motivo="replicacion"
+            )
+            actualizados += 1
+        except Exception as e:
+            errores.append({"obra_social_nro": os_dest, "motivo": str(e)})
+
+    await db.commit()
+    return ActualizacionMasivaResult(actualizados=actualizados, errores=errores)
+
+
 # ─── Actualizaciones masivas ──────────────────────────────────────────────────
 
 @router.post("/actualizar_porcentaje", response_model=ActualizacionMasivaResult)
@@ -569,6 +729,7 @@ async def actualizar_porcentaje(body: ActualizarPorcentajeIn, db: AsyncSession =
     """
     stmt = select(Valor).where(
         Valor.obra_social_nro == body.obra_social_nro,
+        Valor.origen == body.origen.value,
         Valor.estado == "activo",
     )
     if body.filtro_codigos:
@@ -638,11 +799,11 @@ async def actualizar_por_codigos(body: ActualizarPorCodigosIn, db: AsyncSession 
     for item in body.items:
         try:
             anterior = await _buscar_valor_activo(
-                db, body.obra_social_nro, item.nomenclador_id, None
+                db, body.obra_social_nro, item.nomenclador_id, body.origen.value, None
             )
             if not anterior:
                 errores.append({"nomenclador_id": item.nomenclador_id,
-                                "motivo": "Sin valor activo (variante base)"})
+                                "motivo": f"Sin valor activo (origen {body.origen.value}, sin especialidad)"})
                 continue
 
             comps = await _componentes_activos(db, anterior.id)
@@ -709,7 +870,7 @@ async def revertir_ultima_actualizacion(body: RevertirActualizacionIn, db: Async
                 .where(
                     Valor.obra_social_nro == body.obra_social_nro,
                     Valor.nomenclador_id == v.nomenclador_id,
-                    _cond_variante_valor(v.especialidad_id_colegio),
+                    _cond_variante_valor(v.origen, v.especialidad_id_colegio),
                     Valor.estado == "cerrado",
                     Valor.id != v.id,
                     Valor.vigencia_desde < body.vigencia_revertir,
@@ -847,34 +1008,42 @@ async def importar_valores_csv(
 ):
     """
     CSV esperado (una fila por componente):
-    codigo_colegio,descripcion,valor_unitario,nivel,especialidad,concepto,galeno_codigo,cantidad,presupuesto
+    codigo_colegio,origen,descripcion,valor_unitario,nivel,especialidad,concepto,galeno_codigo,cantidad,presupuesto
 
-    - `especialidad` (opcional): variante del valor; vacío = variante base.
+    - `origen` (obligatorio): NE | NNE | NN. Fija la prioridad de la variante.
+    - `especialidad` (opcional): solo válida para origen NE; vacío = sin especialidad.
     - `presupuesto` (opcional, truthy: 1/true/si/x): el grupo es "por presupuesto";
       se ignora la ecuación de las filas y se guardan los 3 conceptos (H/G/A) en 0.
-    - Cada (codigo_colegio, especialidad) agrupa sus filas en un solo Valor.
+      No válido para origen NN (siempre calculado).
+    - Cada (codigo_colegio, origen, especialidad) agrupa sus filas en un solo Valor.
     - Modalidad homogénea por grupo: todas las filas con galeno_codigo o ninguna.
     - Si galeno_codigo tiene valor → el galeno se resuelve por (OS, galeno_codigo,
       nivel del valor) con fallback al galeno sin nivel.
     - Si cantidad=0 con galeno → unidades por defecto del código.
+    - `opcional` (opcional, truthy 1/true/si/x): marca el componente como opcional
+      (típico Ayudante); no suma al precio_base, el operador lo activa al facturar.
     - Si algún componente del grupo falla, NO se crea el Valor (todo o nada).
     """
     contenido = await file.read()
     texto = contenido.decode("utf-8-sig")
     reader = csv.DictReader(io.StringIO(texto))
 
-    # Agrupar filas por (codigo_colegio, especialidad)
+    origenes_validos = {o.value for o in Origen}
+
+    # Agrupar filas por (codigo_colegio, origen, especialidad)
     grupos: dict = {}
     for i, row in enumerate(reader, start=2):
         codigo = row.get("codigo_colegio", "").strip()
         if not codigo:
             continue
+        origen = row.get("origen", "").strip().upper()
         esp_str = row.get("especialidad", "").strip()
         especialidad = int(esp_str) if esp_str else None
         presupuesto = row.get("presupuesto", "").strip().lower() in {"1", "true", "si", "sí", "x"}
-        clave = (codigo, especialidad)
+        clave = (codigo, origen, especialidad)
         if clave not in grupos:
             grupos[clave] = {
+                "origen": origen,
                 "descripcion": row.get("descripcion", "").strip() or None,
                 "nivel": int(row["nivel"]) if row.get("nivel", "").strip() else None,
                 "especialidad": especialidad,
@@ -889,8 +1058,13 @@ async def importar_valores_csv(
     procesados = 0
     errores = []
 
-    for (codigo, especialidad), data in grupos.items():
+    for (codigo, origen, especialidad), data in grupos.items():
         try:
+            if origen not in origenes_validos:
+                errores.append({"fila": data["fila_inicio"],
+                                "motivo": f"origen inválido '{origen}' (esperado: {', '.join(sorted(origenes_validos))})"})
+                continue
+
             stmt_nom = select(NomencladorCMC).where(
                 NomencladorCMC.codigo == codigo, NomencladorCMC.activo == True
             )
@@ -912,6 +1086,9 @@ async def importar_valores_csv(
                 galeno_codigo = row.get("galeno_codigo", "").strip()
                 cantidad_str = row.get("cantidad", "0").strip()
                 valor_unitario_str = row.get("valor_unitario", "").strip()
+                # Columna opcional (default False): permite marcar un componente como
+                # opcional (típico Ayudante). Backward-compatible: CSV sin la columna → False.
+                opcional = row.get("opcional", "").strip().lower() in {"1", "true", "si", "sí", "x"}
 
                 cantidad = Decimal(cantidad_str) if cantidad_str else Decimal("0")
                 valor_unitario = Decimal(valor_unitario_str) if valor_unitario_str else None
@@ -954,7 +1131,7 @@ async def importar_valores_csv(
                     "galeno_id": galeno_id,
                     "cantidad": cantidad,
                     "valor_unitario": valor_unitario,
-                    "opcional": False,
+                    "opcional": opcional,
                     "orden": idx,
                 })
 
@@ -964,12 +1141,23 @@ async def importar_valores_csv(
                 motivo_invalido = _validar_homogeneidad_datos(componentes_resueltos)
                 if motivo_invalido:
                     error_grupo = {"fila": data["fila_inicio"], "motivo": motivo_invalido}
+
+            # Reglas del origen (especialidad solo NE; NN exige galeno y no presupuesto)
+            if error_grupo is None:
+                es_galeno = (
+                    None if por_presupuesto
+                    else any(c.get("galeno_id") is not None for c in componentes_resueltos)
+                )
+                try:
+                    validar_reglas_origen(origen, especialidad, por_presupuesto, es_galeno)
+                except ValueError as e:
+                    error_grupo = {"fila": data["fila_inicio"], "motivo": str(e)}
             if error_grupo:
                 errores.append(error_grupo)
                 continue
 
             # Cerrar valor activo previo de la misma variante si existe
-            prev = await _buscar_valor_activo(db, obra_social_nro, nom.id, especialidad)
+            prev = await _buscar_valor_activo(db, obra_social_nro, nom.id, origen, especialidad)
             fecha_corte = vigencia_desde - datetime.timedelta(days=1)
             if prev:
                 _cerrar_valor(prev, fecha_corte)
@@ -978,6 +1166,7 @@ async def importar_valores_csv(
             nuevo = Valor(
                 obra_social_nro=obra_social_nro,
                 nomenclador_id=nom.id,
+                origen=origen,
                 codigo=nom.codigo,
                 descripcion=data["descripcion"] or nom.descripcion,
                 nivel=nivel_valor,

@@ -31,7 +31,6 @@ def _componentes_from_snapshot(snapshot: list) -> list:
             valor_unitario=Decimal(item["valor_unitario"]) if item.get("valor_unitario") else None,
             cantidad=Decimal(item["cantidad"]) if item.get("cantidad") else None,
             subtotal=Decimal(item["subtotal"]),
-            opcional=item.get("opcional", False),
         ))
     return out
 

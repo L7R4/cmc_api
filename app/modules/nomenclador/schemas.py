@@ -313,7 +313,6 @@ class ValorComponenteIn(BaseModel):
     galeno_id: Optional[int] = None
     cantidad: Decimal = Decimal("0")
     valor_unitario: Optional[Decimal] = None
-    opcional: bool = False
     orden: int = 0
     observacion: Optional[str] = None
 
@@ -381,7 +380,6 @@ class ValorComponenteOut(BaseModel):
     galeno_id: Optional[int]
     cantidad: Decimal
     valor_unitario: Optional[Decimal]
-    opcional: bool
     orden: int
     activo: bool
     observacion: Optional[str]
@@ -569,7 +567,6 @@ class LookupPrecioIn(BaseModel):
     obra_social_nro: int
     fecha_practica: datetime.date
     medico_id: int
-    opcionales_activos: List[int] = []        # IDs de ValorComponente opcionales a incluir
 
     @model_validator(mode="after")
     def check_codigo(self) -> "LookupPrecioIn":
@@ -588,8 +585,6 @@ class ComponenteLookupOut(BaseModel):
     cantidad: Decimal
     valor_unitario: Decimal
     subtotal: Decimal
-    opcional: bool
-    incluido: bool
 
 
 class LookupPrecioOut(BaseModel):
@@ -605,8 +600,8 @@ class LookupPrecioOut(BaseModel):
     # True → código por presupuesto: precio 0, el monto lo carga el operador a mano
     por_presupuesto: bool = False
     fecha_practica: datetime.date
-    precio_base: Decimal            # solo componentes obligatorios
-    precio_total: Decimal           # base + opcionales activados
+    precio_base: Decimal            # = precio_total (ya no hay opcionales)
+    precio_total: Decimal           # suma de los 3 componentes
     componentes: List[ComponenteLookupOut]
 
 
@@ -664,7 +659,6 @@ class BoletinComponenteOut(BaseModel):
     valor_unitario: Optional[Decimal]
     cantidad: Optional[Decimal]
     subtotal: Decimal
-    opcional: bool
 
 
 class BoletinItemOut(BaseModel):

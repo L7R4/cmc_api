@@ -65,10 +65,6 @@ class PrestacionItem(BaseModel):
     tpo_funcion: TpoFuncion = "H"
     porcentaje: int = Field(100, ge=1, le=100)
 
-    # Componentes opcionales del lookup a incluir (IDs de ValorComponente).
-    # Solo aplica con tipo_calculo="A". Vacío en v1.
-    opcionales_activos: list[int] = []
-
 
 class PrestacionesCreate(BaseModel):
     """Payload del POST /facturacion/prestaciones.
@@ -100,7 +96,6 @@ class PrestacionUpdate(BaseModel):
     ayudante: Optional[Decimal] = None
     tpo_funcion: Optional[TpoFuncion] = None
     porcentaje: Optional[int] = Field(None, ge=1, le=100)
-    opcionales_activos: Optional[list[int]] = None
 
 
 class MoverPeriodoPayload(BaseModel):
@@ -168,3 +163,25 @@ class GuardadoResponse(BaseModel):
 class MoverPeriodoResponse(BaseModel):
     ids_movidos: list[int]
     periodo_destino: str
+
+
+# ── Cierre de período ─────────────────────────────────────────────────────────
+class CierrePayload(BaseModel):
+    cod_obra: str
+    periodo: str   # "YYYYMM"
+
+
+class CierrePreviewResponse(BaseModel):
+    cod_obra: str
+    periodo: str
+    cantidad: int
+    importe_total: Decimal
+    cerrado: bool   # True si ya existe factura cerrada para esa OS+período
+
+
+class CierreResponse(BaseModel):
+    id_factura: int
+    cod_obra: str
+    periodo: str
+    cantidad: int
+    importe_total: Decimal

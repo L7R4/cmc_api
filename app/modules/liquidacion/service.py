@@ -68,7 +68,9 @@ async def build_detalles_from_cmc(db: AsyncSession, liquidacion_id: int) -> None
         select(DetalleFacturacionCMC).where(
             DetalleFacturacionCMC.cod_obr == cod_obr,
             DetalleFacturacionCMC.periodo == periodo,
-            DetalleFacturacionCMC.estado == "L",
+            # Prestaciones del Colegio cerradas (A→C). Los 'L' históricos de CMC
+            # quedan como histórico ya liquidado (decisión del negocio).
+            DetalleFacturacionCMC.estado == "C",
         )
     )).scalars().all()
 

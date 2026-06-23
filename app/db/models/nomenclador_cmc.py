@@ -317,8 +317,6 @@ class ValorComponente(Base):
     )
     # Solo se usa cuando galeno_id IS NULL (precio fijo embebido)
     valor_unitario: Mapped[Optional[Decimal]] = mapped_column(DECIMAL(14, 2), nullable=True)
-    # Si True, no se incluye en el precio base; el operador lo activa al facturar
-    opcional: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
     orden: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     activo: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="1")
     observacion: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -342,7 +340,7 @@ class HistorialPrecioCodigo(Base):
     """
     Tabla operativa materializada. Se consulta con lookup O(1) al cargar prestaciones.
     Se escribe SOLO por el motor de service.py; nunca manualmente.
-    precio_total = suma de componentes obligatorios (sin opcionales).
+    precio_total = suma de los 3 componentes del Valor (no hay opcionales).
     """
     __tablename__ = "nm_historial_precio_codigo"
 
@@ -364,7 +362,7 @@ class HistorialPrecioCodigo(Base):
     vigencia_hasta: Mapped[Optional[datetime.date]] = mapped_column(Date, nullable=True)
     precio_total: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), nullable=False)
     valores_id: Mapped[int] = mapped_column(ForeignKey("nm_valores.id"), nullable=False)
-    # JSON con desglose: [{concepto, tipo, galeno_codigo, cantidad, valor_unitario, subtotal, opcional}]
+    # JSON con desglose: [{concepto, tipo, galeno_codigo, cantidad, valor_unitario, subtotal}]
     componentes_snapshot: Mapped[dict] = mapped_column(JSON, nullable=False)
     motivo_cambio: Mapped[str] = mapped_column(
         Enum(

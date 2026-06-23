@@ -130,7 +130,6 @@ async def resolver_precio(
     medico: ListadoMedico,
     codigo: str,
     fecha: datetime.date,
-    opcionales_activos: Optional[list[int]] = None,
 ) -> PrecioResponse:
     """Delega precio Y habilitación en el lookup del módulo nomenclador.
 
@@ -142,8 +141,7 @@ async def resolver_precio(
 
     try:
         out = await service_nm.lookup_precio(
-            nomenclador.id, obra_social_nro, fecha, medico.ID,
-            opcionales_activos or [], db,
+            nomenclador.id, obra_social_nro, fecha, medico.ID, db,
         )
     except PrecioLookupError as e:
         return PrecioResponse(
@@ -154,7 +152,7 @@ async def resolver_precio(
 
     def _suma(concepto: str) -> Decimal:
         return sum(
-            (c.subtotal for c in out.componentes if c.incluido and c.concepto == concepto),
+            (c.subtotal for c in out.componentes if c.concepto == concepto),
             Decimal("0"),
         )
 
@@ -188,6 +186,27 @@ def check_coherencia_servicio_orden(
     return None
 
 
+def check_coherencia_codigo_categoria(
+    tipo_orden: str, categoria: Optional[str]
+) -> Optional[str]:
+    """Coherencia código↔orden basada en `nm_nomenclador.categoria` (reemplaza la
+    validación legacy por rangos). El caso claro y valioso: orden de consulta ⟺
+    código de categoría 'Consulta'. Las demás categorías (Practica / Honorarios
+    individuales) son demasiado gruesas para validar radiología por separado."""
+    if categoria is None:
+        return None  # código sin categoría → no se valida
+    if tipo_orden == "C" and categoria != "Consulta":
+        return f"Orden de consulta (C) requiere un código de categoría Consulta (es '{categoria}')"
+    if categoria == "Consulta" and tipo_orden != "C":
+        return "Un código de consulta requiere orden tipo Consulta (C)"
+    return None
+
+
+async def _get_categoria(db: AsyncSession, codigo: str) -> Optional[str]:
+    stmt = select(NomencladorCMC.categoria).where(NomencladorCMC.codigo == codigo)
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
 async def check_duplicado(
     db: AsyncSession,
     periodo: str,
@@ -208,7 +227,7 @@ async def check_duplicado(
         DetalleFacturacionCMC.cod_obr == cod_obr,
         DetalleFacturacionCMC.cod_nom == cod_nom,
         DetalleFacturacionCMC.tpo_funcion == tpo_funcion,
-        DetalleFacturacionCMC.estado == "P",
+        DetalleFacturacionCMC.estado == "A",
     )
     if dni_p is not None:
         stmt = stmt.where(DetalleFacturacionCMC.dni_p == dni_p)
@@ -260,11 +279,10 @@ def calcular_importe_total(
     return (h + g + a) * Decimal(cantidad) * Decimal(sesion)
 
 
-async def _base_nro_orden(db: AsyncSession, cod_obra: str, periodo: str) -> int:
-    stmt = select(func.max(cast(DetalleFacturacionCMC.nro_orden, Integer))).where(
-        DetalleFacturacionCMC.cod_obr == cod_obra,
-        DetalleFacturacionCMC.periodo == periodo,
-    )
+async def _base_nro_orden(db: AsyncSession) -> int:
+    """MAX(nro_orden) GLOBAL — el nro_orden es único en toda detalle_facturacion,
+    sin importar obra social ni período (evita colisiones al mover de período)."""
+    stmt = select(func.max(cast(DetalleFacturacionCMC.nro_orden, Integer)))
     return (await db.execute(stmt)).scalar() or 0
 
 
@@ -281,7 +299,6 @@ async def _montos_de_item(
     if tipo_calculo == "A":
         precio = await resolver_precio(
             db, cod_obra, medico, cod_nomenclador, fecha,
-            getattr(item, "opcionales_activos", None),
         )
         if not precio.admitido:
             raise HTTPException(422, precio.motivo)
@@ -325,7 +342,7 @@ async def guardar_prestaciones(
         if len(set(cods)) != len(cods):
             raise HTTPException(422, "No se permite repetir cod_medico en el equipo")
 
-    base = await _base_nro_orden(db, payload.obra_social, periodo)
+    base = await _base_nro_orden(db)
 
     ids: list[int] = []
     total_acum = Decimal("0")
@@ -341,6 +358,12 @@ async def guardar_prestaciones(
         )
         if err:
             raise HTTPException(422, err)
+
+        err_cat = check_coherencia_codigo_categoria(
+            item.tipo_orden, await _get_categoria(db, item.cod_nomenclador)
+        )
+        if err_cat:
+            raise HTTPException(422, err_cat)
 
         if item.cod_nomenclador in CODIGOS_NO_PERMITIDOS:
             raise HTTPException(422, "Código no permitido")
@@ -390,7 +413,7 @@ async def guardar_prestaciones(
             tipo_orden=tipo_orden_norm,
             porc=item.porcentaje,
             urgencia=normalizar_urgencia(item.via_quirurgica, item.sub_tipo_nomenclador),
-            estado="P",
+            estado="A",
             usuario=usuario,
         )
         db.add(row)
@@ -476,7 +499,7 @@ async def prestaciones_recientes(
 ) -> list[DetalleFacturacionCMC]:
     periodo = await get_periodo_activo(db, cod_obra)
     M = DetalleFacturacionCMC
-    filtros = [M.cod_obr == cod_obra, M.periodo == periodo, M.estado == "P"]
+    filtros = [M.cod_obr == cod_obra, M.periodo == periodo, M.estado == "A"]
     if usuario is not None:
         filtros.append(M.usuario == usuario)
     stmt = (
@@ -493,8 +516,8 @@ async def editar_prestacion(
     row = await db.get(DetalleFacturacionCMC, prestacion_id)
     if row is None:
         raise HTTPException(404, "Prestación no encontrada")
-    if row.estado != "P":
-        raise HTTPException(409, "Prestación liquidada, no se puede editar")
+    if row.estado != "A":
+        raise HTTPException(409, "Prestación cerrada/liquidada, no se puede editar")
 
     data = payload.model_dump(exclude_unset=True)
 
@@ -534,21 +557,39 @@ async def editar_prestacion(
     medico = await check_medico_activo(db, row.cod_med)
     tipo_calculo = row.manual or "A"
     fecha = row.fecha_practica or datetime.date.today()
-    h_base, g_base, a_base, snapshot = await _montos_de_item(
-        db, payload, row.cod_obr, medico, row.cod_nom, tipo_calculo, fecha,
-    )
-    if tipo_calculo == "M":
-        h_base = row.honorarios or Decimal("0")
-        g_base = row.gastos or Decimal("0")
-        a_base = row.ayudante or Decimal("0")
 
-    h, g, a = aplicar_opcion_pago(
-        h_base, g_base, a_base, row.tpo_funcion or "H", row.porc or 100
-    )
-    row.honorarios, row.gastos, row.ayudante = h, g, a
-    row.calculo_snapshot = snapshot
+    # Inputs de precio que disparan re-aplicar la opción de pago. Clave para no
+    # re-factorizar (doble descuento) cuando solo se edita cantidad/sesión/fecha:
+    # los montos guardados ya están factorizados.
+    pricing_keys = {"honorarios", "gastos", "ayudante", "tpo_funcion", "porcentaje",
+                    "cod_nomenclador", "tipo_calculo"}
+    recotizar = bool(pricing_keys & data.keys())
+
+    if tipo_calculo == "A":
+        if recotizar:
+            # Automático: la base sale del lookup (sin factor) y se factoriza una vez.
+            h_base, g_base, a_base, snapshot = await _montos_de_item(
+                db, payload, row.cod_obr, medico, row.cod_nom, tipo_calculo, fecha,
+            )
+            h, g, a = aplicar_opcion_pago(
+                h_base, g_base, a_base, row.tpo_funcion or "H", row.porc or 100
+            )
+            row.honorarios, row.gastos, row.ayudante = h, g, a
+            row.calculo_snapshot = snapshot
+    else:  # manual
+        if recotizar:
+            # El PATCH trae montos base nuevos (o cambió tpo_funcion/porcentaje):
+            # los campos enviados ya quedaron en row por el mapeo simples; se factoriza una vez.
+            h, g, a = aplicar_opcion_pago(
+                row.honorarios or Decimal("0"), row.gastos or Decimal("0"),
+                row.ayudante or Decimal("0"), row.tpo_funcion or "H", row.porc or 100,
+            )
+            row.honorarios, row.gastos, row.ayudante = h, g, a
+
+    # importe_total siempre se recalcula con los montos (ya factorizados) y cantidad/sesión.
     row.importe_total = calcular_importe_total(
-        h, g, a, row.cantidad or 1, row.sesion or 1
+        row.honorarios or Decimal("0"), row.gastos or Decimal("0"),
+        row.ayudante or Decimal("0"), row.cantidad or 1, row.sesion or 1,
     )
     if row.importe_total <= 0:
         raise HTTPException(422, "El importe total debe ser mayor a 0")
@@ -563,8 +604,8 @@ async def anular_prestacion(db: AsyncSession, prestacion_id: int, usuario: str) 
     row = await db.get(DetalleFacturacionCMC, prestacion_id)
     if row is None:
         raise HTTPException(404, "Prestación no encontrada")
-    if row.estado != "P":
-        raise HTTPException(409, "Prestación liquidada, no se puede anular")
+    if row.estado != "A":
+        raise HTTPException(409, "Prestación cerrada/liquidada, no se puede anular")
     if row.usuario != usuario:
         raise HTTPException(403, "Solo el usuario que cargó la prestación puede anularla")
     row.estado = "X"
@@ -595,7 +636,7 @@ async def mover_prestaciones_periodo(
         M.cod_obr == payload.cod_obra,
         M.periodo == payload.periodo_origen,
         M.nro_orden.in_(payload.nro_ordenes),
-        M.estado == "P",
+        M.estado == "A",
     )
     rows = list((await db.execute(stmt)).scalars().all())
 
@@ -604,7 +645,7 @@ async def mover_prestaciones_periodo(
     if faltantes:
         raise HTTPException(
             422,
-            {"mensaje": "Algunos nro_orden no existen o no están en estado 'P'",
+            {"mensaje": "Algunos nro_orden no existen o no están en estado 'A' (abierto)",
              "faltantes": faltantes},
         )
 
@@ -616,3 +657,75 @@ async def mover_prestaciones_periodo(
         ids_movidos=[r.id_detalle_prestaciones for r in rows],
         periodo_destino=periodo_destino,
     )
+
+
+# ── Cierre de período (A → C) ────────────────────────────────────────────────
+async def preview_cierre(db: AsyncSession, cod_obra: str, periodo: str) -> dict:
+    """Totales de las prestaciones abiertas ('A') de la OS+período, sin cerrar."""
+    M = DetalleFacturacionCMC
+    cantidad, total = (await db.execute(
+        select(func.count(), func.coalesce(func.sum(M.importe_total), 0)).where(
+            M.cod_obr == cod_obra, M.periodo == periodo, M.estado == "A"
+        )
+    )).one()
+    return {
+        "cod_obra": cod_obra,
+        "periodo": periodo,
+        "cantidad": int(cantidad or 0),
+        "importe_total": Decimal(str(total or 0)),  # str() evita ruido float→Decimal
+        "cerrado": await _periodo_cerrado(db, cod_obra, periodo),
+    }
+
+
+async def cerrar_periodo(
+    db: AsyncSession, cod_obra: str, periodo: str, usuario: str
+) -> dict:
+    """Cierra un período: crea la cabecera en `facturacion` (estado 'C') y pasa las
+    prestaciones de la OS+período de 'A' → 'C'. A partir de acá liquidación las toma
+    (`build_detalles_from_cmc` lee estado 'C') y dejan de ser editables."""
+    if await _periodo_cerrado(db, cod_obra, periodo):
+        raise HTTPException(409, "El período ya tiene factura cerrada para esta obra social")
+
+    M = DetalleFacturacionCMC
+    rows = list((await db.execute(
+        select(M).where(M.cod_obr == cod_obra, M.periodo == periodo, M.estado == "A")
+    )).scalars().all())
+    if not rows:
+        raise HTTPException(422, "No hay prestaciones abiertas para cerrar en esta OS+período")
+
+    # importe_total puede volver como float en filas legacy → coercionar a Decimal
+    total = sum((Decimal(str(r.importe_total or 0)) for r in rows), Decimal("0"))
+    hoy = datetime.date.today()
+    # `facturacion` (co-propiedad CMC) tiene varias columnas NOT NULL sin default:
+    # se completan con valores neutros (la cabecera del Colegio no usa numeración AFIP).
+    cabecera = FacturacionCMC(
+        id_cliente=0,
+        tipo_factura="", nro_factura="",
+        tipo_factura_2="", nro_factura_2="",
+        tipo_factura_3="", nro_factura_3="",
+        cod_obr=cod_obra,
+        periodo=periodo,
+        fecha=hoy,
+        fecha_envio=hoy,
+        fecha_recep=hoy,
+        importe=total,
+        afip="N",
+        estado="C",
+        usuario=usuario,
+    )
+    db.add(cabecera)
+    for r in rows:
+        r.estado = "C"
+    try:
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
+    await db.refresh(cabecera)
+    return {
+        "id_factura": cabecera.id_prestaciones,
+        "cod_obra": cod_obra,
+        "periodo": periodo,
+        "cantidad": len(rows),
+        "importe_total": total,
+    }

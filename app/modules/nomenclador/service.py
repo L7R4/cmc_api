@@ -57,9 +57,9 @@ async def calcular_precio_total(
     valor_id: int, db: AsyncSession
 ) -> tuple[Decimal, list]:
     """
-    Suma los componentes obligatorios de un Valor y devuelve
-    (precio_total, componentes_snapshot).
-    El snapshot incluye todos los componentes (obligatorios y opcionales).
+    Suma los 3 componentes de un Valor (Honorarios/Gastos/Ayudante) y devuelve
+    (precio_total, componentes_snapshot). No existen componentes opcionales: todos
+    suman al precio_total.
     """
     stmt = (
         select(ValorComponente)
@@ -88,7 +88,6 @@ async def calcular_precio_total(
                 "cantidad": str(comp.cantidad),
                 "valor_unitario": str(precio_unidad),
                 "subtotal": str(subtotal),
-                "opcional": comp.opcional,
             })
         else:
             # fijo
@@ -103,11 +102,9 @@ async def calcular_precio_total(
                 "cantidad": str(comp.cantidad),
                 "valor_unitario": str(subtotal),
                 "subtotal": str(subtotal),
-                "opcional": comp.opcional,
             })
 
-        if not comp.opcional:
-            precio_total += subtotal
+        precio_total += subtotal
 
     return precio_total, snapshot
 
@@ -436,7 +433,6 @@ async def lookup_precio(
     obra_social_nro: int,
     fecha: datetime.date,
     medico_id: int,
-    opcionales_activos: List[int],
     db: AsyncSession,
 ) -> LookupPrecioOut:
     """
@@ -517,14 +513,11 @@ async def lookup_precio(
 
     valor = await db.get(Valor, historial.valores_id)
 
-    # Calcular con opcionales activados
-    precio_base = historial.precio_total
-    precio_total = precio_base
-    componentes_out: List[ComponenteLookupOut] = []
-
-    for item in historial.componentes_snapshot:
-        incluido = not item["opcional"]
-        componentes_out.append(ComponenteLookupOut(
+    # Todos los componentes suman (ya no hay opcionales): precio_base == precio_total.
+    precio_total = historial.precio_total
+    precio_base = precio_total
+    componentes_out: List[ComponenteLookupOut] = [
+        ComponenteLookupOut(
             componente_id=item.get("componente_id"),
             concepto=item["concepto"],
             tipo=item["tipo"],
@@ -534,27 +527,9 @@ async def lookup_precio(
             cantidad=Decimal(item["cantidad"]),
             valor_unitario=Decimal(item["valor_unitario"]),
             subtotal=Decimal(item["subtotal"]),
-            opcional=item["opcional"],
-            incluido=incluido,
-        ))
-
-    # Agregar opcionales activados (matcheo por id de componente)
-    for comp_id in opcionales_activos:
-        comp = await db.get(ValorComponente, comp_id)
-        if not comp or not comp.opcional or comp.valor_id != historial.valores_id:
-            continue
-        if comp.galeno_id:
-            galeno = await db.get(Galeno, comp.galeno_id)
-            precio_unidad = galeno.valor_unitario if galeno else Decimal("0")
-            subtotal = comp.cantidad * precio_unidad
-        else:
-            subtotal = comp.valor_unitario or Decimal("0")
-
-        precio_total += subtotal
-        for c in componentes_out:
-            if c.componente_id == comp.id:
-                c.incluido = True
-                break
+        )
+        for item in historial.componentes_snapshot
+    ]
 
     return LookupPrecioOut(
         nomenclador_id=nomenclador_id,

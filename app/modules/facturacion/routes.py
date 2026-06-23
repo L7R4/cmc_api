@@ -12,6 +12,9 @@ from app.modules.facturacion import service
 from app.modules.facturacion.schemas import (
     AfiliadoCreate,
     AfiliadoRead,
+    CierrePayload,
+    CierrePreviewResponse,
+    CierreResponse,
     GuardadoResponse,
     MoverPeriodoPayload,
     MoverPeriodoResponse,
@@ -189,6 +192,25 @@ async def mover_periodo(
     db: AsyncSession = Depends(get_db),
 ):
     return await service.mover_prestaciones_periodo(db, payload)
+
+
+# ── Cierre de período (A → C) ────────────────────────────────────────────────
+@router.get("/cierre/preview", response_model=CierrePreviewResponse)
+async def cierre_preview(
+    cod_obra: str = Query(...),
+    periodo: str = Query(..., description="YYYYMM"),
+    db: AsyncSession = Depends(get_db),
+):
+    return await service.preview_cierre(db, cod_obra, periodo)
+
+
+@router.post("/cierre", response_model=CierreResponse)
+async def cerrar_periodo(
+    payload: CierrePayload,
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    return await service.cerrar_periodo(db, payload.cod_obra, payload.periodo, _usuario(user))
 
 
 @router.patch("/prestaciones/{id}", response_model=PrestacionRead)

@@ -62,9 +62,7 @@ def _componentes_presupuesto_cero() -> list[dict]:
             "concepto": concepto,
             "galeno_id": None,
             "cantidad": Decimal("0"),
-            "valor_unitario": Decimal("0"),
-            "opcional": False,
-            "orden": orden,
+            "valor_unitario": Decimal("0"),            "orden": orden,
             "observacion": None,
         }
         for orden, concepto in enumerate(_CONCEPTOS_PRESUPUESTO)
@@ -115,6 +113,28 @@ def _validar_homogeneidad_datos(componentes: list[dict]) -> Optional[str]:
     if repetidos:
         return f"Concepto repetido: {', '.join(sorted(repetidos))} (máximo uno por concepto)"
     return None
+
+
+def _completar_tres_componentes(componentes: list[dict]) -> list[dict]:
+    """Garantiza que el Valor tenga siempre los 3 conceptos (Honorarios, Gastos,
+    Ayudante). Los faltantes se crean en 0 respetando la modalidad del grupo:
+    - galeno (algún componente con galeno_id): el faltante usa ese galeno con cantidad 0.
+    - fijo: el faltante va con valor_unitario 0.
+    El subtotal de un faltante es 0, así que no altera el precio. Asume que la lista
+    ya pasó `_validar_homogeneidad_datos` (modalidad homogénea, sin repetidos)."""
+    presentes = {c["concepto"] for c in componentes}
+    galeno_relleno = next((c["galeno_id"] for c in componentes if c.get("galeno_id")), None)
+    completos = list(componentes)
+    for orden, concepto in enumerate(_CONCEPTOS_PRESUPUESTO):  # Honorarios, Gastos, Ayudante
+        if concepto in presentes:
+            continue
+        completos.append({
+            "concepto": concepto,
+            "galeno_id": galeno_relleno,
+            "cantidad": Decimal("0"),
+            "valor_unitario": None if galeno_relleno is not None else Decimal("0"),            "orden": 90 + orden,
+        })
+    return completos
 
 
 def _resolver_cantidad(
@@ -180,6 +200,8 @@ async def _crear_valor_con_componentes(
         await db.flush()
         return valor
 
+    presentes: set[str] = set()
+    galeno_relleno: Optional[int] = None
     for comp_in in componentes_in:
         cantidad = comp_in.cantidad
         if comp_in.galeno_id is not None:
@@ -197,18 +219,31 @@ async def _crear_valor_con_componentes(
             except NivelInconsistenteError as e:
                 raise HTTPException(422, e.message)
             cantidad = _resolver_cantidad(nom, comp_in.concepto, cantidad)
+            if galeno_relleno is None:
+                galeno_relleno = comp_in.galeno_id
 
         comp = ValorComponente(
             valor_id=valor.id,
             concepto=comp_in.concepto,
             galeno_id=comp_in.galeno_id,
             cantidad=cantidad,
-            valor_unitario=comp_in.valor_unitario,
-            opcional=comp_in.opcional,
-            orden=comp_in.orden,
+            valor_unitario=comp_in.valor_unitario,            orden=comp_in.orden,
             observacion=comp_in.observacion,
         )
         db.add(comp)
+        presentes.add(comp_in.concepto)
+
+    # Todo Valor lleva siempre los 3 conceptos; los faltantes en 0 según la modalidad.
+    for orden, concepto in enumerate(_CONCEPTOS_PRESUPUESTO):  # Honorarios, Gastos, Ayudante
+        if concepto in presentes:
+            continue
+        db.add(ValorComponente(
+            valor_id=valor.id,
+            concepto=concepto,
+            galeno_id=galeno_relleno,
+            cantidad=Decimal("0"),
+            valor_unitario=None if galeno_relleno is not None else Decimal("0"),            orden=90 + orden,
+        ))
     await db.flush()
     return valor
 
@@ -252,9 +287,7 @@ async def _clonar_valor(
             "concepto": c.concepto,
             "galeno_id": c.galeno_id,
             "cantidad": c.cantidad,
-            "valor_unitario": c.valor_unitario,
-            "opcional": c.opcional,
-            "orden": c.orden,
+            "valor_unitario": c.valor_unitario,            "orden": c.orden,
             "observacion": c.observacion,
         }
         if transform_componente:
@@ -530,9 +563,7 @@ async def replicar_estructura(body: ReplicarEstructuraIn, db: AsyncSession = Dep
                     "concepto": c.concepto,
                     "galeno_id": galeno_id,
                     "cantidad": cantidad,
-                    "valor_unitario": c.valor_unitario,
-                    "opcional": c.opcional,
-                    "orden": c.orden,
+                    "valor_unitario": c.valor_unitario,                    "orden": c.orden,
                     "observacion": c.observacion,
                 })
 
@@ -668,9 +699,7 @@ async def replicar_a_obras_sociales(
                     "concepto": c.concepto,
                     "galeno_id": galeno_id,
                     "cantidad": cantidad,
-                    "valor_unitario": valor_unitario,
-                    "opcional": c.opcional,
-                    "orden": c.orden,
+                    "valor_unitario": valor_unitario,                    "orden": c.orden,
                     "observacion": c.observacion,
                 })
 
@@ -756,9 +785,7 @@ async def actualizar_porcentaje(body: ActualizarPorcentajeIn, db: AsyncSession =
             "concepto": c.concepto,
             "galeno_id": c.galeno_id,
             "cantidad": c.cantidad,
-            "valor_unitario": nuevo_vu,
-            "opcional": c.opcional,
-            "orden": c.orden,
+            "valor_unitario": nuevo_vu,            "orden": c.orden,
             "observacion": c.observacion,
         }
 
@@ -819,9 +846,7 @@ async def actualizar_por_codigos(body: ActualizarPorCodigosIn, db: AsyncSession 
                     "concepto": c.concepto,
                     "galeno_id": c.galeno_id,
                     "cantidad": c.cantidad,
-                    "valor_unitario": item.nuevo_valor_unitario,
-                    "opcional": c.opcional,
-                    "orden": c.orden,
+                    "valor_unitario": item.nuevo_valor_unitario,                    "orden": c.orden,
                     "observacion": c.observacion,
                 }
 
@@ -967,7 +992,6 @@ async def lookup_precio(body: LookupPrecioIn, db: AsyncSession = Depends(get_db)
             obra_social_nro=body.obra_social_nro,
             fecha=body.fecha_practica,
             medico_id=body.medico_id,
-            opcionales_activos=body.opcionales_activos,
             db=db,
         )
     except LookupError as e:
@@ -1019,9 +1043,9 @@ async def importar_valores_csv(
     - Modalidad homogénea por grupo: todas las filas con galeno_codigo o ninguna.
     - Si galeno_codigo tiene valor → el galeno se resuelve por (OS, galeno_codigo,
       nivel del valor) con fallback al galeno sin nivel.
-    - Si cantidad=0 con galeno → unidades por defecto del código.
-    - `opcional` (opcional, truthy 1/true/si/x): marca el componente como opcional
-      (típico Ayudante); no suma al precio_base, el operador lo activa al facturar.
+    - Si cantidad=0 con galeno → unidades por defecto del código (0 si no tiene).
+    - Todo Valor se completa siempre a 3 conceptos (Honorarios/Gastos/Ayudante); los
+      faltantes se crean en 0 respetando la modalidad. No existen componentes opcionales.
     - Si algún componente del grupo falla, NO se crea el Valor (todo o nada).
     """
     contenido = await file.read()
@@ -1086,9 +1110,6 @@ async def importar_valores_csv(
                 galeno_codigo = row.get("galeno_codigo", "").strip()
                 cantidad_str = row.get("cantidad", "0").strip()
                 valor_unitario_str = row.get("valor_unitario", "").strip()
-                # Columna opcional (default False): permite marcar un componente como
-                # opcional (típico Ayudante). Backward-compatible: CSV sin la columna → False.
-                opcional = row.get("opcional", "").strip().lower() in {"1", "true", "si", "sí", "x"}
 
                 cantidad = Decimal(cantidad_str) if cantidad_str else Decimal("0")
                 valor_unitario = Decimal(valor_unitario_str) if valor_unitario_str else None
@@ -1114,25 +1135,17 @@ async def importar_valores_csv(
                         break
                     galeno_id = galeno.id
                     if cantidad == 0:
+                        # Pre-fill con las unidades del nomenclador. Si no hay unidades,
+                        # el componente queda en 0 (subtotal 0) — válido: todo Valor lleva
+                        # los 3 conceptos aunque alguno sea 0.
                         attr = _UNIDADES_MAP.get(concepto)
                         cantidad = (attr and getattr(nom, attr, None)) or Decimal("0")
-                        if cantidad == 0:
-                            error_grupo = {
-                                "fila": data["fila_inicio"] + idx,
-                                "motivo": (
-                                    f"Componente '{concepto}' tiene galeno pero sin cantidad "
-                                    f"y el código no tiene unidades por defecto para ese concepto"
-                                ),
-                            }
-                            break
 
                 componentes_resueltos.append({
                     "concepto": concepto,
                     "galeno_id": galeno_id,
                     "cantidad": cantidad,
-                    "valor_unitario": valor_unitario,
-                    "opcional": opcional,
-                    "orden": idx,
+                    "valor_unitario": valor_unitario,                    "orden": idx,
                 })
 
             if por_presupuesto:
@@ -1141,6 +1154,10 @@ async def importar_valores_csv(
                 motivo_invalido = _validar_homogeneidad_datos(componentes_resueltos)
                 if motivo_invalido:
                     error_grupo = {"fila": data["fila_inicio"], "motivo": motivo_invalido}
+                else:
+                    # Todo Valor lleva siempre los 3 conceptos (Honorarios/Gastos/Ayudante);
+                    # los faltantes se crean en 0 respetando la modalidad del grupo.
+                    componentes_resueltos = _completar_tres_componentes(componentes_resueltos)
 
             # Reglas del origen (especialidad solo NE; NN exige galeno y no presupuesto)
             if error_grupo is None:

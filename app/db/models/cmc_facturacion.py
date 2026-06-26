@@ -51,6 +51,12 @@ class DetalleFacturacionCMC(Base):
     id_especialidad: Mapped[Optional[int]] = mapped_column(Integer)
     # Desglose del cálculo del lookup (modo automático). NULL en CMC y modo manual.
     calculo_snapshot: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    # Categorización única (reemplaza el uso de tpo_serv/tipo_orden en la API):
+    # Consulta | Practica | Honorarios individuales | Sanatorio. Derivada: Sanatorio si
+    # hay clínica, si no la categoria del nomenclador. Las columnas viejas coexisten.
+    tipo: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    # Vínculo ayudante/gastos → fila del médico (cabeza del equipo). NULL si factura solo.
+    grupo_equipo_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
 
 class FacturacionCMC(Base):

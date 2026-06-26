@@ -13,9 +13,13 @@ from app.modules.nomenclador.schemas import (
     ActualizacionMasivaResult,
     GalenoActualizarPrecioIn,
     GalenoActualizarPrecioMasivoIn,
+    GalenoActualizarUnidadesIn,
+    GalenoActualizarUnidadesResult,
     GalenoCreate,
     GalenoCrearNivelesIn,
     GalenoOut,
+    GalenosImportarIn,
+    GalenosImportarResult,
     GalenoUpdate,
 )
 
@@ -94,6 +98,10 @@ async def _rotar_precio_galeno(
         vigencia_desde=vigencia_desde,
         vigencia_hasta=None,
         valor_unitario=nuevo_valor_unitario,
+        # La rotación cambia solo el precio: conserva las unidades-plantilla.
+        unidades_honorarios=galeno_anterior.unidades_honorarios,
+        unidades_ayudante=galeno_anterior.unidades_ayudante,
+        unidades_gastos=galeno_anterior.unidades_gastos,
         observacion=galeno_anterior.observacion,
     )
     db.add(nuevo_galeno)
@@ -174,6 +182,9 @@ async def crear_galeno_por_niveles(
             vigencia_desde=body.vigencia_desde,
             vigencia_hasta=None,
             valor_unitario=item.valor_unitario,
+            unidades_honorarios=item.unidades_honorarios,
+            unidades_ayudante=item.unidades_ayudante,
+            unidades_gastos=item.unidades_gastos,
             observacion=body.observacion,
         )
         db.add(obj)
@@ -182,6 +193,31 @@ async def crear_galeno_por_niveles(
     for obj in creados:
         await db.refresh(obj)
     return creados
+
+
+@router.post("/importar_de_obra_social", response_model=GalenosImportarResult)
+async def importar_galenos_de_obra_social(
+    body: GalenosImportarIn, db: AsyncSession = Depends(get_db)
+):
+    """
+    Copia todos los galenos VIGENTES de la OS origen a la OS destino (precio + unidades).
+    Los que ya existen vigentes en el destino se rotan (cierra el viejo, abre uno nuevo
+    con los datos del origen y reapunta los valores del destino al galeno nuevo,
+    conservando historial). Los idénticos se omiten. Operación transaccional única.
+    """
+    resultado = await service.importar_galenos_entre_os(
+        body.obra_social_nro_origen,
+        body.obra_social_nro_destino,
+        body.vigencia_desde,
+        db,
+    )
+    if resultado["total_origen"] == 0:
+        raise HTTPException(
+            404,
+            f"La OS {body.obra_social_nro_origen} no tiene galenos vigentes para importar",
+        )
+    await db.commit()
+    return GalenosImportarResult(**resultado)
 
 
 @router.get("/historial/{obra_social_nro}/{codigo}", response_model=List[GalenoOut])
@@ -242,6 +278,50 @@ async def actualizar_precio_galeno(
     await db.commit()
     await db.refresh(nuevo_galeno)
     return nuevo_galeno
+
+
+@router.post("/{id}/actualizar_unidades", response_model=GalenoActualizarUnidadesResult)
+async def actualizar_unidades_galeno(
+    id: int, body: GalenoActualizarUnidadesIn, db: AsyncSession = Depends(get_db)
+):
+    """
+    Cambia las unidades-plantilla del galeno y PROPAGA (opción 'pisar todos'): pisa la
+    cantidad de todos los componentes activos que usan el galeno en los conceptos
+    provistos y regenera el historial de los códigos afectados. Una transacción.
+    Solo propaga los conceptos enviados con valor no nulo (enviar null solo limpia el
+    default-plantilla a futuro, sin tocar valores vigentes).
+    """
+    galeno = await db.get(Galeno, id)
+    if not galeno:
+        raise HTTPException(404, "Galeno no encontrado")
+    if not galeno.activo:
+        raise HTTPException(409, "El galeno no está activo")
+
+    field_concepto = {
+        "unidades_honorarios": "Honorarios",
+        "unidades_ayudante": "Ayudante",
+        "unidades_gastos": "Gastos",
+    }
+    provistos = body.model_fields_set & field_concepto.keys()
+    if not provistos:
+        raise HTTPException(422, "Debe indicar al menos una unidad a actualizar")
+
+    conceptos_a_propagar: List[str] = []
+    for field in provistos:
+        nuevo = getattr(body, field)
+        setattr(galeno, field, nuevo)
+        if nuevo is not None:
+            conceptos_a_propagar.append(field_concepto[field])
+    await db.flush()
+
+    n = await service.propagar_unidades_galeno(
+        galeno, conceptos_a_propagar, body.vigencia_desde, db
+    )
+    await db.commit()
+    await db.refresh(galeno)
+    return GalenoActualizarUnidadesResult(
+        galeno=GalenoOut.model_validate(galeno), componentes_actualizados=n
+    )
 
 
 @router.post("/actualizar_precio_masivo", response_model=ActualizacionMasivaResult)

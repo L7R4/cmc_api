@@ -2,16 +2,10 @@ import datetime
 from decimal import Decimal
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 # ── Tipos literales ──────────────────────────────────────────────────────────
-TpoFuncion = Literal["H", "A", "HG", "G"]
-TpoServicio = Literal["A", "H", "I"]
-TipoOrden = Literal["C", "P", "S", "R"]   # R → normaliza a P en service
 TipoCalculo = Literal["A", "M"]
-ViaQuirurgica = Literal["T", "L"]
-# Diferido (§9.5): hoy solo alimenta `urgencia`. Opcional para no bloquear la carga.
-SubTipoNomenclador = Literal["NN", "CA", "CI", "NC"]
 
 
 # ── Afiliados ────────────────────────────────────────────────────────────────
@@ -45,25 +39,25 @@ class PrestacionItem(BaseModel):
     dni_paciente: Optional[str] = None
 
     # Servicio
-    tpo_servicio: TpoServicio
-    sub_tipo_nomenclador: Optional[SubTipoNomenclador] = None   # diferido (§9.5)
-    tipo_orden: TipoOrden
     fecha_practica: Optional[datetime.date] = None   # None → primer día del período
-    cod_clinica: Optional[int] = None                # obligatorio si tpo_servicio H/I
+    cod_clinica: Optional[int] = None                # si viene → tipo = "Sanatorio"
 
     # Prestación
     cod_nomenclador: str
-    via_quirurgica: Optional[ViaQuirurgica] = None   # solo CA/CI; persiste en `urgencia`
     cantidad: int = Field(1, ge=1)
     sesion: int = Field(1, ge=1)
 
-    # Montos y función
+    # Montos — el concepto en >0 es el que se factura (médico/gastos/ayudante implícito).
+    # Automático: el backend toma el valor del lookup para cada concepto marcado en >0.
+    # Manual: se guardan los montos enviados tal cual.
     tipo_calculo: TipoCalculo = "A"
-    honorarios: Optional[Decimal] = None   # obligatorio si tipo_calculo="M"
+    honorarios: Optional[Decimal] = None
     gastos: Optional[Decimal] = None
     ayudante: Optional[Decimal] = None
-    tpo_funcion: TpoFuncion = "H"
     porcentaje: int = Field(100, ge=1, le=100)
+
+    # Vínculo a la fila del médico (cabeza del equipo) cuando el ayudante se carga aparte.
+    grupo_equipo_id: Optional[int] = None
 
 
 class PrestacionesCreate(BaseModel):
@@ -81,21 +75,17 @@ class PrestacionUpdate(BaseModel):
     ni nro_orden. Si se envía dni_paciente, se relee el nombre del padrón."""
     cod_medico: Optional[str] = None
     dni_paciente: Optional[str] = None
-    tpo_servicio: Optional[TpoServicio] = None
-    sub_tipo_nomenclador: Optional[SubTipoNomenclador] = None
-    tipo_orden: Optional[TipoOrden] = None
     fecha_practica: Optional[datetime.date] = None
     cod_clinica: Optional[int] = None
     cod_nomenclador: Optional[str] = None
-    via_quirurgica: Optional[ViaQuirurgica] = None
     cantidad: Optional[int] = Field(None, ge=1)
     sesion: Optional[int] = Field(None, ge=1)
     tipo_calculo: Optional[TipoCalculo] = None
     honorarios: Optional[Decimal] = None
     gastos: Optional[Decimal] = None
     ayudante: Optional[Decimal] = None
-    tpo_funcion: Optional[TpoFuncion] = None
     porcentaje: Optional[int] = Field(None, ge=1, le=100)
+    grupo_equipo_id: Optional[int] = None
 
 
 class MoverPeriodoPayload(BaseModel):
@@ -137,7 +127,8 @@ class PrestacionRead(BaseModel):
     nro_orden: Optional[str] = None
     cod_obra_social: Optional[str] = Field(None, alias="cod_obr")
     cod_nomenclador: Optional[str] = Field(None, alias="cod_nom")
-    tpo_funcion: Optional[str] = None
+    tipo: Optional[str] = None
+    grupo_equipo_id: Optional[int] = None
     sesion: Optional[int] = None
     cantidad: Optional[int] = None
     honorarios: Optional[Decimal] = None
@@ -148,6 +139,16 @@ class PrestacionRead(BaseModel):
     fecha_practica: Optional[datetime.date] = None
     dni_paciente: Optional[str] = Field(None, alias="dni_p")
     nombre_paciente: Optional[str] = Field(None, alias="nom_ape_p")
+
+    # cod_med/nro_orden/cod_obr (y otros) son columnas enteras en la DB legacy pero
+    # se exponen como string en la API → coercionar int→str al leer del ORM.
+    @field_validator(
+        "cod_medico", "nro_orden", "cod_obra_social", "cod_nomenclador",
+        "dni_paciente", mode="before",
+    )
+    @classmethod
+    def _num_to_str(cls, v):
+        return str(v) if v is not None else v
 
     class Config:
         from_attributes = True

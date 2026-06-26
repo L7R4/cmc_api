@@ -283,6 +283,241 @@ async def regenerar_historial_por_galeno(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Regla A para unidades-plantilla del galeno + import de galenos entre OS
+# ─────────────────────────────────────────────────────────────────────────────
+
+# concepto del componente → columna de unidad-plantilla en Galeno / NomencladorCMC
+_CONCEPTO_A_UNIDAD: dict[str, str] = {
+    "Honorarios": "unidades_honorarios",
+    "Ayudante": "unidades_ayudante",
+    "Gastos": "unidades_gastos",
+}
+
+
+async def propagar_unidades_galeno(
+    galeno: Galeno,
+    conceptos: List[str],
+    vigencia_desde: datetime.date,
+    db: AsyncSession,
+) -> int:
+    """
+    Opción A — propaga un cambio de unidades-plantilla del galeno a los valores vigentes.
+
+    Pisa la `cantidad` de TODOS los componentes activos (de valores activos) que usan
+    este galeno en los `conceptos` indicados, con la nueva unidad del galeno, y regenera
+    el historial de los códigos afectados (motivo 'galeno_actualizado').
+    Asume que `galeno.unidades_*` ya fueron actualizadas en la sesión. No comitea.
+    Devuelve la cantidad de componentes pisados.
+    """
+    if not conceptos:
+        return 0
+    stmt = (
+        select(ValorComponente)
+        .join(Valor, Valor.id == ValorComponente.valor_id)
+        .where(
+            ValorComponente.galeno_id == galeno.id,
+            ValorComponente.activo == True,
+            Valor.estado == "activo",
+            ValorComponente.concepto.in_(conceptos),
+        )
+    )
+    componentes = (await db.execute(stmt)).scalars().all()
+    if not componentes:
+        return 0
+
+    valor_ids: set[int] = set()
+    for comp in componentes:
+        comp.cantidad = getattr(galeno, _CONCEPTO_A_UNIDAD[comp.concepto])
+        valor_ids.add(comp.valor_id)
+    await db.flush()
+
+    fecha_corte = vigencia_desde - datetime.timedelta(days=1)
+    for valor_id in valor_ids:
+        await regenerar_historial_por_valores(
+            valor_id, fecha_corte, db, motivo="galeno_actualizado",
+            nueva_vigencia_desde=vigencia_desde,
+        )
+        await db.execute(
+            update(HistorialPrecioCodigo)
+            .where(
+                HistorialPrecioCodigo.valores_id == valor_id,
+                HistorialPrecioCodigo.vigencia_hasta.is_(None),
+                HistorialPrecioCodigo.motivo_cambio == "galeno_actualizado",
+            )
+            .values(referencia_cambio_id=galeno.id)
+        )
+    return len(componentes)
+
+
+def _galenos_iguales(a: Galeno, b: Galeno) -> bool:
+    """True si dos galenos tienen el mismo precio y las mismas unidades-plantilla."""
+    return (
+        a.valor_unitario == b.valor_unitario
+        and a.unidades_honorarios == b.unidades_honorarios
+        and a.unidades_ayudante == b.unidades_ayudante
+        and a.unidades_gastos == b.unidades_gastos
+    )
+
+
+async def _hay_mezcla_niveles(
+    db: AsyncSession, obra_social_nro: int, codigo: str, nivel: Optional[int]
+) -> bool:
+    """True si crear (codigo, nivel) en la OS mezclaría galenos nivelados con sin-nivel."""
+    stmt = select(Galeno.id).where(
+        Galeno.obra_social_nro == obra_social_nro,
+        Galeno.codigo == codigo,
+        Galeno.vigencia_hasta.is_(None),
+        Galeno.activo == True,
+        Galeno.nivel.is_not(None) if nivel is None else Galeno.nivel.is_(None),
+    ).limit(1)
+    return (await db.execute(stmt)).first() is not None
+
+
+async def _rotar_galeno_destino(
+    db: AsyncSession,
+    destino_g: Galeno,
+    origen_g: Galeno,
+    vigencia_desde: datetime.date,
+) -> Galeno:
+    """
+    Rota el galeno vigente del destino con los datos del origen: cierra la fila vigente,
+    crea una nueva con el precio + unidades del origen, reapunta los componentes activos
+    del destino al galeno nuevo (pisando la cantidad con la nueva unidad-plantilla donde
+    exista) y regenera el historial (motivo 'replicacion'). No comitea.
+    """
+    fecha_corte = vigencia_desde - datetime.timedelta(days=1)
+    if destino_g.vigencia_desde > fecha_corte:
+        raise ValueError(
+            f"vigencia_desde ({vigencia_desde}) debe ser posterior a la vigencia "
+            f"actual del galeno destino ({destino_g.vigencia_desde})"
+        )
+    destino_g.vigencia_hasta = fecha_corte
+    destino_g.activo = False
+    await db.flush()
+
+    nuevo = Galeno(
+        obra_social_nro=destino_g.obra_social_nro,
+        codigo=destino_g.codigo,
+        nombre=destino_g.nombre,
+        nivel=destino_g.nivel,
+        vigencia_desde=vigencia_desde,
+        vigencia_hasta=None,
+        valor_unitario=origen_g.valor_unitario,
+        unidades_honorarios=origen_g.unidades_honorarios,
+        unidades_ayudante=origen_g.unidades_ayudante,
+        unidades_gastos=origen_g.unidades_gastos,
+    )
+    db.add(nuevo)
+    await db.flush()
+
+    comps = (await db.execute(
+        select(ValorComponente)
+        .join(Valor, Valor.id == ValorComponente.valor_id)
+        .where(
+            ValorComponente.galeno_id == destino_g.id,
+            ValorComponente.activo == True,
+            Valor.estado == "activo",
+        )
+    )).scalars().all()
+
+    valor_ids: set[int] = set()
+    for comp in comps:
+        comp.galeno_id = nuevo.id
+        nueva_unidad = getattr(nuevo, _CONCEPTO_A_UNIDAD[comp.concepto])
+        if nueva_unidad is not None:
+            comp.cantidad = nueva_unidad
+        valor_ids.add(comp.valor_id)
+    await db.flush()
+
+    for valor_id in valor_ids:
+        await regenerar_historial_por_valores(
+            valor_id, fecha_corte, db, motivo="replicacion",
+            nueva_vigencia_desde=vigencia_desde,
+        )
+        await db.execute(
+            update(HistorialPrecioCodigo)
+            .where(
+                HistorialPrecioCodigo.valores_id == valor_id,
+                HistorialPrecioCodigo.vigencia_hasta.is_(None),
+                HistorialPrecioCodigo.motivo_cambio == "replicacion",
+            )
+            .values(referencia_cambio_id=nuevo.id)
+        )
+    return nuevo
+
+
+async def importar_galenos_entre_os(
+    obra_social_nro_origen: int,
+    obra_social_nro_destino: int,
+    vigencia_desde: datetime.date,
+    db: AsyncSession,
+) -> dict:
+    """
+    Copia todos los galenos VIGENTES de la OS origen a la OS destino (precio + unidades):
+    - destino sin ese (codigo, nivel)         → crea el galeno.
+    - destino con ese (codigo, nivel) vigente → rota vigencia (conserva historial) y
+                                                 reapunta los valores del destino al nuevo.
+    - destino idéntico (precio + unidades)    → no hace nada (sin_cambios).
+    Partial-success: los ítems con error se reportan y el resto se importa igual.
+    No comitea: corre dentro de la transacción del caller.
+    """
+    origen_galenos = (await db.execute(
+        select(Galeno).where(
+            Galeno.obra_social_nro == obra_social_nro_origen,
+            Galeno.vigencia_hasta.is_(None),
+            Galeno.activo == True,
+        ).order_by(Galeno.codigo, Galeno.nivel)
+    )).scalars().all()
+
+    creados = rotados = sin_cambios = 0
+    errores: list[dict] = []
+
+    for g in origen_galenos:
+        try:
+            destino_g = await buscar_galeno_vigente(
+                db, obra_social_nro_destino, g.codigo, g.nivel
+            )
+            if destino_g is None:
+                if await _hay_mezcla_niveles(
+                    db, obra_social_nro_destino, g.codigo, g.nivel
+                ):
+                    errores.append({
+                        "codigo": g.codigo, "nivel": g.nivel,
+                        "motivo": "mezclaría galenos nivelados y sin nivel en el destino",
+                    })
+                    continue
+                db.add(Galeno(
+                    obra_social_nro=obra_social_nro_destino,
+                    codigo=g.codigo,
+                    nombre=g.nombre,
+                    nivel=g.nivel,
+                    vigencia_desde=vigencia_desde,
+                    vigencia_hasta=None,
+                    valor_unitario=g.valor_unitario,
+                    unidades_honorarios=g.unidades_honorarios,
+                    unidades_ayudante=g.unidades_ayudante,
+                    unidades_gastos=g.unidades_gastos,
+                ))
+                await db.flush()
+                creados += 1
+            elif _galenos_iguales(destino_g, g):
+                sin_cambios += 1
+            else:
+                await _rotar_galeno_destino(db, destino_g, g, vigencia_desde)
+                rotados += 1
+        except ValueError as e:
+            errores.append({"codigo": g.codigo, "nivel": g.nivel, "motivo": str(e)})
+
+    return {
+        "total_origen": len(origen_galenos),
+        "creados": creados,
+        "rotados": rotados,
+        "sin_cambios": sin_cambios,
+        "errores": errores,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Validaciones de consistencia galeno ↔ valor
 # ─────────────────────────────────────────────────────────────────────────────
 

@@ -182,6 +182,8 @@ class Galeno(Base):
     Identidad natural: (obra_social_nro, codigo, nivel, vigencia_desde).
     nivel NULL → el galeno no está nivelado (un único precio unitario).
     nivel N    → una fila por nivel; cada nivel puede tener su propio valor_unitario.
+    Además funciona como plantilla por OS: unidades_{honorarios,ayudante,gastos} son
+    los defaults por concepto que toma el ValorComponente al asociarse (ver pre-fill).
     """
     __tablename__ = "nm_galenos"
 
@@ -199,6 +201,12 @@ class Galeno(Base):
     vigencia_desde: Mapped[datetime.date] = mapped_column(Date, nullable=False)
     vigencia_hasta: Mapped[Optional[datetime.date]] = mapped_column(Date, nullable=True)
     valor_unitario: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), nullable=False)
+    # Unidades-plantilla por concepto (por OS): defaults que toma el ValorComponente
+    # calculable al asociar este galeno a un código con cantidad=0. Nullable: si el
+    # concepto no tiene unidad acá, el pre-fill cae a nm_nomenclador.unidades_* (NN).
+    unidades_honorarios: Mapped[Optional[Decimal]] = mapped_column(DECIMAL(10, 2), nullable=True)
+    unidades_ayudante: Mapped[Optional[Decimal]] = mapped_column(DECIMAL(10, 2), nullable=True)
+    unidades_gastos: Mapped[Optional[Decimal]] = mapped_column(DECIMAL(10, 2), nullable=True)
     activo: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="1")
     observacion: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime.datetime] = mapped_column(
@@ -284,6 +292,18 @@ class Valor(Base):
         back_populates="valor", cascade="all, delete-orphan", lazy="selectin"
     )
 
+    @property
+    def modalidad(self) -> str:
+        """Modalidad de la ecuación: 'por_presupuesto' | 'galeno' | 'fijo'.
+
+        Homogénea por validación: todos los componentes son calculables o todos fijos.
+        """
+        if self.por_presupuesto:
+            return "por_presupuesto"
+        if any(c.galeno_id is not None for c in self.componentes):
+            return "galeno"
+        return "fijo"
+
     __table_args__ = (
         Index("ix_nm_valores_os_nom", "obra_social_nro", "nomenclador_id"),
         Index("ix_nm_valores_especialidad", "especialidad_id_colegio"),
@@ -329,6 +349,35 @@ class ValorComponente(Base):
 
     valor: Mapped["Valor"] = relationship(back_populates="componentes")
     galeno: Mapped[Optional["Galeno"]] = relationship(back_populates="componentes", lazy="joined")
+
+    # Campos derivados para la API (galeno viene lazy="joined": sin queries extra).
+    @property
+    def tipo(self) -> str:
+        """'calculable' (precio del galeno × cantidad) | 'fijo' (precio embebido)."""
+        return "calculable" if self.galeno_id is not None else "fijo"
+
+    @property
+    def galeno_codigo(self) -> Optional[str]:
+        return self.galeno.codigo if self.galeno else None
+
+    @property
+    def galeno_nivel(self) -> Optional[int]:
+        return self.galeno.nivel if self.galeno else None
+
+    @property
+    def precio_unitario(self) -> Optional[Decimal]:
+        """VU efectivo a mostrar: del galeno si es calculable, del componente si es fijo."""
+        if self.galeno_id is not None:
+            return self.galeno.valor_unitario if self.galeno else None
+        return self.valor_unitario
+
+    @property
+    def subtotal(self) -> Decimal:
+        """Aporte del componente al precio: cantidad × VU (calculable) o VU fijo."""
+        if self.galeno_id is not None:
+            vu = self.galeno.valor_unitario if self.galeno else Decimal("0")
+            return self.cantidad * vu
+        return self.valor_unitario or Decimal("0")
 
     __table_args__ = (
         Index("ix_nm_vc_valor_id", "valor_id"),

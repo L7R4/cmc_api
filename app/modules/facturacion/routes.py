@@ -131,7 +131,7 @@ async def precio_nomenclador(
 
 
 # ── Grupo C — Prestaciones ───────────────────────────────────────────────────
-@router.get("/prestaciones/recientes", response_model=list[PrestacionRead])
+@router.get("/prestaciones/recientes", response_model=list[PrestacionRead], response_model_by_alias=False)
 async def prestaciones_recientes(
     cod_obra: str = Query(...),
     usuario: Optional[str] = Query(None),
@@ -140,7 +140,7 @@ async def prestaciones_recientes(
     return await service.prestaciones_recientes(db, cod_obra, usuario)
 
 
-@router.get("/prestaciones", response_model=list[PrestacionRead])
+@router.get("/prestaciones", response_model=list[PrestacionRead], response_model_by_alias=False)
 async def listar_prestaciones(
     response: Response,
     cod_obra: Optional[str] = Query(None),
@@ -149,9 +149,8 @@ async def listar_prestaciones(
     cod_nomenclador: Optional[str] = Query(None),
     nro_orden: Optional[str] = Query(None),
     estado: Optional[str] = Query(None),
-    tpo_funcion: Optional[str] = Query(None),
-    tpo_servicio: Optional[str] = Query(None),
-    tipo_orden: Optional[str] = Query(None),
+    tipo: Optional[str] = Query(None),
+    grupo_equipo_id: Optional[int] = Query(None),
     dni_paciente: Optional[str] = Query(None),
     nombre_paciente: Optional[str] = Query(None),
     fecha_desde: Optional[datetime.date] = Query(None),
@@ -165,7 +164,7 @@ async def listar_prestaciones(
         db,
         cod_obra=cod_obra, periodo=periodo, cod_medico=cod_medico,
         cod_nomenclador=cod_nomenclador, nro_orden=nro_orden, estado=estado,
-        tpo_funcion=tpo_funcion, tpo_servicio=tpo_servicio, tipo_orden=tipo_orden,
+        tipo=tipo, grupo_equipo_id=grupo_equipo_id,
         dni_paciente=dni_paciente, nombre_paciente=nombre_paciente,
         fecha_desde=fecha_desde, fecha_hasta=fecha_hasta, q=q,
         limit=limit, offset=offset,
@@ -213,7 +212,7 @@ async def cerrar_periodo(
     return await service.cerrar_periodo(db, payload.cod_obra, payload.periodo, _usuario(user))
 
 
-@router.patch("/prestaciones/{id}", response_model=PrestacionRead)
+@router.patch("/prestaciones/{id}", response_model=PrestacionRead, response_model_by_alias=False)
 async def editar_prestacion(
     id: int,
     payload: PrestacionUpdate,

@@ -169,42 +169,21 @@ async def resolver_precio(
     )
 
 
-# ── Validaciones puras ───────────────────────────────────────────────────────
-def check_coherencia_servicio_orden(
-    tpo_servicio: str, tipo_orden: str, cod_nomenclador: str
-) -> Optional[str]:
-    """§4.5 — retorna mensaje de error o None si OK.
-
-    Solo valida la coherencia servicio↔orden. La validación por rangos de código
-    (legacy) se eliminó: la categorización Consulta/Práctica/Honorarios Individuales
-    ahora vive en `nm_nomenclador.categoria`, no en el rango numérico del código.
-    """
-    if tpo_servicio == "I" and tipo_orden in {"C", "P", "R"}:
-        return "Internado solo admite orden tipo Sanatorio"
-    if tpo_servicio == "A" and tipo_orden == "S":
-        return "Ambulatorio no admite orden tipo Sanatorio"
-    return None
-
-
-def check_coherencia_codigo_categoria(
-    tipo_orden: str, categoria: Optional[str]
-) -> Optional[str]:
-    """Coherencia código↔orden basada en `nm_nomenclador.categoria` (reemplaza la
-    validación legacy por rangos). El caso claro y valioso: orden de consulta ⟺
-    código de categoría 'Consulta'. Las demás categorías (Practica / Honorarios
-    individuales) son demasiado gruesas para validar radiología por separado."""
-    if categoria is None:
-        return None  # código sin categoría → no se valida
-    if tipo_orden == "C" and categoria != "Consulta":
-        return f"Orden de consulta (C) requiere un código de categoría Consulta (es '{categoria}')"
-    if categoria == "Consulta" and tipo_orden != "C":
-        return "Un código de consulta requiere orden tipo Consulta (C)"
-    return None
-
-
+# ── Categorización (`tipo`) ──────────────────────────────────────────────────
 async def _get_categoria(db: AsyncSession, codigo: str) -> Optional[str]:
     stmt = select(NomencladorCMC.categoria).where(NomencladorCMC.codigo == codigo)
     return (await db.execute(stmt)).scalar_one_or_none()
+
+
+async def derivar_tipo(
+    db: AsyncSession, cod_clinica: Optional[int], cod_nomenclador: str
+) -> Optional[str]:
+    """`tipo` único de la prestación. Si se cargó una clínica → 'Sanatorio'; si no, la
+    `categoria` del código (Consulta | Practica | Honorarios individuales). NULL si el
+    código no tiene categoría."""
+    if cod_clinica is not None:
+        return "Sanatorio"
+    return await _get_categoria(db, cod_nomenclador)
 
 
 async def check_duplicado(
@@ -214,9 +193,8 @@ async def check_duplicado(
     cod_obr: str,
     cod_nom: str,
     dni_p: Optional[str],
-    tpo_funcion: str,
 ) -> Optional[DetalleFacturacionCMC]:
-    """Busca fila estado='P' con la misma combinación (§4.7).
+    """Busca fila estado='A' con la misma combinación (periodo, médico, OS, código, DNI).
 
     `nro_orden` NO entra en la clave: cada fila recibe uno único, así que
     incluirlo haría que el duplicado nunca matchee.
@@ -226,7 +204,6 @@ async def check_duplicado(
         DetalleFacturacionCMC.cod_med == cod_med,
         DetalleFacturacionCMC.cod_obr == cod_obr,
         DetalleFacturacionCMC.cod_nom == cod_nom,
-        DetalleFacturacionCMC.tpo_funcion == tpo_funcion,
         DetalleFacturacionCMC.estado == "A",
     )
     if dni_p is not None:
@@ -237,46 +214,45 @@ async def check_duplicado(
 
 
 # ── Normalizaciones y cálculo ────────────────────────────────────────────────
-def normalizar_tipo_orden(tipo_orden: str) -> str:
-    return "P" if tipo_orden == "R" else tipo_orden
-
-
 def normalizar_fecha_practica(
     fecha: Optional[datetime.date], periodo: str
 ) -> datetime.date:
     return fecha if fecha is not None else _periodo_to_date(periodo)
 
 
-def normalizar_urgencia(via_quirurgica: Optional[str], sub_tipo: Optional[str]) -> str:
-    if sub_tipo in {"CA", "CI"} and via_quirurgica in {"T", "L"}:
-        return via_quirurgica
-    return "N"
+def _dec(x) -> Decimal:
+    """Coerce a Decimal. Las columnas de montos son `double` en la DB legacy y vuelven
+    como float al leer del ORM → `Decimal(str(...))` evita errores float↔Decimal."""
+    return Decimal(str(x or 0))
 
 
-def aplicar_opcion_pago(
-    honorarios_base: Decimal,
-    gastos_base: Decimal,
-    ayudante_base: Decimal,
-    tpo_funcion: str,
-    porcentaje: int,
+def _aplicar_porcentaje(
+    h: Decimal, g: Decimal, a: Decimal, porcentaje: int
 ) -> tuple[Decimal, Decimal, Decimal]:
-    factor = Decimal(porcentaje) / Decimal(100)
-    cero = Decimal("0")
-    if tpo_funcion == "H":
-        return honorarios_base * factor, cero, cero
-    if tpo_funcion == "G":
-        return cero, gastos_base * factor, cero
-    if tpo_funcion == "HG":
-        return honorarios_base * factor, gastos_base * factor, cero
-    if tpo_funcion == "A":
-        return cero, cero, ayudante_base * factor
-    return honorarios_base, gastos_base, ayudante_base
+    """Escala los montos por el porcentaje (opción de pago)."""
+    f = Decimal(porcentaje) / Decimal(100)
+    return _dec(h) * f, _dec(g) * f, _dec(a) * f
+
+
+def tpo_funcion_derivado(h: Decimal, g: Decimal, a: Decimal) -> str:
+    """Deriva el `tpo_funcion` legacy (H/HG/G/A) de qué montos son > 0, solo para que
+    liquidación y lotes (que aún leen esa columna) sigan funcionando durante la
+    coexistencia. El modelo nuevo no usa este campo en la API."""
+    if h > 0 and g > 0:
+        return "HG"
+    if h > 0:
+        return "H"
+    if g > 0:
+        return "G"
+    if a > 0:
+        return "A"
+    return "H"
 
 
 def calcular_importe_total(
     h: Decimal, g: Decimal, a: Decimal, cantidad: int, sesion: int
 ) -> Decimal:
-    return (h + g + a) * Decimal(cantidad) * Decimal(sesion)
+    return (_dec(h) + _dec(g) + _dec(a)) * Decimal(cantidad) * Decimal(sesion)
 
 
 async def _base_nro_orden(db: AsyncSession) -> int:
@@ -295,30 +271,29 @@ async def _montos_de_item(
     tipo_calculo: str,
     fecha: datetime.date,
 ) -> tuple[Decimal, Decimal, Decimal, Optional[list[dict]]]:
-    """Resuelve los montos base (h, g, a) y el snapshot según el modo de cálculo."""
+    """Resuelve los montos base (h, g, a) SIN porcentaje, y el snapshot.
+
+    El concepto que el cliente manda en > 0 es el que se factura (médico/gastos/ayudante
+    queda implícito). En modo automático el monto sale del lookup para cada concepto
+    marcado en > 0; en manual se usan los montos enviados tal cual.
+    """
+    hi = item.honorarios or Decimal("0")
+    gi = item.gastos or Decimal("0")
+    ai = item.ayudante or Decimal("0")
     if tipo_calculo == "A":
-        precio = await resolver_precio(
-            db, cod_obra, medico, cod_nomenclador, fecha,
-        )
+        precio = await resolver_precio(db, cod_obra, medico, cod_nomenclador, fecha)
         if not precio.admitido:
             raise HTTPException(422, precio.motivo)
-        # Por presupuesto: el lookup admite con H/G/A en 0; el monto lo informa la
-        # OS y lo carga el operador a mano (reusa el modo manual). El check
-        # importe_total > 0 obliga a que el presupuesto venga cargado.
+        # Por presupuesto: el lookup admite con H/G/A en 0; el monto lo informa la OS
+        # y lo carga el operador a mano (montos del item).
         if precio.por_presupuesto:
-            return (
-                item.honorarios or Decimal("0"),
-                item.gastos or Decimal("0"),
-                item.ayudante or Decimal("0"),
-                precio.snapshot,
-            )
-        return precio.honorarios, precio.gastos, precio.ayudante, precio.snapshot
-    return (
-        item.honorarios or Decimal("0"),
-        item.gastos or Decimal("0"),
-        item.ayudante or Decimal("0"),
-        None,
-    )
+            return hi, gi, ai, precio.snapshot
+        # Para cada concepto marcado en > 0 por el front, usar el valor autoritativo del lookup.
+        h = precio.honorarios if hi > 0 else Decimal("0")
+        g = precio.gastos if gi > 0 else Decimal("0")
+        a = precio.ayudante if ai > 0 else Decimal("0")
+        return h, g, a, precio.snapshot
+    return hi, gi, ai, None
 
 
 # ── Guardado ─────────────────────────────────────────────────────────────────
@@ -331,13 +306,8 @@ async def guardar_prestaciones(
     periodo = await get_periodo_activo(db, payload.obra_social)
     items = payload.prestaciones
 
-    # Validaciones de equipo quirúrgico
+    # En carga múltiple (equipo) no se permite repetir el médico
     if len(items) > 1:
-        cirujanos = [i for i in items if i.tpo_funcion in {"H", "HG"}]
-        if len(cirujanos) != 1:
-            raise HTTPException(
-                422, "El equipo quirúrgico debe tener exactamente un cirujano (H/HG)"
-            )
         cods = [i.cod_medico for i in items]
         if len(set(cods)) != len(cods):
             raise HTTPException(422, "No se permite repetir cod_medico en el equipo")
@@ -346,31 +316,20 @@ async def guardar_prestaciones(
 
     ids: list[int] = []
     total_acum = Decimal("0")
+    filas: list[DetalleFacturacionCMC] = []
+    cabeza_id: Optional[int] = None  # fila del médico (honorarios > 0) = cabeza del equipo
 
     for i, item in enumerate(items):
         medico = await check_medico_activo(db, item.cod_medico)
-        tipo_orden_norm = normalizar_tipo_orden(item.tipo_orden)
         fecha_norm = normalizar_fecha_practica(item.fecha_practica, periodo)
         nro_orden_item = str(base + i + 1)
-
-        err = check_coherencia_servicio_orden(
-            item.tpo_servicio, item.tipo_orden, item.cod_nomenclador
-        )
-        if err:
-            raise HTTPException(422, err)
-
-        err_cat = check_coherencia_codigo_categoria(
-            item.tipo_orden, await _get_categoria(db, item.cod_nomenclador)
-        )
-        if err_cat:
-            raise HTTPException(422, err_cat)
 
         if item.cod_nomenclador in CODIGOS_NO_PERMITIDOS:
             raise HTTPException(422, "Código no permitido")
 
         dup = await check_duplicado(
             db, periodo, item.cod_medico, payload.obra_social,
-            item.cod_nomenclador, item.dni_paciente, item.tpo_funcion,
+            item.cod_nomenclador, item.dni_paciente,
         )
         if dup and not confirmar_duplicado:
             raise HTTPException(
@@ -384,11 +343,11 @@ async def guardar_prestaciones(
             db, item, payload.obra_social, medico,
             item.cod_nomenclador, item.tipo_calculo, fecha_norm,
         )
-
-        h, g, a = aplicar_opcion_pago(h_base, g_base, a_base, item.tpo_funcion, item.porcentaje)
+        h, g, a = _aplicar_porcentaje(h_base, g_base, a_base, item.porcentaje)
         total = calcular_importe_total(h, g, a, item.cantidad, item.sesion)
-        if total <= 0:
-            raise HTTPException(422, "El importe total debe ser mayor a 0")
+        # Importe 0 permitido: un concepto en 0 no afecta la suma de la liquidación.
+
+        tipo = await derivar_tipo(db, item.cod_clinica, item.cod_nomenclador)
 
         row = DetalleFacturacionCMC(
             calculo_snapshot=snapshot,
@@ -397,7 +356,10 @@ async def guardar_prestaciones(
             cod_med=item.cod_medico,
             nro_orden=nro_orden_item,
             cod_nom=item.cod_nomenclador,
-            tpo_funcion=item.tpo_funcion,
+            tipo=tipo,
+            grupo_equipo_id=item.grupo_equipo_id,
+            # tpo_funcion derivado SOLO para coexistencia (liquidación/lotes lo leen).
+            tpo_funcion=tpo_funcion_derivado(h, g, a),
             sesion=item.sesion,
             cantidad=item.cantidad,
             honorarios=h,
@@ -407,12 +369,9 @@ async def guardar_prestaciones(
             manual=item.tipo_calculo,
             dni_p=item.dni_paciente,
             nom_ape_p=nombre_paciente,
-            tpo_serv=item.tpo_servicio,
             cod_clinica=item.cod_clinica,
             fecha_practica=fecha_norm,
-            tipo_orden=tipo_orden_norm,
             porc=item.porcentaje,
-            urgencia=normalizar_urgencia(item.via_quirurgica, item.sub_tipo_nomenclador),
             estado="A",
             usuario=usuario,
         )
@@ -420,6 +379,17 @@ async def guardar_prestaciones(
         await db.flush()
         ids.append(row.id_detalle_prestaciones)
         total_acum += total
+        filas.append(row)
+        if cabeza_id is None and h > 0:
+            cabeza_id = row.id_detalle_prestaciones
+
+    # Vínculo de equipo: en POST multi-ítem, las filas sin grupo explícito apuntan a la
+    # fila del médico (cabeza). El médico también queda con grupo = su propio id, así
+    # `WHERE grupo_equipo_id = <id>` trae todo el equipo.
+    if len(items) > 1 and cabeza_id is not None:
+        for row in filas:
+            if row.grupo_equipo_id is None:
+                row.grupo_equipo_id = cabeza_id
 
     await db.commit()
     return GuardadoResponse(ids=ids, importe_total=total_acum)
@@ -435,9 +405,8 @@ async def listar_prestaciones(
     cod_nomenclador: Optional[str] = None,
     nro_orden: Optional[str] = None,
     estado: Optional[str] = None,
-    tpo_funcion: Optional[str] = None,
-    tpo_servicio: Optional[str] = None,
-    tipo_orden: Optional[str] = None,
+    tipo: Optional[str] = None,
+    grupo_equipo_id: Optional[int] = None,
     dni_paciente: Optional[str] = None,
     nombre_paciente: Optional[str] = None,
     fecha_desde: Optional[datetime.date] = None,
@@ -460,12 +429,10 @@ async def listar_prestaciones(
         filtros.append(M.nro_orden == nro_orden)
     if estado is not None:
         filtros.append(M.estado == estado)
-    if tpo_funcion is not None:
-        filtros.append(M.tpo_funcion == tpo_funcion)
-    if tpo_servicio is not None:
-        filtros.append(M.tpo_serv == tpo_servicio)
-    if tipo_orden is not None:
-        filtros.append(M.tipo_orden == tipo_orden)
+    if tipo is not None:
+        filtros.append(M.tipo == tipo)
+    if grupo_equipo_id is not None:
+        filtros.append(M.grupo_equipo_id == grupo_equipo_id)
     if dni_paciente is not None:
         filtros.append(M.dni_p == dni_paciente)
     if nombre_paciente is not None:
@@ -530,11 +497,10 @@ async def editar_prestacion(
     simples = {
         "cod_medico": "cod_med",
         "cod_nomenclador": "cod_nom",
-        "tpo_servicio": "tpo_serv",
         "cod_clinica": "cod_clinica",
+        "grupo_equipo_id": "grupo_equipo_id",
         "cantidad": "cantidad",
         "sesion": "sesion",
-        "tpo_funcion": "tpo_funcion",
         "porcentaje": "porc",
         "fecha_practica": "fecha_practica",
         "tipo_calculo": "manual",
@@ -546,53 +512,47 @@ async def editar_prestacion(
         if src in data:
             setattr(row, dst, data[src])
 
-    if "tipo_orden" in data:
-        row.tipo_orden = normalizar_tipo_orden(data["tipo_orden"])
-    if "via_quirurgica" in data or "sub_tipo_nomenclador" in data:
-        via = data.get("via_quirurgica")
-        sub = data.get("sub_tipo_nomenclador")
-        row.urgencia = normalizar_urgencia(via, sub)
+    # Recalcular `tipo` si cambió la clínica o el código
+    if "cod_clinica" in data or "cod_nomenclador" in data:
+        row.tipo = await derivar_tipo(db, row.cod_clinica, row.cod_nom)
 
     # Recalcular importe con el estado resultante
     medico = await check_medico_activo(db, row.cod_med)
     tipo_calculo = row.manual or "A"
     fecha = row.fecha_practica or datetime.date.today()
 
-    # Inputs de precio que disparan re-aplicar la opción de pago. Clave para no
-    # re-factorizar (doble descuento) cuando solo se edita cantidad/sesión/fecha:
-    # los montos guardados ya están factorizados.
-    pricing_keys = {"honorarios", "gastos", "ayudante", "tpo_funcion", "porcentaje",
+    # Inputs de precio que disparan recotizar. Clave para NO re-factorizar (doble
+    # descuento) cuando solo se edita cantidad/sesión/fecha: los montos ya están factorizados.
+    pricing_keys = {"honorarios", "gastos", "ayudante", "porcentaje",
                     "cod_nomenclador", "tipo_calculo"}
-    recotizar = bool(pricing_keys & data.keys())
+    if pricing_keys & data.keys():
+        # Markers: qué conceptos están en > 0 tras aplicar el PATCH (rol implícito).
+        hi = row.honorarios or Decimal("0")
+        gi = row.gastos or Decimal("0")
+        ai = row.ayudante or Decimal("0")
+        if tipo_calculo == "A":
+            precio = await resolver_precio(db, row.cod_obr, medico, row.cod_nom, fecha)
+            if not precio.admitido:
+                raise HTTPException(422, precio.motivo)
+            if precio.por_presupuesto:
+                hb, gb, ab = hi, gi, ai
+            else:
+                hb = precio.honorarios if hi > 0 else Decimal("0")
+                gb = precio.gastos if gi > 0 else Decimal("0")
+                ab = precio.ayudante if ai > 0 else Decimal("0")
+            row.calculo_snapshot = precio.snapshot
+        else:  # manual
+            hb, gb, ab = hi, gi, ai
+            row.calculo_snapshot = None
+        h, g, a = _aplicar_porcentaje(hb, gb, ab, row.porc or 100)
+        row.honorarios, row.gastos, row.ayudante = h, g, a
+        row.tpo_funcion = tpo_funcion_derivado(h, g, a)
 
-    if tipo_calculo == "A":
-        if recotizar:
-            # Automático: la base sale del lookup (sin factor) y se factoriza una vez.
-            h_base, g_base, a_base, snapshot = await _montos_de_item(
-                db, payload, row.cod_obr, medico, row.cod_nom, tipo_calculo, fecha,
-            )
-            h, g, a = aplicar_opcion_pago(
-                h_base, g_base, a_base, row.tpo_funcion or "H", row.porc or 100
-            )
-            row.honorarios, row.gastos, row.ayudante = h, g, a
-            row.calculo_snapshot = snapshot
-    else:  # manual
-        if recotizar:
-            # El PATCH trae montos base nuevos (o cambió tpo_funcion/porcentaje):
-            # los campos enviados ya quedaron en row por el mapeo simples; se factoriza una vez.
-            h, g, a = aplicar_opcion_pago(
-                row.honorarios or Decimal("0"), row.gastos or Decimal("0"),
-                row.ayudante or Decimal("0"), row.tpo_funcion or "H", row.porc or 100,
-            )
-            row.honorarios, row.gastos, row.ayudante = h, g, a
-
-    # importe_total siempre se recalcula con los montos (ya factorizados) y cantidad/sesión.
+    # importe_total siempre se recalcula con los montos y cantidad/sesión. (0 permitido.)
     row.importe_total = calcular_importe_total(
         row.honorarios or Decimal("0"), row.gastos or Decimal("0"),
         row.ayudante or Decimal("0"), row.cantidad or 1, row.sesion or 1,
     )
-    if row.importe_total <= 0:
-        raise HTTPException(422, "El importe total debe ser mayor a 0")
 
     await db.commit()
     await db.refresh(row)

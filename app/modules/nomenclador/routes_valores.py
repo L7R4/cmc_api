@@ -138,21 +138,25 @@ def _completar_tres_componentes(componentes: list[dict]) -> list[dict]:
 
 
 def _resolver_cantidad(
-    nom: NomencladorCMC, concepto: str, cantidad: Decimal
+    nom: NomencladorCMC, galeno: Optional[Galeno], concepto: str, cantidad: Decimal
 ) -> Decimal:
     """
-    Pre-fill de unidades: si cantidad=0 para un componente calculable, usa las
-    unidades por defecto del código (nomenclador nacional). Lanza 422 si no hay.
+    Pre-fill de unidades para un componente calculable con cantidad=0.
+    Precedencia: cantidad explícita > unidad-plantilla del galeno (por OS) >
+    unidades por defecto del código (nomenclador nacional). Lanza 422 si ninguna existe.
     """
     if cantidad and cantidad > 0:
         return cantidad
     attr = _UNIDADES_MAP[concepto]
+    galeno_default = getattr(galeno, attr, None) if galeno is not None else None
+    if galeno_default:
+        return galeno_default
     default = getattr(nom, attr, None)
     if not default:
         raise HTTPException(
             422,
-            f"El componente '{concepto}' requiere cantidad explícita o "
-            f"que el código tenga '{attr}' configurado",
+            f"El componente '{concepto}' requiere cantidad explícita, o que el galeno "
+            f"o el código tengan '{attr}' configurado",
         )
     return default
 
@@ -218,7 +222,7 @@ async def _crear_valor_con_componentes(
                 service.validar_nivel_galeno(galeno, nivel)
             except NivelInconsistenteError as e:
                 raise HTTPException(422, e.message)
-            cantidad = _resolver_cantidad(nom, comp_in.concepto, cantidad)
+            cantidad = _resolver_cantidad(nom, galeno, comp_in.concepto, cantidad)
             if galeno_relleno is None:
                 galeno_relleno = comp_in.galeno_id
 
@@ -1135,11 +1139,16 @@ async def importar_valores_csv(
                         break
                     galeno_id = galeno.id
                     if cantidad == 0:
-                        # Pre-fill con las unidades del nomenclador. Si no hay unidades,
-                        # el componente queda en 0 (subtotal 0) — válido: todo Valor lleva
-                        # los 3 conceptos aunque alguno sea 0.
+                        # Pre-fill: unidad-plantilla del galeno y, si no tiene, unidades
+                        # del nomenclador. Si ninguna existe, el componente queda en 0
+                        # (subtotal 0) — válido: todo Valor lleva los 3 conceptos aunque
+                        # alguno sea 0 (a diferencia del alta manual, el CSV no lanza 422).
                         attr = _UNIDADES_MAP.get(concepto)
-                        cantidad = (attr and getattr(nom, attr, None)) or Decimal("0")
+                        cantidad = (
+                            (attr and getattr(galeno, attr, None))
+                            or (attr and getattr(nom, attr, None))
+                            or Decimal("0")
+                        )
 
                 componentes_resueltos.append({
                     "concepto": concepto,

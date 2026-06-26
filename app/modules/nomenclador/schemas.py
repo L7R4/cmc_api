@@ -211,6 +211,10 @@ class GalenoCreate(BaseModel):
     nivel: Optional[int] = None
     vigencia_desde: datetime.date
     valor_unitario: Decimal
+    # Unidades-plantilla por concepto (defaults al asociar a un código). Nullable.
+    unidades_honorarios: Optional[Decimal] = None
+    unidades_ayudante: Optional[Decimal] = None
+    unidades_gastos: Optional[Decimal] = None
     observacion: Optional[str] = None
     # Clave-identidad derivada de `nombre` (no se envía; se ignora si llega).
     codigo: str = ""
@@ -226,6 +230,8 @@ class GalenoCreate(BaseModel):
 class GalenoUpdate(BaseModel):
     # `nombre` es inmutable tras crear (deriva la clave-identidad usada por
     # vigencias y lookups). Solo se editan metadatos sin efecto sobre la clave.
+    # Las unidades NO se editan acá: cambiarlas debe propagar a los valores vigentes,
+    # así que tienen su propio endpoint POST /{id}/actualizar_unidades.
     observacion: Optional[str] = None
 
 
@@ -237,6 +243,10 @@ class GalenoActualizarPrecioIn(BaseModel):
 class GalenoNivelItem(BaseModel):
     nivel: Optional[int] = None
     valor_unitario: Decimal
+    # Unidades-plantilla por nivel (cada nivel puede pactar sus propias unidades).
+    unidades_honorarios: Optional[Decimal] = None
+    unidades_ayudante: Optional[Decimal] = None
+    unidades_gastos: Optional[Decimal] = None
 
 
 class GalenoCrearNivelesIn(BaseModel):
@@ -297,11 +307,53 @@ class GalenoOut(BaseModel):
     vigencia_desde: datetime.date
     vigencia_hasta: Optional[datetime.date]
     valor_unitario: Decimal
+    unidades_honorarios: Optional[Decimal]
+    unidades_ayudante: Optional[Decimal]
+    unidades_gastos: Optional[Decimal]
     activo: bool
     observacion: Optional[str]
     created_at: datetime.datetime
 
     model_config = {"from_attributes": True}
+
+
+class GalenoActualizarUnidadesIn(BaseModel):
+    """
+    Cambia las unidades-plantilla de un galeno y PROPAGA el cambio a los valores
+    vigentes: pisa la cantidad de todos los componentes activos que usan el galeno en
+    los conceptos provistos (opción 'pisar todos') y regenera el historial.
+    Solo se propagan los conceptos cuyo campo se envía con un valor no nulo.
+    """
+    vigencia_desde: datetime.date
+    unidades_honorarios: Optional[Decimal] = None
+    unidades_ayudante: Optional[Decimal] = None
+    unidades_gastos: Optional[Decimal] = None
+
+
+class GalenoActualizarUnidadesResult(BaseModel):
+    galeno: GalenoOut
+    componentes_actualizados: int
+
+
+class GalenosImportarIn(BaseModel):
+    """Importa todos los galenos vigentes de una OS origen a una OS destino."""
+    obra_social_nro_origen: int
+    obra_social_nro_destino: int
+    vigencia_desde: datetime.date
+
+    @model_validator(mode="after")
+    def _distintas(self) -> "GalenosImportarIn":
+        if self.obra_social_nro_origen == self.obra_social_nro_destino:
+            raise ValueError("La OS origen y destino deben ser distintas")
+        return self
+
+
+class GalenosImportarResult(BaseModel):
+    total_origen: int
+    creados: int          # galenos nuevos en el destino
+    rotados: int          # galenos del destino rotados (cerró vigente + abrió nuevo)
+    sin_cambios: int      # ya estaban idénticos en el destino
+    errores: List[dict]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -377,9 +429,17 @@ class ValorComponenteOut(BaseModel):
     id: int
     valor_id: int
     concepto: str
+    # Discriminador: 'calculable' (galeno × cantidad) | 'fijo' (precio embebido)
+    tipo: str
     galeno_id: Optional[int]
+    galeno_codigo: Optional[str] = None
+    galeno_nivel: Optional[int] = None
     cantidad: Decimal
+    # valor_unitario = valor CRUDO almacenado (null en calculables, es lo esperado).
+    # precio_unitario = VU EFECTIVO a mostrar (del galeno si es calculable, del fijo si no).
     valor_unitario: Optional[Decimal]
+    precio_unitario: Optional[Decimal] = None
+    subtotal: Decimal
     orden: int
     activo: bool
     observacion: Optional[str]
@@ -453,6 +513,8 @@ class ValorOut(BaseModel):
     complejidad: Optional[str]
     especialidad_id_colegio: Optional[int]
     por_presupuesto: bool = False
+    # Modalidad de la ecuación: 'galeno' | 'fijo' | 'por_presupuesto'
+    modalidad: str
     vigencia_desde: datetime.date
     vigencia_hasta: Optional[datetime.date]
     estado: str

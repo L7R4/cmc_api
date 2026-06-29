@@ -46,6 +46,7 @@ FIELD_MAP = {
 
 DATE_KEYS = {
     "fecha_nac", "fecha_recibido", "fecha_matricula", "fecha_resolucion",
+    "fecha_ingreso",
     "vencimiento_anssal", "vencimiento_malapraxis", "vencimiento_cobertura",
 }
 
@@ -364,6 +365,7 @@ class MedicoUpdateIn(BaseModel):
     matricula_nac: Optional[int] = None
     fecha_recibido: Optional[str] = None
     fecha_matricula: Optional[str] = None
+    fecha_ingreso: Optional[str] = None
     domicilio_consulta: Optional[str] = None
     telefono_consulta: Optional[str] = None
     condicion_impositiva: Optional[str] = None
@@ -396,7 +398,7 @@ class MedicoUpdateIn(BaseModel):
         return v
 
     @field_validator(
-        "fecha_nac", "fecha_recibido", "fecha_matricula",
+        "fecha_nac", "fecha_recibido", "fecha_matricula", "fecha_ingreso",
         "vencimiento_anssal", "vencimiento_malapraxis", "vencimiento_cobertura",
         mode="before",
     )

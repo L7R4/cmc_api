@@ -5,7 +5,7 @@ from decimal import Decimal
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
-from sqlalchemy import select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.database import get_db
@@ -346,6 +346,85 @@ async def list_valores(
     stmt = stmt.offset((page - 1) * size).limit(size)
     result = await db.execute(stmt)
     return result.scalars().all()
+
+
+@router.get("/por_vigencia")
+async def contar_valores_por_vigencia(
+    obra_social_nro: int = Query(...),
+    vigencia_desde: datetime.date = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Cantidad de valores cargados para una OS en una vigencia_desde exacta.
+    Se usa para impedir cargar dos veces los mismos precios en la misma vigencia."""
+    stmt = (
+        select(func.count())
+        .select_from(Valor)
+        .where(
+            Valor.obra_social_nro == obra_social_nro,
+            Valor.vigencia_desde == vigencia_desde,
+        )
+    )
+    cantidad = (await db.execute(stmt)).scalar_one()
+    return {
+        "obra_social_nro": obra_social_nro,
+        "vigencia_desde": vigencia_desde,
+        "cantidad": cantidad,
+    }
+
+
+@router.get("/vigencias")
+async def listar_vigencias_cargadas(
+    obra_social_nro: int = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Vigencias (vigencia_desde) con valores cargados para una OS, con su cantidad.
+    Alimenta el selector del modal de eliminación."""
+    stmt = (
+        select(Valor.vigencia_desde, func.count().label("cantidad"))
+        .where(Valor.obra_social_nro == obra_social_nro)
+        .group_by(Valor.vigencia_desde)
+        .order_by(Valor.vigencia_desde.desc())
+    )
+    rows = (await db.execute(stmt)).all()
+    return [{"vigencia_desde": r[0], "cantidad": r[1]} for r in rows]
+
+
+@router.delete("/por_vigencia")
+async def eliminar_valores_por_vigencia(
+    obra_social_nro: int = Query(...),
+    vigencia_desde: datetime.date = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Elimina TODOS los valores (con sus componentes e historial de precios) de una
+    obra social cargados con una vigencia_desde exacta. Acotado a esa OS y vigencia:
+    no toca otras obras sociales ni otras vigencias. Pensado para revertir una carga
+    equivocada antes de volver a cargar.
+    """
+    ids = (
+        await db.execute(
+            select(Valor.id).where(
+                Valor.obra_social_nro == obra_social_nro,
+                Valor.vigencia_desde == vigencia_desde,
+            )
+        )
+    ).scalars().all()
+
+    if ids:
+        await db.execute(
+            delete(HistorialPrecioCodigo).where(
+                (HistorialPrecioCodigo.valores_id.in_(ids))
+                | (
+                    (HistorialPrecioCodigo.obra_social_nro == obra_social_nro)
+                    & (HistorialPrecioCodigo.vigencia_desde == vigencia_desde)
+                )
+            )
+        )
+        await db.execute(delete(ValorComponente).where(ValorComponente.valor_id.in_(ids)))
+        await db.execute(delete(Valor).where(Valor.id.in_(ids)))
+        await db.commit()
+
+    return {"eliminados": len(ids)}
 
 
 @router.post("/", response_model=ValorOut, status_code=201)
@@ -1089,7 +1168,7 @@ async def importar_valores_csv(
     for (codigo, origen, especialidad), data in grupos.items():
         try:
             if origen not in origenes_validos:
-                errores.append({"fila": data["fila_inicio"],
+                errores.append({"fila": data["fila_inicio"], "codigo": codigo,
                                 "motivo": f"origen inválido '{origen}' (esperado: {', '.join(sorted(origenes_validos))})"})
                 continue
 
@@ -1098,7 +1177,7 @@ async def importar_valores_csv(
             )
             nom = (await db.execute(stmt_nom)).scalar_one_or_none()
             if not nom:
-                errores.append({"fila": data["fila_inicio"], "motivo": f"Código CMC '{codigo}' no encontrado"})
+                errores.append({"fila": data["fila_inicio"], "codigo": codigo, "motivo": f"Código CMC '{codigo}' no encontrado"})
                 continue
 
             nivel_valor = data["nivel"]
@@ -1179,6 +1258,7 @@ async def importar_valores_csv(
                 except ValueError as e:
                     error_grupo = {"fila": data["fila_inicio"], "motivo": str(e)}
             if error_grupo:
+                error_grupo["codigo"] = codigo
                 errores.append(error_grupo)
                 continue
 
@@ -1215,7 +1295,7 @@ async def importar_valores_csv(
             )
             procesados += 1
         except Exception as e:
-            errores.append({"fila": data.get("fila_inicio", "?"), "motivo": str(e)})
+            errores.append({"fila": data.get("fila_inicio", "?"), "codigo": codigo, "motivo": str(e)})
 
     await db.commit()
     return ImportarCSVResult(procesados=procesados, errores=errores)

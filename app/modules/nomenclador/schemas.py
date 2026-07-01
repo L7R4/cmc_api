@@ -564,6 +564,19 @@ class ActualizacionMasivaResult(BaseModel):
     omitidos: int = 0
 
 
+class GenerarValoresNNIn(BaseModel):
+    """Seed de valores NN por rangos de código para una obra social."""
+    obra_social_nro: int
+    vigencia_desde: datetime.date
+
+
+class GenerarValoresNNResult(BaseModel):
+    total_candidatos: int   # códigos en rango (1..419999) con >=1 unidad
+    creados: int            # valores NN nuevos
+    recreados: int          # tenían NN activo → se cerró y recreó
+    errores: List[dict]     # [{codigo, motivo}] (ej: galeno faltante en la OS)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Replicación de estructura (ecuación de componentes)
 # ─────────────────────────────────────────────────────────────────────────────

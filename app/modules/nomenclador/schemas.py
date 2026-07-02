@@ -336,10 +336,19 @@ class GalenoActualizarUnidadesResult(BaseModel):
 
 
 class GalenosImportarIn(BaseModel):
-    """Importa todos los galenos vigentes de una OS origen a una OS destino."""
+    """Importa los galenos vigentes de una OS origen a una OS destino."""
     obra_social_nro_origen: int
     obra_social_nro_destino: int
     vigencia_desde: datetime.date
+    # Limita la importación a estos códigos (None o lista vacía = todos).
+    codigos: Optional[List[str]] = None
+    # Si el origen tiene un galeno nivelado y el destino lo tiene sin nivel,
+    # reemplaza el sin-nivel del destino por los niveles del origen (reapunta
+    # los valores del destino al galeno del nivel de cada valor).
+    convertir_a_nivelado: bool = False
+    # Copia solo el valor_unitario del origen y conserva las unidades del destino
+    # (para galenos que ya existen en el destino).
+    solo_valor: bool = False
 
     @model_validator(mode="after")
     def _distintas(self) -> "GalenosImportarIn":
@@ -353,6 +362,7 @@ class GalenosImportarResult(BaseModel):
     creados: int          # galenos nuevos en el destino
     rotados: int          # galenos del destino rotados (cerró vigente + abrió nuevo)
     sin_cambios: int      # ya estaban idénticos en el destino
+    convertidos: int = 0  # códigos del destino convertidos de sin-nivel a nivelado
     errores: List[dict]
 
 

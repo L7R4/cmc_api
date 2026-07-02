@@ -349,11 +349,18 @@ async def propagar_unidades_galeno(
     return len(componentes)
 
 
-def _galenos_iguales(a: Galeno, b: Galeno) -> bool:
-    """True si dos galenos tienen el mismo precio y las mismas unidades-plantilla."""
+def _galenos_iguales(a: Galeno, b: Galeno, solo_valor: bool = False) -> bool:
+    """
+    True si dos galenos ya coinciden en lo que la importación va a copiar.
+    Con `solo_valor` compara solo el precio (las unidades del destino se conservan);
+    si no, compara precio + unidades-plantilla.
+    """
+    if a.valor_unitario != b.valor_unitario:
+        return False
+    if solo_valor:
+        return True
     return (
-        a.valor_unitario == b.valor_unitario
-        and a.unidades_honorarios == b.unidades_honorarios
+        a.unidades_honorarios == b.unidades_honorarios
         and a.unidades_ayudante == b.unidades_ayudante
         and a.unidades_gastos == b.unidades_gastos
     )
@@ -378,12 +385,17 @@ async def _rotar_galeno_destino(
     destino_g: Galeno,
     origen_g: Galeno,
     vigencia_desde: datetime.date,
+    solo_valor: bool = False,
 ) -> Galeno:
     """
     Rota el galeno vigente del destino con los datos del origen: cierra la fila vigente,
     crea una nueva con el precio + unidades del origen, reapunta los componentes activos
     del destino al galeno nuevo (pisando la cantidad con la nueva unidad-plantilla donde
     exista) y regenera el historial (motivo 'replicacion'). No comitea.
+
+    Con `solo_valor=True` copia SOLO el `valor_unitario` del origen y conserva las
+    unidades-plantilla del destino (y no pisa la cantidad de los componentes): sirve
+    para actualizar el "valor del galeno" sin tocar la estructura de niveles del destino.
     """
     fecha_corte = vigencia_desde - datetime.timedelta(days=1)
     if destino_g.vigencia_desde > fecha_corte:
@@ -395,6 +407,7 @@ async def _rotar_galeno_destino(
     destino_g.activo = False
     await db.flush()
 
+    fuente_unidades = destino_g if solo_valor else origen_g
     nuevo = Galeno(
         obra_social_nro=destino_g.obra_social_nro,
         codigo=destino_g.codigo,
@@ -403,9 +416,9 @@ async def _rotar_galeno_destino(
         vigencia_desde=vigencia_desde,
         vigencia_hasta=None,
         valor_unitario=origen_g.valor_unitario,
-        unidades_honorarios=origen_g.unidades_honorarios,
-        unidades_ayudante=origen_g.unidades_ayudante,
-        unidades_gastos=origen_g.unidades_gastos,
+        unidades_honorarios=fuente_unidades.unidades_honorarios,
+        unidades_ayudante=fuente_unidades.unidades_ayudante,
+        unidades_gastos=fuente_unidades.unidades_gastos,
     )
     db.add(nuevo)
     await db.flush()
@@ -423,9 +436,12 @@ async def _rotar_galeno_destino(
     valor_ids: set[int] = set()
     for comp in comps:
         comp.galeno_id = nuevo.id
-        nueva_unidad = getattr(nuevo, _CONCEPTO_A_UNIDAD[comp.concepto])
-        if nueva_unidad is not None:
-            comp.cantidad = nueva_unidad
+        # En modo solo_valor se conserva la cantidad del componente (la estructura
+        # de niveles del destino no cambia; solo cambia el precio por unidad).
+        if not solo_valor:
+            nueva_unidad = getattr(nuevo, _CONCEPTO_A_UNIDAD[comp.concepto])
+            if nueva_unidad is not None:
+                comp.cantidad = nueva_unidad
         valor_ids.add(comp.valor_id)
     await db.flush()
 
@@ -446,33 +462,160 @@ async def _rotar_galeno_destino(
     return nuevo
 
 
+async def _convertir_destino_a_nivelado(
+    db: AsyncSession,
+    destino_viejo: Galeno,
+    origen_rows: list[Galeno],
+    obra_social_nro_destino: int,
+    vigencia_desde: datetime.date,
+) -> None:
+    """
+    Reemplaza el galeno sin-nivel vigente del destino por el set nivelado del origen:
+    cierra la fila sin nivel, crea una fila por nivel (precio + unidades del origen)
+    y reapunta los componentes activos del destino al galeno del nivel de cada valor,
+    regenerando historial (motivo 'replicacion'). Valida ANTES de mutar: todo valor
+    activo que use el galeno debe tener un nivel presente en el set del origen.
+    No comitea.
+    """
+    fecha_corte = vigencia_desde - datetime.timedelta(days=1)
+    if destino_viejo.vigencia_desde > fecha_corte:
+        raise ValueError(
+            f"vigencia_desde ({vigencia_desde}) debe ser posterior a la vigencia "
+            f"actual del galeno destino ({destino_viejo.vigencia_desde})"
+        )
+
+    pares = (await db.execute(
+        select(ValorComponente, Valor.nivel)
+        .join(Valor, Valor.id == ValorComponente.valor_id)
+        .where(
+            ValorComponente.galeno_id == destino_viejo.id,
+            ValorComponente.activo == True,
+            Valor.estado == "activo",
+        )
+    )).all()
+
+    niveles_origen = {g.nivel for g in origen_rows}
+    for comp, nivel_valor in pares:
+        if nivel_valor not in niveles_origen:
+            raise ValueError(
+                f"no se puede convertir a nivelado: el valor {comp.valor_id} "
+                f"(nivel {nivel_valor}) usa este galeno y el origen no tiene ese nivel"
+            )
+
+    destino_viejo.vigencia_hasta = fecha_corte
+    destino_viejo.activo = False
+    await db.flush()
+
+    nuevos_por_nivel: dict[int, Galeno] = {}
+    for g in origen_rows:
+        nuevo = Galeno(
+            obra_social_nro=obra_social_nro_destino,
+            codigo=g.codigo,
+            nombre=g.nombre,
+            nivel=g.nivel,
+            vigencia_desde=vigencia_desde,
+            vigencia_hasta=None,
+            valor_unitario=g.valor_unitario,
+            unidades_honorarios=g.unidades_honorarios,
+            unidades_ayudante=g.unidades_ayudante,
+            unidades_gastos=g.unidades_gastos,
+        )
+        db.add(nuevo)
+        nuevos_por_nivel[g.nivel] = nuevo
+    await db.flush()
+
+    nivel_por_valor: dict[int, int] = {}
+    for comp, nivel_valor in pares:
+        nuevo = nuevos_por_nivel[nivel_valor]
+        comp.galeno_id = nuevo.id
+        nueva_unidad = getattr(nuevo, _CONCEPTO_A_UNIDAD[comp.concepto])
+        if nueva_unidad is not None:
+            comp.cantidad = nueva_unidad
+        nivel_por_valor[comp.valor_id] = nivel_valor
+    await db.flush()
+
+    for valor_id, nivel_valor in nivel_por_valor.items():
+        await regenerar_historial_por_valores(
+            valor_id, fecha_corte, db, motivo="replicacion",
+            nueva_vigencia_desde=vigencia_desde,
+        )
+        await db.execute(
+            update(HistorialPrecioCodigo)
+            .where(
+                HistorialPrecioCodigo.valores_id == valor_id,
+                HistorialPrecioCodigo.vigencia_hasta.is_(None),
+                HistorialPrecioCodigo.motivo_cambio == "replicacion",
+            )
+            .values(referencia_cambio_id=nuevos_por_nivel[nivel_valor].id)
+        )
+
+
 async def importar_galenos_entre_os(
     obra_social_nro_origen: int,
     obra_social_nro_destino: int,
     vigencia_desde: datetime.date,
     db: AsyncSession,
+    codigos: Optional[list[str]] = None,
+    convertir_a_nivelado: bool = False,
+    solo_valor: bool = False,
 ) -> dict:
     """
-    Copia todos los galenos VIGENTES de la OS origen a la OS destino (precio + unidades):
+    Copia los galenos VIGENTES de la OS origen a la OS destino (precio + unidades):
+    - `codigos` limita la importación a esos códigos (None/vacío = todos).
     - destino sin ese (codigo, nivel)         → crea el galeno.
     - destino con ese (codigo, nivel) vigente → rota vigencia (conserva historial) y
                                                  reapunta los valores del destino al nuevo.
     - destino idéntico (precio + unidades)    → no hace nada (sin_cambios).
+    - origen nivelado y destino sin nivel     → error, salvo `convertir_a_nivelado`:
+      reemplaza el sin-nivel del destino por los niveles del origen y reapunta los
+      valores del destino al galeno del nivel de cada valor.
+    Con `solo_valor` la rotación copia SOLO el `valor_unitario` del origen y conserva
+    las unidades-plantilla del destino (solo aplica a galenos ya existentes en el destino;
+    los que no existen se crean igual con los datos del origen, no hay unidades que conservar).
     Partial-success: los ítems con error se reportan y el resto se importa igual.
     No comitea: corre dentro de la transacción del caller.
     """
+    stmt = select(Galeno).where(
+        Galeno.obra_social_nro == obra_social_nro_origen,
+        Galeno.vigencia_hasta.is_(None),
+        Galeno.activo == True,
+    )
+    if codigos:
+        stmt = stmt.where(Galeno.codigo.in_(codigos))
     origen_galenos = (await db.execute(
-        select(Galeno).where(
-            Galeno.obra_social_nro == obra_social_nro_origen,
-            Galeno.vigencia_hasta.is_(None),
-            Galeno.activo == True,
-        ).order_by(Galeno.codigo, Galeno.nivel)
+        stmt.order_by(Galeno.codigo, Galeno.nivel)
     )).scalars().all()
 
-    creados = rotados = sin_cambios = 0
+    creados = rotados = sin_cambios = convertidos = 0
     errores: list[dict] = []
+    # Códigos ya resueltos por conversión (con éxito o con error): el loop
+    # principal los saltea para no duplicar conteos ni repetir errores por nivel.
+    codigos_resueltos: set[str] = set()
+
+    if convertir_a_nivelado:
+        por_codigo: dict[str, list[Galeno]] = {}
+        for g in origen_galenos:
+            por_codigo.setdefault(g.codigo, []).append(g)
+        for codigo, rows in por_codigo.items():
+            if rows[0].nivel is None:
+                continue
+            destino_viejo = await buscar_galeno_vigente(
+                db, obra_social_nro_destino, codigo, None
+            )
+            if destino_viejo is None:
+                continue
+            try:
+                await _convertir_destino_a_nivelado(
+                    db, destino_viejo, rows, obra_social_nro_destino, vigencia_desde
+                )
+                convertidos += 1
+            except ValueError as e:
+                errores.append({"codigo": codigo, "nivel": None, "motivo": str(e)})
+            codigos_resueltos.add(codigo)
 
     for g in origen_galenos:
+        if g.codigo in codigos_resueltos:
+            continue
         try:
             destino_g = await buscar_galeno_vigente(
                 db, obra_social_nro_destino, g.codigo, g.nivel
@@ -500,10 +643,12 @@ async def importar_galenos_entre_os(
                 ))
                 await db.flush()
                 creados += 1
-            elif _galenos_iguales(destino_g, g):
+            elif _galenos_iguales(destino_g, g, solo_valor=solo_valor):
                 sin_cambios += 1
             else:
-                await _rotar_galeno_destino(db, destino_g, g, vigencia_desde)
+                await _rotar_galeno_destino(
+                    db, destino_g, g, vigencia_desde, solo_valor=solo_valor
+                )
                 rotados += 1
         except ValueError as e:
             errores.append({"codigo": g.codigo, "nivel": g.nivel, "motivo": str(e)})
@@ -513,6 +658,7 @@ async def importar_galenos_entre_os(
         "creados": creados,
         "rotados": rotados,
         "sin_cambios": sin_cambios,
+        "convertidos": convertidos,
         "errores": errores,
     }
 

@@ -200,16 +200,22 @@ async def importar_galenos_de_obra_social(
     body: GalenosImportarIn, db: AsyncSession = Depends(get_db)
 ):
     """
-    Copia todos los galenos VIGENTES de la OS origen a la OS destino (precio + unidades).
-    Los que ya existen vigentes en el destino se rotan (cierra el viejo, abre uno nuevo
-    con los datos del origen y reapunta los valores del destino al galeno nuevo,
-    conservando historial). Los idénticos se omiten. Operación transaccional única.
+    Copia los galenos VIGENTES de la OS origen a la OS destino (precio + unidades);
+    `codigos` limita la copia a esos códigos. Los que ya existen vigentes en el
+    destino se rotan (cierra el viejo, abre uno nuevo con los datos del origen y
+    reapunta los valores del destino al galeno nuevo, conservando historial). Los
+    idénticos se omiten. Con `convertir_a_nivelado`, si el destino tiene el galeno
+    sin nivel y el origen lo tiene nivelado, se reemplaza por los niveles del origen.
+    Operación transaccional única.
     """
     resultado = await service.importar_galenos_entre_os(
         body.obra_social_nro_origen,
         body.obra_social_nro_destino,
         body.vigencia_desde,
         db,
+        codigos=body.codigos,
+        convertir_a_nivelado=body.convertir_a_nivelado,
+        solo_valor=body.solo_valor,
     )
     if resultado["total_origen"] == 0:
         raise HTTPException(

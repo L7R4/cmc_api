@@ -372,6 +372,31 @@ async def contar_valores_por_vigencia(
     }
 
 
+@router.get("/codigos_por_vigencia")
+async def codigos_por_vigencia(
+    obra_social_nro: int = Query(...),
+    vigencia_desde: datetime.date = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Códigos ya cargados para una OS en una vigencia_desde exacta.
+    Permite cargar una misma vigencia por partes (varias hojas) sin repetir códigos:
+    el importador omite los que ya están cargados en esa vigencia."""
+    stmt = (
+        select(Valor.codigo)
+        .where(
+            Valor.obra_social_nro == obra_social_nro,
+            Valor.vigencia_desde == vigencia_desde,
+        )
+        .distinct()
+    )
+    codigos = (await db.execute(stmt)).scalars().all()
+    return {
+        "obra_social_nro": obra_social_nro,
+        "vigencia_desde": vigencia_desde,
+        "codigos": list(codigos),
+    }
+
+
 @router.get("/vigencias")
 async def listar_vigencias_cargadas(
     obra_social_nro: int = Query(...),

@@ -626,7 +626,11 @@ async def importar_galenos_entre_os(
                 ):
                     errores.append({
                         "codigo": g.codigo, "nivel": g.nivel,
-                        "motivo": "mezclaría galenos nivelados y sin nivel en el destino",
+                        "motivo": (
+                            "el destino tiene este galeno sin nivel — activá "
+                            "'Reemplazar galenos sin nivel del destino por los niveles "
+                            "del origen' para convertirlo a nivelado"
+                        ),
                     })
                     continue
                 db.add(Galeno(

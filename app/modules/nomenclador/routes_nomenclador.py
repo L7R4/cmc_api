@@ -55,6 +55,19 @@ async def list_nomenclador(
     return result.scalars().all()
 
 
+@router.get("/codigos", response_model=List[str])
+async def list_codigos(
+    activo: Optional[bool] = Query(True),
+    db: AsyncSession = Depends(get_db),
+):
+    """Solo los códigos del catálogo (para auto-detectar/validar en importaciones)."""
+    stmt = select(NomencladorCMC.codigo)
+    if activo is not None:
+        stmt = stmt.where(NomencladorCMC.activo == activo)
+    result = await db.execute(stmt)
+    return [row[0] for row in result.all()]
+
+
 @router.post("/", response_model=NomencladorOut, status_code=201)
 async def create_nomenclador(body: NomencladorCreate, db: AsyncSession = Depends(get_db)):
     if body.proviene_de_id is not None:

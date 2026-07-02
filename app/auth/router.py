@@ -23,6 +23,29 @@ COOKIE_CSRF = "csrf_token"
 COOKIE_LOGGED  = "CMC_LOGGED"   # <- cookie visible para Caddy
 
 
+# Columnas legacy de especialidad del médico, en orden de prioridad (la principal NO
+# lleva sufijo "1"). Mismo orden/criterio que _especialidades_medico del motor de precios.
+_CAMPOS_ESPECIALIDAD = (
+    "NRO_ESPECIALIDAD",
+    "NRO_ESPECIALIDAD2",
+    "NRO_ESPECIALIDAD3",
+    "NRO_ESPECIALIDAD4",
+    "NRO_ESPECIALIDAD5",
+    "NRO_ESPECIALIDAD6",
+)
+
+
+def _especialidades_ordenadas(user) -> list[int]:
+    """Especialidades cargadas del médico (ID_COLEGIO_ESPE) en orden de prioridad;
+    omite slots vacíos (0/None)."""
+    out: list[int] = []
+    for campo in _CAMPOS_ESPECIALIDAD:
+        esp = getattr(user, campo, None)
+        if esp:
+            out.append(int(esp))
+    return out
+
+
 class LoginIn(BaseModel):
     nro_socio: int
     password: str  # = matricula_prov (inicialmente)
@@ -208,6 +231,7 @@ async def get_me(dep = Depends(get_current_user_with_scopes_and_role)):
         role=role,
         es_organizacion=getattr(user, "es_organizacion", False),
         adherente=getattr(user, "adherente", False),
+        especialidades=_especialidades_ordenadas(user),
     )
     return {"user": out}
 

@@ -758,6 +758,9 @@ class TablaValoresItem(BaseModel):
     nomenclador_id: int
     codigo: str
     origen: str
+    # Especialidad de la variante elegida (ID_COLEGIO_ESPE). NULL = variante sin
+    # perfil (NNE/NN o NE sin especialidad). Se puebla al filtrar por especialidades.
+    especialidad_id_colegio: Optional[int] = None
     descripcion: Optional[str]
     nivel: Optional[int]
     por_presupuesto: bool = False

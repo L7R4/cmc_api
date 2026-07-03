@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.database import get_db
-from app.db.models.nomenclador_cmc import Galeno, Valor, ValorComponente
+from app.db.models.nomenclador_cmc import Galeno, GalenoPlantilla, Valor, ValorComponente
 from app.modules.nomenclador import service
 from app.modules.nomenclador.schemas import (
     ActualizacionMasivaResult,
@@ -18,6 +18,8 @@ from app.modules.nomenclador.schemas import (
     GalenoCreate,
     GalenoCrearNivelesIn,
     GalenoOut,
+    GalenoPlantillaNivelOut,
+    GalenoPlantillaOut,
     GalenosImportarIn,
     GalenosImportarResult,
     GalenoUpdate,
@@ -242,6 +244,49 @@ async def historial_galeno(
     stmt = stmt.order_by(Galeno.nivel, Galeno.vigencia_desde)
     result = await db.execute(stmt)
     return result.scalars().all()
+
+
+def _plantilla_out(grupo: str, filas: List[GalenoPlantilla]) -> GalenoPlantillaOut:
+    primera = filas[0]
+    return GalenoPlantillaOut(
+        grupo=grupo,
+        codigo=primera.codigo,
+        nombre=primera.nombre,
+        niveles=[GalenoPlantillaNivelOut.model_validate(f) for f in filas],
+    )
+
+
+@router.get("/plantillas", response_model=List[GalenoPlantillaOut])
+async def list_plantillas_galeno(db: AsyncSession = Depends(get_db)):
+    """
+    Plantillas prearmadas de galenos (cargadas a mano por el programador; solo
+    lectura). Agrupa las filas por `grupo` con la misma forma que espera
+    POST /crear_niveles: el front usa `nombre` + `niveles[]` para pre-armar el
+    formulario, completando `obra_social_nro`, `vigencia_desde` y los precios reales.
+    """
+    stmt = select(GalenoPlantilla).order_by(
+        GalenoPlantilla.grupo, GalenoPlantilla.nivel
+    )
+    filas = (await db.execute(stmt)).scalars().all()
+
+    agrupadas: dict[str, List[GalenoPlantilla]] = {}
+    for fila in filas:
+        agrupadas.setdefault(fila.grupo, []).append(fila)
+
+    return [_plantilla_out(grupo, filas) for grupo, filas in agrupadas.items()]
+
+
+@router.get("/plantillas/{grupo}", response_model=GalenoPlantillaOut)
+async def get_plantilla_galeno(grupo: str, db: AsyncSession = Depends(get_db)):
+    stmt = (
+        select(GalenoPlantilla)
+        .where(GalenoPlantilla.grupo == grupo)
+        .order_by(GalenoPlantilla.nivel)
+    )
+    filas = (await db.execute(stmt)).scalars().all()
+    if not filas:
+        raise HTTPException(404, "Plantilla no encontrada")
+    return _plantilla_out(grupo, filas)
 
 
 @router.get("/{id}", response_model=GalenoOut)

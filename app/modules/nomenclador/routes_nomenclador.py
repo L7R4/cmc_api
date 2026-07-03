@@ -1,10 +1,12 @@
 from typing import List, Optional
 
+import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select
+from sqlalchemy import and_, exists, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.auth.deps import get_current_user_with_scopes_and_role
 from app.db.database import get_db
 from app.db.models.nomenclador_cmc import (
     MedicoCodigoHabilitado,
@@ -12,6 +14,7 @@ from app.db.models.nomenclador_cmc import (
     NomencladorEspecialidad,
     Valor,
 )
+from app.modules.nomenclador.service import _especialidades_medico
 from app.modules.nomenclador.schemas import (
     MedicoHabilitacionCreate,
     MedicoHabilitacionOut,
@@ -38,7 +41,10 @@ async def list_nomenclador(
     page: int = Query(1, ge=1),
     size: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
+    dep=Depends(get_current_user_with_scopes_and_role),
 ):
+    user, _scopes, role = dep
+
     stmt = select(NomencladorCMC)
     if q:
         stmt = stmt.where(
@@ -50,6 +56,53 @@ async def list_nomenclador(
         stmt = stmt.where(NomencladorCMC.complejidad == complejidad)
     if activo is not None:
         stmt = stmt.where(NomencladorCMC.activo == activo)
+
+    # Rol "medico": solo ve los códigos que tiene habilitados. Replica la misma
+    # precedencia que el gate de facturación (_validar_habilitacion_medico):
+    #   permitido = NO inhabilitado Y (habilitado O sin_restriccion O match_especialidad)
+    # - inhabilita/habilita: overrides individuales vigentes de nm_medico_codigo_habilitado
+    #   (inhabilita gana sobre todo lo demás).
+    # - sin_restriccion: código habilitado para todos.
+    # - match_especialidad: nm_nomenclador_especialidad activa para alguna de sus
+    #   NRO_ESPECIALIDAD*.
+    # Otros roles (operador/admin) ven el catálogo completo.
+    if role == "medico":
+        hoy = datetime.date.today()
+        especialidades = _especialidades_medico(user)
+
+        vigencia_ok = and_(
+            (MedicoCodigoHabilitado.vigencia_desde.is_(None))
+            | (MedicoCodigoHabilitado.vigencia_desde <= hoy),
+            (MedicoCodigoHabilitado.vigencia_hasta.is_(None))
+            | (MedicoCodigoHabilitado.vigencia_hasta >= hoy),
+        )
+
+        def _override_vigente(tipo: str):
+            return exists().where(
+                (MedicoCodigoHabilitado.medico_id == user.ID)
+                & (MedicoCodigoHabilitado.nomenclador_id == NomencladorCMC.id)
+                & (MedicoCodigoHabilitado.tipo == tipo)
+                & (MedicoCodigoHabilitado.activo == True)
+                & vigencia_ok
+            )
+
+        inhabilitado = _override_vigente("inhabilita")
+        habilitado = _override_vigente("habilita")
+        esp_habilitada = exists().where(
+            (NomencladorEspecialidad.nomenclador_id == NomencladorCMC.id)
+            & (NomencladorEspecialidad.especialidad_id_colegio.in_(especialidades))
+            & (NomencladorEspecialidad.activo == True)
+        )
+
+        stmt = stmt.where(
+            ~inhabilitado,
+            or_(
+                habilitado,
+                NomencladorCMC.sin_restriccion_especialidad == True,
+                esp_habilitada,
+            ),
+        )
+
     stmt = stmt.offset((page - 1) * size).limit(size)
     result = await db.execute(stmt)
     return result.scalars().all()

@@ -317,6 +317,31 @@ class GalenoOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# GalenoPlantilla (solo lectura — se carga a mano por el programador)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class GalenoPlantillaNivelOut(BaseModel):
+    nivel: Optional[int]
+    # Informativo: se seedea en 0, el precio real se pacta por OS al instanciar.
+    valor_unitario: Decimal
+    unidades_honorarios: Optional[Decimal]
+    unidades_ayudante: Optional[Decimal]
+    unidades_gastos: Optional[Decimal]
+
+    model_config = {"from_attributes": True}
+
+
+class GalenoPlantillaOut(BaseModel):
+    """Un grupo de plantilla con sus niveles ya agrupados. La forma (`nombre` +
+    `niveles[]`) calza casi 1:1 con GalenoCrearNivelesIn: el front solo agrega
+    `obra_social_nro`, `vigencia_desde` y completa los `valor_unitario` reales."""
+    grupo: str
+    codigo: str
+    nombre: str
+    niveles: List[GalenoPlantillaNivelOut]
+
+
 class GalenoActualizarUnidadesIn(BaseModel):
     """
     Cambia las unidades-plantilla de un galeno y PROPAGA el cambio a los valores

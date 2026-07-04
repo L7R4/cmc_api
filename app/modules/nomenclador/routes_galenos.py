@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.database import get_db
 from app.db.models.nomenclador_cmc import Galeno, Valor, ValorComponente
 from app.modules.nomenclador import service
+from app.modules.nomenclador.plantillas_galenos import PLANTILLAS_GALENOS
 from app.modules.nomenclador.schemas import (
     ActualizacionMasivaResult,
     GalenoActualizarPrecioIn,
@@ -242,6 +243,20 @@ async def historial_galeno(
     stmt = stmt.order_by(Galeno.nivel, Galeno.vigencia_desde)
     result = await db.execute(stmt)
     return result.scalars().all()
+
+
+@router.get("/plantillas")
+async def listar_plantillas_galenos():
+    """
+    Plantillas canónicas para el alta ("Nuevo galeno"). Set estático (ver
+    `plantillas_galenos.py`): NO depende de la base, así funciona también en
+    entornos cuya base todavía no tiene galenos cargados (antes se derivaban de la
+    base y quedaba vacío en producción).
+
+    IMPORTANTE: declarar ANTES de `GET /{id}`; si no, el path "plantillas" cae en esa
+    ruta y falla al parsearse como id entero (422).
+    """
+    return PLANTILLAS_GALENOS
 
 
 @router.get("/{id}", response_model=GalenoOut)

@@ -100,6 +100,10 @@ class UserOut(BaseModel):
     role: Optional[str] = None
     es_organizacion: bool = False
     adherente: bool = False
+    # Especialidades del médico (ID_COLEGIO_ESPE) en orden de prioridad: principal
+    # primero (NRO_ESPECIALIDAD), luego 2..6. Se pasa tal cual al parámetro
+    # `especialidades` de /api/reportes_nm/tabla_valores. Vacía si no tiene o no aplica.
+    especialidades: List[int] = []
 
 class UserEnvelope(BaseModel):
     user: UserOut

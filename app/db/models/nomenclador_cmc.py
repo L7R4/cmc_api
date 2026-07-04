@@ -228,6 +228,55 @@ class Galeno(Base):
     )
 
 
+class GalenoPlantilla(Base):
+    """
+    Plantillas prearmadas de galenos, cargadas a mano por el programador (sin acceso
+    de usuarios ni endpoints de escritura). Un `grupo` agrupa las filas que componen
+    un galeno completo listo para instanciar: una fila por nivel (o una sola con
+    nivel NULL si no es nivelado).
+
+    El front las consulta (GET) para pre-armar el formulario de
+    POST /galenos/crear_niveles: `nombre` + `niveles[]` calzan casi 1:1 con
+    GalenoCrearNivelesIn. `valor_unitario` se carga en 0 — es informativo, el precio
+    real se pacta por OS al instanciar.
+
+    Sin obra_social_nro (genéricas, reutilizables para cualquier OS) y sin
+    vigencia/activo/observacion (no aplican a una plantilla).
+
+    `codigo` es el slug real que tendrá el galeno en nm_galenos al instanciarse
+    (debe ser igual a slugify_codigo(nombre), ver GalenoCreate/GalenoCrearNivelesIn).
+    `grupo` identifica el conjunto completo, ej. 'cirugia_adulto_de_7_niveles'.
+    """
+    __tablename__ = "nm_galenos_plantilla"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    grupo: Mapped[str] = mapped_column(String(100), nullable=False)
+    codigo: Mapped[str] = mapped_column(String(100), nullable=False)
+    nombre: Mapped[str] = mapped_column(String(200), nullable=False)
+    nivel: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # Columna generada para poder declarar la unique con nivel NULL (-1 = sin nivel)
+    nivel_key: Mapped[int] = mapped_column(
+        Integer, Computed("coalesce(nivel, -1)", persisted=True), nullable=False
+    )
+    valor_unitario: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), nullable=False)
+    unidades_honorarios: Mapped[Optional[Decimal]] = mapped_column(DECIMAL(10, 2), nullable=True)
+    unidades_ayudante: Mapped[Optional[Decimal]] = mapped_column(DECIMAL(10, 2), nullable=True)
+    unidades_gastos: Mapped[Optional[Decimal]] = mapped_column(DECIMAL(10, 2), nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "grupo", "nivel_key", name="uq_nm_galenos_plantilla_grupo_nivel"
+        ),
+        Index("ix_nm_galenos_plantilla_grupo", "grupo"),
+    )
+
+
 class Valor(Base):
     """
     Variante de precio para un código+OS+vigencia.

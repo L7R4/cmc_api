@@ -9,7 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.database import get_db
 from app.db.models.catalogs import ObrasSociales
 from app.db.models.nomenclador_cmc import HistorialPrecioCodigo, NomencladorCMC, Valor
+from app.modules.nomenclador.service import prioridad_origen
 from app.modules.nomenclador.schemas import (
+    Origen,
     BoletinItemOut,
     BoletinOut,
     EvolucionPrecioItem,
@@ -135,43 +137,43 @@ async def tabla_valores(
     obra_social_nro: int = Query(...),
     fecha: Optional[datetime.date] = Query(None),
     codigo: Optional[str] = Query(None),
+    especialidades: Optional[List[int]] = Query(
+        None,
+        description=(
+            "IDs de especialidad del colegio (ID_COLEGIO_ESPE) del médico, en orden de "
+            "prioridad (principal primero). Si se envía, entre las variantes NE de cada "
+            "código gana la que matchee la especialidad del médico de mayor rango."
+        ),
+    ),
     orden: str = Query("codigo", pattern="^(codigo|valor)$"),
     page: int = Query(1, ge=1),
     size: int = Query(100, ge=1, le=500),
     db: AsyncSession = Depends(get_db),
 ):
-    """Todos los códigos vigentes de una OS con su precio a una fecha."""
+    """Códigos vigentes de una OS con su precio a una fecha, UNA fila por código.
+
+    Pensado para consultar por `codigo` (el médico/operador ingresa 420101 y obtiene esa
+    única fila con la variante que le corresponde). Sin `codigo` lista toda la OS, igual
+    colapsada a una fila por código.
+
+    Cada código puede tener varias variantes. Se devuelve solo la de mayor "peso" según la
+    misma prioridad que el lookup de facturación: origen (NE>NNE>NN) → match de
+    especialidad por orden de slots → vigencia más reciente.
+    - Con `especialidades`: NE entra en juego (gana la que matchee la especialidad de
+      mayor rango del médico); si ninguna NE aplica, cae a NNE y luego NN.
+    - Sin `especialidades`: NE queda fuera; compiten solo NNE y NN (en ese orden).
+    Si `codigo` no existe, se devuelve vacío.
+    """
     fecha_ref = fecha or datetime.date.today()
 
-    stmt = select(HistorialPrecioCodigo).where(
-        HistorialPrecioCodigo.obra_social_nro == obra_social_nro,
-        HistorialPrecioCodigo.vigencia_desde <= fecha_ref,
-        (HistorialPrecioCodigo.vigencia_hasta.is_(None))
-        | (HistorialPrecioCodigo.vigencia_hasta >= fecha_ref),
-    )
-    if codigo:
-        stmt_nom = select(NomencladorCMC).where(NomencladorCMC.codigo == codigo)
-        nom = (await db.execute(stmt_nom)).scalar_one_or_none()
-        if nom:
-            stmt = stmt.where(HistorialPrecioCodigo.nomenclador_id == nom.id)
-
-    if orden == "valor":
-        stmt = stmt.order_by(HistorialPrecioCodigo.precio_total.desc())
-    else:
-        stmt = stmt.join(NomencladorCMC, NomencladorCMC.id == HistorialPrecioCodigo.nomenclador_id).order_by(NomencladorCMC.codigo)
-
-    stmt = stmt.offset((page - 1) * size).limit(size)
-    result = await db.execute(stmt)
-    historiales = result.scalars().all()
-
-    items = []
-    for h in historiales:
+    async def _build_item(h: HistorialPrecioCodigo) -> TablaValoresItem:
         nom = await db.get(NomencladorCMC, h.nomenclador_id)
         valor = await db.get(Valor, h.valores_id)
-        items.append(TablaValoresItem(
+        return TablaValoresItem(
             nomenclador_id=h.nomenclador_id,
             codigo=nom.codigo if nom else str(h.nomenclador_id),
             origen=h.origen,
+            especialidad_id_colegio=h.especialidad_id_colegio,
             descripcion=valor.descripcion if valor else None,
             nivel=valor.nivel if valor else None,
             por_presupuesto=bool(valor and valor.por_presupuesto),
@@ -179,8 +181,77 @@ async def tabla_valores(
             vigencia_desde=h.vigencia_desde,
             vigencia_hasta=h.vigencia_hasta,
             componentes=h.componentes_snapshot,
-        ))
-    return items
+        )
+
+    base_filters = [
+        HistorialPrecioCodigo.obra_social_nro == obra_social_nro,
+        HistorialPrecioCodigo.vigencia_desde <= fecha_ref,
+        (HistorialPrecioCodigo.vigencia_hasta.is_(None))
+        | (HistorialPrecioCodigo.vigencia_hasta >= fecha_ref),
+    ]
+    if codigo:
+        stmt_nom = select(NomencladorCMC).where(NomencladorCMC.codigo == codigo)
+        nom = (await db.execute(stmt_nom)).scalar_one_or_none()
+        if not nom:
+            return []  # código inexistente → sin resultados
+        base_filters.append(HistorialPrecioCodigo.nomenclador_id == nom.id)
+
+    # Traemos todas las variantes vigentes (más reciente primero para desempatar) y
+    # colapsamos en Python: la elección por peso depende del perfil del médico.
+    stmt = (
+        select(HistorialPrecioCodigo)
+        .where(*base_filters)
+        .order_by(HistorialPrecioCodigo.vigencia_desde.desc())
+    )
+    filas = (await db.execute(stmt)).scalars().all()
+
+    # Perfil del médico: orden de slots (principal = índice 0 = mejor rank).
+    especialidades = especialidades or []
+    slot_rank = {esp: i for i, esp in enumerate(especialidades)}
+    _SLOT_SIN_ESP = len(especialidades) + 1
+
+    def _aplicable(fila: HistorialPrecioCodigo) -> bool:
+        # NNE y NN siempre entran en juego. NE (siempre por especialidad) solo aplica si
+        # se pasó el perfil del médico y este posee esa especialidad; sin especialidades
+        # NE queda fuera y compiten únicamente NNE y NN (en ese orden).
+        if fila.origen == Origen.NE.value:
+            return bool(especialidades) and fila.especialidad_id_colegio in slot_rank
+        return True
+
+    def _orden_variante(fila: HistorialPrecioCodigo):
+        # Menor gana: prioridad de origen (NE>NNE>NN) → match de especialidad por orden
+        # de slots → vigencia más reciente como desempate final.
+        rank = (
+            slot_rank.get(fila.especialidad_id_colegio, _SLOT_SIN_ESP)
+            if fila.especialidad_id_colegio is not None
+            else _SLOT_SIN_ESP
+        )
+        return (prioridad_origen(fila.origen), rank, -fila.vigencia_desde.toordinal())
+
+    # Una sola fila elegida por código (nomenclador_id).
+    elegidas: dict[int, HistorialPrecioCodigo] = {}
+    for fila in filas:
+        if not _aplicable(fila):
+            continue
+        actual = elegidas.get(fila.nomenclador_id)
+        if actual is None or _orden_variante(fila) < _orden_variante(actual):
+            elegidas[fila.nomenclador_id] = fila
+
+    seleccion = list(elegidas.values())
+
+    # Orden final + paginación a nivel de código (ya colapsado).
+    if orden == "valor":
+        seleccion.sort(key=lambda h: h.precio_total, reverse=True)
+    else:
+        codigos: dict[int, str] = {}
+        for h in seleccion:
+            nom = await db.get(NomencladorCMC, h.nomenclador_id)
+            codigos[h.nomenclador_id] = nom.codigo if nom else str(h.nomenclador_id)
+        seleccion.sort(key=lambda h: codigos[h.nomenclador_id])
+
+    inicio = (page - 1) * size
+    pagina = seleccion[inicio : inicio + size]
+    return [await _build_item(h) for h in pagina]
 
 
 @router.get("/evolucion_precios", response_model=List[EvolucionPrecioItem])

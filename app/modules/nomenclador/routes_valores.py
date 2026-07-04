@@ -23,6 +23,8 @@ from app.modules.nomenclador.schemas import (
     ActualizacionMasivaResult,
     ActualizarPorcentajeIn,
     ActualizarPorCodigosIn,
+    GenerarValoresNNIn,
+    GenerarValoresNNResult,
     HistorialPrecioOut,
     ImportarCSVResult,
     LookupPrecioIn,
@@ -489,6 +491,49 @@ async def create_valor(body: ValorCreate, db: AsyncSession = Depends(get_db)):
     await db.commit()
     await db.refresh(valor)
     return valor
+
+
+@router.post("/generar_nn_por_rangos", response_model=GenerarValoresNNResult)
+async def generar_nn_por_rangos(
+    body: GenerarValoresNNIn, db: AsyncSession = Depends(get_db)
+):
+    """
+    Siembra los valores NN de una OS: por cada código numérico de nm_nomenclador en
+    1..419999 con al menos una unidad no nula, crea un Valor NN con 3 componentes
+    calculables (Honorarios/Ayudante contra el galeno de honorarios del rango, Gastos
+    contra el galeno de gastos del rango). Si el código ya tiene un NN activo, lo cierra
+    y recrea. Partial-success: los códigos sin galeno vigente van a `errores`.
+    """
+    os = (await db.execute(
+        select(ObrasSociales).where(ObrasSociales.NRO_OBRASOCIAL == body.obra_social_nro)
+    )).scalar_one_or_none()
+    if not os:
+        raise HTTPException(404, f"Obra social {body.obra_social_nro} no encontrada")
+
+    try:
+        resultado = await service.generar_valores_nn_por_rangos(
+            body.obra_social_nro, body.vigencia_desde, db
+        )
+    except ValueError as e:
+        await db.rollback()
+        raise HTTPException(409, str(e))
+
+    # Si no se creó/recreó nada y todo cayó en errores por falta de galenos, avisar claro
+    if (
+        resultado["total_candidatos"] > 0
+        and resultado["creados"] == 0
+        and resultado["recreados"] == 0
+        and resultado["errores"]
+    ):
+        await db.rollback()
+        raise HTTPException(
+            404,
+            f"La OS {body.obra_social_nro} no tiene los galenos base cargados "
+            f"(galeno_quirurgico/practica/radiologico, gasto_*). Cargá los galenos primero.",
+        )
+
+    await db.commit()
+    return GenerarValoresNNResult(**resultado)
 
 
 @router.get("/{id}", response_model=ValorOut)

@@ -668,6 +668,189 @@ async def importar_galenos_entre_os(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Seed de valores NN por rangos de código (galeno de honorarios + galeno de gastos)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Mapeo rango → galeno. Ambos ejes cubren TODO 1..419999 sin huecos.
+# El galeno de honorarios se usa también para el Ayudante (mismo VU, otra unidad).
+_RANGOS_HONORARIOS: list[tuple[int, int, str]] = [
+    (1, 139999, "galeno_quirurgico"),
+    (140000, 179999, "galeno_practica"),
+    (180000, 189999, "galeno_radiologico"),
+    (190000, 339999, "galeno_practica"),
+    (340000, 349999, "galeno_radiologico"),
+    (350000, 419999, "galeno_practica"),
+]
+# Ojo: los rangos específicos (bioquimico/radiologico) van ANTES que gasto_otros,
+# porque los de bioquimico son subconjunto de los de gasto_otros (precedencia).
+_RANGOS_GASTOS: list[tuple[int, int, str]] = [
+    (1, 139999, "gasto_quirurgico"),
+    (150000, 159999, "gasto_bioquimico"),
+    (230000, 249999, "gasto_bioquimico"),
+    (180000, 189999, "gasto_radiologico"),
+    (340000, 349999, "gasto_radiologico"),
+    (140000, 179999, "gasto_otros"),
+    (190000, 339999, "gasto_otros"),
+    (350000, 419999, "gasto_otros"),
+]
+# Todos los galenos base que la OS necesita tener cargados
+_GALENOS_NN_CODIGOS: set[str] = (
+    {c for _, _, c in _RANGOS_HONORARIOS} | {c for _, _, c in _RANGOS_GASTOS}
+)
+# Rango global cubierto (fuera de esto el código no es candidato)
+_NN_RANGO_MIN, _NN_RANGO_MAX = 1, 419999
+
+
+def _galeno_por_rango(n: int, rangos: list[tuple[int, int, str]]) -> Optional[str]:
+    """codigo del galeno del primer rango que contiene a n (None si ninguno)."""
+    for lo, hi, cod in rangos:
+        if lo <= n <= hi:
+            return cod
+    return None
+
+
+async def generar_valores_nn_por_rangos(
+    obra_social_nro: int,
+    vigencia_desde: datetime.date,
+    db: AsyncSession,
+) -> dict:
+    """
+    Crea (o recrea) los valores NN de una OS para todos los códigos numéricos de
+    nm_nomenclador en 1..419999 con al menos una unidad (unidades_*) no nula.
+
+    Cada valor lleva 3 componentes calculables:
+      - Honorarios → galeno de honorarios del rango, cantidad = unidades_honorarios
+      - Ayudante   → el MISMO galeno de honorarios, cantidad = unidades_ayudante
+      - Gastos     → galeno de gastos del rango, cantidad = unidades_gastos
+    Cantidad por concepto: galeno.unidades_<c> → nomenclador.unidades_<c> → 0.
+
+    Conflicto (ya hay un NN activo para (OS, código)): cierra el vigente y crea el nuevo
+    (rota vigencia). Partial-success: los ítems con galeno faltante van a `errores`.
+    No comitea: corre dentro de la transacción del caller.
+    """
+    # 1. Galenos base vigentes de la OS (nivel NULL), indexados por codigo
+    galenos = {
+        g.codigo: g
+        for g in (await db.execute(
+            select(Galeno).where(
+                Galeno.obra_social_nro == obra_social_nro,
+                Galeno.codigo.in_(_GALENOS_NN_CODIGOS),
+                Galeno.nivel.is_(None),
+                Galeno.vigencia_hasta.is_(None),
+                Galeno.activo == True,
+            )
+        )).scalars()
+    }
+
+    # 1b. Rechazar si algún galeno base tiene VU = 0 (no sirve para calcular precios)
+    galenos_en_cero = [cod for cod, g in galenos.items() if g.valor_unitario == Decimal("0")]
+    if galenos_en_cero:
+        raise ValueError(
+            f"Los siguientes galenos tienen valor_unitario = 0 en OS {obra_social_nro}: "
+            f"{', '.join(sorted(galenos_en_cero))}. Actualizá el precio antes de generar."
+        )
+
+    # 2. Candidatos: activos con >=1 unidad no nula (el rango se filtra en Python)
+    candidatos = (await db.execute(
+        select(NomencladorCMC).where(
+            NomencladorCMC.activo == True,
+            (NomencladorCMC.unidades_honorarios.is_not(None))
+            | (NomencladorCMC.unidades_ayudante.is_not(None))
+            | (NomencladorCMC.unidades_gastos.is_not(None)),
+        )
+    )).scalars().all()
+
+    corte = vigencia_desde - datetime.timedelta(days=1)
+    total = creados = recreados = 0
+    errores: list[dict] = []
+
+    for nom in candidatos:
+        if not nom.codigo.isdigit():
+            continue
+        n = int(nom.codigo)
+        if not (_NN_RANGO_MIN <= n <= _NN_RANGO_MAX):
+            continue
+        total += 1
+
+        cod_hon = _galeno_por_rango(n, _RANGOS_HONORARIOS)
+        cod_gas = _galeno_por_rango(n, _RANGOS_GASTOS)
+        g_hon = galenos.get(cod_hon)
+        g_gas = galenos.get(cod_gas)
+        if g_hon is None or g_gas is None:
+            faltan = [c for c, g in ((cod_hon, g_hon), (cod_gas, g_gas)) if g is None]
+            errores.append({
+                "codigo": nom.codigo,
+                "motivo": f"galeno(s) no vigente(s) en la OS: {', '.join(faltan)}",
+            })
+            continue
+
+        # Conflicto: cerrar el NN activo previo (cerrar y recrear)
+        existente = (await db.execute(
+            select(Valor).where(
+                Valor.obra_social_nro == obra_social_nro,
+                Valor.nomenclador_id == nom.id,
+                Valor.origen == "NN",
+                Valor.especialidad_id_colegio.is_(None),
+                Valor.estado == "activo",
+            )
+        )).scalars().first()
+        if existente is not None:
+            existente.estado = "cerrado"
+            existente.vigencia_hasta = corte
+            fecha_corte = corte
+            recreados += 1
+        else:
+            fecha_corte = None
+            creados += 1
+
+        def _cant(concepto_attr: str, galeno: Galeno) -> Decimal:
+            return (
+                getattr(galeno, concepto_attr)
+                or getattr(nom, concepto_attr)
+                or Decimal("0")
+            )
+
+        valor = Valor(
+            obra_social_nro=obra_social_nro,
+            nomenclador_id=nom.id,
+            origen="NN",
+            codigo=nom.codigo,
+            descripcion=nom.descripcion,
+            nivel=None,
+            complejidad=None,
+            especialidad_id_colegio=None,
+            por_presupuesto=False,
+            vigencia_desde=vigencia_desde,
+            vigencia_hasta=None,
+            estado="activo",
+        )
+        db.add(valor)
+        await db.flush()
+
+        db.add_all([
+            ValorComponente(valor_id=valor.id, concepto="Honorarios",
+                            galeno_id=g_hon.id, cantidad=_cant("unidades_honorarios", g_hon), orden=0),
+            ValorComponente(valor_id=valor.id, concepto="Gastos",
+                            galeno_id=g_gas.id, cantidad=_cant("unidades_gastos", g_gas), orden=1),
+            ValorComponente(valor_id=valor.id, concepto="Ayudante",
+                            galeno_id=g_hon.id, cantidad=_cant("unidades_ayudante", g_hon), orden=2),
+        ])
+        await db.flush()
+
+        await regenerar_historial_por_valores(
+            valor.id, fecha_corte, db, motivo="carga_inicial",
+            nueva_vigencia_desde=vigencia_desde,
+        )
+
+    return {
+        "total_candidatos": total,
+        "creados": creados,
+        "recreados": recreados,
+        "errores": errores,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Validaciones de consistencia galeno ↔ valor
 # ─────────────────────────────────────────────────────────────────────────────
 

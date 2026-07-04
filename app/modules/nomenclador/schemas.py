@@ -317,6 +317,31 @@ class GalenoOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# GalenoPlantilla (solo lectura — se carga a mano por el programador)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class GalenoPlantillaNivelOut(BaseModel):
+    nivel: Optional[int]
+    # Informativo: se seedea en 0, el precio real se pacta por OS al instanciar.
+    valor_unitario: Decimal
+    unidades_honorarios: Optional[Decimal]
+    unidades_ayudante: Optional[Decimal]
+    unidades_gastos: Optional[Decimal]
+
+    model_config = {"from_attributes": True}
+
+
+class GalenoPlantillaOut(BaseModel):
+    """Un grupo de plantilla con sus niveles ya agrupados. La forma (`nombre` +
+    `niveles[]`) calza casi 1:1 con GalenoCrearNivelesIn: el front solo agrega
+    `obra_social_nro`, `vigencia_desde` y completa los `valor_unitario` reales."""
+    grupo: str
+    codigo: str
+    nombre: str
+    niveles: List[GalenoPlantillaNivelOut]
+
+
 class GalenoActualizarUnidadesIn(BaseModel):
     """
     Cambia las unidades-plantilla de un galeno y PROPAGA el cambio a los valores
@@ -574,6 +599,19 @@ class ActualizacionMasivaResult(BaseModel):
     omitidos: int = 0
 
 
+class GenerarValoresNNIn(BaseModel):
+    """Seed de valores NN por rangos de código para una obra social."""
+    obra_social_nro: int
+    vigencia_desde: datetime.date
+
+
+class GenerarValoresNNResult(BaseModel):
+    total_candidatos: int   # códigos en rango (1..419999) con >=1 unidad
+    creados: int            # valores NN nuevos
+    recreados: int          # tenían NN activo → se cerró y recreó
+    errores: List[dict]     # [{codigo, motivo}] (ej: galeno faltante en la OS)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Replicación de estructura (ecuación de componentes)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -755,6 +793,9 @@ class TablaValoresItem(BaseModel):
     nomenclador_id: int
     codigo: str
     origen: str
+    # Especialidad de la variante elegida (ID_COLEGIO_ESPE). NULL = variante sin
+    # perfil (NNE/NN o NE sin especialidad). Se puebla al filtrar por especialidades.
+    especialidad_id_colegio: Optional[int] = None
     descripcion: Optional[str]
     nivel: Optional[int]
     por_presupuesto: bool = False

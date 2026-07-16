@@ -117,6 +117,26 @@ class NomencladorEspecialidadOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class NomencladorEspecialidadResumenOut(BaseModel):
+    """Fila enriquecida código↔especialidad para la vista de tabla del front.
+
+    Trae el código y descripción del nomenclador + el nombre de la especialidad
+    resuelto (ID_COLEGIO_ESPE → especialidad.ESPECIALIDAD) en una sola respuesta.
+    `especialidad` es None si el ID_COLEGIO_ESPE no matchea ninguna fila del catálogo.
+    """
+    id: int
+    nomenclador_id: int
+    codigo: str
+    descripcion: str
+    especialidad_id_colegio: int
+    especialidad: Optional[str] = None
+    activo: bool
+    observacion: Optional[str] = None
+    created_at: datetime.datetime
+
+    model_config = {"from_attributes": True}
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # MedicoCodigoHabilitado
 # ─────────────────────────────────────────────────────────────────────────────

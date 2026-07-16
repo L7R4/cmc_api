@@ -8,6 +8,7 @@ from sqlalchemy.orm import selectinload
 
 from app.auth.deps import get_current_user_with_scopes_and_role
 from app.db.database import get_db
+from app.db.models import Especialidad
 from app.db.models.nomenclador_cmc import (
     MedicoCodigoHabilitado,
     NomencladorCMC,
@@ -23,6 +24,7 @@ from app.modules.nomenclador.schemas import (
     NomencladorCreate,
     NomencladorEspecialidadCreate,
     NomencladorEspecialidadOut,
+    NomencladorEspecialidadResumenOut,
     NomencladorOut,
     NomencladorUpdate,
 )
@@ -119,6 +121,68 @@ async def list_codigos(
         stmt = stmt.where(NomencladorCMC.activo == activo)
     result = await db.execute(stmt)
     return [row[0] for row in result.all()]
+
+
+@router.get("/especialidades", response_model=List[NomencladorEspecialidadResumenOut])
+async def list_codigos_por_especialidad(
+    q: Optional[str] = Query(None, description="Busca en código o descripción del nomenclador"),
+    especialidad_id_colegio: Optional[int] = Query(None, description="Filtra por ID_COLEGIO_ESPE"),
+    activo: Optional[bool] = Query(True),
+    page: int = Query(1, ge=1),
+    size: int = Query(50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+    dep=Depends(get_current_user_with_scopes_and_role),
+):
+    """Vista tabla código↔especialidad: cada fila trae el código, su descripción y
+    el nombre de la especialidad resuelto, en una sola llamada."""
+    stmt = (
+        select(
+            NomencladorEspecialidad,
+            NomencladorCMC.codigo,
+            NomencladorCMC.descripcion,
+        )
+        .join(NomencladorCMC, NomencladorCMC.id == NomencladorEspecialidad.nomenclador_id)
+    )
+    if activo is not None:
+        stmt = stmt.where(NomencladorEspecialidad.activo == activo)
+    if especialidad_id_colegio is not None:
+        stmt = stmt.where(
+            NomencladorEspecialidad.especialidad_id_colegio == especialidad_id_colegio
+        )
+    if q:
+        stmt = stmt.where(
+            NomencladorCMC.codigo.contains(q) | NomencladorCMC.descripcion.contains(q)
+        )
+    stmt = stmt.order_by(NomencladorCMC.codigo).offset((page - 1) * size).limit(size)
+    rows = (await db.execute(stmt)).all()
+
+    # Resolver nombres (ID_COLEGIO_ESPE → especialidad.ESPECIALIDAD) con un solo
+    # query, igual que medicos/padrones: ID_COLEGIO_ESPE no es PK, el join directo
+    # podría multiplicar filas si estuviera duplicado.
+    esp_ids = {ne.especialidad_id_colegio for ne, _cod, _desc in rows}
+    nombres: dict[int, str] = {}
+    if esp_ids:
+        esp_rows = await db.execute(
+            select(Especialidad.ID_COLEGIO_ESPE, Especialidad.ESPECIALIDAD)
+            .where(Especialidad.ID_COLEGIO_ESPE.in_(esp_ids))
+        )
+        for id_colegio, nombre in esp_rows.all():
+            nombres.setdefault(int(id_colegio), str(nombre))
+
+    return [
+        NomencladorEspecialidadResumenOut(
+            id=ne.id,
+            nomenclador_id=ne.nomenclador_id,
+            codigo=codigo,
+            descripcion=descripcion,
+            especialidad_id_colegio=ne.especialidad_id_colegio,
+            especialidad=nombres.get(ne.especialidad_id_colegio),
+            activo=ne.activo,
+            observacion=ne.observacion,
+            created_at=ne.created_at,
+        )
+        for ne, codigo, descripcion in rows
+    ]
 
 
 @router.post("/", response_model=NomencladorOut, status_code=201)

@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "skills": {
+    "Excel Analysis": {
+      "source": "davila7/claude-code-templates",
+      "sourceType": "github",
+      "skillPath": "cli-tool/components/skills/enterprise-communication/excel-analysis/SKILL.md",
+      "computedHash": "931298820626001e63ac80e2c0244152677e09761c16b866874350c8a33925e3"
+    },
+    "pdf": {
+      "source": "anthropics/skills",
+      "sourceType": "github",
+      "skillPath": "skills/pdf/SKILL.md",
+      "computedHash": "37226d4220d844377e6b2a386c51a011df4cd130855ff0b80bcc22f9c28abd57"
+    }
+  }
+}

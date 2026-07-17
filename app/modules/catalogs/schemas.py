@@ -110,6 +110,9 @@ class ObraSocialCreate(BaseModel):
     plazo_vencimiento: Optional[int] = None
     fecha_alta_convenio: Optional[date] = None
     obra_social_principal_id: Optional[int] = None
+    # Ventana del período: 1 = mes completo, 20 = del 20 al 20. El front envía 1 cuando
+    # el check "A mes completo" está marcado; default 20.
+    dia_corte: int = Field(20, ge=1, le=28)
     contactos: List[ContactoIn] = Field(default_factory=list)
     direcciones: List[DireccionIn] = Field(default_factory=list)
 
@@ -125,6 +128,7 @@ class ObraSocialUpdate(BaseModel):
     plazo_vencimiento: Optional[int] = None
     fecha_alta_convenio: Optional[date] = None
     obra_social_principal_id: Optional[int] = None
+    dia_corte: Optional[int] = Field(None, ge=1, le=28)
     # Si se provee, reemplaza la lista completa
     contactos: Optional[List[ContactoIn]] = None
     direcciones: Optional[List[DireccionIn]] = None
@@ -143,6 +147,7 @@ class ObraSocialOut(BaseModel):
     plazo_vencimiento: Optional[int] = None
     fecha_alta_convenio: Optional[date] = None
     obra_social_principal_id: Optional[int] = None
+    dia_corte: int = 20
     emails: List[ContactoSimpleOut] = Field(default_factory=list)
     telefonos: List[ContactoSimpleOut] = Field(default_factory=list)
     obra_social_principal: Optional[ObraSocialSimpleOut] = None

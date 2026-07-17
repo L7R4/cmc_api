@@ -67,7 +67,7 @@ async def crear_liquidacion(payload: LiquidacionCreate, db: AsyncSession = Depen
         select(FacturacionCMC).where(
             FacturacionCMC.cod_obr == str(payload.obra_social_id),
             FacturacionCMC.periodo == periodo,
-            FacturacionCMC.estado.in_(["L", "LC"]),
+            FacturacionCMC.estado.in_(["C", "L", "LC"]),
         ).order_by(FacturacionCMC.id_prestaciones.desc()).limit(1)
     )).scalars().first()
     nro_factura = fac_cmc.nro_factura if fac_cmc else None

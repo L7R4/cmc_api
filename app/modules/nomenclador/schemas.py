@@ -7,7 +7,7 @@ import unicodedata
 from decimal import Decimal
 from typing import List, Literal, Optional
 
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -496,6 +496,8 @@ class ValorCreate(BaseModel):
     # True → código por presupuesto: se ignora la ecuación, los componentes H/G/A
     # se guardan en 0 y el monto lo informa la OS al facturar (modo manual)
     por_presupuesto: bool = False
+    # Máximo de ayudantes admitidos para este código+OS. NULL = no lleva ayudantes.
+    cantidad_ayudantes: Optional[int] = Field(None, ge=0)
     vigencia_desde: datetime.date
     observacion: Optional[str] = None
     componentes: List[ValorComponenteIn] = []
@@ -517,6 +519,7 @@ class ValorUpdate(BaseModel):
     descripcion: Optional[str] = None
     nivel: Optional[int] = None
     complejidad: Optional[Literal["baja", "media", "alta"]] = None
+    cantidad_ayudantes: Optional[int] = Field(None, ge=0)
     observacion: Optional[str] = None
 
 
@@ -528,6 +531,7 @@ class ValorCerrarYCrearIn(BaseModel):
     descripcion: Optional[str] = None
     nivel: Optional[int] = None
     complejidad: Optional[Literal["baja", "media", "alta"]] = None
+    cantidad_ayudantes: Optional[int] = Field(None, ge=0)
     observacion: Optional[str] = None
 
     @model_validator(mode="after")
@@ -548,6 +552,7 @@ class ValorOut(BaseModel):
     complejidad: Optional[str]
     especialidad_id_colegio: Optional[int]
     por_presupuesto: bool = False
+    cantidad_ayudantes: Optional[int] = None
     # Modalidad de la ecuación: 'galeno' | 'fijo' | 'por_presupuesto'
     modalidad: str
     vigencia_desde: datetime.date

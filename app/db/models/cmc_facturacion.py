@@ -2,7 +2,7 @@ import datetime
 from decimal import Decimal
 from typing import Optional
 
-from sqlalchemy import DECIMAL, JSON, Date, DateTime, Integer, String, Text, func
+from sqlalchemy import DECIMAL, JSON, Boolean, Date, DateTime, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -57,6 +57,22 @@ class DetalleFacturacionCMC(Base):
     tipo: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
     # Vínculo ayudante/gastos → fila del médico (cabeza del equipo). NULL si factura solo.
     grupo_equipo_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # Quién cargó la prestación: 'medico' (portal del médico) o 'colegio'. Gatea qué
+    # fase de la cabecera controla su edición. Histórico → 'colegio'.
+    origen_carga: Mapped[str] = mapped_column(
+        String(10), nullable=False, server_default="colegio"
+    )
+    # Checkbox de auditoría del colegio sobre la prestación cargada. No participa
+    # del cálculo ni de los gates de edición/cierre — es solo un marcador manual.
+    revisado: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
+    # Número de autorización de la obra social para la prestación. Nullable — no todas
+    # las OS/prestaciones lo requieren; se carga/edita como cualquier otro campo simple.
+    autorizacion: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    # Versión de la factura a la que pertenece la prestación dentro del par (cod_obr,
+    # periodo). 1 = factura original; 2+ = facturas complementarias (prestaciones que
+    # llegaron por excepción luego de cerrar/enviar el período — se reenvían aparte a la
+    # OS con nota de crédito externa). Histórico → 1.
+    version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
 
 
 class FacturacionCMC(Base):
@@ -79,7 +95,39 @@ class FacturacionCMC(Base):
     importe: Mapped[Optional[Decimal]] = mapped_column(DECIMAL(14, 2))
     afip: Mapped[Optional[str]] = mapped_column(String(1))
     usuario: Mapped[Optional[str]] = mapped_column(String(30))
+    # Fase COLEGIO del período: 'A' abierta / 'C' cerrada (liquidable). Los históricos
+    # CMC usaban 'L'/'LC' (aceptados como cerrados por compatibilidad).
     estado: Mapped[Optional[str]] = mapped_column(String(2))
+    # Fase MÉDICO del período: 'A' abierta (los médicos aún cargan) / 'C' cerrada.
+    # La misma cabecera transita médico → colegio. Histórico → 'C'.
+    estado_doctor: Mapped[str] = mapped_column(
+        String(1), nullable=False, server_default="C"
+    )
+    created: Mapped[datetime.datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    # Path relativo (servido por /uploads) del comprobante de la factura, subido al
+    # cerrar el período. Nullable — no todas las facturas tienen documento adjunto.
+    documento_url: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
+    # Versión de la factura dentro del par (cod_obr, periodo). 1 = original; 2+ =
+    # complementarias. A lo sumo una versión está abierta a la vez y es la de mayor
+    # número. Ver `abrir_complemento` en el servicio. Histórico → 1.
+    version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+
+
+class PeriodoMedicoActual(Base):
+    """Puntero del período abierto para carga de médicos. Reemplaza la tabla legacy
+    `periodos_doctor` (deprecada). Es global con override por obra social:
+    la fila con `obra_social_id = NULL` es el período global por defecto; las filas
+    con `obra_social_id` (NRO_OBRASOCIAL) son overrides puntuales (ej. OS 151)."""
+    __tablename__ = "periodo_medico_actual"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    obra_social_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+    periodo: Mapped[str] = mapped_column(String(6), nullable=False)  # YYYYMM
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
 
 
 class Afiliado(Base):

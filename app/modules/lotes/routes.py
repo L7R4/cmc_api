@@ -279,7 +279,7 @@ async def listar_lotes_enriquecidos(
             FacturacionCMC,
             (cast(FacturacionCMC.cod_obr, String) == cast(LoteAjuste.obra_social_id, String))
             & (FacturacionCMC.periodo == periodo_expr)
-            & (FacturacionCMC.estado.in_(["L", "LC"])),
+            & (FacturacionCMC.estado.in_(["C", "L", "LC"])),
         )
     )
 

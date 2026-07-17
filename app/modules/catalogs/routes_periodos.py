@@ -36,7 +36,7 @@ async def periodos_disponibles_lotes(
         )
         .where(
             FacturacionCMC.cod_obr == str(obra_social_id),
-            FacturacionCMC.estado.in_(["L", "LC"]),
+            FacturacionCMC.estado.in_(["C", "L", "LC"]),
             not_(subq.exists()),
         )
         .distinct()
@@ -83,7 +83,7 @@ async def periodos_disponibles(
         )
         .where(
             FacturacionCMC.cod_obr == str(obra_social_id),
-            FacturacionCMC.estado.in_(["L", "LC"]),
+            FacturacionCMC.estado.in_(["C", "L", "LC"]),
             not_(subq.exists()),
         )
         .distinct()

@@ -14,6 +14,20 @@ services:
       - mysql
     env_file:
       - .env
+    environment:
+      TZ: America/Argentina/Cordoba
+
+  cron:
+    container_name: cmc_cron
+    build:
+      context: ./cron
+    restart: unless-stopped
+    depends_on:
+      - fastapi
+    env_file:
+      - .env
+    environment:
+      API_URL: http://fastapi:8000
 
   mysql:
     container_name: mysql

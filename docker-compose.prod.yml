@@ -16,8 +16,22 @@ services:
       MYSQL_HOST: mysql
       MYSQL_DB: ${MYSQL_DATABASE}
       CORS_ORIGINS: ${CORS_ORIGINS}
+      TZ: America/Argentina/Cordoba
     expose:
       - "8000"
+    networks:
+      - internal
+
+  cron:
+    build:
+      context: ./cron
+    container_name: cmc_cron
+    restart: unless-stopped
+    env_file: .env.prod
+    environment:
+      API_URL: http://api:8000
+    depends_on:
+      - api
     networks:
       - internal
 

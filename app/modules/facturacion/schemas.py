@@ -2,10 +2,56 @@ import datetime
 from decimal import Decimal
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+from app.modules.medicos.schemas import MedicoEspecialidadOut
 
 # ── Tipos literales ──────────────────────────────────────────────────────────
 TipoCalculo = Literal["A", "M"]
+
+
+# ── Autocomplete de médicos ───────────────────────────────────────────────────
+class MedicoBuscarOut(BaseModel):
+    cod: str
+    nombre: str
+    matricula: Optional[int] = None
+    categoria: Optional[str] = None
+    condicion_impositiva: Optional[str] = None
+    # `/medicos` devuelve médicos Y clínicas (misma tabla listado_medico). Este flag
+    # permite al front distinguirlos en un solo pedido: True → es una clínica/organización
+    # (payee que cobra, requiere médico ejecutor); False → médico real.
+    es_organizacion: bool = False
+    especialidades: list[MedicoEspecialidadOut] = Field(default_factory=list)
+
+
+# ── Autocomplete de clínicas/organizaciones ───────────────────────────────────
+class ClinicaBuscarOut(BaseModel):
+    """Misma tabla `listado_medico` que los médicos, filtrada por
+    `es_organizacion=1`. `cod` = NRO_SOCIO, listo para usar directo en
+    `PrestacionItem.cod_clinica` (mismo tipo, int)."""
+    cod: int
+    nombre: str
+    documento: Optional[str] = None
+    cuit: Optional[str] = None
+    localidad: Optional[str] = None
+
+
+class EspecialidadSimpleOut(BaseModel):
+    id: int
+    nombre: Optional[str] = None
+
+
+class CodigoHabilitadoOut(BaseModel):
+    codigo: str
+    descripcion: str
+    categoria: Optional[str] = None
+    complejidad: Optional[str] = None
+    # Especialidad(es) DEL MÉDICO que habilitan este código — vacía si entra por
+    # excepción individual o por "sin restricción de especialidad" (no por especialidad).
+    especialidades: list[EspecialidadSimpleOut] = Field(default_factory=list)
+
+    class Config:
+        from_attributes = True
 
 
 # ── Afiliados ────────────────────────────────────────────────────────────────
@@ -29,11 +75,18 @@ class AfiliadoRead(BaseModel):
 class PrestacionItem(BaseModel):
     """Un prestador individual (cirujano o ayudante).
 
-    `periodo` y `nro_orden` no se envían: los asigna el backend. El nombre del
-    paciente tampoco: se obtiene del padrón `afiliado` por `dni_paciente`.
+    `periodo` no se envía: lo asigna el backend. El nombre del paciente tampoco: se
+    obtiene del padrón `afiliado` por `dni_paciente`.
     """
-    # Médico
-    cod_medico: str   # NRO_SOCIO del médico
+    # Payee — a quién se le PAGA. NRO_SOCIO de un médico o de una clínica
+    # (listado_medico con es_organizacion=1, vía autocomplete /clinicas).
+    cod_medico: str
+
+    # Médico EJECUTOR — obligatorio cuando `cod_medico` es una clínica; NULL si el payee
+    # ya es el propio médico. No cobra: solo registra quién ejecutó y determina el precio
+    # (por su especialidad). La regla payee-clínica⇒ejecutor se valida en el backend
+    # (requiere resolver es_organizacion contra la DB).
+    cod_medico_ejecutor: Optional[str] = None
 
     # Paciente — solo DNI; el nombre se resuelve contra el padrón afiliado
     dni_paciente: Optional[str] = None
@@ -41,6 +94,7 @@ class PrestacionItem(BaseModel):
     # Servicio
     fecha_practica: Optional[datetime.date] = None   # None → primer día del período
     cod_clinica: Optional[int] = None                # si viene → tipo = "Sanatorio"
+    autorizacion: Optional[str] = Field(None, max_length=30)  # nro de autorización de la OS
 
     # Prestación
     cod_nomenclador: str
@@ -63,20 +117,39 @@ class PrestacionItem(BaseModel):
 class PrestacionesCreate(BaseModel):
     """Payload del POST /facturacion/prestaciones.
 
-    1 ítem = carga individual. N ítems = equipo quirúrgico (misma transacción,
-    `nro_orden` único por fila). `periodo` lo calcula el backend según la OS.
+    1 ítem = carga individual. N ítems = equipo quirúrgico (misma transacción).
     """
     obra_social: str                      # cod_obra_social
+    # Período destino (YYYYMM) — SOLO carga del colegio. None = automático (último
+    # período cerrado + 1). Se envía cuando el operador usa "editar período" para saltar
+    # meses sin movimiento (ej. última cerrada abril, sin mayo → cargar directo junio).
+    # Debe ser >= el automático; un período ya cerrado se rechaza (usar complemento).
+    # En la carga del médico este campo se ignora (el período sale del puntero).
+    periodo: Optional[str] = Field(None, pattern=r"^\d{6}$")
+    prestaciones: list[PrestacionItem] = Field(..., min_length=1)
+
+
+class PrestacionesComplementariaCreate(BaseModel):
+    """Payload de POST /facturacion/prestaciones-complementaria.
+
+    A diferencia de `PrestacionesCreate`, la cabecera (factura complementaria) YA
+    existe — se creó explícitamente con `POST /facturas/complemento` y se referencia
+    acá por su `factura_id` (`id_prestaciones`), no se infiere por obra_social+período.
+    `obra_social` y `periodo` se toman de la factura, no se envían.
+    """
+    factura_id: int
     prestaciones: list[PrestacionItem] = Field(..., min_length=1)
 
 
 class PrestacionUpdate(BaseModel):
     """PATCH — todos los campos opcionales. No se puede cambiar periodo, cod_obra
     ni nro_orden. Si se envía dni_paciente, se relee el nombre del padrón."""
-    cod_medico: Optional[str] = None
+    cod_medico: Optional[str] = None            # payee (médico o clínica)
+    cod_medico_ejecutor: Optional[str] = None   # médico ejecutor (si payee es clínica)
     dni_paciente: Optional[str] = None
     fecha_practica: Optional[datetime.date] = None
     cod_clinica: Optional[int] = None
+    autorizacion: Optional[str] = Field(None, max_length=30)
     cod_nomenclador: Optional[str] = None
     cantidad: Optional[int] = Field(None, ge=1)
     sesion: Optional[int] = Field(None, ge=1)
@@ -88,12 +161,37 @@ class PrestacionUpdate(BaseModel):
     grupo_equipo_id: Optional[int] = None
 
 
+class PrestacionesRevisadoUpdate(BaseModel):
+    """PATCH /prestaciones/revisado — actualización batch del checkbox de auditoría."""
+    marcados: list[int] = Field(default_factory=list)
+    desmarcados: list[int] = Field(default_factory=list)
+
+    @field_validator("marcados", "desmarcados")
+    @classmethod
+    def ids_positivos(cls, ids: list[int]) -> list[int]:
+        if any(prestacion_id <= 0 for prestacion_id in ids):
+            raise ValueError("Los IDs de prestación deben ser positivos")
+        return ids
+
+    @model_validator(mode="after")
+    def grupos_validos(self):
+        marcados = set(self.marcados)
+        desmarcados = set(self.desmarcados)
+        if not marcados and not desmarcados:
+            raise ValueError("Debe enviar al menos una prestación marcada o desmarcada")
+        if len(marcados) != len(self.marcados) or len(desmarcados) != len(self.desmarcados):
+            raise ValueError("No se permiten IDs repetidos")
+        if marcados & desmarcados:
+            raise ValueError("Un ID no puede estar marcado y desmarcado a la vez")
+        return self
+
+
 class MoverPeriodoPayload(BaseModel):
     """Mueve un conjunto de prestaciones al período siguiente o anterior.
     Todas deben pertenecer a la misma OS y período origen."""
     cod_obra: str
     periodo_origen: str               # "YYYYMM"
-    nro_ordenes: list[str] = Field(..., min_length=1)
+    ids: list[int] = Field(..., min_length=1)   # id_detalle_prestaciones (PK)
     direccion: Literal["siguiente", "anterior"]
 
 
@@ -102,6 +200,11 @@ class PeriodoActivoResponse(BaseModel):
     cod_obra: str
     periodo: str        # "YYYYMM"
     periodo_label: str  # "Mayo 2026"
+    # Versión de la factura de ese período. 1 = fresca/original (siempre el caso en
+    # /periodo-activo y /periodo-medico); > 1 en /periodo-colegio si el período
+    # devuelto corresponde a un complemento abierto en vez de una cabecera nueva.
+    version: int = 1
+    es_complemento: bool = False
 
 
 class PrecioResponse(BaseModel):
@@ -118,16 +221,31 @@ class PrecioResponse(BaseModel):
     # True → código por presupuesto: H/G/A vienen en 0; el monto lo carga el
     # operador a mano (lo informa la OS). Ver _montos_de_item.
     por_presupuesto: bool = False
+    # Máximo de ayudantes admitidos para este código+OS (informativo, para que el front
+    # limite el armado del equipo). NULL/0 = no lleva ayudantes.
+    cantidad_ayudantes: Optional[int] = None
 
 
 class PrestacionRead(BaseModel):
     id: int = Field(..., alias="id_detalle_prestaciones")
     periodo: str
-    cod_medico: str = Field(..., alias="cod_med")
+    cod_medico: str = Field(..., alias="cod_med")   # payee (médico o clínica)
+    # Médico ejecutor (NRO_SOCIO) cuando el payee es una clínica; NULL si el payee ya es
+    # el médico. Para precargar el formulario de edición.
+    cod_medico_ejecutor: Optional[str] = Field(None, alias="cod_med_ejecutor")
+    # Legacy, co-propiedad con CMC: igual al PK (id_detalle_prestaciones) para las
+    # cargas nuevas — ya no es un identificador propio, se mantiene solo porque
+    # liquidación (nro_orden_cmc) y lotes todavía lo leen para mostrar.
     nro_orden: Optional[str] = None
     cod_obra_social: Optional[str] = Field(None, alias="cod_obr")
     cod_nomenclador: Optional[str] = Field(None, alias="cod_nom")
     tipo: Optional[str] = None
+    # Badge "Medico" | "Ayudante" | "Gastos" según qué monto está en >0 (misma derivación
+    # que en `GET /facturas/{id}/detalle`, ver `_derivar_tipo_prestador`). NO viene del
+    # ORM: se calcula en `obtener_prestacion` — en el resto de las respuestas que usan
+    # `PrestacionRead` queda None. Identifica cuál integrante de `grupo` es la cabecera
+    # ("Medico") sin tener que interpretar el código legacy `tpo_funcion` (H/HG/G/A).
+    tipo_prestador: Optional[str] = None
     grupo_equipo_id: Optional[int] = None
     sesion: Optional[int] = None
     cantidad: Optional[int] = None
@@ -136,15 +254,29 @@ class PrestacionRead(BaseModel):
     ayudante: Optional[Decimal] = None
     importe_total: Optional[Decimal] = None
     estado: Optional[str] = None
+    origen_carga: Optional[str] = None  # 'medico' | 'colegio'
     fecha_practica: Optional[datetime.date] = None
     dni_paciente: Optional[str] = Field(None, alias="dni_p")
     nombre_paciente: Optional[str] = Field(None, alias="nom_ape_p")
+    revisado: bool = False
+    autorizacion: Optional[str] = None
+    # Campos necesarios para precargar el formulario de edición (no se usaban en el
+    # listado hasta ahora, pero ya se guardan al crear/editar la prestación).
+    cod_clinica: Optional[int] = None
+    tipo_calculo: Optional[str] = Field(None, alias="manual")   # "A" | "M"
+    porcentaje: Optional[int] = Field(None, alias="porc")
+    # Integrantes del equipo (mismo `grupo_equipo_id`) DISTINTOS de esta prestación —
+    # ayudantes / gastos / cabeza. Cada uno es un `PrestacionRead` completo. Se puebla solo
+    # en `GET /prestaciones/{id}`; en los ítems anidados queda None (sin recursión).
+    # `[]` cuando la prestación no pertenece a un equipo. Sirve para que el front, al
+    # editar, cargue toda la información del grupo que participó.
+    grupo: Optional[list["PrestacionRead"]] = None
 
     # cod_med/nro_orden/cod_obr (y otros) son columnas enteras en la DB legacy pero
     # se exponen como string en la API → coercionar int→str al leer del ORM.
     @field_validator(
-        "cod_medico", "nro_orden", "cod_obra_social", "cod_nomenclador",
-        "dni_paciente", mode="before",
+        "cod_medico", "cod_medico_ejecutor", "nro_orden", "cod_obra_social",
+        "cod_nomenclador", "dni_paciente", mode="before",
     )
     @classmethod
     def _num_to_str(cls, v):
@@ -155,10 +287,14 @@ class PrestacionRead(BaseModel):
         populate_by_name = True
 
 
+PrestacionRead.model_rebuild()  # resuelve la auto-referencia de `grupo`
+
+
 class GuardadoResponse(BaseModel):
     """Respuesta del POST — aplica a 1 o N filas."""
     ids: list[int]
     importe_total: Decimal
+    periodo: Optional[str] = None   # período (YYYYMM) donde efectivamente se guardó
 
 
 class MoverPeriodoResponse(BaseModel):
@@ -167,17 +303,14 @@ class MoverPeriodoResponse(BaseModel):
 
 
 # ── Cierre de período ─────────────────────────────────────────────────────────
-class CierrePayload(BaseModel):
-    cod_obra: str
-    periodo: str   # "YYYYMM"
-
-
+# NOTA: POST /cierre es multipart/form-data (cod_obra/periodo van como Form fields,
+# el comprobante como File) — no tiene un schema de request Pydantic, ver routes.py.
 class CierrePreviewResponse(BaseModel):
     cod_obra: str
     periodo: str
     cantidad: int
     importe_total: Decimal
-    cerrado: bool   # True si ya existe factura cerrada para esa OS+período
+    cerrado: bool   # True si la última versión ya está cerrada para esa OS+período
 
 
 class CierreResponse(BaseModel):
@@ -186,3 +319,182 @@ class CierreResponse(BaseModel):
     periodo: str
     cantidad: int
     importe_total: Decimal
+    documento_url: Optional[str] = None
+    nro_factura: Optional[str] = None
+
+
+# ── Factura complementaria (nueva versión de un período+OS ya cerrado) ───────
+class ComplementoCreate(BaseModel):
+    cod_obra: str
+    periodo: str   # "YYYYMM"
+
+
+# ── Facturas / períodos (cabeceras de `facturacion`) ─────────────────────────
+class FacturaRead(BaseModel):
+    """Cabecera de `facturacion` — todos los campos de la fila."""
+    id_prestaciones: int
+    id_cliente: Optional[int] = None
+    tipo_factura: Optional[str] = None
+    nro_factura: Optional[str] = None
+    tipo_factura_2: Optional[str] = None
+    nro_factura_2: Optional[str] = None
+    tipo_factura_3: Optional[str] = None
+    nro_factura_3: Optional[str] = None
+    periodo: Optional[str] = None
+    periodo_label: Optional[str] = None
+    cod_obr: Optional[str] = None
+    fecha: Optional[datetime.date] = None
+    fecha_envio: Optional[datetime.date] = None
+    fecha_recep: Optional[datetime.date] = None
+    importe: Optional[Decimal] = None
+    afip: Optional[str] = None
+    usuario: Optional[str] = None           # NRO_SOCIO de quien creó/cerró la cabecera
+    usuario_nombre: Optional[str] = None    # NOMBRE resuelto contra ListadoMedico (batch, no persistido)
+    estado: Optional[str] = None            # fase colegio: 'A' abierta / 'C' cerrada
+    estado_doctor: Optional[str] = None     # fase médico:  'A' abierta / 'C' cerrada
+    created: Optional[datetime.datetime] = None
+    documento_url: Optional[str] = None     # comprobante subido al cerrar (si lo hay)
+    version: int = 1                        # 1 = original; 2+ = facturas complementarias
+
+    @field_validator("cod_obr", mode="before")
+    @classmethod
+    def _num_to_str(cls, v):
+        return str(v) if v is not None else v
+
+    @field_validator("fecha", "fecha_envio", "fecha_recep", "created", mode="before")
+    @classmethod
+    def _zero_date_to_none(cls, v):
+        # MySQL puede devolver zero-dates ('0000-00-00') que no son fechas válidas.
+        if isinstance(v, str) and v.startswith("0000-00-00"):
+            return None
+        return v
+
+    class Config:
+        from_attributes = True
+
+
+# ── Períodos médico / colegio ────────────────────────────────────────────────
+class CierreDoctorPayload(BaseModel):
+    cod_obra: str
+    periodo: str   # "YYYYMM"
+
+
+class CierreDoctorResponse(BaseModel):
+    cod_obra: str
+    periodo: str
+    estado_doctor: str
+    # Si el puntero de médicos apuntaba al período cerrado, se avanza y acá viene el
+    # nuevo período donde los médicos cargan; None si el puntero no estaba ahí.
+    periodo_medico_nuevo: Optional[str] = None
+
+
+class AvanzarPeriodoMedicoPayload(BaseModel):
+    # None → avanza el período global; con valor → override de esa OS.
+    cod_obra: Optional[str] = None
+
+
+class AvanzarPeriodoMedicoResponse(BaseModel):
+    alcance: str           # "global" o el cod_obra
+    periodo_saliente: str
+    periodo_nuevo: str
+    cabeceras_cerradas: int
+
+
+class PeriodoMedicoAvanceItem(BaseModel):
+    obra_social_id: Optional[int] = None  # None = puntero global
+    periodo_saliente: str
+    periodo_nuevo: str
+    cabeceras_cerradas: int
+
+
+class CerrarPeriodosVencidosResponse(BaseModel):
+    """Response de POST /periodo-medico/cerrar-vencidos (disparado por el cron)."""
+    os_avanzadas: int
+    cabeceras_cerradas: int
+    detalle: list[PeriodoMedicoAvanceItem] = Field(default_factory=list)
+
+
+class SetPeriodoMedicoPayload(BaseModel):
+    # None → fija el puntero global; con valor → el puntero de esa OS.
+    cod_obra: Optional[str] = None
+    periodo: str = Field(..., pattern=r"^\d{6}$", description="YYYYMM")
+
+
+class SetPeriodoMedicoResponse(BaseModel):
+    alcance: str           # "global" o el cod_obra
+    periodo: str
+
+
+class PeriodoMedicoPunteroOut(BaseModel):
+    obra_social_id: Optional[int] = None  # None = global
+    obra_social: Optional[str] = None
+    es_global: bool
+    periodo: str
+    periodo_label: str
+    updated_at: datetime.datetime
+
+
+# ── Detalle de factura agrupado por prestador ────────────────────────────────
+class PrestacionFacturaDetalleOut(BaseModel):
+    id: int
+    periodo: str
+    autorizacion: Optional[str] = None
+    fecha_practica: Optional[datetime.date] = None   # fecha de la prestación (no de carga)
+    codigo: Optional[str] = None                     # cod_nom
+    nro_afiliado: Optional[str] = None                # dni_p
+    # Médico ejecutor — presente solo cuando el payee (cod_medico del grupo) es una clínica.
+    cod_medico_ejecutor: Optional[str] = None
+    nombre_ejecutor: Optional[str] = None
+    cantidad: Optional[int] = None
+    sesion: Optional[int] = None
+    porcentaje: Optional[int] = None                 # porc
+    honorarios: Optional[Decimal] = None
+    gastos: Optional[Decimal] = None
+    tipo_prestador: Optional[str] = None             # badge: Medico | Ayudante | Gastos
+    subtotal: Optional[Decimal] = None               # importe_total
+    tipo: Optional[str] = None                       # badge: Consulta | Practica | Honorarios individuales | Sanatorio
+    revisado: bool = False
+    estado: Optional[str] = None
+
+    # codigo/nro_afiliado son columnas enteras en filas legacy → coercionar a string.
+    @field_validator("codigo", "nro_afiliado", mode="before")
+    @classmethod
+    def _num_to_str(cls, v):
+        return str(v) if v is not None else v
+
+
+class PrestadorFacturaGrupoOut(BaseModel):
+    cod_medico: str                                  # payee (médico o clínica)
+    nombre: Optional[str] = None
+    matricula: Optional[int] = None
+    pago_a_clinica: bool = False                     # True → el payee es una clínica
+    cantidad_prestaciones: int
+    total_cantidad: int
+    total_honorarios: Decimal
+    total_gastos: Decimal
+    total_subtotal: Decimal
+    prestaciones: list[PrestacionFacturaDetalleOut]
+
+    @field_validator("cod_medico", mode="before")
+    @classmethod
+    def _num_to_str(cls, v):
+        return str(v) if v is not None else v
+
+
+class FacturaDetalleOut(BaseModel):
+    id_factura: int
+    periodo: str
+    periodo_label: str
+    cod_obra: str
+    estado: Optional[str] = None
+    estado_doctor: Optional[str] = None
+    version: int = 1                # 1 = original; 2+ = factura complementaria
+    es_complemento: bool = False
+    total_prestaciones: int
+    total_importe: Decimal
+    prestadores: list[PrestadorFacturaGrupoOut]
+
+    @field_validator("cod_obra", mode="before")
+    @classmethod
+    def _num_to_str(cls, v):
+        return str(v) if v is not None else v

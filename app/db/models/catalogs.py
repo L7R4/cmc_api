@@ -43,6 +43,12 @@ class ObrasSociales(Base):
         Enum('responsable_inscripto', 'exento', name='condicion_iva_enum'), nullable=True
     )
     plazo_vencimiento: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # Día de corte de la ventana del período: 1 = mes completo (1 al último día del
+    # mes); 20 = del 20 al 20. Define a qué período pertenece una prestación según su
+    # fecha_practica y el plazo operativo de carga/cierre. Default 20 (la mayoría).
+    dia_corte: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("'20'")
+    )
     fecha_alta_convenio: Mapped[Optional[datetime.date]] = mapped_column(Date, nullable=True)
     obra_social_principal_id: Mapped[Optional[int]] = mapped_column(
         Integer, ForeignKey('obras_sociales.ID', ondelete='SET NULL'), nullable=True, index=True
@@ -128,6 +134,9 @@ class ObraSocialDocumento(Base):
 
 
 class Periodos(Base):
+    # DEPRECADO: el período del colegio se modela en la cabecera `facturacion`
+    # (fase `estado` A/C). No usar en código nuevo. Ver PeriodoMedicoActual para la
+    # fase médico. Se conserva solo por datos legacy.
     __tablename__ = 'periodos'
     __table_args__ = (
         Index('ANIO', 'ANIO'),
@@ -149,6 +158,8 @@ class Periodos(Base):
 
 
 class PeriodosDoctor(Base):
+    # DEPRECADO: reemplazada por `periodo_medico_actual` (PeriodoMedicoActual), que es
+    # el puntero global-con-override del período de médicos. No usar en código nuevo.
     __tablename__ = 'periodos_doctor'
     __table_args__ = (
         Index('ANIO_DOCTOR', 'ANIO_DOCTOR'),

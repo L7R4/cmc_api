@@ -30,9 +30,12 @@ class Settings(BaseSettings):
     MEDIA_URL: str = "uploads"        
     MEDIA_BASE_URL: str | None = None   
                  
-    RESEND_API_KEY: str | None = None     
+    RESEND_API_KEY: str | None = None
     EMAIL_NOTIFY_TO: str | None = None
     EMAIL_FROM: str | None = None
+
+    # Secreto de máquina para endpoints llamados por el cron (no un JWT de usuario).
+    CRON_SECRET: str | None = None
     @property
     def MYSQL_URL(self) -> str:
         return (

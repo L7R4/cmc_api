@@ -15,6 +15,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
 
+from app.common.money import quantize_money
 from app.db.base import Base
 
 
@@ -314,6 +315,8 @@ class Valor(Base):
     especialidad_id_colegio: Mapped[Optional[int]] = mapped_column(
         Integer, nullable=True
     )
+    # Máximo de ayudantes admitidos para este código+OS. NULL = no lleva ayudantes (0).
+    cantidad_ayudantes: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     # True → el código se factura "por presupuesto": no hay precio pactado en el
     # sistema, la OS informa el importe por fuera. Los componentes H/G/A quedan en 0
     # y el operador carga el monto a mano al facturar (modo manual).
@@ -422,10 +425,12 @@ class ValorComponente(Base):
 
     @property
     def subtotal(self) -> Decimal:
-        """Aporte del componente al precio: cantidad × VU (calculable) o VU fijo."""
+        """Aporte del componente al precio: cantidad × VU (calculable) o VU fijo.
+        Redondeado a 2 decimales — cantidad es DECIMAL(10,4), sin quantize el producto
+        arrastra hasta 6 decimales."""
         if self.galeno_id is not None:
             vu = self.galeno.valor_unitario if self.galeno else Decimal("0")
-            return self.cantidad * vu
+            return quantize_money(self.cantidad * vu)
         return self.valor_unitario or Decimal("0")
 
     __table_args__ = (

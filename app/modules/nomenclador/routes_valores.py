@@ -176,6 +176,7 @@ async def _crear_valor_con_componentes(
     especialidad_id_colegio: Optional[int],
     observacion: Optional[str],
     por_presupuesto: bool = False,
+    cantidad_ayudantes: Optional[int] = None,
 ) -> Valor:
     nom = await db.get(NomencladorCMC, nomenclador_id)
     if not nom:
@@ -191,6 +192,7 @@ async def _crear_valor_con_componentes(
         complejidad=complejidad,
         especialidad_id_colegio=especialidad_id_colegio,
         por_presupuesto=por_presupuesto,
+        cantidad_ayudantes=cantidad_ayudantes,
         vigencia_desde=vigencia_desde,
         vigencia_hasta=None,
         estado="activo",
@@ -280,6 +282,7 @@ async def _clonar_valor(
         nivel=nivel if nivel is not None else origen.nivel,
         complejidad=origen.complejidad,
         especialidad_id_colegio=origen.especialidad_id_colegio,
+        cantidad_ayudantes=origen.cantidad_ayudantes,
         vigencia_desde=vigencia_desde,
         vigencia_hasta=None,
         estado="activo",
@@ -484,6 +487,7 @@ async def create_valor(body: ValorCreate, db: AsyncSession = Depends(get_db)):
         especialidad_id_colegio=body.especialidad_id_colegio,
         observacion=body.observacion,
         por_presupuesto=body.por_presupuesto,
+        cantidad_ayudantes=body.cantidad_ayudantes,
     )
 
     await service.regenerar_historial_por_valores(valor.id, None, db, motivo="carga_inicial")
@@ -616,6 +620,10 @@ async def actualizar_valor(
         especialidad_id_colegio=anterior.especialidad_id_colegio,
         observacion=body.observacion or anterior.observacion,
         por_presupuesto=body.por_presupuesto,
+        cantidad_ayudantes=(
+            body.cantidad_ayudantes if body.cantidad_ayudantes is not None
+            else anterior.cantidad_ayudantes
+        ),
     )
 
     await service.regenerar_historial_por_valores(
@@ -748,6 +756,7 @@ async def replicar_estructura(body: ReplicarEstructuraIn, db: AsyncSession = Dep
                 nivel=nivel_destino,
                 complejidad=None,
                 especialidad_id_colegio=origen.especialidad_id_colegio,
+                cantidad_ayudantes=origen.cantidad_ayudantes,
                 vigencia_desde=body.vigencia_desde,
                 vigencia_hasta=None,
                 estado="activo",
@@ -879,6 +888,7 @@ async def replicar_a_obras_sociales(
                 nivel=origen.nivel,
                 complejidad=None,
                 especialidad_id_colegio=origen.especialidad_id_colegio,
+                cantidad_ayudantes=origen.cantidad_ayudantes,
                 vigencia_desde=body.vigencia_desde,
                 vigencia_hasta=None,
                 estado="activo",
@@ -1348,6 +1358,7 @@ async def importar_valores_csv(
                 nivel=nivel_valor,
                 complejidad=prev.complejidad if prev else None,
                 especialidad_id_colegio=especialidad,
+                cantidad_ayudantes=prev.cantidad_ayudantes if prev else None,
                 por_presupuesto=por_presupuesto,
                 vigencia_desde=vigencia_desde,
                 vigencia_hasta=None,

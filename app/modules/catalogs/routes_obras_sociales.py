@@ -103,6 +103,7 @@ def _build_out(
         plazo_vencimiento=obj.plazo_vencimiento,
         fecha_alta_convenio=obj.fecha_alta_convenio,
         obra_social_principal_id=obj.obra_social_principal_id,
+        dia_corte=obj.dia_corte,
         emails=emails,
         telefonos=telefonos,
         obra_social_principal=_simple_out(principal) if principal else None,
@@ -219,6 +220,7 @@ async def create_obra_social(
         plazo_vencimiento=payload.plazo_vencimiento,
         fecha_alta_convenio=payload.fecha_alta_convenio,
         obra_social_principal_id=payload.obra_social_principal_id,
+        dia_corte=payload.dia_corte,
     )
     db.add(obj)
     try:
@@ -288,6 +290,7 @@ async def update_obra_social(
         "plazo_vencimiento": "plazo_vencimiento",
         "fecha_alta_convenio": "fecha_alta_convenio",
         "obra_social_principal_id": "obra_social_principal_id",
+        "dia_corte": "dia_corte",
     }
     changes = payload.model_dump(exclude_unset=True, exclude={"contactos", "direcciones"})
     for field, orm_attr in scalar_map.items():

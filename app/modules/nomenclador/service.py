@@ -10,9 +10,10 @@ import datetime
 from decimal import Decimal
 from typing import List, Optional
 
-from sqlalchemy import and_, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.common.money import quantize_money
 from app.db.models.nomenclador_cmc import (
     Galeno,
     HistorialPrecioCodigo,
@@ -23,6 +24,7 @@ from app.db.models.nomenclador_cmc import (
     ValorComponente,
 )
 from app.db.models.medico import ListadoMedico
+from app.db.models.catalogs import Especialidad
 from app.modules.nomenclador.schemas import (
     ComponenteLookupOut,
     LookupPrecioOut,
@@ -77,7 +79,7 @@ async def calcular_precio_total(
             # calculable
             galeno = await db.get(Galeno, comp.galeno_id)
             precio_unidad = galeno.valor_unitario if galeno else Decimal("0")
-            subtotal = comp.cantidad * precio_unidad
+            subtotal = quantize_money(comp.cantidad * precio_unidad)
             snapshot.append({
                 "componente_id": comp.id,
                 "concepto": comp.concepto,
@@ -91,7 +93,7 @@ async def calcular_precio_total(
             })
         else:
             # fijo
-            subtotal = comp.valor_unitario or Decimal("0")
+            subtotal = quantize_money(comp.valor_unitario or Decimal("0"))
             snapshot.append({
                 "componente_id": comp.id,
                 "concepto": comp.concepto,
@@ -106,7 +108,7 @@ async def calcular_precio_total(
 
         precio_total += subtotal
 
-    return precio_total, snapshot
+    return quantize_money(precio_total), snapshot
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -996,6 +998,121 @@ async def _validar_habilitacion_medico(
         raise LookupError("Médico sin habilitación por especialidad para este código")
 
 
+async def listar_codigos_habilitados(
+    db: AsyncSession, medico: ListadoMedico, q: Optional[str] = None,
+) -> list[dict]:
+    """Todos los códigos que el médico puede facturar, con el mismo alcance que evalúa
+    `_validar_habilitacion_medico` (para que este listado sea 100% consistente con lo
+    que `lookup_precio` aceptaría después): por especialidad + excepción individual
+    `habilita` + `sin_restriccion_especialidad`, menos excepción individual
+    `inhabilita` (gana sobre todo lo demás). Filtra códigos activos; `q` busca por
+    código o descripción.
+
+    Cada código trae además las especialidades DEL MÉDICO que lo habilitan (puede ser
+    más de una si el código está vinculado a varias especialidades que el médico
+    tiene, y queda vacía si solo entra por excepción individual o sin restricción)."""
+    fecha = datetime.date.today()
+    vigencia_ok = and_(
+        (MedicoCodigoHabilitado.vigencia_desde.is_(None)) |
+        (MedicoCodigoHabilitado.vigencia_desde <= fecha),
+        (MedicoCodigoHabilitado.vigencia_hasta.is_(None)) |
+        (MedicoCodigoHabilitado.vigencia_hasta >= fecha),
+    )
+
+    inhabilita_ids = set((await db.execute(
+        select(MedicoCodigoHabilitado.nomenclador_id).where(
+            MedicoCodigoHabilitado.medico_id == medico.ID,
+            MedicoCodigoHabilitado.tipo == "inhabilita",
+            MedicoCodigoHabilitado.activo == True,
+            vigencia_ok,
+        )
+    )).scalars().all())
+
+    habilita_ids = set((await db.execute(
+        select(MedicoCodigoHabilitado.nomenclador_id).where(
+            MedicoCodigoHabilitado.medico_id == medico.ID,
+            MedicoCodigoHabilitado.tipo == "habilita",
+            MedicoCodigoHabilitado.activo == True,
+            vigencia_ok,
+        )
+    )).scalars().all())
+
+    # (nomenclador_id, especialidad_id_colegio) — se conserva el par para poder armar,
+    # más abajo, QUÉ especialidad del médico habilita cada código (puede ser más de una).
+    especialidades = _especialidades_medico(medico)
+    especialidad_rows: list[tuple[int, int]] = []
+    if especialidades:
+        especialidad_rows = (await db.execute(
+            select(NomencladorEspecialidad.nomenclador_id, NomencladorEspecialidad.especialidad_id_colegio)
+            .where(
+                NomencladorEspecialidad.especialidad_id_colegio.in_(especialidades),
+                NomencladorEspecialidad.activo == True,
+            )
+        )).all()
+    especialidad_ids = {nid for nid, _ in especialidad_rows}
+    especialidades_por_codigo: dict[int, list[int]] = {}
+    for nid, eid in especialidad_rows:
+        especialidades_por_codigo.setdefault(nid, []).append(eid)
+
+    sin_restriccion_ids = set((await db.execute(
+        select(NomencladorCMC.id).where(NomencladorCMC.sin_restriccion_especialidad == True)
+    )).scalars().all())
+
+    ids_finales = (habilita_ids | especialidad_ids | sin_restriccion_ids) - inhabilita_ids
+    if not ids_finales:
+        return []
+
+    stmt = (
+        select(NomencladorCMC)
+        .where(NomencladorCMC.id.in_(ids_finales), NomencladorCMC.activo == True)
+        .order_by(NomencladorCMC.codigo.asc())
+    )
+    if q:
+        like = f"%{q}%"
+        stmt = stmt.where(or_(NomencladorCMC.codigo.ilike(like), NomencladorCMC.descripcion.ilike(like)))
+    codigos = list((await db.execute(stmt)).scalars().all())
+
+    # Nombres de las especialidades DEL MÉDICO (alcanza con resolver esas, no todo el catálogo).
+    nombre_map: dict[int, str] = {}
+    if especialidades:
+        esp_rows = (await db.execute(
+            select(Especialidad.ID_COLEGIO_ESPE, Especialidad.ESPECIALIDAD)
+            .where(Especialidad.ID_COLEGIO_ESPE.in_(especialidades))
+        )).all()
+        nombre_map = {int(eid): nombre for eid, nombre in esp_rows}
+
+    return [
+        {
+            "codigo": c.codigo,
+            "descripcion": c.descripcion,
+            "categoria": c.categoria,
+            "complejidad": c.complejidad,
+            "especialidades": [
+                {"id": eid, "nombre": nombre_map.get(eid)}
+                for eid in especialidades_por_codigo.get(c.id, [])
+            ],
+        }
+        for c in codigos
+    ]
+
+
+async def get_cantidad_ayudantes(
+    db: AsyncSession, obra_social_nro: int, nomenclador_id: int, fecha: datetime.date,
+) -> int:
+    """Máximo de ayudantes admitidos por el Valor vigente activo para (OS, código).
+    0 si es NULL o no hay valor (NULL = no lleva ayudantes). Usa MAX para ser robusto
+    ante múltiples variantes del mismo código+OS (caso marginal)."""
+    stmt = select(func.max(Valor.cantidad_ayudantes)).where(
+        Valor.obra_social_nro == obra_social_nro,
+        Valor.nomenclador_id == nomenclador_id,
+        Valor.estado == "activo",
+        Valor.vigencia_desde <= fecha,
+        (Valor.vigencia_hasta.is_(None)) | (Valor.vigencia_hasta >= fecha),
+    )
+    val = (await db.execute(stmt)).scalar()
+    return int(val) if val is not None else 0
+
+
 async def lookup_precio(
     nomenclador_id: int,
     obra_social_nro: int,
@@ -1094,7 +1211,9 @@ async def lookup_precio(
             galeno_nivel=item.get("galeno_nivel"),
             cantidad=Decimal(item["cantidad"]),
             valor_unitario=Decimal(item["valor_unitario"]),
-            subtotal=Decimal(item["subtotal"]),
+            # quantize defensivo: snapshots históricos previos al fix de precisión
+            # pueden traer más de 2 decimales; se limpian solos al leerse.
+            subtotal=quantize_money(item["subtotal"]),
         )
         for item in historial.componentes_snapshot
     ]

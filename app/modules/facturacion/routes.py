@@ -290,14 +290,16 @@ async def listar_prestaciones(
 @router.post("/prestaciones", response_model=GuardadoResponse, status_code=status.HTTP_201_CREATED)
 async def crear_prestaciones(
     payload: PrestacionesCreate,
-    confirmar_duplicado: bool = Query(False),
     user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Carga del **colegio**. El período sale de la fecha + ventana de la OS o del
-    período activo del colegio."""
+    """Carga del **colegio**. Por defecto el período es el automático (último cerrado +
+    1). Si el payload trae `periodo` (YYYYMM, botón "editar período"), se carga en ese
+    período — útil para saltar meses sin movimiento. Debe ser >= el automático (un período
+    ya cerrado → usar complemento). La respuesta incluye el `periodo` usado. Sin validación
+    de duplicados: se puede cargar la misma prestación más de una vez."""
     return await service.guardar_prestaciones(
-        db, payload, _usuario(user), confirmar_duplicado, actor=service.ORIGEN_COLEGIO,
+        db, payload, _usuario(user), actor=service.ORIGEN_COLEGIO,
     )
 
 
@@ -307,7 +309,6 @@ async def crear_prestaciones(
 )
 async def crear_prestaciones_complementaria(
     payload: PrestacionesComplementariaCreate,
-    confirmar_duplicado: bool = Query(False),
     user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -317,21 +318,20 @@ async def crear_prestaciones_complementaria(
     período ni se crea sola. 404 si la factura no existe, 422 si no es un complemento
     (`version=1`), 409 si el complemento ya está cerrado."""
     return await service.guardar_prestaciones_complementaria(
-        db, payload, _usuario(user), confirmar_duplicado,
+        db, payload, _usuario(user),
     )
 
 
 @router.post("/medico/prestaciones", response_model=GuardadoResponse, status_code=status.HTTP_201_CREATED)
 async def crear_prestaciones_medico(
     payload: PrestacionesCreate,
-    confirmar_duplicado: bool = Query(False),
     user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Carga del **médico** (portal). El período sale de la fecha + ventana de la OS o
     del período activo de médicos. Requiere que la fase médico esté abierta."""
     return await service.guardar_prestaciones(
-        db, payload, _usuario(user), confirmar_duplicado, actor=service.ORIGEN_MEDICO,
+        db, payload, _usuario(user), actor=service.ORIGEN_MEDICO,
     )
 
 

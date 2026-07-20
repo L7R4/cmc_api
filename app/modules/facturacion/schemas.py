@@ -17,6 +17,10 @@ class MedicoBuscarOut(BaseModel):
     matricula: Optional[int] = None
     categoria: Optional[str] = None
     condicion_impositiva: Optional[str] = None
+    # `/medicos` devuelve médicos Y clínicas (misma tabla listado_medico). Este flag
+    # permite al front distinguirlos en un solo pedido: True → es una clínica/organización
+    # (payee que cobra, requiere médico ejecutor); False → médico real.
+    es_organizacion: bool = False
     especialidades: list[MedicoEspecialidadOut] = Field(default_factory=list)
 
 
@@ -74,8 +78,15 @@ class PrestacionItem(BaseModel):
     `periodo` no se envía: lo asigna el backend. El nombre del paciente tampoco: se
     obtiene del padrón `afiliado` por `dni_paciente`.
     """
-    # Médico
-    cod_medico: str   # NRO_SOCIO del médico
+    # Payee — a quién se le PAGA. NRO_SOCIO de un médico o de una clínica
+    # (listado_medico con es_organizacion=1, vía autocomplete /clinicas).
+    cod_medico: str
+
+    # Médico EJECUTOR — obligatorio cuando `cod_medico` es una clínica; NULL si el payee
+    # ya es el propio médico. No cobra: solo registra quién ejecutó y determina el precio
+    # (por su especialidad). La regla payee-clínica⇒ejecutor se valida en el backend
+    # (requiere resolver es_organizacion contra la DB).
+    cod_medico_ejecutor: Optional[str] = None
 
     # Paciente — solo DNI; el nombre se resuelve contra el padrón afiliado
     dni_paciente: Optional[str] = None
@@ -107,9 +118,14 @@ class PrestacionesCreate(BaseModel):
     """Payload del POST /facturacion/prestaciones.
 
     1 ítem = carga individual. N ítems = equipo quirúrgico (misma transacción).
-    `periodo` lo calcula el backend según la OS.
     """
     obra_social: str                      # cod_obra_social
+    # Período destino (YYYYMM) — SOLO carga del colegio. None = automático (último
+    # período cerrado + 1). Se envía cuando el operador usa "editar período" para saltar
+    # meses sin movimiento (ej. última cerrada abril, sin mayo → cargar directo junio).
+    # Debe ser >= el automático; un período ya cerrado se rechaza (usar complemento).
+    # En la carga del médico este campo se ignora (el período sale del puntero).
+    periodo: Optional[str] = Field(None, pattern=r"^\d{6}$")
     prestaciones: list[PrestacionItem] = Field(..., min_length=1)
 
 
@@ -128,7 +144,8 @@ class PrestacionesComplementariaCreate(BaseModel):
 class PrestacionUpdate(BaseModel):
     """PATCH — todos los campos opcionales. No se puede cambiar periodo, cod_obra
     ni nro_orden. Si se envía dni_paciente, se relee el nombre del padrón."""
-    cod_medico: Optional[str] = None
+    cod_medico: Optional[str] = None            # payee (médico o clínica)
+    cod_medico_ejecutor: Optional[str] = None   # médico ejecutor (si payee es clínica)
     dni_paciente: Optional[str] = None
     fecha_practica: Optional[datetime.date] = None
     cod_clinica: Optional[int] = None
@@ -212,7 +229,10 @@ class PrecioResponse(BaseModel):
 class PrestacionRead(BaseModel):
     id: int = Field(..., alias="id_detalle_prestaciones")
     periodo: str
-    cod_medico: str = Field(..., alias="cod_med")
+    cod_medico: str = Field(..., alias="cod_med")   # payee (médico o clínica)
+    # Médico ejecutor (NRO_SOCIO) cuando el payee es una clínica; NULL si el payee ya es
+    # el médico. Para precargar el formulario de edición.
+    cod_medico_ejecutor: Optional[str] = Field(None, alias="cod_med_ejecutor")
     # Legacy, co-propiedad con CMC: igual al PK (id_detalle_prestaciones) para las
     # cargas nuevas — ya no es un identificador propio, se mantiene solo porque
     # liquidación (nro_orden_cmc) y lotes todavía lo leen para mostrar.
@@ -220,6 +240,12 @@ class PrestacionRead(BaseModel):
     cod_obra_social: Optional[str] = Field(None, alias="cod_obr")
     cod_nomenclador: Optional[str] = Field(None, alias="cod_nom")
     tipo: Optional[str] = None
+    # Badge "Medico" | "Ayudante" | "Gastos" según qué monto está en >0 (misma derivación
+    # que en `GET /facturas/{id}/detalle`, ver `_derivar_tipo_prestador`). NO viene del
+    # ORM: se calcula en `obtener_prestacion` — en el resto de las respuestas que usan
+    # `PrestacionRead` queda None. Identifica cuál integrante de `grupo` es la cabecera
+    # ("Medico") sin tener que interpretar el código legacy `tpo_funcion` (H/HG/G/A).
+    tipo_prestador: Optional[str] = None
     grupo_equipo_id: Optional[int] = None
     sesion: Optional[int] = None
     cantidad: Optional[int] = None
@@ -239,12 +265,18 @@ class PrestacionRead(BaseModel):
     cod_clinica: Optional[int] = None
     tipo_calculo: Optional[str] = Field(None, alias="manual")   # "A" | "M"
     porcentaje: Optional[int] = Field(None, alias="porc")
+    # Integrantes del equipo (mismo `grupo_equipo_id`) DISTINTOS de esta prestación —
+    # ayudantes / gastos / cabeza. Cada uno es un `PrestacionRead` completo. Se puebla solo
+    # en `GET /prestaciones/{id}`; en los ítems anidados queda None (sin recursión).
+    # `[]` cuando la prestación no pertenece a un equipo. Sirve para que el front, al
+    # editar, cargue toda la información del grupo que participó.
+    grupo: Optional[list["PrestacionRead"]] = None
 
     # cod_med/nro_orden/cod_obr (y otros) son columnas enteras en la DB legacy pero
     # se exponen como string en la API → coercionar int→str al leer del ORM.
     @field_validator(
-        "cod_medico", "nro_orden", "cod_obra_social", "cod_nomenclador",
-        "dni_paciente", mode="before",
+        "cod_medico", "cod_medico_ejecutor", "nro_orden", "cod_obra_social",
+        "cod_nomenclador", "dni_paciente", mode="before",
     )
     @classmethod
     def _num_to_str(cls, v):
@@ -255,10 +287,14 @@ class PrestacionRead(BaseModel):
         populate_by_name = True
 
 
+PrestacionRead.model_rebuild()  # resuelve la auto-referencia de `grupo`
+
+
 class GuardadoResponse(BaseModel):
     """Respuesta del POST — aplica a 1 o N filas."""
     ids: list[int]
     importe_total: Decimal
+    periodo: Optional[str] = None   # período (YYYYMM) donde efectivamente se guardó
 
 
 class MoverPeriodoResponse(BaseModel):
@@ -406,6 +442,9 @@ class PrestacionFacturaDetalleOut(BaseModel):
     fecha_practica: Optional[datetime.date] = None   # fecha de la prestación (no de carga)
     codigo: Optional[str] = None                     # cod_nom
     nro_afiliado: Optional[str] = None                # dni_p
+    # Médico ejecutor — presente solo cuando el payee (cod_medico del grupo) es una clínica.
+    cod_medico_ejecutor: Optional[str] = None
+    nombre_ejecutor: Optional[str] = None
     cantidad: Optional[int] = None
     sesion: Optional[int] = None
     porcentaje: Optional[int] = None                 # porc
@@ -425,9 +464,10 @@ class PrestacionFacturaDetalleOut(BaseModel):
 
 
 class PrestadorFacturaGrupoOut(BaseModel):
-    cod_medico: str
+    cod_medico: str                                  # payee (médico o clínica)
     nombre: Optional[str] = None
     matricula: Optional[int] = None
+    pago_a_clinica: bool = False                     # True → el payee es una clínica
     cantidad_prestaciones: int
     total_cantidad: int
     total_honorarios: Decimal

@@ -31,6 +31,11 @@ class DetalleFacturacionCMC(Base):
     ayudante: Mapped[Optional[Decimal]] = mapped_column(DECIMAL(14, 2))
     importe_total: Mapped[Optional[Decimal]] = mapped_column(DECIMAL(14, 2))
     manual: Mapped[Optional[str]] = mapped_column(String(1))
+    # NRO_SOCIO del médico que EJECUTÓ la prestación cuando `cod_med` (el payee) apunta
+    # a una clínica (listado_medico.es_organizacion=1). NULL cuando el payee ya es el
+    # propio médico. Determina el precio (por la especialidad del ejecutor) pero NO cobra
+    # — a quien se le paga es siempre `cod_med`. Sin FK real, igual que `cod_med`.
+    cod_med_ejecutor: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
     dni_p: Mapped[Optional[str]] = mapped_column(String(15))
     nom_ape_p: Mapped[Optional[str]] = mapped_column(String(100))
     tpo_serv: Mapped[Optional[str]] = mapped_column(String(1))

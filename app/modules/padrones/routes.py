@@ -21,6 +21,19 @@ def _padron_number_attr():
     return getattr(MedicoObraSocial, "NRO_OBRASOCIAL")
 
 
+def _clean_str(v) -> str | None:
+    """Coacciona un valor de la fila a str limpio (o None).
+
+    Algunas columnas de `listado_medico` (p. ej. CODIGO_POSTAL, CUIT) llegan
+    como int desde MySQL aunque el modelo las declare String, así que no se
+    puede asumir .strip(). str() cubre int/str/None de forma segura.
+    """
+    if v is None:
+        return None
+    s = str(v).strip()
+    return s or None
+
+
 async def _listado_defaults(db: AsyncSession, nro_socio: int):
     lm = (await db.execute(select(ListadoMedico).where(ListadoMedico.NRO_SOCIO == nro_socio))).scalar_one_or_none()
     if not lm:
@@ -285,10 +298,10 @@ async def list_medicos_por_obra_social(
             "MATRICULA_NAC": r["MATRICULA_NAC"],
             "CATEGORIA": r["CATEGORIA"],
             "TELEFONO_CONSULTA": r["TELEFONO_CONSULTA"],
-            "DOMICILIO_CONSULTA": (r["DOMICILIO_CONSULTA"] or "").strip() or None,
-            "MAIL_PARTICULAR": (r["MAIL_PARTICULAR"] or "").strip() or None,
-            "CUIT": (r["CUIT"] or "").strip() or None,
-            "CODIGO_POSTAL": (r["CODIGO_POSTAL"] or "").strip() or None,
+            "DOMICILIO_CONSULTA": _clean_str(r["DOMICILIO_CONSULTA"]),
+            "MAIL_PARTICULAR": _clean_str(r["MAIL_PARTICULAR"]),
+            "CUIT": _clean_str(r["CUIT"]),
+            "CODIGO_POSTAL": _clean_str(r["CODIGO_POSTAL"]),
             "MARCA": r["MARCA"],
             "OBRA_SOCIAL": (r["OBRA_SOCIAL"] or "").strip() if r["OBRA_SOCIAL"] is not None else None,
             "ESPECIALIDADES": especialidades,

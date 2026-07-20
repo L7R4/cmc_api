@@ -44,6 +44,11 @@ class MedicoOSItemOut(BaseModel):
     MARCA: str | None = None
     OBRA_SOCIAL: str | None = None
     ESPECIALIDADES: list[str] = Field(default_factory=list)
+    # Datos de contacto para exportaciones (evita el fetch por fila en el front)
+    DOMICILIO_CONSULTA: str | None = None
+    MAIL_PARTICULAR: str | None = None
+    CUIT: str | None = None
+    CODIGO_POSTAL: str | None = None
 
     model_config = {"from_attributes": True}
 

@@ -20,7 +20,7 @@ from typing import Any, DefaultDict, Literal, Optional, Dict, List
 from fastapi import APIRouter, Body, Depends, File, Form, Query, HTTPException, Request, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import case, delete, desc, func, literal, select, or_, cast, String, Integer, update
-from app.core.passwords import hash_password
+from app.core.passwords import hash_password, validate_new_password
 from app.db.database import get_db
 from app.db.models import (
     Deduccion, Descuentos, DetalleLiquidacion, Documento, Especialidad, Liquidacion, ListadoMedico,
@@ -31,7 +31,8 @@ from app.modules.medicos.schemas import (
     CEAppOut, CEBundleOut, CEBundlePatchIn, CEStoreOut, ConceptRecordOut, ConceptoAplicacionOut,
     DoctorStatsPointOut, ExisteIn, MedicoBase, MedicoConceptoOut, MedicoDebtOut, MedicoDocOut,
     MedicoEspecialidadOut, MedicoListRow, MedicoDetailOut, MedicoPartialIn, MedicoUpdateIn,
-    NuevaDeudaIn, PatchCEIn, RegisterIn, RegisterOut, SaveContinueOut, _coerce_existe, _coerce_sexo,
+    NuevaDeudaIn, PatchCEIn, RegisterIn, RegisterOut, ResetPasswordIn, SaveContinueOut,
+    _coerce_existe, _coerce_sexo,
 )
 from app.auth.deps import require_scope
 from app.services.email import send_email_resend
@@ -1371,6 +1372,25 @@ async def set_existe(medico_id: int, body: ExisteIn, db: AsyncSession = Depends(
     await db.flush()
     await db.commit()
     return {"ok": True, "medico_id": medico_id, "EXISTE": med.EXISTE}
+
+
+@router.post("/{medico_id}/reset-password", dependencies=[Depends(require_scope("medicos:editar_perfil"))])
+async def reset_password_medico(medico_id: int, body: ResetPasswordIn, db: AsyncSession = Depends(get_db)):
+    """Resetea la contraseña de un socio sin requerir la actual — para uso de un
+    admin/staff cuando el socio se la olvidó. El self-service está en
+    POST /auth/change-password (requiere la contraseña actual)."""
+    med = await db.get(ListadoMedico, medico_id)
+    if not med:
+        raise HTTPException(404, "Médico no encontrado")
+
+    try:
+        new_password = validate_new_password(body.new_password)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+    med.hashed_password = hash_password(new_password)
+    await db.commit()
+    return {"ok": True, "medico_id": medico_id}
 
 
 @router.delete("/{medico_id}", status_code=204, dependencies=[Depends(require_scope("medicos:eliminar"))])

@@ -29,6 +29,7 @@ from app.db.models.catalogs import (
     ValoresEticos,
 )
 from app.db.models.rbac import Role, Permission, UserRole, RolePermission, UserPermission
+from app.db.models.auditoria import AuditLog
 from app.db.models.contenido import Noticia, DocumentoNoticias, PublicidadMedico
 from app.db.models.solicitud import SolicitudRegistro
 from app.db.models.cmc_facturacion import (
@@ -68,6 +69,8 @@ __all__ = [
     "ValoresEticos",
     # rbac
     "Role", "Permission", "UserRole", "RolePermission", "UserPermission",
+    # auditoria
+    "AuditLog",
     # contenido
     "Noticia", "DocumentoNoticias", "PublicidadMedico",
     # solicitud

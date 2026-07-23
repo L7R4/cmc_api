@@ -557,6 +557,10 @@ class ExisteIn(BaseModel):
     existe: Literal["S", "N"]
 
 
+class ResetPasswordIn(BaseModel):
+    new_password: str
+
+
 class AdminSaveContinueIn(BaseModel):
     medico_id: Optional[int] = None
     documentType: Optional[str] = None

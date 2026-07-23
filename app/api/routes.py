@@ -6,6 +6,7 @@ from app.modules.nomenclador.routes_galenos import router as galenos_router
 from app.modules.nomenclador.routes_valores import router as valores_nm_router
 from app.modules.nomenclador.routes_reportes import router as reportes_nm_router
 
+from app.modules.auditoria.routes import router as auditoria_router
 from app.modules.catalogs.routes_especialidades import router as especialidades_router
 from app.modules.catalogs.routes_obras_sociales import router as obras_social_router
 from app.modules.catalogs.routes_periodos import router as periodos_router
@@ -50,6 +51,7 @@ api_router.include_router(publicidades_medico_router, prefix="/publicidad-medico
 api_router.include_router(exports_router, prefix="/exports", tags=["exports"])
 
 api_router.include_router(rbac_router, prefix="/admin/rbac", tags=["Rbac"])
+api_router.include_router(auditoria_router, prefix="/auditoria", tags=["Auditoría"])
 
 # ── Nomenclador y Valores ─────────────────────────────────────────────────────
 api_router.include_router(nomenclador_router,  prefix="/nomenclador",     tags=["Nomenclador"])

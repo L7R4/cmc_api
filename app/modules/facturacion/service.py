@@ -648,10 +648,16 @@ async def derivar_tipo(
 
 
 # ── Normalizaciones y cálculo ────────────────────────────────────────────────
-def normalizar_fecha_practica(
-    fecha: Optional[datetime.date], periodo: str
-) -> datetime.date:
-    return fecha if fecha is not None else _periodo_to_date(periodo)
+def fecha_para_precio(fecha: Optional[datetime.date]) -> datetime.date:
+    """Fecha a usar para cotizar (lookup de precio + habilitación).
+
+    Cuando la carga es por `cantidad` (equipo/lote) el operador no puede asignarle
+    una fecha de práctica a cada unidad — en ese caso `fecha_practica` se guarda en
+    NULL (no se inventa un valor) y para el precio se usa HOY, así siempre trae el
+    valor VIGENTE más actualizado en vez del que regía al primer día del período
+    (que podría estar desactualizado si hubo un cambio de precio a mitad de mes).
+    """
+    return fecha if fecha is not None else datetime.date.today()
 
 
 def _dec(x) -> Decimal:
@@ -848,7 +854,9 @@ async def _insertar_prestaciones(
         payee, _ejecutor, medico_precio = await resolver_payee_ejecutor(
             db, item.cod_medico, item.cod_medico_ejecutor
         )
-        fecha_norm = normalizar_fecha_practica(item.fecha_practica, periodo)
+        # Cotiza con la fecha informada o, si no vino (carga por cantidad), con HOY —
+        # nunca se inventa una fecha de práctica para guardar (ver `fecha_para_precio`).
+        fecha_precio = fecha_para_precio(item.fecha_practica)
 
         if item.cod_nomenclador in CODIGOS_NO_PERMITIDOS:
             raise HTTPException(422, "Código no permitido")
@@ -859,7 +867,7 @@ async def _insertar_prestaciones(
         # payee no es una clínica).
         h_base, g_base, a_base, snapshot = await _montos_de_item(
             db, item, cod_obra, medico_precio,
-            item.cod_nomenclador, item.tipo_calculo, fecha_norm,
+            item.cod_nomenclador, item.tipo_calculo, fecha_precio,
         )
         h, g, a = _aplicar_porcentaje(h_base, g_base, a_base, item.porcentaje)
         total = calcular_importe_total(h, g, a, item.cantidad, item.sesion)
@@ -889,7 +897,9 @@ async def _insertar_prestaciones(
             dni_p=item.dni_paciente,
             nom_ape_p=nombre_paciente,
             cod_clinica=item.cod_clinica,
-            fecha_practica=fecha_norm,
+            # NULL cuando el operador no la cargó (carga por cantidad) — no se rellena
+            # con el primer día del período, eso solo se usaba para cotizar (arriba).
+            fecha_practica=item.fecha_practica,
             autorizacion=item.autorizacion,
             porc=item.porcentaje,
             estado="A",
@@ -1206,7 +1216,7 @@ async def listar_prestaciones(
         .limit(limit).offset(offset)
     )
     rows = (await db.execute(stmt)).scalars().all()
-    return _to_prestacion_read_list(rows), total
+    return await _to_prestacion_read_list(db, rows), total
 
 
 async def prestaciones_recientes(
@@ -1222,7 +1232,7 @@ async def prestaciones_recientes(
         .order_by(M.id_detalle_prestaciones.desc()).limit(10)
     )
     rows = (await db.execute(stmt)).scalars().all()
-    return _to_prestacion_read_list(rows)
+    return await _to_prestacion_read_list(db, rows)
 
 
 # ── Detalle de una prestación (precarga de formulario de edición) ────────────
@@ -1232,16 +1242,35 @@ def _tipo_prestador_de(row: DetalleFacturacionCMC) -> Optional[str]:
     )
 
 
-def _to_prestacion_read_list(
-    rows: Sequence[DetalleFacturacionCMC],
+async def _to_prestacion_read_list(
+    db: AsyncSession, rows: Sequence[DetalleFacturacionCMC],
 ) -> list[PrestacionRead]:
     """Convierte filas ORM a `PrestacionRead` completando `tipo_prestador` (no viene del
-    ORM). Mismo criterio que `obtener_prestacion` — reusado acá para que el listado
+    ORM) y `nombre_obra_social` (resuelto en batch contra `obras_sociales`, sin N+1).
+    Mismo criterio que `obtener_prestacion` — reusado acá para que el listado
     también lo traiga."""
+    nros_os: set[int] = set()
+    for row in rows:
+        try:
+            nros_os.add(int(row.cod_obr))
+        except (TypeError, ValueError):
+            continue
+    nombres_os: dict[int, str] = {}
+    if nros_os:
+        os_rows = (await db.execute(
+            select(ObrasSociales.NRO_OBRASOCIAL, ObrasSociales.OBRA_SOCIAL)
+            .where(ObrasSociales.NRO_OBRASOCIAL.in_(nros_os))
+        )).all()
+        nombres_os = {nro: nombre for nro, nombre in os_rows}
+
     out = []
     for row in rows:
         item = PrestacionRead.model_validate(row)
         item.tipo_prestador = _tipo_prestador_de(row)
+        try:
+            item.nombre_obra_social = nombres_os.get(int(row.cod_obr))
+        except (TypeError, ValueError):
+            pass
         out.append(item)
     return out
 
@@ -1334,7 +1363,7 @@ async def editar_prestacion(
 
     # Recalcular importe con el estado resultante
     tipo_calculo = row.manual or "A"
-    fecha = row.fecha_practica or datetime.date.today()
+    fecha = fecha_para_precio(row.fecha_practica)
 
     # Inputs de precio que disparan recotizar. Clave para NO re-factorizar (doble
     # descuento) cuando solo se edita cantidad/sesión/fecha: los montos ya están factorizados.

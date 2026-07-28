@@ -92,7 +92,11 @@ class PrestacionItem(BaseModel):
     dni_paciente: Optional[str] = None
 
     # Servicio
-    fecha_practica: Optional[datetime.date] = None   # None → primer día del período
+    # Opcional: en cargas por `cantidad` (equipo/lote) el operador no puede asignarle
+    # una fecha distinta a cada unidad. Si no viene, se guarda NULL y el precio se
+    # cotiza con la fecha de HOY (el valor vigente más actualizado), ver
+    # `service.fecha_para_precio`.
+    fecha_practica: Optional[datetime.date] = None
     cod_clinica: Optional[int] = None                # si viene → tipo = "Sanatorio"
     autorizacion: Optional[str] = Field(None, max_length=30)  # nro de autorización de la OS
 
@@ -238,6 +242,8 @@ class PrestacionRead(BaseModel):
     # liquidación (nro_orden_cmc) y lotes todavía lo leen para mostrar.
     nro_orden: Optional[str] = None
     cod_obra_social: Optional[str] = Field(None, alias="cod_obr")
+    # Resuelto en batch contra `obras_sociales` (NRO_OBRASOCIAL) — no viene del ORM.
+    nombre_obra_social: Optional[str] = None
     cod_nomenclador: Optional[str] = Field(None, alias="cod_nom")
     tipo: Optional[str] = None
     # Badge "Medico" | "Ayudante" | "Gastos" según qué monto está en >0 (misma derivación

@@ -167,9 +167,7 @@ async def precio_nomenclador(
     db: AsyncSession = Depends(get_db),
 ):
     medico = await service.check_medico_activo(db, cod_medico)
-    if fecha is None:
-        periodo = await service.get_periodo_activo(db, cod_obra)
-        fecha = service.normalizar_fecha_practica(None, periodo)
+    fecha = service.fecha_para_precio(fecha)
     return await service.resolver_precio(db, cod_obra, medico, codigo, fecha)
 
 

@@ -27,8 +27,8 @@ class MedicoBuscarOut(BaseModel):
 # ── Autocomplete de clínicas/organizaciones ───────────────────────────────────
 class ClinicaBuscarOut(BaseModel):
     """Misma tabla `listado_medico` que los médicos, filtrada por
-    `es_organizacion=1`. `cod` = NRO_SOCIO, listo para usar directo en
-    `PrestacionItem.cod_clinica` (mismo tipo, int)."""
+    `es_organizacion=1`. `cod` = NRO_SOCIO — se envía en `PrestacionItem.cod_medico`
+    (junto con el médico en `cod_medico_ejecutor`) y el backend lo baja a `cod_clinica`."""
     cod: int
     nombre: str
     documento: Optional[str] = None
@@ -56,8 +56,18 @@ class CodigoHabilitadoOut(BaseModel):
 
 # ── Afiliados ────────────────────────────────────────────────────────────────
 class AfiliadoCreate(BaseModel):
-    dni: str = Field(..., min_length=6, max_length=15, pattern=r"^\d+$")
+    # El campo se sigue llamando `dni` por compatibilidad, pero identifica al paciente
+    # por DNI **o** por nro de afiliado de la obra social, que es alfanumérico y puede
+    # llevar separadores (ej. "1231233/00"). Por eso no se valida como sólo dígitos.
+    dni: str = Field(..., min_length=4, max_length=20, pattern=r"^[A-Za-z0-9./\-]+$")
     nombre: str = Field(..., min_length=1, max_length=100)
+
+    @field_validator("dni", mode="before")
+    @classmethod
+    def _limpiar(cls, v):
+        # Espacios accidentales del pegado/tipeo del operador; el resto se conserva tal
+        # cual (no se normalizan separadores para no crear duplicados del mismo padrón).
+        return v.strip() if isinstance(v, str) else v
 
 
 class AfiliadoRead(BaseModel):
@@ -78,14 +88,17 @@ class PrestacionItem(BaseModel):
     `periodo` no se envía: lo asigna el backend. El nombre del paciente tampoco: se
     obtiene del padrón `afiliado` por `dni_paciente`.
     """
-    # Payee — a quién se le PAGA. NRO_SOCIO de un médico o de una clínica
-    # (listado_medico con es_organizacion=1, vía autocomplete /clinicas).
+    # PRESTADOR seleccionado en el formulario. NRO_SOCIO de un médico o de una clínica
+    # (listado_medico con es_organizacion=1, vía autocomplete /clinicas). NO es
+    # necesariamente lo que se guarda en `detalle_facturacion.cod_med`: si es una
+    # clínica, la clínica baja a `cod_clinica` y el que queda en `cod_med` es el
+    # ejecutor — el médico es siempre quien cobra. Ver `service.resolver_prestador`.
     cod_medico: str
 
-    # Médico EJECUTOR — obligatorio cuando `cod_medico` es una clínica; NULL si el payee
-    # ya es el propio médico. No cobra: solo registra quién ejecutó y determina el precio
-    # (por su especialidad). La regla payee-clínica⇒ejecutor se valida en el backend
-    # (requiere resolver es_organizacion contra la DB).
+    # Médico EJECUTOR — obligatorio cuando `cod_medico` es una clínica. Es el que
+    # termina persistido en `cod_med`: cobra Y determina el precio (por su especialidad).
+    # Se ignora (o debe repetir a `cod_medico`) cuando el prestador ya es un médico.
+    # La columna `cod_med_ejecutor` NO se escribe: este campo es sólo la señal de entrada.
     cod_medico_ejecutor: Optional[str] = None
 
     # Paciente — solo DNI; el nombre se resuelve contra el padrón afiliado
@@ -97,17 +110,29 @@ class PrestacionItem(BaseModel):
     # cotiza con la fecha de HOY (el valor vigente más actualizado), ver
     # `service.fecha_para_precio`.
     fecha_practica: Optional[datetime.date] = None
-    cod_clinica: Optional[int] = None                # si viene → tipo = "Sanatorio"
+    # Clínica donde se hizo la prestación, cuando `cod_medico` es un MÉDICO que factura
+    # por sí mismo (la clínica es sólo el ámbito). Fuerza `tipo="Honorarios individuales"`
+    # — no es un sanatorio, aunque comparta la marca `tipo_orden='S'`. Debe ser una
+    # organización (`es_organizacion=1`) o se rechaza con 422.
+    # Si `cod_medico` ya es una clínica (caso sanatorio), este campo se IGNORA: la
+    # clínica se toma de `cod_medico`.
+    cod_clinica: Optional[int] = None
     autorizacion: Optional[str] = Field(None, max_length=30)  # nro de autorización de la OS
 
     # Prestación
     cod_nomenclador: str
+    # Vía quirúrgica: T = tradicional (default), L = laparoscópica. Solo afecta el
+    # precio de códigos cuyo Honorarios use un galeno de cirugía adulto/infantil
+    # (ver app/modules/nomenclador/service_vias.py); en modo manual es solo dato.
+    via: Optional[Literal["T", "L"]] = None
     cantidad: int = Field(1, ge=1)
     sesion: int = Field(1, ge=1)
 
     # Montos — el concepto en >0 es el que se factura (médico/gastos/ayudante implícito).
     # Automático: el backend toma el valor del lookup para cada concepto marcado en >0.
     # Manual: se guardan los montos enviados tal cual.
+    # Excepción: bajo clínica (tipo_orden='S'), código de categoría 'Honorarios
+    # individuales' y `tipo_calculo="A"`, `gastos` se fuerza a 0 — los factura la clínica.
     tipo_calculo: TipoCalculo = "A"
     honorarios: Optional[Decimal] = None
     gastos: Optional[Decimal] = None
@@ -148,13 +173,20 @@ class PrestacionesComplementariaCreate(BaseModel):
 class PrestacionUpdate(BaseModel):
     """PATCH — todos los campos opcionales. No se puede cambiar periodo, cod_obra
     ni nro_orden. Si se envía dni_paciente, se relee el nombre del padrón."""
-    cod_medico: Optional[str] = None            # payee (médico o clínica)
-    cod_medico_ejecutor: Optional[str] = None   # médico ejecutor (si payee es clínica)
+    # Mismo trío que en la carga: `cod_medico` es el prestador seleccionado (médico o
+    # clínica), `cod_medico_ejecutor` el médico cuando el prestador es una clínica, y
+    # `cod_clinica` el ámbito cuando el prestador es un médico. El backend los reparte en
+    # cod_med / cod_clinica / tipo_orden / tipo. Los campos que no se envían se toman de
+    # la fila (se reconstruye la selección original y se revalida). Enviar
+    # `cod_clinica: null` explícito saca la clínica.
+    cod_medico: Optional[str] = None
+    cod_medico_ejecutor: Optional[str] = None
+    cod_clinica: Optional[int] = None
     dni_paciente: Optional[str] = None
     fecha_practica: Optional[datetime.date] = None
-    cod_clinica: Optional[int] = None
     autorizacion: Optional[str] = Field(None, max_length=30)
     cod_nomenclador: Optional[str] = None
+    via: Optional[Literal["T", "L"]] = None
     cantidad: Optional[int] = Field(None, ge=1)
     sesion: Optional[int] = Field(None, ge=1)
     tipo_calculo: Optional[TipoCalculo] = None
@@ -228,14 +260,21 @@ class PrecioResponse(BaseModel):
     # Máximo de ayudantes admitidos para este código+OS (informativo, para que el front
     # limite el armado del equipo). NULL/0 = no lleva ayudantes.
     cantidad_ayudantes: Optional[int] = None
+    # Vía cotizada (T=tradicional, L=laparoscópica) y, si L, el nivel de galeno
+    # efectivamente usado (ver app/modules/nomenclador/service_vias.py).
+    via: str = "T"
+    nivel_cotizado: Optional[int] = None
 
 
 class PrestacionRead(BaseModel):
     id: int = Field(..., alias="id_detalle_prestaciones")
     periodo: str
-    cod_medico: str = Field(..., alias="cod_med")   # payee (médico o clínica)
-    # Médico ejecutor (NRO_SOCIO) cuando el payee es una clínica; NULL si el payee ya es
-    # el médico. Para precargar el formulario de edición.
+    # El MÉDICO que cobra — siempre un médico real, aun bajo clínica (la clínica va en
+    # `cod_clinica`). Para precargar el formulario de edición: si viene `cod_clinica`,
+    # el selector de prestador va con la clínica y éste es el "médico ejecutor".
+    cod_medico: str = Field(..., alias="cod_med")
+    # LEGACY: sólo tiene valor en filas cargadas antes del 2026-07-31. Hoy el ejecutor
+    # es `cod_medico` y esta columna queda NULL.
     cod_medico_ejecutor: Optional[str] = Field(None, alias="cod_med_ejecutor")
     # Legacy, co-propiedad con CMC: igual al PK (id_detalle_prestaciones) para las
     # cargas nuevas — ya no es un identificador propio, se mantiene solo porque
@@ -245,6 +284,7 @@ class PrestacionRead(BaseModel):
     # Resuelto en batch contra `obras_sociales` (NRO_OBRASOCIAL) — no viene del ORM.
     nombre_obra_social: Optional[str] = None
     cod_nomenclador: Optional[str] = Field(None, alias="cod_nom")
+    via: Optional[str] = None
     tipo: Optional[str] = None
     # Badge "Medico" | "Ayudante" | "Gastos" según qué monto está en >0 (misma derivación
     # que en `GET /facturas/{id}/detalle`, ver `_derivar_tipo_prestador`). NO viene del
@@ -268,7 +308,13 @@ class PrestacionRead(BaseModel):
     autorizacion: Optional[str] = None
     # Campos necesarios para precargar el formulario de edición (no se usaban en el
     # listado hasta ahora, pero ya se guardan al crear/editar la prestación).
+    # Clínica bajo la que se ejecutó (NRO_SOCIO de la organización); None = el médico
+    # factura por sí mismo. `nombre_clinica` se resuelve en batch, no viene del ORM.
     cod_clinica: Optional[int] = None
+    nombre_clinica: Optional[str] = None
+    # Marca legacy: 'S' si hubo clínica (sea prestador o ámbito), None si no. NO sirve
+    # para distinguir sanatorio de ámbito — para eso está `tipo`.
+    tipo_orden: Optional[str] = None
     tipo_calculo: Optional[str] = Field(None, alias="manual")   # "A" | "M"
     porcentaje: Optional[int] = Field(None, alias="porc")
     # Integrantes del equipo (mismo `grupo_equipo_id`) DISTINTOS de esta prestación —
@@ -448,9 +494,14 @@ class PrestacionFacturaDetalleOut(BaseModel):
     fecha_practica: Optional[datetime.date] = None   # fecha de la prestación (no de carga)
     codigo: Optional[str] = None                     # cod_nom
     nro_afiliado: Optional[str] = None                # dni_p
-    # Médico ejecutor — presente solo cuando el payee (cod_medico del grupo) es una clínica.
+    # Médico ejecutor — LEGACY, sólo en filas viejas (hoy el ejecutor es el cod_medico
+    # del grupo, que es siempre el médico que cobra).
     cod_medico_ejecutor: Optional[str] = None
     nombre_ejecutor: Optional[str] = None
+    # Clínica donde se hizo la prestación (prestador o ámbito); None si no hubo.
+    cod_clinica: Optional[int] = None
+    nombre_clinica: Optional[str] = None
+    tipo_orden: Optional[str] = None                 # marca legacy 'S'; discrimina `tipo`
     cantidad: Optional[int] = None
     sesion: Optional[int] = None
     porcentaje: Optional[int] = None                 # porc
@@ -470,10 +521,12 @@ class PrestacionFacturaDetalleOut(BaseModel):
 
 
 class PrestadorFacturaGrupoOut(BaseModel):
-    cod_medico: str                                  # payee (médico o clínica)
+    cod_medico: str                                  # el médico que cobra
     nombre: Optional[str] = None
     matricula: Optional[int] = None
-    pago_a_clinica: bool = False                     # True → el payee es una clínica
+    # LEGACY: True sólo en grupos históricos donde el payee era una organización. Con el
+    # modelo actual el payee es siempre un médico → la clínica se informa por prestación.
+    pago_a_clinica: bool = False
     cantidad_prestaciones: int
     total_cantidad: int
     total_honorarios: Decimal

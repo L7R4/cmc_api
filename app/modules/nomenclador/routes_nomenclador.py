@@ -4,7 +4,6 @@ import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import and_, exists, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
 from app.auth.deps import get_current_user_with_scopes_and_role
 from app.db.database import get_db
@@ -20,7 +19,6 @@ from app.modules.nomenclador.schemas import (
     MedicoHabilitacionCreate,
     MedicoHabilitacionOut,
     MedicoHabilitacionUpdate,
-    NomencladorConVariantesOut,
     NomencladorCreate,
     NomencladorEspecialidadCreate,
     NomencladorEspecialidadOut,
@@ -187,10 +185,6 @@ async def list_codigos_por_especialidad(
 
 @router.post("/", response_model=NomencladorOut, status_code=201)
 async def create_nomenclador(body: NomencladorCreate, db: AsyncSession = Depends(get_db)):
-    if body.proviene_de_id is not None:
-        raiz = await db.get(NomencladorCMC, body.proviene_de_id)
-        if not raiz:
-            raise HTTPException(404, "Código raíz no encontrado")
     obj = NomencladorCMC(**body.model_dump())
     db.add(obj)
     await db.commit()
@@ -198,14 +192,9 @@ async def create_nomenclador(body: NomencladorCreate, db: AsyncSession = Depends
     return obj
 
 
-@router.get("/{id}", response_model=NomencladorConVariantesOut)
+@router.get("/{id}", response_model=NomencladorOut)
 async def get_nomenclador(id: int, db: AsyncSession = Depends(get_db)):
-    stmt = (
-        select(NomencladorCMC)
-        .where(NomencladorCMC.id == id)
-        .options(selectinload(NomencladorCMC.variantes))
-    )
-    obj = (await db.execute(stmt)).scalar_one_or_none()
+    obj = await db.get(NomencladorCMC, id)
     if not obj:
         raise HTTPException(404, "Código no encontrado")
     return obj
@@ -244,9 +233,6 @@ async def delete_nomenclador(id: int, db: AsyncSession = Depends(get_db)):
     stmt = select(Valor).where(Valor.nomenclador_id == id, Valor.estado == "activo").limit(1)
     if (await db.execute(stmt)).scalar_one_or_none():
         raise HTTPException(409, "El código tiene valores activos; ciérrelos antes de eliminarlo")
-    stmt_variantes = select(NomencladorCMC).where(NomencladorCMC.proviene_de_id == id).limit(1)
-    if (await db.execute(stmt_variantes)).scalar_one_or_none():
-        raise HTTPException(409, "El código tiene variantes; elimínelas primero")
     await db.delete(obj)
     await db.commit()
 

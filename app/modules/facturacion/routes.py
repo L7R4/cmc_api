@@ -125,15 +125,17 @@ async def buscar_afiliados(
     limit: int = Query(20, ge=1, le=20),
     db: AsyncSession = Depends(get_db),
 ):
-    """Autocomplete de afiliados por nombre o DNI."""
+    """Autocomplete de afiliados por nombre, DNI o nro de afiliado."""
     return await service.buscar_afiliados(db, q, limit)
 
 
-@router.get("/afiliados/{dni}", response_model=AfiliadoRead)
+# `{dni:path}` en vez de `{dni}` porque el identificador puede ser un nro de afiliado
+# con barra ("1231233/00") — el converter por defecto no matchea `/` y devolvía 404.
+@router.get("/afiliados/{dni:path}", response_model=AfiliadoRead)
 async def get_afiliado(dni: str, db: AsyncSession = Depends(get_db)):
     afiliado = await service.get_afiliado_by_dni(db, dni)
     if not afiliado:
-        raise HTTPException(404, f"Afiliado con DNI {dni} no encontrado")
+        raise HTTPException(404, f"Afiliado '{dni}' no encontrado")
     return afiliado
 
 
@@ -164,11 +166,12 @@ async def precio_nomenclador(
     cod_obra: str = Query(...),
     codigo: str = Query(...),
     fecha: Optional[datetime.date] = Query(None),
+    via: str = Query("T", description="T = tradicional, L = laparoscópica"),
     db: AsyncSession = Depends(get_db),
 ):
     medico = await service.check_medico_activo(db, cod_medico)
     fecha = service.fecha_para_precio(fecha)
-    return await service.resolver_precio(db, cod_obra, medico, codigo, fecha)
+    return await service.resolver_precio(db, cod_obra, medico, codigo, fecha, via=via)
 
 
 # ── Facturas / períodos ──────────────────────────────────────────────────────

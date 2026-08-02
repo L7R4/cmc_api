@@ -46,7 +46,6 @@ def slugify_codigo(nombre: str) -> str:
 
 class NomencladorCreate(BaseModel):
     codigo: str
-    proviene_de_id: Optional[int] = None
     descripcion: str
     categoria: Optional[str] = None
     complejidad: Optional[Literal["baja", "media", "alta"]] = None
@@ -55,11 +54,6 @@ class NomencladorCreate(BaseModel):
     unidades_ayudante: Optional[Decimal] = None
     unidades_gastos: Optional[Decimal] = None
     observacion: Optional[str] = None
-
-    @field_validator("proviene_de_id", mode="before")
-    @classmethod
-    def coerce_zero_to_none(cls, v: object) -> Optional[int]:
-        return None if v == 0 else v
 
 
 class NomencladorUpdate(BaseModel):
@@ -77,7 +71,6 @@ class NomencladorUpdate(BaseModel):
 class NomencladorOut(BaseModel):
     id: int
     codigo: str
-    proviene_de_id: Optional[int]
     descripcion: str
     categoria: Optional[str]
     complejidad: Optional[str]
@@ -91,10 +84,6 @@ class NomencladorOut(BaseModel):
     updated_at: datetime.datetime
 
     model_config = {"from_attributes": True}
-
-
-class NomencladorConVariantesOut(NomencladorOut):
-    variantes: List[NomencladorOut] = []
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -702,6 +691,7 @@ class LookupPrecioIn(BaseModel):
     obra_social_nro: int
     fecha_practica: datetime.date
     medico_id: int
+    via: Literal["T", "L"] = "T"              # T = tradicional, L = laparoscópica
 
     @model_validator(mode="after")
     def check_codigo(self) -> "LookupPrecioIn":
@@ -738,6 +728,11 @@ class LookupPrecioOut(BaseModel):
     precio_base: Decimal            # = precio_total (ya no hay opcionales)
     precio_total: Decimal           # suma de los 3 componentes
     componentes: List[ComponenteLookupOut]
+    # Vía cotizada (T=tradicional, L=laparoscópica) y, si L, el nivel efectivamente
+    # usado para cotizar (galeno de 7 niveles → nivel siguiente; 10 niveles → mismo
+    # nivel con recargo). Ver app/modules/nomenclador/service_vias.py.
+    via: str = "T"
+    nivel_cotizado: Optional[int] = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -828,6 +823,10 @@ class TablaValoresItem(BaseModel):
     vigencia_desde: datetime.date
     vigencia_hasta: Optional[datetime.date]
     componentes: list
+    # Vía efectivamente aplicada al precio de esta fila (T=tradicional, L=laparoscópica).
+    # Si se pidió L y el código no admite laparoscopía, la fila cae a T con su precio
+    # tradicional en vez de romper el listado (ver GET /tabla_valores).
+    via_aplicada: str = "T"
 
 
 class EvolucionPrecioItem(BaseModel):

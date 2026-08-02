@@ -20,7 +20,9 @@ from app.db.base import Base
 
 
 class NomencladorCMC(Base):
-    """Catálogo operativo del Colegio. Raíces + variantes por técnica (proviene_de_id)."""
+    """Catálogo operativo del Colegio. Un código por práctica; la vía/técnica
+    (tradicional/laparoscópica) es un atributo de la prestación, no del código
+    (ver detalle_facturacion.via y app/modules/nomenclador/service_vias.py)."""
     __tablename__ = "nm_nomenclador"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -29,9 +31,6 @@ class NomencladorCMC(Base):
     # NULL = no identificado como nacional (código propio del Colegio o sin match).
     # Se cargó por comparación contra el extracto del PDF (ver scripts/compare_nomenclador.py).
     codigo_nacional: Mapped[Optional[str]] = mapped_column(String(20), nullable=True, index=True)
-    proviene_de_id: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("nm_nomenclador.id"), nullable=True, index=True
-    )
     descripcion: Mapped[str] = mapped_column(String(255), nullable=False)
     categoria: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     complejidad: Mapped[Optional[str]] = mapped_column(
@@ -54,19 +53,6 @@ class NomencladorCMC(Base):
         DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
     )
 
-    variantes: Mapped[List["NomencladorCMC"]] = relationship(
-        "NomencladorCMC",
-        foreign_keys=[proviene_de_id],
-        back_populates="raiz",
-        lazy="raise",
-    )
-    raiz: Mapped[Optional["NomencladorCMC"]] = relationship(
-        "NomencladorCMC",
-        remote_side="NomencladorCMC.id",
-        foreign_keys=[proviene_de_id],
-        back_populates="variantes",
-        lazy="raise",
-    )
     especialidades: Mapped[List["NomencladorEspecialidad"]] = relationship(
         back_populates="nomenclador", cascade="all, delete-orphan", lazy="selectin"
     )

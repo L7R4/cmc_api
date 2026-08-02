@@ -25,6 +25,7 @@ from app.db.models.nomenclador_cmc import (
 )
 from app.db.models.medico import ListadoMedico
 from app.db.models.catalogs import Especialidad
+from app.modules.nomenclador import service_vias
 from app.modules.nomenclador.schemas import (
     ComponenteLookupOut,
     LookupPrecioOut,
@@ -1119,6 +1120,7 @@ async def lookup_precio(
     fecha: datetime.date,
     medico_id: int,
     db: AsyncSession,
+    via: str = service_vias.VIA_TRADICIONAL,
 ) -> LookupPrecioOut:
     """
     Lookup directo en historial_precio_codigo + validación de habilitación del médico.
@@ -1198,9 +1200,6 @@ async def lookup_precio(
 
     valor = await db.get(Valor, historial.valores_id)
 
-    # Todos los componentes suman (ya no hay opcionales): precio_base == precio_total.
-    precio_total = historial.precio_total
-    precio_base = precio_total
     componentes_out: List[ComponenteLookupOut] = [
         ComponenteLookupOut(
             componente_id=item.get("componente_id"),
@@ -1218,6 +1217,16 @@ async def lookup_precio(
         for item in historial.componentes_snapshot
     ]
 
+    try:
+        componentes_out, precio_total, nivel_cotizado = await service_vias.ajustar_componentes_por_via(
+            db, obra_social_nro, componentes_out, via,
+        )
+    except service_vias.ViaNoAplicableError as e:
+        raise LookupError(e.message, e.status_code)
+
+    # Todos los componentes suman (ya no hay opcionales): precio_base == precio_total.
+    precio_base = precio_total
+
     return LookupPrecioOut(
         nomenclador_id=nomenclador_id,
         codigo_colegio=nomenclador.codigo,
@@ -1231,4 +1240,6 @@ async def lookup_precio(
         precio_base=precio_base,
         precio_total=precio_total,
         componentes=componentes_out,
+        via=via,
+        nivel_cotizado=nivel_cotizado,
     )

@@ -3,7 +3,7 @@ import os
 import shutil
 import uuid
 from decimal import Decimal
-from typing import Optional, Sequence
+from typing import NamedTuple, Optional, Sequence
 
 from fastapi import HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
@@ -24,6 +24,7 @@ from app.db.models import (
 )
 from app.modules.medicos.helpers import parse_conceps_espec
 from app.modules.nomenclador import service as service_nm
+from app.modules.nomenclador import service_vias
 from app.modules.nomenclador.service import LookupError as PrecioLookupError
 
 from app.modules.facturacion.schemas import (
@@ -58,6 +59,22 @@ DOCTOR_CERRADA = "C"
 # Quién carga la prestación (columna `detalle_facturacion.origen_carga`).
 ORIGEN_MEDICO = "medico"
 ORIGEN_COLEGIO = "colegio"
+
+# `detalle_facturacion.tipo_orden` — 'S' cuando la prestación se hizo en una clínica
+# (`cod_clinica` presente), sea la clínica el prestador o sólo el ámbito. NULL cuando el
+# médico factura por sí mismo sin clínica.
+#
+# ⚠ Es una MARCA, no el discriminador: `tipo_orden='S'` NO distingue "Sanatorio" de
+# "Honorarios individuales" (ambos casos la llevan). La fuente de verdad para eso es
+# `tipo` — la columna legacy queda poblada sólo para que se vea al mirar la tabla a mano,
+# y nada del código depende de ella (decisión usuario 2026-07-31). Ningún módulo aguas
+# abajo (liquidación, lotes, exports) la lee.
+TIPO_ORDEN_SANATORIO = "S"
+
+# `tipo` (categorización única de la prestación) y la categoría del nomenclador que
+# dispara la regla de gasto 0 bajo sanatorio.
+TIPO_SANATORIO = "Sanatorio"
+CATEGORIA_HONORARIOS_INDIVIDUALES = "Honorarios individuales"
 
 # Ventana por defecto cuando la OS no define `dia_corte` (20 = del 20 al 20).
 DIA_CORTE_DEFAULT = 20
@@ -395,7 +412,7 @@ async def buscar_afiliados(db: AsyncSession, q: str, limit: int) -> list[Afiliad
 
 async def crear_afiliado(db: AsyncSession, payload: AfiliadoCreate, usuario: str) -> Afiliado:
     if await get_afiliado_by_dni(db, payload.dni):
-        raise HTTPException(409, f"Ya existe un afiliado con DNI {payload.dni}")
+        raise HTTPException(409, f"Ya existe un afiliado con identificador {payload.dni}")
     af = Afiliado(dni=payload.dni, nombre=payload.nombre, usuario=usuario)
     db.add(af)
     await db.commit()
@@ -409,7 +426,7 @@ async def _nombre_desde_afiliado(db: AsyncSession, dni: Optional[str]) -> Option
     af = await get_afiliado_by_dni(db, dni)
     if af is None:
         raise HTTPException(
-            422, f"Afiliado con DNI {dni} no encontrado. Registrarlo primero."
+            422, f"Afiliado '{dni}' no encontrado. Registrarlo primero."
         )
     return af.nombre
 
@@ -526,31 +543,103 @@ async def check_medico_ejecutor(db: AsyncSession, cod_ejecutor: str) -> ListadoM
     return medico
 
 
-async def resolver_payee_ejecutor(
-    db: AsyncSession, cod_medico: str, cod_medico_ejecutor: Optional[str]
-) -> tuple[ListadoMedico, Optional[ListadoMedico], ListadoMedico]:
-    """Resuelve (payee, ejecutor, medico_para_precio) para una prestación.
+async def check_clinica(db: AsyncSession, cod_clinica: int) -> ListadoMedico:
+    """La clínica enviada en `cod_clinica` debe ser una organización activa."""
+    org = await check_medico_activo(db, str(cod_clinica))
+    if not org.es_organizacion:
+        raise HTTPException(
+            422, f"El código {cod_clinica} no es una clínica/organización"
+        )
+    return org
 
-    - Si `cod_medico` es una clínica (es_organizacion=1): el ejecutor es obligatorio y
-      es quien fija el precio (su especialidad). El payee-clínica cobra.
-    - Si `cod_medico` es un médico: no debe venir ejecutor; el propio médico fija el
-      precio y cobra.
+
+class PrestadorResuelto(NamedTuple):
+    """Cómo se persiste una prestación a partir de lo que seleccionó el front."""
+    cod_med: str                    # → detalle_facturacion.cod_med (SIEMPRE el médico)
+    cod_clinica: Optional[int]      # → detalle_facturacion.cod_clinica (None si no hay)
+    tipo_orden: Optional[str]       # → 'S' si hay clínica (marca legacy, ver constante)
+    tipo: Optional[str]             # → `tipo` forzado; None = usar la categoría del código
+    medico: ListadoMedico           # el médico — cobra Y cotiza (por su especialidad)
+
+    @property
+    def es_sanatorio(self) -> bool:
+        """La clínica fue el PRESTADOR (no sólo el ámbito). Se lee de `tipo`, no de
+        `tipo_orden` — este último vale 'S' en los dos casos con clínica."""
+        return self.tipo == TIPO_SANATORIO
+
+
+async def resolver_prestador(
+    db: AsyncSession,
+    cod_medico: str,
+    cod_medico_ejecutor: Optional[str],
+    cod_clinica: Optional[int] = None,
+) -> PrestadorResuelto:
+    """Traduce la selección del front a las columnas de la fila.
+
+    El **médico es siempre quien cobra**, así que `cod_med` termina siendo siempre un
+    médico real. Hay tres combinaciones:
+
+    1. **`cod_medico` es una clínica** (`es_organizacion=1`) → SANATORIO.
+       `cod_medico_ejecutor` es obligatorio y pasa a `cod_med` (cobra y cotiza con su
+       especialidad); la clínica baja a `cod_clinica`; **`tipo='Sanatorio'`**.
+    2. **`cod_medico` es un médico, sin `cod_clinica`** → flujo de siempre. `cod_med` es
+       él mismo, sin clínica; `tipo` = la categoría del código.
+    3. **`cod_medico` es un médico + viene `cod_clinica`** → el médico factura por sí
+       mismo pero la prestación se hizo en esa clínica: `cod_med` es él, la clínica se
+       guarda en `cod_clinica` y **`tipo='Honorarios individuales'`** (forzado, no importa
+       la categoría del código) — la clínica es sólo el ámbito, no un sanatorio.
+
+    **`tipo` es el discriminador** entre 1 y 3. `tipo_orden='S'` se estampa en AMBOS
+    (marca legacy de "hubo clínica", ver `TIPO_ORDEN_SANATORIO`) y no decide nada.
+
+    `cod_med_ejecutor` NO se persiste en ningún caso: es solo la señal de entrada.
     """
-    payee = await check_medico_activo(db, cod_medico)
-    if payee.es_organizacion:
+    seleccionado = await check_medico_activo(db, cod_medico)
+
+    # Caso 1 — la clínica es el prestador seleccionado.
+    if seleccionado.es_organizacion:
         if not cod_medico_ejecutor:
             raise HTTPException(
                 422,
-                "Cuando se factura a una clínica se debe indicar el médico ejecutor",
+                "Cuando la prestación se factura bajo una clínica se debe indicar el "
+                "médico ejecutor, que es quien cobra",
             )
-        ejecutor = await check_medico_ejecutor(db, cod_medico_ejecutor)
-        return payee, ejecutor, ejecutor
-    if cod_medico_ejecutor:
+        medico = await check_medico_ejecutor(db, cod_medico_ejecutor)
+        return PrestadorResuelto(
+            cod_med=str(medico.NRO_SOCIO),
+            cod_clinica=int(seleccionado.NRO_SOCIO),
+            tipo_orden=TIPO_ORDEN_SANATORIO,
+            tipo=TIPO_SANATORIO,
+            medico=medico,
+        )
+
+    if cod_medico_ejecutor and str(cod_medico_ejecutor) != str(cod_medico):
         raise HTTPException(
             422,
-            "El médico ejecutor solo se indica cuando el payee es una clínica",
+            "El médico ejecutor solo se indica cuando el prestador seleccionado es una "
+            "clínica",
         )
-    return payee, None, payee
+
+    # Caso 3 — médico que factura por sí mismo, con la clínica como ámbito. Lleva la
+    # misma marca `tipo_orden='S'` que el caso 1 (hubo clínica); los separa `tipo`.
+    if cod_clinica:  # 0 = sentinel legacy "sin clínica"
+        await check_clinica(db, cod_clinica)
+        return PrestadorResuelto(
+            cod_med=str(seleccionado.NRO_SOCIO),
+            cod_clinica=int(cod_clinica),
+            tipo_orden=TIPO_ORDEN_SANATORIO,
+            tipo=CATEGORIA_HONORARIOS_INDIVIDUALES,
+            medico=seleccionado,
+        )
+
+    # Caso 2 — médico solo.
+    return PrestadorResuelto(
+        cod_med=str(seleccionado.NRO_SOCIO),
+        cod_clinica=None,
+        tipo_orden=None,
+        tipo=None,
+        medico=seleccionado,
+    )
 
 
 async def _get_nomenclador_by_codigo(db: AsyncSession, codigo: str) -> NomencladorCMC:
@@ -568,24 +657,25 @@ async def resolver_precio(
     medico: ListadoMedico,
     codigo: str,
     fecha: datetime.date,
+    via: str = service_vias.VIA_TRADICIONAL,
 ) -> PrecioResponse:
     """Delega precio Y habilitación en el lookup del módulo nomenclador.
 
     Errores de mapeo de identificadores → HTTPException (404/422).
-    Falta de precio / habilitación / fecha → admitido=False + motivo.
+    Falta de precio / habilitación / fecha / vía no aplicable → admitido=False + motivo.
     """
     obra_social_nro = _cod_obra_to_int(cod_obra)
     nomenclador = await _get_nomenclador_by_codigo(db, codigo)
 
     try:
         out = await service_nm.lookup_precio(
-            nomenclador.id, obra_social_nro, fecha, medico.ID, db,
+            nomenclador.id, obra_social_nro, fecha, medico.ID, db, via=via,
         )
     except PrecioLookupError as e:
         return PrecioResponse(
             admitido=False, motivo=e.message,
             honorarios=Decimal("0"), gastos=Decimal("0"), ayudante=Decimal("0"),
-            descripcion="", fuente=FUENTE_PRECIO,
+            descripcion="", fuente=FUENTE_PRECIO, via=via,
         )
 
     def _suma(concepto: str) -> Decimal:
@@ -609,6 +699,8 @@ async def resolver_precio(
         admitido=True,
         por_presupuesto=out.por_presupuesto,
         cantidad_ayudantes=cantidad_ayudantes,
+        via=out.via,
+        nivel_cotizado=out.nivel_cotizado,
     )
 
 
@@ -630,20 +722,39 @@ async def _get_categoria(db: AsyncSession, codigo: str) -> Optional[str]:
 
 
 async def derivar_tipo(
-    db: AsyncSession, cod_nomenclador: str, payee_es_clinica: bool
+    db: AsyncSession, cod_nomenclador: str, tipo_forzado: Optional[str]
 ) -> Optional[str]:
-    """`tipo` único de la prestación:
-    - payee (`cod_med`) es una clínica/organización (`es_organizacion=1`) → 'Sanatorio'
-    - si no → la `categoria` del código (Consulta | Practica | Honorarios individuales);
-      NULL si el código no tiene categoría.
+    """`tipo` único de la prestación. Lo decide el prestador
+    (`resolver_prestador`) y, si éste no fuerza nada, la `categoria` del código
+    (Consulta | Practica | Honorarios individuales); NULL si el código no tiene.
 
-    Decisión usuario (2026-07-19): 'Sanatorio' se asigna SOLO cuando el payee es una
-    organización — ya NO se deriva de `cod_clinica` (que se conserva en la fila solo por
-    compatibilidad legacy). El resto sigue tomando la categoría del nomenclador.
+    Los dos casos que fuerzan `tipo` (ver `resolver_prestador`): la clínica como
+    prestador → 'Sanatorio'; el médico con clínica como ámbito → 'Honorarios
+    individuales'.
+
+    Nota (2026-07-31): antes el driver era `payee.es_organizacion`. Hoy el payee
+    (`cod_med`) es siempre un médico y la clínica vive en `cod_clinica`.
     """
-    if payee_es_clinica:
-        return "Sanatorio"
+    if tipo_forzado:
+        return tipo_forzado
     return await _get_categoria(db, cod_nomenclador)
+
+
+async def _gasto_forzado_a_cero(
+    db: AsyncSession, cod_nomenclador: str, es_sanatorio: bool, tipo_calculo: str
+) -> bool:
+    """True → los gastos de la fila deben guardarse en 0.
+
+    Bajo sanatorio los gastos los factura la clínica, no el médico. Aplica sólo a los
+    códigos de categoría 'Honorarios individuales' y sólo en cálculo automático — en
+    manual el operador manda (decisión usuario 2026-07-31).
+
+    El front ya envía `gastos=0` en ese escenario; esto lo hace cumplir del lado del
+    backend para que ningún camino (edición, carga del médico, API directa) lo saltee.
+    """
+    if not es_sanatorio or tipo_calculo != "A":
+        return False
+    return await _get_categoria(db, cod_nomenclador) == CATEGORIA_HONORARIOS_INDIVIDUALES
 
 
 
@@ -735,7 +846,8 @@ async def _montos_de_item(
     gi = item.gastos or Decimal("0")
     ai = item.ayudante or Decimal("0")
     if tipo_calculo == "A":
-        precio = await resolver_precio(db, cod_obra, medico, cod_nomenclador, fecha)
+        via = item.via or service_vias.VIA_TRADICIONAL
+        precio = await resolver_precio(db, cod_obra, medico, cod_nomenclador, fecha, via=via)
         if not precio.admitido:
             raise HTTPException(422, precio.motivo)
         # Por presupuesto: el lookup admite con H/G/A en 0; el monto lo informa la OS
@@ -850,10 +962,12 @@ async def _insertar_prestaciones(
     cabeza_id: Optional[int] = None  # fila del médico (honorarios > 0) = cabeza del equipo
 
     for i, item in enumerate(items):
-        # payee (a quién se paga) + ejecutor (quién ejecutó / fija el precio si es clínica)
-        payee, _ejecutor, medico_precio = await resolver_payee_ejecutor(
-            db, item.cod_medico, item.cod_medico_ejecutor
+        # Traduce la selección del front a columnas: el médico siempre termina en
+        # `cod_med` (cobra y cotiza) y la clínica, si la hubo, en `cod_clinica`.
+        prestador = await resolver_prestador(
+            db, item.cod_medico, item.cod_medico_ejecutor, item.cod_clinica
         )
+        medico_precio = prestador.medico
         # Cotiza con la fecha informada o, si no vino (carga por cantidad), con HOY —
         # nunca se inventa una fecha de práctica para guardar (ver `fecha_para_precio`).
         fecha_precio = fecha_para_precio(item.fecha_practica)
@@ -869,20 +983,29 @@ async def _insertar_prestaciones(
             db, item, cod_obra, medico_precio,
             item.cod_nomenclador, item.tipo_calculo, fecha_precio,
         )
+        # Sanatorio + Honorarios individuales + automático ⇒ los gastos los factura la
+        # clínica: se fuerzan a 0 antes de aplicar el porcentaje.
+        if await _gasto_forzado_a_cero(
+            db, item.cod_nomenclador, prestador.es_sanatorio, item.tipo_calculo
+        ):
+            g_base = Decimal("0")
         h, g, a = _aplicar_porcentaje(h_base, g_base, a_base, item.porcentaje)
         total = calcular_importe_total(h, g, a, item.cantidad, item.sesion)
         # Importe 0 permitido: un concepto en 0 no afecta la suma de la liquidación.
 
-        tipo = await derivar_tipo(db, item.cod_nomenclador, bool(payee.es_organizacion))
+        tipo = await derivar_tipo(db, item.cod_nomenclador, prestador.tipo)
 
         row = DetalleFacturacionCMC(
             calculo_snapshot=snapshot,
             periodo=periodo,
             cod_obr=cod_obra,
-            cod_med=item.cod_medico,
-            cod_med_ejecutor=item.cod_medico_ejecutor,
+            # Siempre el médico (nunca la clínica) — es quien recibe la plata.
+            cod_med=prestador.cod_med,
+            # `cod_med_ejecutor` ya no se persiste: era solo la señal de entrada.
+            cod_med_ejecutor=None,
             nro_orden="0",  # placeholder — la columna es NOT NULL; se espeja el PK abajo
             cod_nom=item.cod_nomenclador,
+            via=item.via,
             tipo=tipo,
             grupo_equipo_id=item.grupo_equipo_id,
             # tpo_funcion derivado SOLO para coexistencia (liquidación/lotes lo leen).
@@ -896,7 +1019,9 @@ async def _insertar_prestaciones(
             manual=item.tipo_calculo,
             dni_p=item.dni_paciente,
             nom_ape_p=nombre_paciente,
-            cod_clinica=item.cod_clinica,
+            # Derivados del prestador seleccionado: la clínica y su marca 'S'.
+            cod_clinica=prestador.cod_clinica,
+            tipo_orden=prestador.tipo_orden,
             # NULL cuando el operador no la cargó (carga por cantidad) — no se rellena
             # con el primer día del período, eso solo se usaba para cotizar (arriba).
             fecha_practica=item.fecha_practica,
@@ -1040,12 +1165,13 @@ async def obtener_factura_detalle(db: AsyncSession, factura_id: int) -> dict:
     )
     rows = list((await db.execute(stmt)).scalars().all())
 
-    # Batch de médicos (socio/matrícula) para todos los cod_med (payee) y cod_med_ejecutor
-    # presentes — un solo IN para ambos.
+    # Batch de médicos (socio/matrícula) para todos los cod_med (el médico que cobra),
+    # las cod_clinica (organizaciones, para mostrar su nombre) y los cod_med_ejecutor
+    # legacy que quedaron persistidos — un solo IN para los tres.
     nros: set[int] = set()
     for r in rows:
-        for cod in (r.cod_med, r.cod_med_ejecutor):
-            if cod is None:
+        for cod in (r.cod_med, r.cod_clinica, r.cod_med_ejecutor):
+            if not cod:  # None y el sentinel legacy `cod_clinica = 0` ("sin clínica")
                 continue
             try:
                 nros.add(int(cod))
@@ -1093,7 +1219,9 @@ async def obtener_factura_detalle(db: AsyncSession, factura_id: int) -> dict:
                 "cod_medico": cod_med,
                 "nombre": medico.NOMBRE if medico else None,
                 "matricula": medico.MATRICULA_PROV if medico else None,
-                # El payee es una clínica → las filas del grupo llevan médico ejecutor.
+                # Legacy: el payee ya nunca es una clínica (el médico es siempre quien
+                # cobra). Queda en False salvo en filas históricas cargadas con el
+                # modelo viejo. La clínica ahora se informa por prestación (`cod_clinica`).
                 "pago_a_clinica": bool(medico.es_organizacion) if medico else False,
                 "cantidad_prestaciones": 0,
                 "total_cantidad": 0,
@@ -1112,6 +1240,7 @@ async def obtener_factura_detalle(db: AsyncSession, factura_id: int) -> dict:
         g["total_gastos"] += ga
         g["total_subtotal"] += subtotal
         ejecutor = medicos.get(str(r.cod_med_ejecutor)) if r.cod_med_ejecutor else None
+        clinica = medicos.get(str(r.cod_clinica)) if r.cod_clinica else None
         g["prestaciones"].append({
             "id": r.id_detalle_prestaciones,
             "periodo": r.periodo,
@@ -1119,9 +1248,13 @@ async def obtener_factura_detalle(db: AsyncSession, factura_id: int) -> dict:
             "fecha_practica": r.fecha_practica,
             "codigo": r.cod_nom,
             "nro_afiliado": r.dni_p,
-            # Médico ejecutor (solo cuando el payee es una clínica).
+            # Médico ejecutor — legacy, sólo en filas viejas (hoy el ejecutor ES cod_med).
             "cod_medico_ejecutor": str(r.cod_med_ejecutor) if r.cod_med_ejecutor else None,
             "nombre_ejecutor": ejecutor.NOMBRE if ejecutor else None,
+            # Clínica bajo la que se ejecutó (tipo_orden='S'); None si el médico factura solo.
+            "cod_clinica": r.cod_clinica or None,
+            "nombre_clinica": clinica.NOMBRE if clinica else None,
+            "tipo_orden": r.tipo_orden,
             "cantidad": r.cantidad,
             "sesion": r.sesion,
             "porcentaje": r.porc,
@@ -1229,7 +1362,9 @@ async def prestaciones_recientes(
         filtros.append(M.usuario == usuario)
     stmt = (
         select(M).where(*filtros)
-        .order_by(M.id_detalle_prestaciones.desc()).limit(10)
+        # 30 (no 10): la tabla bajo el formulario de carga tiene que mostrar la tanda
+        # completa que viene cargando el operador, no sólo las últimas diez.
+        .order_by(M.id_detalle_prestaciones.desc()).limit(30)
     )
     rows = (await db.execute(stmt)).scalars().all()
     return await _to_prestacion_read_list(db, rows)
@@ -1246,15 +1381,18 @@ async def _to_prestacion_read_list(
     db: AsyncSession, rows: Sequence[DetalleFacturacionCMC],
 ) -> list[PrestacionRead]:
     """Convierte filas ORM a `PrestacionRead` completando `tipo_prestador` (no viene del
-    ORM) y `nombre_obra_social` (resuelto en batch contra `obras_sociales`, sin N+1).
-    Mismo criterio que `obtener_prestacion` — reusado acá para que el listado
-    también lo traiga."""
+    ORM), `nombre_obra_social` (batch contra `obras_sociales`) y `nombre_clinica` (batch
+    contra `listado_medico`), sin N+1. Mismo criterio que `obtener_prestacion` — reusado
+    acá para que el listado también lo traiga."""
     nros_os: set[int] = set()
+    nros_clinica: set[int] = set()
     for row in rows:
         try:
             nros_os.add(int(row.cod_obr))
         except (TypeError, ValueError):
-            continue
+            pass
+        if row.cod_clinica:  # 0 = sentinel legacy "sin clínica"
+            nros_clinica.add(int(row.cod_clinica))
     nombres_os: dict[int, str] = {}
     if nros_os:
         os_rows = (await db.execute(
@@ -1262,6 +1400,13 @@ async def _to_prestacion_read_list(
             .where(ObrasSociales.NRO_OBRASOCIAL.in_(nros_os))
         )).all()
         nombres_os = {nro: nombre for nro, nombre in os_rows}
+    nombres_clinica: dict[int, str] = {}
+    if nros_clinica:
+        cl_rows = (await db.execute(
+            select(ListadoMedico.NRO_SOCIO, ListadoMedico.NOMBRE)
+            .where(ListadoMedico.NRO_SOCIO.in_(nros_clinica))
+        )).all()
+        nombres_clinica = {nro: nombre for nro, nombre in cl_rows}
 
     out = []
     for row in rows:
@@ -1271,6 +1416,8 @@ async def _to_prestacion_read_list(
             item.nombre_obra_social = nombres_os.get(int(row.cod_obr))
         except (TypeError, ValueError):
             pass
+        if row.cod_clinica:
+            item.nombre_clinica = nombres_clinica.get(int(row.cod_clinica))
         out.append(item)
     return out
 
@@ -1329,12 +1476,12 @@ async def editar_prestacion(
         row.dni_p = data["dni_paciente"]
         row.nom_ape_p = await _nombre_desde_afiliado(db, data["dni_paciente"])
 
-    # Mapeo de campos simples
+    # Mapeo de campos simples. `cod_medico`/`cod_medico_ejecutor` NO van acá: no se
+    # copian tal cual a la fila, se resuelven más abajo (el médico puede terminar en
+    # `cod_med` y la clínica en `cod_clinica`).
     simples = {
-        "cod_medico": "cod_med",
-        "cod_medico_ejecutor": "cod_med_ejecutor",
         "cod_nomenclador": "cod_nom",
-        "cod_clinica": "cod_clinica",
+        "via": "via",
         "autorizacion": "autorizacion",
         "grupo_equipo_id": "grupo_equipo_id",
         "cantidad": "cantidad",
@@ -1350,16 +1497,40 @@ async def editar_prestacion(
         if src in data:
             setattr(row, dst, data[src])
 
-    # Resolver payee + ejecutor con el estado resultante del PATCH (valida la regla
-    # payee-clínica ⇒ ejecutor requerido; médico ⇒ sin ejecutor). `medico_precio` es el
-    # médico cuya especialidad cotiza (el ejecutor si el payee es una clínica).
-    payee, _ejecutor, medico_precio = await resolver_payee_ejecutor(
-        db, row.cod_med, row.cod_med_ejecutor
-    )
+    # Prestador: se reconstruye la selección tal como la habría enviado el front —
+    # desde la fila si el PATCH no la toca, con lo que vino si sí. `resolver_prestador`
+    # reasigna cod_med / cod_clinica / tipo_orden / tipo en los tres casos.
+    campos_prestador = {"cod_medico", "cod_medico_ejecutor", "cod_clinica"}
+    cambio_prestador = bool(campos_prestador & data.keys())
+    # Selección persistida. El discriminador es `tipo`, NO `tipo_orden` (que vale 'S' en
+    # los dos casos con clínica).
+    if row.cod_med_ejecutor:
+        # Fila legacy (2026-07-17→30): `cod_med` era la clínica-payee y el ejecutor iba
+        # aparte. Se reconstruye con esa semántica vieja y el resolver la reacomoda al
+        # layout nuevo — editar una de estas filas la migra sola.
+        prev_cod, prev_ejecutor, prev_clinica = str(row.cod_med), str(row.cod_med_ejecutor), None
+    elif row.tipo == TIPO_SANATORIO and row.cod_clinica:
+        # Caso 1: el prestador fue la clínica; el médico que cobra es el ejecutor.
+        prev_cod, prev_ejecutor, prev_clinica = str(row.cod_clinica), str(row.cod_med), None
+    else:
+        # Casos 2 y 3: el prestador fue el médico; la clínica (si hay) es el ámbito.
+        prev_cod, prev_ejecutor, prev_clinica = str(row.cod_med), None, row.cod_clinica
 
-    # Recalcular `tipo` si cambió el payee (su es_organizacion) o el código (su categoría).
-    if {"cod_medico", "cod_nomenclador"} & data.keys():
-        row.tipo = await derivar_tipo(db, row.cod_nom, bool(payee.es_organizacion))
+    sel_cod = data.get("cod_medico", prev_cod)
+    sel_ejecutor = data.get("cod_medico_ejecutor", prev_ejecutor)
+    sel_clinica = data.get("cod_clinica", prev_clinica)
+
+    prestador = await resolver_prestador(db, sel_cod, sel_ejecutor, sel_clinica)
+    medico_precio = prestador.medico
+    row.cod_med = prestador.cod_med
+    row.cod_clinica = prestador.cod_clinica
+    row.tipo_orden = prestador.tipo_orden
+    row.cod_med_ejecutor = None  # ya no se persiste (ver resolver_prestador)
+    es_sanatorio = prestador.es_sanatorio
+
+    # Recalcular `tipo` si cambió el prestador (clínica/ámbito) o el código (su categoría).
+    if cambio_prestador or "cod_nomenclador" in data:
+        row.tipo = await derivar_tipo(db, row.cod_nom, prestador.tipo)
 
     # Recalcular importe con el estado resultante
     tipo_calculo = row.manual or "A"
@@ -1369,7 +1540,7 @@ async def editar_prestacion(
     # descuento) cuando solo se edita cantidad/sesión/fecha: los montos ya están factorizados.
     # cod_medico/cod_medico_ejecutor entran porque cambiar el payee o el ejecutor cambia
     # la especialidad que cotiza → puede cambiar el precio.
-    pricing_keys = {"honorarios", "gastos", "ayudante", "porcentaje",
+    pricing_keys = {"honorarios", "gastos", "ayudante", "porcentaje", "via",
                     "cod_nomenclador", "tipo_calculo", "cod_medico", "cod_medico_ejecutor"}
     if pricing_keys & data.keys():
         # Markers: qué conceptos están en > 0 tras aplicar el PATCH (rol implícito).
@@ -1377,7 +1548,8 @@ async def editar_prestacion(
         gi = row.gastos or Decimal("0")
         ai = row.ayudante or Decimal("0")
         if tipo_calculo == "A":
-            precio = await resolver_precio(db, row.cod_obr, medico_precio, row.cod_nom, fecha)
+            via = row.via or service_vias.VIA_TRADICIONAL
+            precio = await resolver_precio(db, row.cod_obr, medico_precio, row.cod_nom, fecha, via=via)
             if not precio.admitido:
                 raise HTTPException(422, precio.motivo)
             if precio.por_presupuesto:
@@ -1393,6 +1565,16 @@ async def editar_prestacion(
         h, g, a = _aplicar_porcentaje(hb, gb, ab, row.porc or 100)
         row.honorarios, row.gastos, row.ayudante = h, g, a
         row.tpo_funcion = tpo_funcion_derivado(h, g, a)
+
+    # Misma regla que en la carga: bajo sanatorio los gastos los factura la clínica.
+    # Va FUERA del bloque de recotización — si no, un PATCH que no toca ningún campo de
+    # precio (ej. solo `cantidad`) dejaría gastos viejos en una fila que pasó a sanatorio.
+    # Forzar a 0 es idempotente y no depende del porcentaje (0 escalado sigue siendo 0).
+    if await _gasto_forzado_a_cero(db, row.cod_nom, es_sanatorio, tipo_calculo):
+        row.gastos = Decimal("0")
+        row.tpo_funcion = tpo_funcion_derivado(
+            row.honorarios or Decimal("0"), Decimal("0"), row.ayudante or Decimal("0")
+        )
 
     # importe_total siempre se recalcula con los montos y cantidad/sesión. (0 permitido.)
     row.importe_total = calcular_importe_total(

@@ -31,6 +31,11 @@ from app.db.models.catalogs import (
 from app.db.models.rbac import Role, Permission, UserRole, RolePermission, UserPermission
 from app.db.models.contenido import Noticia, DocumentoNoticias, PublicidadMedico
 from app.db.models.solicitud import SolicitudRegistro
+from app.db.models.solicitud_cambio import SolicitudCambioMedico
+from app.db.models.beneficios import Beneficio
+# AvisoPush (tabla avisos_push) — NO confundir con el `Avisos` legacy de arriba.
+from app.db.models.avisos_push import AvisoPush
+from app.db.models.dispositivos_push import DispositivoPush
 from app.db.models.cmc_facturacion import (
     DetalleFacturacionCMC, FacturacionCMC, Afiliado, PeriodoMedicoActual,
 )
@@ -72,10 +77,19 @@ __all__ = [
     "Noticia", "DocumentoNoticias", "PublicidadMedico",
     # solicitud
     "SolicitudRegistro",
+    # solicitudes de cambio de datos (app móvil)
+    "SolicitudCambioMedico",
+    # beneficios / convenios para socios
+    "Beneficio",
+    # avisos push para la app móvil (tabla avisos_push, distinta del legacy Avisos)
+    "AvisoPush",
+    # tokens de dispositivo del app móvil (destinatarios del push)
+    "DispositivoPush",
     # cmc_facturacion (detalle/facturacion CMC + padrón afiliado + período médico)
     "DetalleFacturacionCMC", "FacturacionCMC", "Afiliado", "PeriodoMedicoActual",
     # nomenclador / valores (sistema nuevo)
     "NomencladorCMC", "NomencladorEspecialidad", "MedicoCodigoHabilitado",
     "Homologador", "Galeno", "GalenoPlantilla", "Valor", "ValorComponente",
     "HistorialPrecioCodigo",
+    # validaciones con obras sociales (tablas propias, no legacy)
 ]

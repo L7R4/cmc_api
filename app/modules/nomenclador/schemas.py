@@ -402,6 +402,57 @@ class GalenosImportarIn(BaseModel):
         return self
 
 
+class GalenoLoteItem(BaseModel):
+    """Un galeno del lote: plano (un nivel con `nivel=None`) o nivelado."""
+    nombre: str
+    niveles: List[GalenoNivelItem]
+
+
+class GalenoImportarLoteIn(BaseModel):
+    """Alta masiva desde una planilla. Todos comparten O.S. y vigencia."""
+    obra_social_nro: int
+    vigencia_desde: datetime.date
+    galenos: List[GalenoLoteItem]
+    observacion: Optional[str] = None
+    # Si el galeno ya existe vigente: `omitir` lo saltea, `rotar` cierra el
+    # vigente y abre uno nuevo desde `vigencia_desde`.
+    si_existe: Literal["omitir", "rotar"] = "omitir"
+
+    @model_validator(mode="after")
+    def check_lote(self) -> "GalenoImportarLoteIn":
+        if not self.galenos:
+            raise ValueError("El lote no tiene galenos")
+        for g in self.galenos:
+            if not slugify_codigo(g.nombre):
+                raise ValueError(f"Nombre inválido: '{g.nombre}' no genera una clave")
+            if not g.niveles:
+                raise ValueError(f"'{g.nombre}' no tiene niveles")
+            vistos = set()
+            for item in g.niveles:
+                if item.nivel in vistos:
+                    raise ValueError(f"'{g.nombre}': nivel {item.nivel} repetido")
+                vistos.add(item.nivel)
+        return self
+
+
+class GalenoLoteResultItem(BaseModel):
+    nombre: str
+    codigo: str
+    # creado | rotado | omitido | error
+    estado: str
+    niveles: int = 0
+    detalle: Optional[str] = None
+
+
+class GalenoImportarLoteResult(BaseModel):
+    total: int
+    creados: int
+    rotados: int
+    omitidos: int
+    errores: int
+    items: List[GalenoLoteResultItem]
+
+
 class GalenosImportarResult(BaseModel):
     total_origen: int
     creados: int          # galenos nuevos en el destino

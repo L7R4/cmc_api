@@ -17,6 +17,13 @@ FastAPI backend for the Colegio Médico de Corrientes platform, providing secure
 
 ---
 
+## Latest changes
+
+- **2026-07-24** — Mobile BFF (`/api/mobile`), benefits/agreements module and the
+  data-correction request inbox. See [`docs/CAMBIOS-2026-07-24.md`](docs/CAMBIOS-2026-07-24.md).
+
+---
+
 ## Tech Stack
 
 - **Backend:** Python, FastAPI

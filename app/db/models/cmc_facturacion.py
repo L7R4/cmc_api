@@ -79,6 +79,36 @@ class DetalleFacturacionCMC(Base):
     # OS con nota de crédito externa). Histórico → 1.
     version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
 
+    # ── Validación contra la obra social (módulo `validaciones`) ──────────────
+    # Las prestaciones que el médico valida contra el portal/servicio de la O.S.
+    # se guardan en esta misma tabla (origen_carga='medico'). Estas columnas son
+    # lo que el circuito de facturación no tenía dónde guardar. NULL/0 en toda
+    # fila que no venga de una validación (carga del Colegio, importación CMC).
+    #
+    # Estado que devolvió la O.S.: autorizada · rechazada · pendiente · cargada
+    # ('cargada' = O.S. de carga manual, autorizó por fuera del panel). NULL = la
+    # fila no pasó por el módulo de validaciones.
+    validacion_estado: Mapped[Optional[str]] = mapped_column(String(12), nullable=True)
+    # Texto crudo que devolvió la O.S., sin normalizar. Para soporte.
+    validacion_detalle: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    # Traza de la conversación con el validador (mensaje enviado, respuesta cruda,
+    # modo). Imprescindible cuando la O.S. discute una autorización. NULL en las
+    # obras sociales de carga manual.
+    validacion_respuesta: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    # Baja lógica desde el panel del prestador. La fila además pasa a `estado='X'`;
+    # este flag distingue "el médico la borró" de "la O.S. la rechazó" (que también
+    # queda en 'X' para no entrar nunca a la facturación).
+    validacion_anulada: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="0"
+    )
+    # Lo que el afiliado paga de su bolsillo. Sólo lo usan las O.S. que lo
+    # descuentan del total (Boreal); ya viene descontado de `importe_total`.
+    coseguro: Mapped[Decimal] = mapped_column(
+        DECIMAL(14, 2), nullable=False, default=0, server_default="0"
+    )
+    # Orden/receta en PDF que adjunta el prestador (ruta relativa en uploads/).
+    orden_path: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
+
 
 class FacturacionCMC(Base):
     """Tabla facturacion importada desde CMC (lotes de facturación cerrados). Solo lectura."""

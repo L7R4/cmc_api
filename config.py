@@ -1,7 +1,15 @@
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import SecretStr
 
 class Settings(BaseSettings):
+    # docker-compose inyecta TODO el .env en el contenedor (env_file), incluidas
+    # las claves de MySQL y phpMyAdmin que la app no consume (MYSQL_ROOT_PASSWORD,
+    # PMA_*, COOKIE_SAMESITE, FRONT_BASE_URL, ALLOWED_FRONT_HOSTS). pydantic-settings
+    # v2 rechaza los extras por defecto, así que sin esto el import de config falla
+    # y no levanta la API. Ignorarlos no cambia nada: nunca se leyeron desde acá.
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+
     MYSQL_USER: str
     MYSQL_PASS: str
     MYSQL_HOST: str

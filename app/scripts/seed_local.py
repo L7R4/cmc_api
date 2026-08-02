@@ -24,6 +24,8 @@ DEFAULT_PERMISSIONS = [
     "medicos:agregar",
     "medicos:editar_perfil",
     "medicos:eliminar",
+    "beneficios:gestionar",
+    "solicitudes_cambio:gestionar",
 ]
 
 

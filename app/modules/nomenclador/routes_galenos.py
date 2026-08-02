@@ -17,12 +17,16 @@ from app.modules.nomenclador.schemas import (
     GalenoActualizarUnidadesResult,
     GalenoCreate,
     GalenoCrearNivelesIn,
+    GalenoImportarLoteIn,
+    GalenoImportarLoteResult,
+    GalenoLoteResultItem,
     GalenoOut,
     GalenoPlantillaNivelOut,
     GalenoPlantillaOut,
     GalenosImportarIn,
     GalenosImportarResult,
     GalenoUpdate,
+    slugify_codigo,
 )
 
 router = APIRouter()
@@ -195,6 +199,127 @@ async def crear_galeno_por_niveles(
     for obj in creados:
         await db.refresh(obj)
     return creados
+
+
+@router.post("/importar_lote", response_model=GalenoImportarLoteResult, status_code=201)
+async def importar_galenos_lote(
+    body: GalenoImportarLoteIn, db: AsyncSession = Depends(get_db)
+):
+    """
+    Alta masiva de galenos desde una planilla (ver el importador del panel).
+
+    Todos los galenos del lote comparten obra social y vigencia. Cada uno puede
+    ser plano (un único nivel con `nivel=None`) o nivelado (una fila por nivel).
+
+    Si un galeno ya está vigente, `si_existe` decide: `omitir` lo saltea y
+    `rotar` cierra el vigente y abre uno nuevo desde `vigencia_desde`. Un galeno
+    que falla no aborta el lote: se reporta en `items` y el resto sigue.
+    """
+    items: List[GalenoLoteResultItem] = []
+    creados = rotados = omitidos = errores = 0
+
+    for g in body.galenos:
+        codigo = slugify_codigo(g.nombre)
+        try:
+            # ¿Ya hay algo vigente para este código?
+            existentes: list[Galeno] = []
+            for item in g.niveles:
+                actual = await _galeno_vigente(
+                    db, body.obra_social_nro, codigo, item.nivel
+                )
+                if actual is not None:
+                    existentes.append(actual)
+
+            if existentes and body.si_existe == "omitir":
+                omitidos += 1
+                items.append(
+                    GalenoLoteResultItem(
+                        nombre=g.nombre, codigo=codigo, estado="omitido",
+                        niveles=len(g.niveles),
+                        detalle="Ya existe un galeno vigente para esta obra social.",
+                    )
+                )
+                continue
+
+            if existentes:  # si_existe == "rotar"
+                for item in g.niveles:
+                    actual = await _galeno_vigente(
+                        db, body.obra_social_nro, codigo, item.nivel
+                    )
+                    if actual is None:
+                        await _validar_mezcla_niveles(
+                            db, body.obra_social_nro, codigo, item.nivel
+                        )
+                        db.add(_nuevo_galeno(body, g, codigo, item))
+                    else:
+                        await _rotar_precio_galeno(
+                            db, actual, item.valor_unitario, body.vigencia_desde
+                        )
+                rotados += 1
+                items.append(
+                    GalenoLoteResultItem(
+                        nombre=g.nombre, codigo=codigo, estado="rotado",
+                        niveles=len(g.niveles),
+                    )
+                )
+                continue
+
+            for item in g.niveles:
+                await _validar_mezcla_niveles(
+                    db, body.obra_social_nro, codigo, item.nivel
+                )
+                db.add(_nuevo_galeno(body, g, codigo, item))
+            creados += 1
+            items.append(
+                GalenoLoteResultItem(
+                    nombre=g.nombre, codigo=codigo, estado="creado",
+                    niveles=len(g.niveles),
+                )
+            )
+
+        except HTTPException as e:
+            errores += 1
+            items.append(
+                GalenoLoteResultItem(
+                    nombre=g.nombre, codigo=codigo, estado="error",
+                    niveles=len(g.niveles), detalle=str(e.detail),
+                )
+            )
+
+    await db.commit()
+    return GalenoImportarLoteResult(
+        total=len(body.galenos), creados=creados, rotados=rotados,
+        omitidos=omitidos, errores=errores, items=items,
+    )
+
+
+def _nuevo_galeno(body, g, codigo: str, item) -> Galeno:
+    return Galeno(
+        obra_social_nro=body.obra_social_nro,
+        codigo=codigo,
+        nombre=g.nombre,
+        nivel=item.nivel,
+        vigencia_desde=body.vigencia_desde,
+        vigencia_hasta=None,
+        valor_unitario=item.valor_unitario,
+        unidades_honorarios=item.unidades_honorarios,
+        unidades_ayudante=item.unidades_ayudante,
+        unidades_gastos=item.unidades_gastos,
+        observacion=body.observacion,
+    )
+
+
+async def _galeno_vigente(
+    db: AsyncSession, obra_social_nro: int, codigo: str, nivel: Optional[int]
+) -> Optional[Galeno]:
+    """El galeno vigente (sin `vigencia_hasta`) para esa OS/código/nivel, si hay."""
+    q = select(Galeno).where(
+        Galeno.obra_social_nro == obra_social_nro,
+        Galeno.codigo == codigo,
+        Galeno.vigencia_hasta.is_(None),
+    )
+    q = q.where(Galeno.nivel.is_(None) if nivel is None else Galeno.nivel == nivel)
+    return (await db.execute(q)).scalars().first()
 
 
 @router.post("/importar_de_obra_social", response_model=GalenosImportarResult)

@@ -1156,6 +1156,7 @@ async def lookup_precio(body: LookupPrecioIn, db: AsyncSession = Depends(get_db)
             fecha=body.fecha_practica,
             medico_id=body.medico_id,
             db=db,
+            via=body.via,
         )
     except LookupError as e:
         raise HTTPException(e.status_code, e.message)

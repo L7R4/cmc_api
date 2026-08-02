@@ -10,6 +10,16 @@ _pwd = CryptContext(
     pbkdf2_sha256__rounds=480_000,
 )
 
+MIN_PASSWORD_LENGTH = 6
+
+
+def validate_new_password(raw: str) -> str:
+    """Normaliza y valida una contraseña nueva. Lanza ValueError si no cumple el mínimo."""
+    pwd = (raw or "").strip()
+    if len(pwd) < MIN_PASSWORD_LENGTH:
+        raise ValueError(f"La contraseña debe tener al menos {MIN_PASSWORD_LENGTH} caracteres")
+    return pwd
+
 def hash_password(plain: str) -> str:
     return _pwd.hash((plain or "").strip())
 

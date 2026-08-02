@@ -9,11 +9,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.database import get_db
 from app.db.models.catalogs import ObrasSociales
 from app.db.models.nomenclador_cmc import HistorialPrecioCodigo, NomencladorCMC, Valor
+from app.modules.nomenclador import service_vias
 from app.modules.nomenclador.service import prioridad_origen
 from app.modules.nomenclador.schemas import (
     Origen,
     BoletinItemOut,
     BoletinOut,
+    ComponenteLookupOut,
     EvolucionPrecioItem,
     RankingItem,
     RankingValoresOut,
@@ -146,6 +148,7 @@ async def tabla_valores(
         ),
     ),
     orden: str = Query("codigo", pattern="^(codigo|valor)$"),
+    via: str = Query("T", description="T = tradicional, L = laparoscópica"),
     page: int = Query(1, ge=1),
     size: int = Query(100, ge=1, le=500),
     db: AsyncSession = Depends(get_db),
@@ -163,12 +166,42 @@ async def tabla_valores(
       mayor rango del médico); si ninguna NE aplica, cae a NNE y luego NN.
     - Sin `especialidades`: NE queda fuera; compiten solo NNE y NN (en ese orden).
     Si `codigo` no existe, se devuelve vacío.
+
+    `via=L`: los códigos elegibles (Honorarios con galeno de cirugía adulto/infantil)
+    devuelven el precio laparoscópico. Los que no admiten laparoscopía NO rompen el
+    listado: la fila cae a su precio tradicional con `via_aplicada="T"` (es un listado,
+    no una cotización puntual — el rechazo estricto queda para el lookup de facturación).
     """
     fecha_ref = fecha or datetime.date.today()
 
     async def _build_item(h: HistorialPrecioCodigo) -> TablaValoresItem:
         nom = await db.get(NomencladorCMC, h.nomenclador_id)
         valor = await db.get(Valor, h.valores_id)
+
+        componentes = [
+            ComponenteLookupOut(
+                componente_id=item.get("componente_id"),
+                concepto=item["concepto"],
+                tipo=item["tipo"],
+                galeno_id=item.get("galeno_id"),
+                galeno_codigo=item.get("galeno_codigo"),
+                galeno_nivel=item.get("galeno_nivel"),
+                cantidad=Decimal(item["cantidad"]),
+                valor_unitario=Decimal(item["valor_unitario"]),
+                subtotal=Decimal(item["subtotal"]),
+            )
+            for item in h.componentes_snapshot
+        ]
+        precio_total = h.precio_total
+        via_aplicada = service_vias.VIA_TRADICIONAL
+        try:
+            componentes, precio_total, _nivel = await service_vias.ajustar_componentes_por_via(
+                db, h.obra_social_nro, componentes, via,
+            )
+            via_aplicada = via
+        except service_vias.ViaNoAplicableError:
+            pass  # código no elegible para laparoscopía → queda con el precio tradicional
+
         return TablaValoresItem(
             nomenclador_id=h.nomenclador_id,
             codigo=nom.codigo if nom else str(h.nomenclador_id),
@@ -177,10 +210,11 @@ async def tabla_valores(
             descripcion=valor.descripcion if valor else None,
             nivel=valor.nivel if valor else None,
             por_presupuesto=bool(valor and valor.por_presupuesto),
-            precio_total=h.precio_total,
+            precio_total=precio_total,
             vigencia_desde=h.vigencia_desde,
             vigencia_hasta=h.vigencia_hasta,
-            componentes=h.componentes_snapshot,
+            componentes=[c.model_dump(mode="json") for c in componentes],
+            via_aplicada=via_aplicada,
         )
 
     base_filters = [

@@ -26,6 +26,8 @@ DEFAULT_PERMISSIONS = [
     "medicos:eliminar",
     "beneficios:gestionar",
     "solicitudes_cambio:gestionar",
+    "auditoria:ver",
+    "auditoria:purgar",
 ]
 
 

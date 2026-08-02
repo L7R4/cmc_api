@@ -2,7 +2,7 @@ import datetime
 from decimal import Decimal
 from typing import Optional
 
-from sqlalchemy import DECIMAL, JSON, Boolean, Date, DateTime, Integer, String, Text, func
+from sqlalchemy import DECIMAL, JSON, BigInteger, Boolean, Date, DateTime, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -18,11 +18,19 @@ class DetalleFacturacionCMC(Base):
 
     id_detalle_prestaciones: Mapped[int] = mapped_column(Integer, primary_key=True)
     periodo: Mapped[str] = mapped_column(String(6), nullable=False)
+    # NRO_SOCIO del MÉDICO que cobra. Siempre un médico real (`es_organizacion=0`): el
+    # médico es siempre quien recibe la plata, aun cuando la prestación se haya hecho
+    # bajo una clínica (en ese caso la clínica va en `cod_clinica`). Sin FK real.
     cod_med: Mapped[str] = mapped_column(String(20), nullable=False)
     categoria: Mapped[Optional[str]] = mapped_column(String(1))
     nro_orden: Mapped[Optional[str]] = mapped_column(String(30))
     cod_obr: Mapped[Optional[str]] = mapped_column(String(10))
     cod_nom: Mapped[Optional[str]] = mapped_column(String(20))
+    # Vía quirúrgica de la prestación: 'T' tradicional, 'L' laparoscópica, NULL = no
+    # aplica. Reemplaza el diseño anterior de "un código por técnica" (ver
+    # app/modules/nomenclador/service_vias.py). No confundir con las columnas legacy
+    # CMC `urgencia`/`nro_vias` (sin uso en este módulo).
+    via: Mapped[Optional[str]] = mapped_column(String(1))
     tpo_funcion: Mapped[Optional[str]] = mapped_column(String(5))
     sesion: Mapped[Optional[int]] = mapped_column(Integer)
     cantidad: Mapped[Optional[int]] = mapped_column(Integer)
@@ -31,16 +39,32 @@ class DetalleFacturacionCMC(Base):
     ayudante: Mapped[Optional[Decimal]] = mapped_column(DECIMAL(14, 2))
     importe_total: Mapped[Optional[Decimal]] = mapped_column(DECIMAL(14, 2))
     manual: Mapped[Optional[str]] = mapped_column(String(1))
-    # NRO_SOCIO del médico que EJECUTÓ la prestación cuando `cod_med` (el payee) apunta
-    # a una clínica (listado_medico.es_organizacion=1). NULL cuando el payee ya es el
-    # propio médico. Determina el precio (por la especialidad del ejecutor) pero NO cobra
-    # — a quien se le paga es siempre `cod_med`. Sin FK real, igual que `cod_med`.
+    # DEPRECADA (2026-07-31) — la API ya NO la escribe: siempre queda NULL. El front sigue
+    # ENVIANDO `cod_med_ejecutor` en el request, pero es solo la señal que le dice al
+    # backend cómo repartir los códigos: si el `cod_med` seleccionado es una clínica, el
+    # ejecutor pasa a `cod_med` y la clínica a `cod_clinica`. Conserva los valores del
+    # período en que sí se persistía. Ver `service.resolver_prestador`.
     cod_med_ejecutor: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
-    dni_p: Mapped[Optional[str]] = mapped_column(String(15))
+    # Identificador del paciente: DNI **o** nro de afiliado de la obra social (que es
+    # alfanumérico y puede llevar separadores, ej. "1231233/00"). La columna es
+    # varchar(20) en la DB legacy — el modelo la declaraba 15 por error.
+    dni_p: Mapped[Optional[str]] = mapped_column(String(20))
     nom_ape_p: Mapped[Optional[str]] = mapped_column(String(100))
+    # Legacy CMC, sin uso: la API del Colegio nunca la escribió ni la lee (reemplazada
+    # por `tipo`). Queda NULL en toda fila cargada por este módulo.
     tpo_serv: Mapped[Optional[str]] = mapped_column(String(1))
-    cod_clinica: Mapped[Optional[int]] = mapped_column(Integer)
+    # NRO_SOCIO de la CLÍNICA (listado_medico con `es_organizacion=1`) bajo la que se
+    # ejecutó la prestación. NULL = el médico factura por sí mismo. Derivada por el
+    # backend del `cod_med` que selecciona el front, nunca se envía sueltA.
+    # `bigint` desde la migración e9f0a1b2c3d4 (los NRO_SOCIO llegan a 76910; antes era
+    # smallint y desbordaba). 0 = sentinel legacy "sin clínica" en las filas de CMC.
+    cod_clinica: Mapped[Optional[int]] = mapped_column(BigInteger)
     fecha_practica: Mapped[Optional[datetime.date]] = mapped_column(Date)
+    # 'S' cuando la prestación se hizo en una clínica (`cod_clinica` presente), sea la
+    # clínica el prestador o sólo el ámbito. NULL si el médico factura solo. Reactivada
+    # el 2026-07-31; los valores del histórico CMC ('C'/'P'/'L'…) son de otra semántica.
+    # ⚠ Es una MARCA para quien mire la tabla, NO el discriminador — 'Sanatorio' vs
+    # 'Honorarios individuales' se decide por `tipo`. Nada del código depende de ella.
     tipo_orden: Mapped[Optional[str]] = mapped_column(String(1))
     porc: Mapped[Optional[int]] = mapped_column(Integer)
     cod_med_indica: Mapped[Optional[str]] = mapped_column(String(20))
@@ -166,12 +190,15 @@ class PeriodoMedicoActual(Base):
 
 
 class Afiliado(Base):
-    """Padrón de afiliados/pacientes. DNI único; el nombre se desnormaliza en
+    """Padrón de afiliados/pacientes. Identificador único; el nombre se desnormaliza en
     `detalle_facturacion.nom_ape_p` al cargar una prestación."""
     __tablename__ = "afiliado"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    dni: Mapped[str] = mapped_column(String(15), nullable=False, unique=True, index=True)
+    # DNI **o** nro de afiliado de la obra social (alfanumérico, admite separadores:
+    # "1231233/00"). Se mantiene el nombre `dni` por compatibilidad con la API.
+    # Ancho alineado con `detalle_facturacion.dni_p` (varchar 20), que es donde se copia.
+    dni: Mapped[str] = mapped_column(String(20), nullable=False, unique=True, index=True)
     nombre: Mapped[str] = mapped_column(String(100), nullable=False)
     usuario: Mapped[str] = mapped_column(String(30), nullable=False)
     created_at: Mapped[datetime.datetime] = mapped_column(

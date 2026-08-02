@@ -3,11 +3,11 @@ from fastapi import APIRouter, Depends, Header, Response, Request, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select,text
-from app.auth.deps import get_current_user_with_scopes, get_current_user_with_scopes_and_role, get_user_role
+from app.auth.deps import get_current_user, get_current_user_with_scopes, get_current_user_with_scopes_and_role, get_user_role
 from app.db.database import get_db
 from app.db.models import ListadoMedico
 from app.core.security import create_access_token, create_refresh_token, decode_token
-from app.core.passwords import verify_and_upgrade, verify_password, hash_password
+from app.core.passwords import verify_and_upgrade, verify_password, hash_password, validate_new_password
 from app.core.config import settings
 import time, json, hmac, hashlib, base64, urllib.parse
 from fastapi import HTTPException
@@ -198,25 +198,25 @@ class ChangePasswordIn(BaseModel):
     new_password: str
 
 @router.post("/change-password")
-async def change_password(body: ChangePasswordIn, req: Request, db: AsyncSession = Depends(get_db)):
-    # Requiere estar logueado: decodificamos access desde header en un paso simple:
-    # (Si preferÃ­s, usÃ¡ get_current_user de deps.py)
-    auth = req.headers.get("Authorization", "")
-    if not auth.startswith("Bearer "):
-        raise HTTPException(401, "Falta token")
-    data = decode_token(auth.split()[1])
-    if data.get("type") != "access":
-        raise HTTPException(401, "Token invÃ¡lido")
+async def change_password(
+    body: ChangePasswordIn,
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        new_password = validate_new_password(body.new_password)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
-    nro_socio = int(data["sub"])
+    nro_socio = int(user["nro_socio"])
     stmt = select(ListadoMedico).where(ListadoMedico.NRO_SOCIO == nro_socio)
     medico = (await db.execute(stmt)).scalar_one_or_none()
     if not medico:
         raise HTTPException(404, "Usuario no encontrado")
     if not verify_password(body.old_password, medico.hashed_password):
-        raise HTTPException(400, "La contrasena actual es incorrecta")
+        raise HTTPException(400, "La contraseña actual es incorrecta")
 
-    medico.hashed_password = hash_password(body.new_password)
+    medico.hashed_password = hash_password(new_password)
     await db.commit()
     return {"ok": True}
 

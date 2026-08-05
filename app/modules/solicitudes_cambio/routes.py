@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth.deps import get_current_user, require_scope
+from app.auth.deps import get_current_user
 from app.db.database import get_db
 from app.db.models.medico import ListadoMedico
 from app.db.models.solicitud_cambio import (
@@ -29,7 +29,7 @@ from app.modules.solicitudes_cambio.schemas import (
     SolicitudCambioOut,
 )
 
-router = APIRouter(dependencies=[Depends(require_scope("solicitudes_cambio:gestionar"))])
+router = APIRouter()  # El scope lo declara app/auth/authz.py::SCOPES_POR_RUTA (fuente unica de autorizacion).
 
 MAX_PAGE_SIZE = 100
 

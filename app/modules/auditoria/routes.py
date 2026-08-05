@@ -5,7 +5,6 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth.deps import require_scope
 from app.db.database import get_db
 from app.db.models import AuditLog, ListadoMedico
 from app.modules.auditoria.schemas import AuditLogDetail, AuditLogListItem, PurgeResult
@@ -15,7 +14,7 @@ router = APIRouter()
 _PURGE_BATCH_SIZE = 1000
 
 
-@router.get("/", response_model=List[AuditLogListItem], dependencies=[Depends(require_scope("auditoria:ver"))])
+@router.get("/", response_model=List[AuditLogListItem])
 async def listar_auditoria(
     nro_socio: Optional[int] = None,
     route: Optional[str] = None,
@@ -69,7 +68,7 @@ async def listar_auditoria(
     ]
 
 
-@router.get("/{audit_id}", response_model=AuditLogDetail, dependencies=[Depends(require_scope("auditoria:ver"))])
+@router.get("/{audit_id}", response_model=AuditLogDetail)
 async def obtener_auditoria(audit_id: int, db: AsyncSession = Depends(get_db)):
     log = await db.get(AuditLog, audit_id)
     if not log:
@@ -101,7 +100,7 @@ async def obtener_auditoria(audit_id: int, db: AsyncSession = Depends(get_db)):
     )
 
 
-@router.delete("/purge", response_model=PurgeResult, dependencies=[Depends(require_scope("auditoria:purgar"))])
+@router.delete("/purge", response_model=PurgeResult)
 async def purgar_auditoria(
     months: int = Query(12, ge=1, le=120),
     db: AsyncSession = Depends(get_db),

@@ -6,6 +6,7 @@ from app.modules.nomenclador.routes_galenos import router as galenos_router
 from app.modules.nomenclador.routes_valores import router as valores_nm_router
 from app.modules.nomenclador.routes_reportes import router as reportes_nm_router
 
+from app.modules.archivos.routes import router as archivos_router
 from app.modules.avisos.routes import router as avisos_router
 from app.modules.beneficios.routes import router as beneficios_router
 from app.modules.auditoria.routes import router as auditoria_router
@@ -65,6 +66,9 @@ api_router.include_router(exports_router, prefix="/exports", tags=["exports"])
 
 api_router.include_router(rbac_router, prefix="/admin/rbac", tags=["Rbac"])
 api_router.include_router(auditoria_router, prefix="/auditoria", tags=["Auditoría"])
+# Entrega autorizada de adjuntos. Reemplaza el servido público de /uploads/*;
+# ver app/modules/archivos/routes.py y S6 en docs/api/AUDITORIA_SEGURIDAD.md.
+api_router.include_router(archivos_router, prefix="/archivos", tags=["Archivos"])
 
 # ── Nomenclador y Valores ─────────────────────────────────────────────────────
 api_router.include_router(nomenclador_router,  prefix="/nomenclador",     tags=["Nomenclador"])

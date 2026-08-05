@@ -102,6 +102,21 @@ class ListadoMedico(Base):
     documentos = relationship("Documento", back_populates="medico", cascade="all, delete-orphan")
     hashed_password = Column(String(255), nullable=False)
 
+    # Toda cuenta nueva nace con app.core.passwords.PASSWORD_INICIAL, que es
+    # pública. El flag es lo que hace que eso no sea un agujero: el front lo lee
+    # del login y de /auth/me y manda a la pantalla de cambio. Ver A2/A3.
+    must_change_password: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="0"
+    )
+
+    # Corte de sesiones (A7/A12). Todo access token emitido ANTES de esta marca
+    # queda inválido, aunque no haya vencido. Se pisa con NOW() al cambiar la
+    # contraseña y al tocar roles o permisos del usuario; ver app/auth/sessions.py.
+    # NULL = nunca se revocó nada.
+    tokens_valid_from: Mapped[Optional[datetime.datetime]] = mapped_column(
+        DateTime, nullable=True
+    )
+
 
 class Documento(Base):
     __tablename__ = "documentos"

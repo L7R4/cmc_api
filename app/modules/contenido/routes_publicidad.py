@@ -7,6 +7,7 @@ from sqlalchemy import String, cast, or_, select, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
+from app.common.uploads import MEDIA, validate_upload
 from app.db.database import get_db
 from app.db.models import ListadoMedico, PublicidadMedico
 from app.modules.contenido.schemas import PublicidadMedicoOut
@@ -17,20 +18,16 @@ MEDICOS_ADS_DIR = Path("uploads/medicos_publicidad").resolve()
 MEDICOS_ADS_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def _save_name(orig: str | None) -> str:
-    ext = Path(orig or "").suffix.lower() or ".bin"
-    return f"{uuid4().hex}{ext}"
-
-
 async def _save_file(file: UploadFile) -> dict:
-    name = _save_name(file.filename)
-    dest = MEDICOS_ADS_DIR / name
-    data = await file.read()
-    dest.write_bytes(data)
+    # Publicidad acepta imagen o video (MEDIA). Antes se guardaba cualquier
+    # cosa con la extensión que viniera en el nombre.
+    info = await validate_upload(file, MEDIA)
+    name = f"{uuid4().hex}{info.extension}"
+    (MEDICOS_ADS_DIR / name).write_bytes(info.data)
     return {
-        "adjunto_filename": file.filename or name,
-        "adjunto_content_type": file.content_type,
-        "adjunto_size": len(data),
+        "adjunto_filename": info.original_name,
+        "adjunto_content_type": info.content_type,
+        "adjunto_size": info.size,
         "adjunto_path": f"/uploads/medicos_publicidad/{name}",
     }
 

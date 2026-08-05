@@ -6,6 +6,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.deps import get_current_user
+from app.auth.ownership import filtro_socio, socio_objetivo
 from app.core.config import settings
 from app.db.database import get_db
 from app.db.models import ListadoMedico, NomencladorCMC, ObrasSociales
@@ -111,11 +112,17 @@ async def codigos_habilitados_medico(
     nro_socio: str,
     q: Optional[str] = Query(None, description="Filtro por código o descripción"),
     db: AsyncSession = Depends(get_db),
+    user=Depends(get_current_user),
 ):
     """Códigos de nomenclador que el médico puede facturar: por especialidad +
     excepciones individuales + códigos sin restricción de especialidad — mismo
-    alcance que evalúa el sistema al cargar una prestación."""
-    return await service.codigos_habilitados_medico(db, nro_socio, q)
+    alcance que evalúa el sistema al cargar una prestación.
+
+    El `nro_socio` del path se valida contra el del token: un prestador solo
+    consulta los propios. El personal del Colegio necesita `medico:leer`.
+    """
+    objetivo = socio_objetivo(user, int(nro_socio))
+    return await service.codigos_habilitados_medico(db, str(objetivo), q)
 
 
 # ── Grupo A2 — Afiliados ─────────────────────────────────────────────────────
@@ -273,7 +280,14 @@ async def listar_prestaciones(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
+    user=Depends(get_current_user),
 ):
+    # Sin `medico:leer`, el filtro se fuerza al médico del token: un prestador
+    # que omite `cod_medico` ve lo suyo, no lo de todos. Con el scope
+    # administrativo, `None` sigue significando "sin filtro".
+    _socio = filtro_socio(user, int(cod_medico) if cod_medico else None)
+    cod_medico = str(_socio) if _socio is not None else None
+
     rows, total = await service.listar_prestaciones(
         db,
         cod_obra=cod_obra, periodo=periodo, cod_medico=cod_medico,

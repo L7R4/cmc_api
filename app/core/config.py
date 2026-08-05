@@ -37,6 +37,52 @@ class Settings(BaseSettings):
     # Secreto de máquina para endpoints llamados por el cron (no un JWT de usuario).
     CRON_SECRET: str | None = None
 
+    # ── Entorno ───────────────────────────────────────────────────────────────
+    # "production" apaga /docs, /redoc y /openapi.json. Cualquier otro valor los
+    # deja activos para desarrollo. Se setea en docker-compose.prod.yml.
+    ENV: str = "development"
+
+    # ── Uploads ───────────────────────────────────────────────────────────────
+    # Tamaño máximo por archivo subido, en bytes. 20 MB.
+    MAX_UPLOAD_BYTES: int = 20 * 1024 * 1024
+
+    # ── Tamaño de request que NO es un archivo ────────────────────────────────
+    # 2 MB. El punto de partida es el body legítimo más grande que acepta la
+    # API: `POST /api/valores_nm/actualizar_por_codigos`, un item por código del
+    # nomenclador. Con 5.175 códigos y ~75 bytes por item son ~390 KB, así que
+    # 2 MB deja ~5x de margen — cubre que el nomenclador crezca al doble y que
+    # alguien mande el JSON indentado, sin dejar de ser tres órdenes de magnitud
+    # menos que "sin límite", que es lo que había.
+    #
+    # NO aplica a `multipart/form-data`: esos van por MAX_UPLOAD_BYTES, que los
+    # valida por archivo y además chequea el tipo por magic bytes.
+    # Ver app/middleware/body_limit.py y S2 en docs/api/AUDITORIA_SEGURIDAD.md.
+    MAX_JSON_BODY_BYTES: int = 2 * 1024 * 1024
+
+    # ── RBAC ──────────────────────────────────────────────────────────────────
+    # False = modo observación: si a un usuario le falta el scope se registra un
+    # WARNING en el log y la request pasa igual. True = rechazo real con 403.
+    #
+    # Arranca en False A PROPÓSITO. Cerrar 301 endpoints de golpe rompe pantallas
+    # del front sin aviso; una o dos semanas de tráfico real en observación dicen
+    # exactamente qué rol necesita qué. Ver docs/api/RBAC_PROPUESTA.md §7, Etapa 1.
+    RBAC_ENFORCE: bool = False
+
+    # ── Rate limiting de autenticación ────────────────────────────────────────
+    # Cuenta solo INTENTOS FALLIDOS, en ventana deslizante. Ver app/core/ratelimit.py.
+    RATE_LIMIT_ENABLED: bool = True
+    RATE_LIMIT_WINDOW_SECONDS: int = 15 * 60
+    # Por IP: tolerante, porque un consultorio o el NAT de un hospital comparten
+    # salida entre varios médicos.
+    RATE_LIMIT_MAX_PER_IP: int = 20
+    # Por cuenta: estricto. Es el que corta el password spraying, y un usuario
+    # legítimo no falla 8 veces seguidas en 15 minutos.
+    RATE_LIMIT_MAX_PER_SOCIO: int = 8
+
+    @property
+    def IS_PRODUCTION(self) -> bool:
+        return self.ENV.strip().lower() in {"production", "prod"}
+
     # ── Sancor Salud (O.S. 411) — autorizador HL7 v2.4 sobre SOAP ─────────────
     # MODO controla a dónde se manda cada autorización. Arranca en "simulado"
     # A PROPÓSITO: así nadie dispara autorizaciones reales contra Sancor por

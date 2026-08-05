@@ -38,7 +38,18 @@ def get_current_user(creds: HTTPAuthorizationCredentials = Depends(bearer)):
     if data.get("type") != "access":
         raise HTTPException(401, "invalid_token_type")
 
-    return {"nro_socio": data["sub"], "scopes": data.get("scopes", [])}
+    # `uid` es ListadoMedico.ID; puede venir None en tokens emitidos antes de que
+    # el claim existiera. Como el access vive ACCESS_MINUTES, la ventana de
+    # transición es de minutos, no de días: el refresh relee la base y emite uno
+    # nuevo con el claim. app/auth/ownership.py maneja el None explícitamente.
+    return {
+        "nro_socio": data["sub"],
+        "uid": data.get("uid"),
+        "scopes": data.get("scopes", []),
+        # Lo usa app/auth/sessions.py::access_revocado para comparar contra
+        # `listado_medico.tokens_valid_from` y cortar sesiones sin esperar al exp.
+        "iat": data.get("iat"),
+    }
 
 
 def require_scope(scope: str):
@@ -86,22 +97,17 @@ async def get_current_user_with_scopes_and_role(
     if not sub:
         raise HTTPException(status_code=401, detail="Token inválido (sub)")
 
-    # Buscar usuario por ID (preferido) o por NRO_SOCIO como fallback
-    user = None
+    # `sub` es SIEMPRE el NRO_SOCIO — lo emiten así los tres puntos que crean
+    # access tokens (/auth/login, /auth/legacy-sso-accept y el login móvil).
+    # Acá había una segunda consulta idéntica como supuesto "fallback por ID",
+    # que consultaba la misma columna y por lo tanto no podía encontrar nada que
+    # la primera no hubiera encontrado ya. Ver A10.
     try:
         user = (await db.execute(
             select(ListadoMedico).where(ListadoMedico.NRO_SOCIO == int(sub))
         )).scalar_one_or_none()
     except ValueError:
         user = None
-
-    if not user:
-        try:
-            user = (await db.execute(
-                select(ListadoMedico).where(ListadoMedico.NRO_SOCIO == int(sub))
-            )).scalar_one_or_none()
-        except ValueError:
-            user = None
 
     if not user:
         raise HTTPException(status_code=401, detail="Usuario no encontrado")

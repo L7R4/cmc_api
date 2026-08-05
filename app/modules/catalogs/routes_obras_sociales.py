@@ -9,6 +9,8 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.common.files import url_archivo
+from app.common.uploads import DOCUMENTOS, validate_upload
 from app.db.database import get_db
 from app.db.models.catalogs import ObrasSociales, ObraSocialContacto, ObraSocialDireccion, ObraSocialDocumento
 from app.modules.catalogs.schemas import (
@@ -85,7 +87,10 @@ def _build_out(
             id=doc.id,
             tipo=doc.tipo,
             nombre_custom=doc.nombre_custom,
-            url=doc.url,
+            # `doc.url` en la base es la ruta de disco; acá sale como URL
+            # autorizada. Ojo: os.remove() más abajo usa `doc.url` crudo, así que
+            # la transformación va SOLO al serializar.
+            url=url_archivo(doc.url),
             created_at=doc.created_at,
         )
         for doc in obj.documentos
@@ -359,17 +364,18 @@ async def upload_documento(
 ):
     obj = await _get_or_404(id, db)
 
+    # Convenios y normas: PDF o imagen escaneada. Valida contenido, no nombre.
+    info = await validate_upload(archivo, DOCUMENTOS)
+
     dest_dir = os.path.join(UPLOAD_DIR, str(id))
     os.makedirs(dest_dir, exist_ok=True)
 
-    ext = os.path.splitext(archivo.filename or "")[1]
-    filename = f"{uuid.uuid4().hex}{ext}"
+    filename = f"{uuid.uuid4().hex}{info.extension}"
     dest_path = os.path.join(dest_dir, filename).replace("\\", "/")
 
     def _write():
-        archivo.file.seek(0)
         with open(dest_path, "wb") as f:
-            shutil.copyfileobj(archivo.file, f, length=1024 * 1024)
+            f.write(info.data)
 
     await run_in_threadpool(_write)
 
@@ -387,7 +393,7 @@ async def upload_documento(
         id=doc.id,
         tipo=doc.tipo,
         nombre_custom=doc.nombre_custom,
-        url=doc.url,
+        url=url_archivo(doc.url),
         created_at=doc.created_at,
     )
 

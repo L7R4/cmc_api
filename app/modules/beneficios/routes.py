@@ -8,7 +8,6 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, Path, Query, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth.deps import require_scope
 from app.db.database import get_db
 from app.db.models.beneficios import CATEGORIAS_BENEFICIO, Beneficio
 from app.modules.beneficios import service
@@ -18,7 +17,7 @@ from app.modules.beneficios.schemas import (
     BeneficioUpdate,
 )
 
-router = APIRouter(dependencies=[Depends(require_scope("beneficios:gestionar"))])
+router = APIRouter()  # El scope lo declara app/auth/authz.py::SCOPES_POR_RUTA (fuente unica de autorizacion).
 
 MAX_PAGE_SIZE = 200
 

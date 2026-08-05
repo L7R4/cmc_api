@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.auth.deps import get_current_user
+from app.common.uploads import IMAGENES, validate_upload
 from app.db.database import get_db
 from app.db.models import DocumentoNoticias as DocNoticiaModel
 from app.db.models import Noticia as NoticiaModel
@@ -25,16 +26,16 @@ def _is_image(content_type: str | None) -> bool:
 
 
 async def _save_file(file: UploadFile) -> dict:
-    ext = Path(file.filename or "").suffix.lower() or ".bin"
-    name = f"{uuid4().hex}{ext}"
-    dest = WEB_NEWS_DIR / name
-    data = await file.read()
-    dest.write_bytes(data)
+    # El tipo sale de los magic bytes, no del content_type que declara el
+    # cliente: `_is_image()` sobre el header era trivial de falsear.
+    info = await validate_upload(file, IMAGENES)
+    name = f"{uuid4().hex}{info.extension}"
+    (WEB_NEWS_DIR / name).write_bytes(info.data)
     return {
-        "original_name": file.filename or name,
+        "original_name": info.original_name,
         "filename": name,
-        "content_type": file.content_type,
-        "size": len(data),
+        "content_type": info.content_type,
+        "size": info.size,
         "path": f"/uploads/web_noticias/{name}",
     }
 

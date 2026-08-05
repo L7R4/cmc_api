@@ -15,19 +15,20 @@ To add a mobile feature: add an endpoint here (reusing existing services), add i
 slim schema in ./schemas.py, and wire the matching repo in the app's src/api/repos.
 """
 import datetime
-import secrets
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from jose import ExpiredSignatureError, JWTError
 from pydantic import BaseModel
 from sqlalchemy import and_, exists, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth import sessions
 from app.auth.deps import get_current_user_with_scopes_and_role, get_user_role
 from app.auth.permissions import get_effective_permission_codes
+from app.core import ratelimit
 from app.core.passwords import verify_and_upgrade
-from app.core.security import create_access_token, create_refresh_token, decode_token
+from app.core.security import create_access_token, decode_token
 from app.db.database import get_db
 from app.db.models import Especialidad, ListadoMedico
 from app.db.models.catalogs import ObrasSociales
@@ -662,12 +663,24 @@ class MobileRefreshIn(BaseModel):
     refresh_token: str
 
 
-async def _issue_session(medico: ListadoMedico, db: AsyncSession) -> dict:
-    sub = str(medico.NRO_SOCIO)
+async def _issue_session(
+    medico: ListadoMedico,
+    db: AsyncSession,
+    *,
+    refresh: str,
+) -> dict:
+    """Arma el response de sesión. El refresh ya viene emitido y registrado.
+
+    Se recibe hecho en vez de crearlo acá porque el login y el refresh lo
+    obtienen distinto: el primero abre una sesión nueva, el segundo **rota** una
+    existente y tiene que revocar la anterior en la misma operación. Ver
+    app/auth/sessions.py.
+    """
     scopes = await get_effective_permission_codes(db, medico.ID)
     role = await get_user_role(db, medico.ID)
-    access = create_access_token(sub=sub, scopes=scopes, role=role)
-    refresh = create_refresh_token(sub=sub, jti=secrets.token_hex(16))
+    access = create_access_token(
+        sub=str(medico.NRO_SOCIO), uid=medico.ID, scopes=scopes, role=role
+    )
     return {
         "access_token": access,
         "refresh_token": refresh,
@@ -681,28 +694,54 @@ async def _issue_session(medico: ListadoMedico, db: AsyncSession) -> dict:
             "ingresar": getattr(medico, "INGRESAR", None),
             "especialidades": _especialidades_medico(medico),
             "es_organizacion": getattr(medico, "es_organizacion", False),
+            # El app manda a la pantalla de cambio de contraseña antes de
+            # mostrar nada: la cuenta todavía tiene la clave inicial pública.
+            "must_change_password": bool(getattr(medico, "must_change_password", False)),
         },
     }
 
 
 @router.post("/auth/login")
-async def mobile_login(body: MobileLoginIn, db: AsyncSession = Depends(get_db)):
+async def mobile_login(
+    body: MobileLoginIn, req: Request, db: AsyncSession = Depends(get_db)
+):
     """Login del app: valida credenciales y devuelve access + refresh en el body."""
+    # Mismo contador que /auth/login: comparten las claves `ip:` y `socio:`, así
+    # que agotar los intentos en un flujo también los agota en el otro. Limitar
+    # solo el login web dejaría esta puerta abierta con el mismo espacio de
+    # contraseñas.
+    ratelimit.chequear_login(req, body.nro_socio)
+
     medico = (
         await db.execute(select(ListadoMedico).where(ListadoMedico.NRO_SOCIO == body.nro_socio))
     ).scalar_one_or_none()
     if not medico:
+        ratelimit.registrar_fallo(req, body.nro_socio)
         raise HTTPException(401, "Usuario inválido")
     if getattr(medico, "EXISTE", "N") != "S":
         raise HTTPException(403, "Tu registro está pendiente de aprobación")
     if not await verify_and_upgrade(db, medico, body.password):
+        ratelimit.registrar_fallo(req, body.nro_socio)
         raise HTTPException(401, "Credenciales inválidas")
-    return await _issue_session(medico, db)
+
+    ratelimit.registrar_exito(req, body.nro_socio)
+    refresh = await sessions.emitir_refresh(db, medico, origen="mobile", request=req)
+    return await _issue_session(medico, db, refresh=refresh)
 
 
 @router.post("/auth/refresh")
-async def mobile_refresh(body: MobileRefreshIn, db: AsyncSession = Depends(get_db)):
-    """Canjea un refresh token (del SecureStore del app) por un access nuevo."""
+async def mobile_refresh(
+    body: MobileRefreshIn, req: Request, db: AsyncSession = Depends(get_db)
+):
+    """Canjea un refresh token (del SecureStore del app) por un access nuevo.
+
+    Rota: el token que se presenta queda revocado y el app se queda con el
+    nuevo. Esto importa más en móvil que en web — el refresh vive en el
+    dispositivo, no en una cookie HttpOnly, y es lo que se lleva quien saca una
+    copia del almacenamiento del teléfono. Con rotación, la próxima vez que
+    cualquiera de los dos use el token viejo se detecta el reuso y se cierran
+    todas las sesiones del socio.
+    """
     try:
         payload = decode_token(body.refresh_token)
     except ExpiredSignatureError:
@@ -719,4 +758,43 @@ async def mobile_refresh(body: MobileRefreshIn, db: AsyncSession = Depends(get_d
     ).scalar_one_or_none()
     if not medico:
         raise HTTPException(401, "Usuario no encontrado")
-    return await _issue_session(medico, db)
+
+    try:
+        refresh = await sessions.rotar_refresh(
+            db, medico, payload.get("jti"), origen="mobile", request=req
+        )
+    except sessions.SesionInvalida as e:
+        raise HTTPException(401, e.codigo)
+
+    return await _issue_session(medico, db, refresh=refresh)
+
+
+@router.post("/auth/logout")
+async def mobile_logout(
+    body: MobileRefreshIn,
+    db: AsyncSession = Depends(get_db),
+    dep=Depends(get_current_user_with_scopes_and_role),
+):
+    """Cierra la sesión del dispositivo.
+
+    No existía: el app borraba el token del SecureStore y listo, con lo que un
+    refresh copiado del teléfono seguía sirviendo 15 días después del logout.
+
+    Se exige access token además del refresh para que nadie pueda desloguear a
+    otro socio con un refresh que encontró; y se verifica que el refresh sea del
+    mismo usuario, para que un token válido no sirva para cerrar sesiones ajenas.
+    """
+    user, _scopes, _role = dep
+    try:
+        payload = decode_token(body.refresh_token)
+    except Exception:
+        # Vencido o ilegible: no hay nada que revocar y el app ya lo va a
+        # descartar. Responder 200 evita que el logout falle por un token que ya
+        # no sirve.
+        return {"ok": True}
+
+    if str(payload.get("sub")) != str(user.NRO_SOCIO):
+        raise HTTPException(403, "El refresh no pertenece a esta sesión")
+
+    await sessions.revocar_por_jti(db, payload.get("jti"), motivo="logout")
+    return {"ok": True}

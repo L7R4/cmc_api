@@ -301,3 +301,11 @@ class ValoresEticosOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+    # El modelo se serializa directo desde el ORM, así que la conversión a URL
+    # autorizada va acá y no en el handler. En la base `pdf_path` sigue siendo la
+    # ruta de disco, que es lo que necesita el DELETE para borrar el archivo.
+    @field_serializer("pdf_path")
+    def _url_pdf(self, v: Optional[str]) -> Optional[str]:
+        from app.common.files import url_archivo
+        return url_archivo(v)

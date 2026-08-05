@@ -9,8 +9,11 @@ import shutil
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm.attributes import flag_modified
 
+from uuid import uuid4
+
 from app.common.dates import _parse_fecha_to_yyyy_mm_dd, parse_ddmmyyyy, _parse_date
-from app.common.files import save_upload_for_medico
+from app.common.files import save_upload_for_medico, url_archivo
+from app.common.uploads import DOCUMENTOS, validate_upload
 from app.modules.medicos.helpers import (
     SPECIALTY_SLOTS, _parse_conceps_espec, _dump_conceps_espec,
     _find_slot_index, _next_free_slot_index, build_espec_item, parse_conceps_espec,
@@ -20,7 +23,10 @@ from typing import Any, DefaultDict, Literal, Optional, Dict, List
 from fastapi import APIRouter, Body, Depends, File, Form, Query, HTTPException, Request, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import case, delete, desc, func, literal, select, or_, cast, String, Integer, update
-from app.core.passwords import hash_password, validate_new_password
+from app.auth import sessions
+from app.auth.deps import get_current_user
+from app.auth.ownership import medico_objetivo
+from app.core.passwords import hash_password, hash_password_inicial, validate_new_password
 from app.db.database import get_db
 from app.db.models import (
     Deduccion, Descuentos, DetalleLiquidacion, Documento, Especialidad, Liquidacion, ListadoMedico,
@@ -34,7 +40,6 @@ from app.modules.medicos.schemas import (
     NuevaDeudaIn, PatchCEIn, RegisterIn, RegisterOut, ResetPasswordIn, SaveContinueOut,
     _coerce_existe, _coerce_sexo,
 )
-from app.auth.deps import require_scope
 from app.services.email import send_email_resend
 from app.core.config import settings
 from app.modules.medicos.service import create_medico_and_solicitud, save_medico_admin_draft
@@ -140,9 +145,7 @@ MEDICO_ILIKE_FIELDS = {"provincia", "localidad"}
 
 @router.get(
     "",
-    response_model=List[MedicoListRow],
-    dependencies=[Depends(require_scope("medicos:leer"))],
-)
+    response_model=List[MedicoListRow])
 async def listar_medicos(
     db: AsyncSession = Depends(get_db),
     q: Optional[str] = Query(None),
@@ -233,7 +236,7 @@ async def listar_medicos(
     return out
 
 
-@router.get("/all", response_model=List[MedicoBase], dependencies=[Depends(require_scope("medicos:leer"))])
+@router.get("/all", response_model=List[MedicoBase])
 async def listar_medicos_full(
     request: Request,
     db: AsyncSession = Depends(get_db),
@@ -444,7 +447,7 @@ async def listar_medicos_full(
     return [dict(r) for r in rows]
 
 
-@router.get("/count", dependencies=[Depends(require_scope("medicos:leer"))])
+@router.get("/count")
 async def contar_medicos(
     q: Optional[str] = Query(None),
     db: AsyncSession = Depends(get_db),
@@ -471,14 +474,27 @@ async def public_register_medico(body: RegisterIn, db: AsyncSession = Depends(ge
     return {"medico_id": med.ID, "solicitud_id": sol.id, "ok": True}
 
 
-@router.post("/admin/register", response_model=RegisterOut, dependencies=[Depends(require_scope("medicos:agregar"))])
+@router.post("/admin/register", response_model=RegisterOut)
 async def admin_register_medico(body: RegisterIn, db: AsyncSession = Depends(get_db)):
     med, sol = await create_medico_and_solicitud(db, body, existe="N")
     return {"medico_id": med.ID, "solicitud_id": sol.id, "ok": True}
 
 
 @router.get("/{medico_id}", response_model=MedicoDetailOut)
-async def obtener_medico(medico_id: int, db: AsyncSession = Depends(get_db)):
+async def obtener_medico(
+    medico_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: dict = Depends(get_current_user),
+):
+    """Legajo completo de un médico.
+
+    `medico_objetivo()` decide sobre quién se opera: con `medico:leer` (staff)
+    respeta el `medico_id` pedido; con solo `medico:leer_propio` lo ignora y
+    devuelve el del token, y pedir otro es 403. Sin esto, cualquier colegiado
+    autenticado recorría `medico_id` de 1 a N y se bajaba el padrón entero con
+    DNI, CUIT y CBU. Ver A4.
+    """
+    medico_id = medico_objetivo(user, medico_id)
     stmt = (
         select(
             ListadoMedico.ID.label("id"),
@@ -545,17 +561,22 @@ async def obtener_medico(medico_id: int, db: AsyncSession = Depends(get_db)):
 
     d = dict(row)
 
-    def norm_path(p: str | None) -> str | None:
-        if not p:
-            return None
-        s = str(p).strip()
-        if not s:
-            return None
-        if s.startswith("http://") or s.startswith("https://"):
-            return s
-        if not s.startswith("/"):
-            s = "/" + s
-        return s
+    # Antes esto solo le pegaba una barra adelante y devolvía `/uploads/...`,
+    # que Caddy servía sin autenticación. Ahora delega en el único lugar donde
+    # se decide por dónde se pide cada archivo (app/common/files.py).
+    norm_path = url_archivo
+
+    # Los once `attach_*` son rutas guardadas: van por el mismo helper. Si no se
+    # transformaran acá, el detalle del médico seguiría entregando URLs públicas
+    # aunque el índice de documentos ya no lo haga.
+    for _campo in (
+        "attach_titulo", "attach_matricula_nac", "attach_matricula_prov",
+        "attach_resolucion", "attach_habilitacion_municipal", "attach_cuit",
+        "attach_condicion_impositiva", "attach_anssal", "attach_malapraxis",
+        "attach_cbu", "attach_dni",
+    ):
+        if _campo in d:
+            d[_campo] = url_archivo(d[_campo])
 
     raw = d.get("conceps_espec") or {}
     espec_list = raw.get("espec") or []
@@ -674,7 +695,12 @@ async def update_medico(
 
 
 @router.get("/{medico_id}/deuda", response_model=MedicoDebtOut)
-async def deuda_medico(medico_id: int, db: AsyncSession = Depends(get_db)):
+async def deuda_medico(
+    medico_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: dict = Depends(get_current_user),
+):
+    medico_id = medico_objetivo(user, medico_id)
     # Saldo = SUM(calculado_total - monto_aplicado) para deducciones pendientes/en_pago
     q_total = await db.execute(
         select(func.coalesce(
@@ -737,7 +763,12 @@ async def crear_deuda_manual(
 
 
 @router.get("/{medico_id}/especialidades", response_model=List[MedicoEspecialidadOut])
-async def listar_especialidades_medico(medico_id: int, db: AsyncSession = Depends(get_db)):
+async def listar_especialidades_medico(
+    medico_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: dict = Depends(get_current_user),
+):
+    medico_id = medico_objetivo(user, medico_id)
     row = (
         await db.execute(
             select(ListadoMedico.conceps_espec).where(ListadoMedico.ID == medico_id)
@@ -1014,7 +1045,19 @@ async def remove_especialidad(
 
 
 @router.get("/{medico_id}/documentos", response_model=List[MedicoDocOut])
-async def documentos_medico(medico_id: int, db: AsyncSession = Depends(get_db)):
+async def documentos_medico(
+    medico_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: dict = Depends(get_current_user),
+):
+    """Índice de adjuntos del médico: escaneos de DNI, título y constancia de CBU.
+
+    El control de propiedad es lo que hace que el renombrado a uuid4 de §2.2 no
+    sea evadible: sin esto, una sola cuenta autenticada reconstruía el índice
+    completo de los 525 archivos —que /uploads sirve sin autenticación— con un
+    `for` sobre `medico_id`.
+    """
+    medico_id = medico_objetivo(user, medico_id)
     doc_rows = (
         await db.execute(
             select(
@@ -1080,7 +1123,7 @@ async def documentos_medico(medico_id: int, db: AsyncSession = Depends(get_db)):
                 espec_name = espec_names.get(espec_id) or f"ID {espec_id}"
                 pretty = f"Adjunto {espec_name}"
 
-        url = "/" + str(path).lstrip("/")
+        url = url_archivo(path)
 
         out.append(
             MedicoDocOut(
@@ -1123,24 +1166,28 @@ async def _save_upload_for_medico(medico_id: int, up: UploadFile) -> dict:
     if not up or not up.filename:
         raise HTTPException(400, "Archivo no recibido")
 
+    # Valida tipo real (magic bytes) y tamaño antes de escribir nada a disco.
+    info = await validate_upload(up, DOCUMENTOS)
+
     folder_fs = MEDIA_URL / "medicos" / str(medico_id)
     folder_fs.mkdir(parents=True, exist_ok=True)
 
-    safe_name = _safe_name(up.filename)
+    # Nombre generado en vez de derivado del cliente: `_safe_name` limpiaba
+    # separadores pero seguía dejando pasar extensiones dobles y permitía que
+    # dos subidas se pisaran entre sí.
+    safe_name = f"{uuid4().hex}{info.extension}"
     abs_path = folder_fs / safe_name
-
-    content = await up.read()
-    abs_path.write_bytes(content)
+    abs_path.write_bytes(info.data)
 
     rel_path = f"{MEDIA_URL}/medicos/{medico_id}/{safe_name}"
 
     return {
         "safe_name": safe_name,
         "rel_path": rel_path,
-        "size": len(content),
-        "content_type": up.content_type or "application/octet-stream",
+        "size": info.size,
+        "content_type": info.content_type,
         "abs_path": abs_path,
-        "original_name": up.filename or "",
+        "original_name": os.path.basename(info.original_name),
     }
 
 
@@ -1292,7 +1339,7 @@ async def upload_document(
     return {"ok": True, "doc_id": doc.id}
 
 
-@router.post("/admin/register/{medico_id}/document", dependencies=[Depends(require_scope("medicos:agregar"))])
+@router.post("/admin/register/{medico_id}/document")
 async def admin_upload_document(
     medico_id: int,
     file: UploadFile = File(...),
@@ -1357,13 +1404,13 @@ async def admin_upload_document(
     return {"ok": True, "doc_id": doc.id}
 
 
-@router.post("/admin/save-continue", response_model=SaveContinueOut, dependencies=[Depends(require_scope("medicos:agregar"))])
+@router.post("/admin/save-continue", response_model=SaveContinueOut)
 async def admin_save_continue(body: AdminSaveContinueIn, db: AsyncSession = Depends(get_db)):
     med = await save_medico_admin_draft(db, body, medico_id=body.medico_id)
     return {"medico_id": int(med.ID), "ok": True}
 
 
-@router.patch("/{medico_id}/existe", dependencies=[Depends(require_scope("medicos:editar_perfil"))])
+@router.patch("/{medico_id}/existe")
 async def set_existe(medico_id: int, body: ExisteIn, db: AsyncSession = Depends(get_db)):
     med = await db.get(ListadoMedico, medico_id)
     if not med:
@@ -1374,26 +1421,39 @@ async def set_existe(medico_id: int, body: ExisteIn, db: AsyncSession = Depends(
     return {"ok": True, "medico_id": medico_id, "EXISTE": med.EXISTE}
 
 
-@router.post("/{medico_id}/reset-password", dependencies=[Depends(require_scope("medicos:editar_perfil"))])
+@router.post("/{medico_id}/reset-password")
 async def reset_password_medico(medico_id: int, body: ResetPasswordIn, db: AsyncSession = Depends(get_db)):
     """Resetea la contraseña de un socio sin requerir la actual — para uso de un
     admin/staff cuando el socio se la olvidó. El self-service está en
-    POST /auth/change-password (requiere la contraseña actual)."""
+    POST /auth/change-password (requiere la contraseña actual).
+
+    Sin `new_password` vuelve a `PASSWORD_INICIAL`. En los dos casos la cuenta
+    queda con `must_change_password`: la contraseña la eligió otro, así que no
+    puede quedarse.
+
+    Cierra además todas las sesiones del socio, por el mismo motivo que el
+    cambio de contraseña (A7): un reset suele pedirse porque alguien no puede
+    entrar, y a veces porque otro sí pudo.
+    """
     med = await db.get(ListadoMedico, medico_id)
     if not med:
         raise HTTPException(404, "Médico no encontrado")
 
-    try:
-        new_password = validate_new_password(body.new_password)
-    except ValueError as e:
-        raise HTTPException(400, str(e))
+    if body.new_password:
+        try:
+            med.hashed_password = hash_password(validate_new_password(body.new_password))
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+    else:
+        med.hashed_password = hash_password_inicial()
 
-    med.hashed_password = hash_password(new_password)
+    med.must_change_password = True
     await db.commit()
+    await sessions.revocar_sesiones(db, med.ID, motivo="cambio_password")
     return {"ok": True, "medico_id": medico_id}
 
 
-@router.delete("/{medico_id}", status_code=204, dependencies=[Depends(require_scope("medicos:eliminar"))])
+@router.delete("/{medico_id}", status_code=204)
 async def delete_medico(medico_id: int, db: AsyncSession = Depends(get_db)):
     med = await db.get(ListadoMedico, medico_id)
     if not med:
@@ -1406,9 +1466,7 @@ async def delete_medico(medico_id: int, db: AsyncSession = Depends(get_db)):
 async def delete_documento(
     medico_id: int,
     doc_id: int,
-    db: AsyncSession = Depends(get_db),
-    _=Depends(require_scope("medicos:editar_perfil")),
-):
+    db: AsyncSession = Depends(get_db)):
     doc = await db.get(Documento, doc_id)
     if not doc or doc.medico_id != medico_id:
         raise HTTPException(status_code=404, detail="Documento no encontrado")
@@ -1445,9 +1503,7 @@ class AttachMapIn(_BaseModel):
 async def map_attach(
     medico_id: int,
     body: AttachMapIn,
-    db: AsyncSession = Depends(get_db),
-    _=Depends(require_scope("medicos:editar_perfil")),
-):
+    db: AsyncSession = Depends(get_db)):
     field = body.field
     if field not in LABEL_TO_FIELD.values():
         raise HTTPException(status_code=400, detail="Campo attach_* no permitido")
@@ -1467,7 +1523,12 @@ async def map_attach(
 
 
 @router.get("/{medico_id}/conceptos", response_model=List[MedicoConceptoOut])
-async def listar_conceptos_medico(medico_id: int, db: AsyncSession = Depends(get_db)):
+async def listar_conceptos_medico(
+    medico_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: dict = Depends(get_current_user),
+):
+    medico_id = medico_objetivo(user, medico_id)
     store = (await db.execute(
         select(ListadoMedico.conceps_espec).where(ListadoMedico.ID == medico_id)
     )).scalar_one_or_none() or {"conceps": [], "espec": []}

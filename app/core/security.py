@@ -10,14 +10,24 @@ def _ts(dt: datetime) -> int:
     # convierte a epoch seconds (int)
     return int(dt.timestamp())
 
-def create_access_token(*, sub: str | int, scopes: list[str] = None, role: str | None = None, expires_delta: timedelta | None = None):
+def create_access_token(*, sub: str | int, uid: int | None = None, scopes: list[str] = None, role: str | None = None, expires_delta: timedelta | None = None):
+    """Access token.
+
+    `sub` es el NRO_SOCIO (la credencial pública) y `uid` es `ListadoMedico.ID`
+    (la PK interna). Van los dos porque la base usa las dos convenciones y el
+    control de propiedad necesita comparar contra la correcta: `medicos` y
+    `padrones` indexan por ID, `validaciones` y `DetalleLiquidacion` por
+    NRO_SOCIO. Resolver uno desde el otro costaría una query por request.
+    Ver app/auth/ownership.py y docs/api/RBAC_PROPUESTA.md §6.2.
+    """
     now = _now_utc()
     exp = now + timedelta(minutes=settings.ACCESS_MINUTES)
     payload = {
         "sub": str(sub),
+        "uid": int(uid) if uid is not None else None,
         "type": "access",
         "scopes": scopes or [],
-        "role": role, 
+        "role": role,
         "iat": _ts(now),            # emitido en
         "nbf": _ts(now),            # no válido antes de
         "exp": _ts(exp),            # vence en

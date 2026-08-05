@@ -8,6 +8,7 @@ from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.deps import get_current_user
+from app.common.uploads import validate_upload
 from app.db.database import get_db
 from app.db.models import ValoresEticos
 from app.modules.catalogs.schemas import ValoresEticosOut
@@ -17,12 +18,15 @@ router = APIRouter()
 VALORES_ETICOS_DIR = Path("uploads") / "boletin_valores_eticos"
 VALORES_ETICOS_DIR.mkdir(parents=True, exist_ok=True)
 
+_SOLO_PDF = frozenset({".pdf"})
+
 
 async def _save_pdf(file: UploadFile) -> str:
-    ext = Path(file.filename or "").suffix.lower() or ".pdf"
-    filename = f"{uuid4().hex}{ext}"
-    dest = VALORES_ETICOS_DIR / filename
-    dest.write_bytes(await file.read())
+    # Antes tomaba la extensión del nombre y caía a .pdf por defecto: se podía
+    # subir cualquier cosa y quedaba registrada como PDF.
+    info = await validate_upload(file, _SOLO_PDF)
+    filename = f"{uuid4().hex}{info.extension}"
+    (VALORES_ETICOS_DIR / filename).write_bytes(info.data)
     return f"uploads/boletin_valores_eticos/{filename}"
 
 

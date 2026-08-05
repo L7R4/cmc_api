@@ -11,6 +11,8 @@ from sqlalchemy import func, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.common.money import quantize_money
+from app.common.files import url_archivo
+from app.common.uploads import DOCUMENTOS, validate_upload
 from app.db.models import (
     Afiliado,
     DetalleFacturacionCMC,
@@ -88,16 +90,18 @@ async def _guardar_documento_factura(factura_id: int, archivo: Optional[UploadFi
     /uploads, o None si no vino archivo."""
     if not archivo or not archivo.filename:
         return None
+
+    # Valida tipo real y tamaño antes de escribir (ver app/common/uploads.py).
+    info = await validate_upload(archivo, DOCUMENTOS)
+
     dest_dir = os.path.join(UPLOAD_ROOT_FACTURAS, str(factura_id))
     os.makedirs(dest_dir, exist_ok=True)
-    ext = os.path.splitext(archivo.filename)[1]
-    filename = f"{uuid.uuid4().hex}{ext}"
+    filename = f"{uuid.uuid4().hex}{info.extension}"
     dest_path = os.path.join(dest_dir, filename).replace("\\", "/")
 
     def _write():
-        archivo.file.seek(0)
         with open(dest_path, "wb") as f:
-            shutil.copyfileobj(archivo.file, f, length=1024 * 1024)
+            f.write(info.data)
 
     await run_in_threadpool(_write)
     return dest_path
@@ -1894,7 +1898,7 @@ async def cerrar_periodo(
         "periodo": periodo,
         "cantidad": len(rows),
         "importe_total": total,
-        "documento_url": cabecera.documento_url,
+        "documento_url": url_archivo(cabecera.documento_url),
         "nro_factura": cabecera.nro_factura,
     }
 

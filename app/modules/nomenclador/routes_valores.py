@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.common.uploads import leer_texto
 from app.db.database import get_db
 from app.db.models.catalogs import ObrasSociales
 from app.db.models.nomenclador_cmc import (
@@ -1212,8 +1213,7 @@ async def importar_valores_csv(
       faltantes se crean en 0 respetando la modalidad. No existen componentes opcionales.
     - Si algún componente del grupo falla, NO se crea el Valor (todo o nada).
     """
-    contenido = await file.read()
-    texto = contenido.decode("utf-8-sig")
+    texto = await leer_texto(file)
     reader = csv.DictReader(io.StringIO(texto))
 
     origenes_validos = {o.value for o in Origen}

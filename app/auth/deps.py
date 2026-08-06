@@ -52,6 +52,35 @@ def get_current_user(creds: HTTPAuthorizationCredentials = Depends(bearer)):
     }
 
 
+def usuario_opcional(creds: HTTPAuthorizationCredentials = Depends(bearer)):
+    """El usuario del token, o `None` si no vino token o no sirve.
+
+    Para los endpoints **públicos con respuesta reducida**: los del portal, que
+    tiene que poder ver un visitante anónimo, pero que devuelven más datos a
+    quien está autenticado. `GET /api/obras_social/` es el caso: un visitante
+    necesita el nombre de la obra social, y el personal del Colegio necesita
+    además el CUIT, los contactos y las condiciones del convenio.
+
+    Nunca lanza: un token vencido o inválido es lo mismo que no traer ninguno.
+    Eso es correcto acá y **sería un agujero en cualquier otro lado** — por eso
+    no reemplaza a `get_current_user`, que sigue siendo el que exige token.
+    """
+    if not creds:
+        return None
+    try:
+        data = decode_token(creds.credentials)
+    except (ExpiredSignatureError, JWTError):
+        return None
+    if data.get("type") != "access":
+        return None
+    return {
+        "nro_socio": data.get("sub"),
+        "uid": data.get("uid"),
+        "scopes": data.get("scopes", []),
+        "iat": data.get("iat"),
+    }
+
+
 def require_scope(scope: str):
     def checker(user=Depends(get_current_user)):
         if scope not in (user.get("scopes") or []):

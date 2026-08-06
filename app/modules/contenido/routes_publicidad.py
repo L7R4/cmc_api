@@ -8,6 +8,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from app.common.uploads import MEDIA, validate_upload
+from app.auth.deps import usuario_opcional
+from app.auth.scopes import Scope
 from app.db.database import get_db
 from app.db.models import ListadoMedico, PublicidadMedico
 from app.modules.contenido.schemas import PublicidadMedicoOut
@@ -57,8 +59,19 @@ async def listar_publicidades(
     activo: Optional[bool] = Query(None),
     medico_id: Optional[int] = Query(None),
     db: AsyncSession = Depends(get_db),
+    user: dict | None = Depends(usuario_opcional),
 ):
+    """Avisos del portal. **Público**: los muestra el sitio sin login.
+
+    Un visitante ve solo los activos, aunque no mande `?activo=true`. Sin ese
+    recorte, hacer público el endpoint publicaría también los avisos dados de
+    baja —que el Colegio decidió no mostrar— junto con el nombre del médico que
+    los contrató.
+    """
     LM = aliased(ListadoMedico)
+
+    if Scope.CONTENIDO_LEER not in ((user or {}).get("scopes") or []):
+        activo = True
     stmt = select(PublicidadMedico, LM.NOMBRE).join(
         LM, LM.ID == PublicidadMedico.medico_id, isouter=True
     )

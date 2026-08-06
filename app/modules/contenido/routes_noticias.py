@@ -7,7 +7,8 @@ from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.auth.deps import get_current_user
+from app.auth.deps import get_current_user, usuario_opcional
+from app.auth.scopes import Scope
 from app.common.uploads import IMAGENES, validate_upload
 from app.db.database import get_db
 from app.db.models import DocumentoNoticias as DocNoticiaModel
@@ -87,8 +88,18 @@ async def _try_unlink_file(doc_path: str) -> None:
 async def list_noticias(
     tipo: Optional[Literal["Blog", "Noticia", "Curso"]] = Query(None),
     db: AsyncSession = Depends(get_db),
+    user: dict | None = Depends(usuario_opcional),
 ):
-    stmt = select(NoticiaModel).where(NoticiaModel.publicada.is_(True))
+    """Listado del portal. **Público**: lo consume el sitio sin login.
+
+    Un visitante ve solo las publicadas. Quien administra contenido ve también
+    los borradores, que es lo que necesita la pantalla de edición.
+    """
+    puede_ver_borradores = Scope.CONTENIDO_EDITAR in ((user or {}).get("scopes") or [])
+
+    stmt = select(NoticiaModel)
+    if not puede_ver_borradores:
+        stmt = stmt.where(NoticiaModel.publicada.is_(True))
     if tipo:
         stmt = stmt.where(NoticiaModel.tipo == tipo)
     stmt = stmt.order_by(desc(NoticiaModel.fecha_creacion))
@@ -113,10 +124,26 @@ async def list_noticias(
 
 
 @router.get("/{id}", response_model=NoticiaDetailOut)
-async def obtener_noticia(id: int, db: AsyncSession = Depends(get_db)):
+async def obtener_noticia(
+    id: int,
+    db: AsyncSession = Depends(get_db),
+    user: dict | None = Depends(usuario_opcional),
+):
+    """Detalle de una noticia. **Público** para las publicadas.
+
+    Este handler NO filtraba por `publicada`: al hacerlo público había que
+    agregarlo, o cualquiera podía leer los borradores del editor recorriendo
+    `id`. Se responde 404 y no 403 a propósito — un 403 confirmaría que el
+    borrador existe.
+    """
     n = await db.get(NoticiaModel, id)
     if not n:
         raise HTTPException(status_code=404, detail="Noticia no encontrada")
+
+    if not n.publicada:
+        if Scope.CONTENIDO_EDITAR not in ((user or {}).get("scopes") or []):
+            raise HTTPException(status_code=404, detail="Noticia no encontrada")
+
     await db.refresh(n, attribute_names=["documentos"])
     return _to_out(n)
 
@@ -269,7 +296,19 @@ async def eliminar_noticia(id: int, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/{id}/documentos", response_model=List[DocumentoNoticiasOut])
-async def listar_documentos_noticia(id: int, db: AsyncSession = Depends(get_db)):
+async def listar_documentos_noticia(
+    id: int,
+    db: AsyncSession = Depends(get_db),
+    user: dict | None = Depends(usuario_opcional),
+):
+    # Mismo criterio que el detalle: los adjuntos de un borrador no se listan.
+    n = await db.get(NoticiaModel, id)
+    if n is None or (
+        not n.publicada
+        and Scope.CONTENIDO_EDITAR not in ((user or {}).get("scopes") or [])
+    ):
+        raise HTTPException(status_code=404, detail="Noticia no encontrada")
+
     result = await db.execute(
         select(DocNoticiaModel).where(DocNoticiaModel.noticia_id == id)
     )

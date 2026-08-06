@@ -70,13 +70,50 @@ def test_no_hay_rutas_declaradas_de_mas(app):
 
 
 def test_la_allowlist_publica_no_crecio():
-    """Lo público solo puede achicarse.
+    """Lo público solo crece con una justificación explícita en el diff.
 
-    Ocho rutas: login/refresh/logout web, SSO legacy, login/refresh del app y el
-    alta pública de registro con su adjunto. Subir este número requiere
-    justificarlo en el diff, que es exactamente el punto de B1.
+    Trece rutas:
+
+      * **8 de autenticación y alta** — login/refresh/logout web, SSO legacy,
+        login/refresh del app, y el alta pública de registro con su adjunto.
+      * **5 del portal**, agregadas el 2026-08-05 — noticias (listado, detalle y
+        adjuntos), publicidad y obras sociales. El default cerrado de B1 las
+        había dejado en 401 y eso rompió el sitio para los visitantes anónimos.
+
+    Las cinco del portal **recortan la respuesta** para quien no manda token:
+    noticias oculta borradores, publicidad oculta avisos inactivos, y obras
+    sociales oculta CUIT, contactos y condiciones del convenio. Que estén acá
+    significa "no exige token", no "devuelve todo" — lo verifica
+    `test_los_endpoints_publicos_del_portal_recortan_la_respuesta`.
     """
-    assert len(PUBLIC_ROUTES) <= 8, sorted(PUBLIC_ROUTES)
+    assert len(PUBLIC_ROUTES) <= 13, sorted(PUBLIC_ROUTES)
+
+
+def test_los_endpoints_publicos_del_portal_recortan_la_respuesta():
+    """Cada ruta pública del portal tiene que mirar quién pregunta.
+
+    Es la mitad que hace que abrirlas no sea una filtración. Si alguien saca el
+    `usuario_opcional` de uno de estos handlers, el endpoint sigue respondiendo
+    200 —no se rompe nada visible— pero pasa a entregar borradores, avisos dados
+    de baja o el CUIT y los contactos de cada obra social. Este test es lo único
+    que lo detecta.
+    """
+    import inspect
+
+    from app.modules.catalogs import routes_obras_sociales
+    from app.modules.contenido import routes_noticias, routes_publicidad
+
+    for modulo, handlers in (
+        (routes_noticias, ("list_noticias", "obtener_noticia", "listar_documentos_noticia")),
+        (routes_publicidad, ("listar_publicidades",)),
+        (routes_obras_sociales, ("list_obras_sociales",)),
+    ):
+        for nombre in handlers:
+            fuente = inspect.getsource(getattr(modulo, nombre))
+            assert "usuario_opcional" in fuente, (
+                f"{modulo.__name__}.{nombre} es público y ya no distingue al "
+                "visitante anónimo del usuario autenticado"
+            )
 
 
 def test_scopes_del_catalogo_tienen_descripcion():

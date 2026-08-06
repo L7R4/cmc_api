@@ -36,6 +36,28 @@ PUBLIC_ROUTES: set[tuple[str, str]] = {
     # un token de un solo uso emitido por POST /register. Ver B1 en
     # docs/api/AUDITORIA_SEGURIDAD.md.
     ("POST", "/api/medicos/register/{medico_id}/document"),
+
+    # ── Portal público ───────────────────────────────────────────────────────
+    # Agregadas el 2026-08-05: el default cerrado de B1 las había dejado en 401 y
+    # eso rompió el sitio para los visitantes anónimos. Son las que alimentan la
+    # home del Colegio.
+    #
+    # Tres de las cinco **no devuelven lo mismo a un anónimo que a un usuario
+    # autenticado**, y esa diferencia la impone el handler, no esta lista:
+    #
+    #   * `/noticias/` y `/noticias/{id}` ocultan las **no publicadas**, o sea
+    #     los borradores del editor;
+    #   * `/publicidad-medicos/` oculta los avisos **inactivos**;
+    #   * `/obras_social/` recorta CUIT, contactos, condiciones del convenio y
+    #     la lista de documentos, que son datos comerciales.
+    #
+    # El patrón es `usuario_opcional()` de app/auth/deps.py. Que la ruta esté
+    # acá significa "no exige token", NO significa "devuelve todo".
+    ("GET", "/api/noticias/"),
+    ("GET", "/api/noticias/{id}"),
+    ("GET", "/api/noticias/{id}/documentos"),
+    ("GET", "/api/publicidad-medicos/"),
+    ("GET", "/api/obras_social/"),
 }
 
 

@@ -104,6 +104,10 @@ class UserOut(BaseModel):
     # primero (NRO_ESPECIALIDAD), luego 2..6. Se pasa tal cual al parámetro
     # `especialidades` de /api/reportes_nm/tabla_valores. Vacía si no tiene o no aplica.
     especialidades: List[int] = []
+    # La cuenta todavía tiene la contraseña inicial (pública). El front manda a
+    # la pantalla de cambio antes que a ningún otro lado. Ver A2/A3 y
+    # app/core/passwords.py.
+    must_change_password: bool = False
 
 class UserEnvelope(BaseModel):
     user: UserOut
@@ -558,7 +562,10 @@ class ExisteIn(BaseModel):
 
 
 class ResetPasswordIn(BaseModel):
-    new_password: str
+    # Opcional: sin valor, la cuenta vuelve a PASSWORD_INICIAL. Es el caso
+    # habitual del mostrador —"me olvidé la contraseña"— y evita que el
+    # administrativo tenga que inventar una y dictarla por teléfono.
+    new_password: Optional[str] = None
 
 
 class AdminSaveContinueIn(BaseModel):

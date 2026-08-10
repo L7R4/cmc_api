@@ -40,9 +40,15 @@ from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.common.files import UPLOAD_ROOT
+import uuid
+
+from app.common.files import UPLOAD_ROOT, url_archivo
 from app.common.money import quantize_money
 from app.db.models import DetalleFacturacionCMC, ListadoMedico, PadronOspm
+from app.common.uploads import validate_upload
+
+_SOLO_PDF = frozenset({".pdf"})
+from app.db.models import DetalleFacturacionCMC, ListadoMedico
 from app.db.models.nomenclador_cmc import NomencladorCMC
 from app.modules.facturacion.service import (
     ORIGEN_MEDICO,
@@ -264,7 +270,9 @@ def _to_dict(f: DetalleFacturacionCMC, descripcion: str = "") -> dict:
         "mes": mes,
         "anio": anio,
         "obra_social": int(f.cod_obr),
-        "orden": f.orden_path,
+        # La orden es del paciente: sale por el endpoint autorizado, nunca
+        # por /uploads. Ver app/common/files.py::url_archivo.
+        "orden": url_archivo(f.orden_path),
     }
 
 
@@ -1085,21 +1093,20 @@ async def adjuntar_orden(
     """Guarda la orden/receta en PDF y deja la ruta en `orden_path`."""
     fila = await _prestacion_del_socio(db, prestacion_id, nro_socio)
 
-    if (archivo.content_type or "") not in {"application/pdf", "application/x-pdf"}:
-        raise HTTPException(422, "La orden tiene que ser un PDF.")
+    # El chequeo anterior era sobre `content_type`, que lo declara el cliente:
+    # bastaba mandar el header correcto para guardar cualquier cosa como PDF.
+    # `validate_upload` lo decide por magic bytes y además limita el tamaño.
+    info = await validate_upload(archivo, _SOLO_PDF)
 
     destino_dir = os.path.join(UPLOAD_ROOT, "validaciones", str(nro_socio))
     os.makedirs(destino_dir, exist_ok=True)
 
-    base = os.path.basename(archivo.filename or "orden.pdf")
-    seguro = "".join(c for c in base if c.isalnum() or c in "._-").strip() or "orden.pdf"
-    nombre = f"{int(datetime.datetime.now().timestamp())}_{seguro}"[:120]
+    nombre = f"{uuid.uuid4().hex}{info.extension}"
     destino = os.path.join(destino_dir, nombre)
 
     def _escribir() -> None:
-        archivo.file.seek(0)
         with open(destino, "wb") as f:
-            shutil.copyfileobj(archivo.file, f, length=1024 * 1024)
+            f.write(info.data)
 
     await run_in_threadpool(_escribir)
 

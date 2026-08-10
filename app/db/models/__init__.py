@@ -29,6 +29,7 @@ from app.db.models.catalogs import (
     ValoresEticos,
 )
 from app.db.models.rbac import Role, Permission, UserRole, RolePermission, UserPermission
+from app.db.models.sesiones import RefreshToken
 from app.db.models.auditoria import AuditLog
 from app.db.models.contenido import Noticia, DocumentoNoticias, PublicidadMedico
 from app.db.models.solicitud import SolicitudRegistro
@@ -76,6 +77,8 @@ __all__ = [
     "ValoresEticos",
     # rbac
     "Role", "Permission", "UserRole", "RolePermission", "UserPermission",
+    # sesiones (refresh tokens revocables)
+    "RefreshToken",
     # auditoria
     "AuditLog",
     # contenido

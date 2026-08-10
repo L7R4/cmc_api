@@ -6,7 +6,6 @@ from fastapi.params import Query
 from sqlalchemy import insert, select, func, or_, cast, String, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth.deps import require_scope
 from app.db.database import get_db
 from app.db.models import ListadoMedico, Role, SolicitudRegistro, UserRole
 from app.modules.solicitudes.schemas import ApproveIn, RejectIn, SolicitudDetailOut, SolicitudListItem

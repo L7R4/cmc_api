@@ -5,6 +5,8 @@ from sqlalchemy import func, select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
+from app.auth.deps import get_current_user
+from app.auth.ownership import medico_objetivo
 from app.db.database import get_db
 from app.db.models import Especialidad, MedicoObraSocial, ListadoMedico, ObrasSociales
 from app.modules.padrones.schemas import AsignacionesOut, ObraSocialOut, PadronOut, PadronUpdate, PageMedicoOS
@@ -78,7 +80,16 @@ async def catalogo_obras_sociales(
 async def list_padrones_de_medico(
     nro_socio: int = Path(..., ge=1),
     db: AsyncSession = Depends(get_db),
+    user: dict = Depends(get_current_user),
 ):
+    """Obras sociales en las que el médico está empadronado.
+
+    OJO con el nombre del parámetro: se filtra por `ListadoMedico.ID`, no por
+    `NRO_SOCIO`. Por eso el helper es `medico_objetivo` (compara contra el claim
+    `uid`) y no `socio_objetivo` — ver la explicación de los dos identificadores
+    en app/auth/ownership.py.
+    """
+    nro_socio = medico_objetivo(user, nro_socio)
     stmt = (
         select(MedicoObraSocial)
         .join(ListadoMedico, MedicoObraSocial.NRO_SOCIO == ListadoMedico.NRO_SOCIO)
@@ -330,7 +341,12 @@ def _ensure_json(doc: dict | None) -> dict:
 
 
 @router.get("/{medico_id}/asignaciones", response_model=AsignacionesOut)
-async def get_asignaciones(medico_id: int, db: AsyncSession = Depends(get_db)):
+async def get_asignaciones(
+    medico_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: dict = Depends(get_current_user),
+):
+    medico_id = medico_objetivo(user, medico_id)
     med = await db.get(ListadoMedico, medico_id)
     if not med:
         raise HTTPException(404, "Médico no encontrado")

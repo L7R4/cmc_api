@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Upload
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.common.uploads import leer_texto
 from app.db.database import get_db
 from app.db.models.nomenclador_cmc import Homologador, NomencladorCMC
 from app.modules.nomenclador.schemas import (
@@ -119,8 +120,7 @@ async def importar_homologaciones_csv(
     """
     CSV esperado: obra_social_nro,codigo_origen,codigo_colegio,descripcion_origen
     """
-    contenido = await file.read()
-    texto = contenido.decode("utf-8-sig")
+    texto = await leer_texto(file)
     reader = csv.DictReader(io.StringIO(texto))
 
     procesados = 0

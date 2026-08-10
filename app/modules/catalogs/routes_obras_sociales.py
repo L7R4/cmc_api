@@ -9,6 +9,10 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.common.files import url_archivo
+from app.common.uploads import DOCUMENTOS, validate_upload
+from app.auth.deps import usuario_opcional
+from app.auth.scopes import Scope
 from app.db.database import get_db
 from app.db.models.catalogs import ObrasSociales, ObraSocialContacto, ObraSocialDireccion, ObraSocialDocumento
 from app.modules.catalogs.schemas import (
@@ -85,7 +89,10 @@ def _build_out(
             id=doc.id,
             tipo=doc.tipo,
             nombre_custom=doc.nombre_custom,
-            url=doc.url,
+            # `doc.url` en la base es la ruta de disco; acá sale como URL
+            # autorizada. Ojo: os.remove() más abajo usa `doc.url` crudo, así que
+            # la transformación va SOLO al serializar.
+            url=url_archivo(doc.url),
             created_at=doc.created_at,
         )
         for doc in obj.documentos
@@ -150,12 +157,57 @@ async def _get_or_404(id: int, db: AsyncSession) -> ObrasSociales:
 
 # ── Endpoints ──────────────────────────────────────────────────────────────
 
+# Lo que un visitante anónimo SÍ ve de una obra social. Es una **lista blanca**,
+# no una lista de lo que se oculta: con la lista negra, agregar un campo nuevo al
+# schema lo publicaba por omisión, que es exactamente el modo de falla que este
+# trabajo vino a eliminar. Acá, un campo nuevo queda privado hasta que alguien lo
+# agregue a mano.
+#
+# Lo de afuera —CUIT, dirección real, condición de IVA, plazo de vencimiento,
+# fecha de alta y día de corte del convenio, emails, teléfonos y la lista de
+# convenios en PDF— son datos comerciales o material para armar una base de
+# contactos. Los `documentos`, además, ya quedaron detrás de /api/archivos con
+# `catalogo:leer`: dejar sus URLs acá sería anunciarlas.
+_CAMPOS_OS_PUBLICOS = frozenset({
+    "id",
+    "nro_obra_social",
+    "nombre",
+    "denominacion",
+    "marca",
+    "ver_valor",
+    "obra_social_principal_id",
+    "obra_social_principal",
+    "asociadas",
+})
+
+
+def _recortar_os(out: ObraSocialOut) -> ObraSocialOut:
+    """Deja la obra social con lo que puede ver cualquiera.
+
+    Se reconstruye el modelo con solo los campos permitidos: el resto toma el
+    default del schema. Blanquear campo por campo no servía —`dia_corte` es
+    `int` no nullable y ponerlo en `None` rompe la validación— y además obligaba
+    a mantener la lista negra al día.
+    """
+    datos = out.model_dump()
+    return ObraSocialOut(**{k: v for k, v in datos.items() if k in _CAMPOS_OS_PUBLICOS})
+
+
 @router.get("/", response_model=list[ObraSocialOut])
 async def list_obras_sociales(
     db: AsyncSession = Depends(get_db),
     nro_obra_social: Optional[int] = Query(None, description="Filtrar por N° obra social (exacto)"),
     nombre: Optional[str] = Query(None, description="Filtrar por nombre (contiene)"),
+    user: dict | None = Depends(usuario_opcional),
 ):
+    """Listado de obras sociales. **Público con respuesta recortada.**
+
+    Lo consume el portal sin login, pero el payload completo incluye CUIT,
+    emails, teléfonos, condiciones del convenio y la lista de convenios en PDF.
+    Publicar eso entero sería cambiar un 401 por una filtración: al visitante se
+    le entrega solo la identificación de la obra social, y el resto requiere
+    `catalogo:leer`.
+    """
     query = select(ObrasSociales).order_by(ObrasSociales.OBRA_SOCIAL.asc())
     if nro_obra_social is not None:
         query = query.where(ObrasSociales.NRO_OBRASOCIAL == nro_obra_social)
@@ -167,7 +219,7 @@ async def list_obras_sociales(
 
     principals_map, asociadas_map = await _batch_principal_and_asociadas(objs, db)
 
-    return [
+    salida = [
         _build_out(
             obj,
             principals_map.get(obj.obra_social_principal_id) if obj.obra_social_principal_id else None,
@@ -175,6 +227,11 @@ async def list_obras_sociales(
         )
         for obj in objs
     ]
+
+    if Scope.CATALOGO_LEER not in ((user or {}).get("scopes") or []):
+        salida = [_recortar_os(o) for o in salida]
+
+    return salida
 
 
 @router.get("/{id}", response_model=ObraSocialOut)
@@ -359,17 +416,18 @@ async def upload_documento(
 ):
     obj = await _get_or_404(id, db)
 
+    # Convenios y normas: PDF o imagen escaneada. Valida contenido, no nombre.
+    info = await validate_upload(archivo, DOCUMENTOS)
+
     dest_dir = os.path.join(UPLOAD_DIR, str(id))
     os.makedirs(dest_dir, exist_ok=True)
 
-    ext = os.path.splitext(archivo.filename or "")[1]
-    filename = f"{uuid.uuid4().hex}{ext}"
+    filename = f"{uuid.uuid4().hex}{info.extension}"
     dest_path = os.path.join(dest_dir, filename).replace("\\", "/")
 
     def _write():
-        archivo.file.seek(0)
         with open(dest_path, "wb") as f:
-            shutil.copyfileobj(archivo.file, f, length=1024 * 1024)
+            f.write(info.data)
 
     await run_in_threadpool(_write)
 
@@ -387,7 +445,7 @@ async def upload_documento(
         id=doc.id,
         tipo=doc.tipo,
         nombre_custom=doc.nombre_custom,
-        url=doc.url,
+        url=url_archivo(doc.url),
         created_at=doc.created_at,
     )
 

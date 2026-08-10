@@ -21,7 +21,7 @@ from app.modules.beneficios.schemas import (
     BeneficioUpdate,
 )
 
-router = APIRouter(dependencies=[Depends(require_scope("beneficios:gestionar"))])
+router = APIRouter()  # El scope lo declara app/auth/authz.py::SCOPES_POR_RUTA (fuente unica de autorizacion).
 
 # Sólo autenticación: cualquier socio logueado puede leer los convenios vigentes.
 router_socio = APIRouter()

@@ -20,6 +20,7 @@ from app.auth.deps import (
     get_current_user_with_scopes_and_role,
     require_scope,
 )
+from app.auth.deps import get_current_user
 from app.db.database import get_db
 from app.db.models.medico import ListadoMedico
 from app.db.models.solicitud_cambio import (
@@ -39,7 +40,7 @@ from app.modules.solicitudes_cambio.schemas import (
     SolicitudCambioOut,
 )
 
-router = APIRouter(dependencies=[Depends(require_scope("solicitudes_cambio:gestionar"))])
+router = APIRouter()  # El scope lo declara app/auth/authz.py::SCOPES_POR_RUTA (fuente unica de autorizacion).
 
 # Sólo autenticación: el socio abre y consulta SUS reclamos, nunca los de otro.
 router_socio = APIRouter()

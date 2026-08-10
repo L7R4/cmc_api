@@ -17,14 +17,14 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth.deps import get_current_user, require_scope
+from app.auth.deps import get_current_user
 from app.db.database import get_db
 from app.db.models.avisos_push import TIPOS_AVISO, AvisoPush
 from app.modules.avisos import push, service
 from app.modules.avisos.schemas import AvisoCreate, AvisoOut, AvisoUpdate
 from app.modules.dispositivos import service as dispositivos_service
 
-router = APIRouter(dependencies=[Depends(require_scope("avisos:gestionar"))])
+router = APIRouter()  # El scope lo declara app/auth/authz.py::SCOPES_POR_RUTA (fuente unica de autorizacion).
 
 MAX_PAGE_SIZE = 200
 

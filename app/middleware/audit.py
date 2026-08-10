@@ -140,14 +140,26 @@ class AuditMiddleware:
             await send(message)
 
         start = time.perf_counter()
+        excepcion: BaseException | None = None
         try:
             await self.app(scope, receive_wrapper, send_wrapper)
+        except BaseException as exc:
+            # La respuesta 500 la arma ServerErrorMiddleware, que está por fuera
+            # nuestro: este middleware nunca ve ese body. Sin capturar acá, la
+            # fila quedaba con error_detail=NULL justo en los errores que más
+            # importan. Se re-lanza intacta.
+            excepcion = exc
+            raise
         finally:
             duration_ms = int((time.perf_counter() - start) * 1000)
             nro_socio, role = _decode_user(authorization)
 
             error_detail = None
-            if state["status_code"] >= 400 and error_chunks:
+            if excepcion is not None:
+                error_detail = (
+                    f"{type(excepcion).__name__}: {excepcion}"
+                )[:_MAX_ERROR_DETAIL_CHARS]
+            elif state["status_code"] >= 400 and error_chunks:
                 try:
                     parsed = json.loads(b"".join(error_chunks))
                     if isinstance(parsed, dict) and "detail" in parsed:
@@ -169,7 +181,11 @@ class AuditMiddleware:
                 user_agent=(_header(headers, b"user-agent") or "")[:255] or None,
                 request_body=_build_request_body(b"".join(body_chunks), content_type),
                 error_detail=error_detail,
-                request_id=uuid.uuid4().hex,
+                # El mismo id que viaja en X-Request-ID y que lleva cada línea
+                # de log de esta petición. Lo asigna RequestContextMiddleware;
+                # el fallback cubre el caso de que ese middleware no esté.
+                request_id=scope.get("state", {}).get("request_id")
+                or uuid.uuid4().hex,
             )
 
             task = asyncio.create_task(_persist(entry))

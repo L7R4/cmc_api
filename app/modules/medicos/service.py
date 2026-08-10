@@ -5,7 +5,7 @@ from typing import Optional, List, Dict, Any
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.db.models import ListadoMedico, SolicitudRegistro, Especialidad
-from app.core.passwords import hash_password
+from app.core.passwords import hash_password, hash_password_inicial
 from app.common.dates import _parse_date
 
 def _int_or_zero(v: Optional[str]) -> int:
@@ -108,7 +108,11 @@ async def create_medico_and_solicitud(db: AsyncSession, body, *, existe="N"):
         # SEXO normalizado
         SEXO = (getattr(body, "gender", None) or "M")[:1].upper(),
     )
-    medico.hashed_password = hash_password(str(getattr(body, "documentNumber", "")))
+    # Contraseña inicial fija + obligación de cambiarla en el primer ingreso.
+    # Era el DNI, que es un secreto compartido con media provincia y que además
+    # no caducaba nunca. Ver A2/A3 y app/core/passwords.py.
+    medico.hashed_password = hash_password_inicial()
+    medico.must_change_password = True
 
     medico.conceps_espec = {
         "conceps": [],
@@ -249,8 +253,10 @@ async def save_medico_admin_draft(
             SEXO = (_nn(getattr(body, "gender", None), "M")[:1]).upper(),
         )
 
-        # hashed_password igual que público (usa DNI). Si no hay DNI, hasheá "0"
-        med.hashed_password = hash_password(_nn(getattr(body, "documentNumber", None), "0"))
+        # Misma credencial inicial que el alta pública: PASSWORD_INICIAL + el
+        # flag que obliga a cambiarla. Ver A2/A3.
+        med.hashed_password = hash_password_inicial()
+        med.must_change_password = True
 
         # conceps_espec default
         med.conceps_espec = {
@@ -282,9 +288,9 @@ async def save_medico_admin_draft(
     if getattr(body, "documentNumber", None) is not None:
         new_doc = _nn(getattr(body, "documentNumber", None), med.DOCUMENTO or "0")
         med.DOCUMENTO = new_doc
-        # si no tenía hash, generalo ahora
-        if not getattr(med, "hashed_password", None):
-            med.hashed_password = hash_password(new_doc)
+        # Editar el DNI NO toca la contraseña: es un dato de contacto, no una
+        # credencial. Una cuenta sin hash sigue entrando por el fallback de
+        # matrícula de verify_and_upgrade() y fija su hash en ese primer login.
 
     # Contacto
     for attr, src in [

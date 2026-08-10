@@ -27,6 +27,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.deps import get_current_user
+from app.auth.ownership import socio_objetivo
 from app.core.config import settings
 from app.db.database import get_db
 from app.modules.validaciones import sancor, service
@@ -41,22 +42,18 @@ from app.modules.validaciones.schemas import (
 
 router = APIRouter()
 
-SCOPE_ADMIN = "medicos:leer"
-
-
 def _socio_objetivo(user: dict, pedido: Optional[int]) -> int:
     """Socio sobre el que se opera.
 
     Por defecto el del token. Si se pide otro explícitamente, hace falta el
     scope administrativo — si no, un prestador podría leer o cargar sobre la
     matrícula de otro.
+
+    La lógica se generalizó a `app/auth/ownership.py` y se aplica igual en
+    `medicos`, `padrones`, `pagos` y `facturacion`. Se conserva este alias para
+    no tocar los 9 llamadores del módulo.
     """
-    propio = int(user["nro_socio"])
-    if pedido is None or int(pedido) == propio:
-        return propio
-    if SCOPE_ADMIN not in (user.get("scopes") or []):
-        raise HTTPException(403, "No podés operar sobre otro prestador.")
-    return int(pedido)
+    return socio_objetivo(user, pedido)
 
 
 @router.get("/sancor/estado")

@@ -10,8 +10,12 @@ misma tabla y el mismo puntero que usa la carga del médico desde facturación,
 así que entra derecho a la liquidación. Lo que respondió la obra social va en
 las columnas `validacion_*` de la misma fila. El módulo no tiene tablas propias.
 
-OSPJN (151), Nobis (402) y OSPM (433) todavía no están implementadas;
-`POST /prestaciones` responde 422 con el detalle si se intenta una de esas.
+Nobis (402) se autoriza en línea contra el WSGeCROS de Gecros, OSPJN (151)
+valida al afiliado por REST, y OSPM (433) valida contra padrón propio
+(`padron_ospm`), sin servicio externo.
+
+Las seis obras sociales integradas están implementadas. `POST /prestaciones`
+responde 422 si se manda cualquier otra.
 
 Autorización: el prestador es el dueño del token. El personal del Colegio que
 carga en nombre de un médico puede mandar `nro_socio`, pero necesita el scope
@@ -185,6 +189,40 @@ async def cargar_prestacion(
             usuario_carga=propio,
         )
 
+    if payload.obra_social == service.OSPJN_OS:
+        return await service.validar_ospjn(
+            db,
+            nro_socio=socio,
+            codigo=payload.codigo.strip(),
+            nro_afiliado=payload.nro_afiliado,
+            barra_afiliado=payload.barra_afiliado,
+            cantidad=payload.cantidad,
+            usuario_carga=propio,
+        )
+
+    if payload.obra_social == service.NOBIS_OS:
+        return await service.validar_nobis(
+            db,
+            nro_socio=socio,
+            codigo=payload.codigo.strip(),
+            nro_afiliado=payload.nro_afiliado,
+            token=payload.token,
+            cantidad=payload.cantidad,
+            usuario_carga=propio,
+        )
+
+    if payload.obra_social == service.OSPM_OS:
+        # OSPM no consulta a nadie: valida contra su padrón propio. El DNI viaja
+        # en `nro_afiliado`, que es el campo que manda el formulario.
+        return await service.validar_ospm(
+            db,
+            nro_socio=socio,
+            codigo=payload.codigo.strip(),
+            documento=payload.nro_afiliado,
+            cantidad=payload.cantidad,
+            usuario_carga=propio,
+        )
+
     obra = service.obra_manual_o_error(payload.obra_social)
     return await service.crear_prestacion_manual(
         db,
@@ -198,6 +236,26 @@ async def cargar_prestacion(
         cantidad=payload.cantidad,
         usuario_carga=propio,
     )
+
+
+@router.post("/ospm/padron")
+async def importar_padron_ospm(
+    archivo: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    """Reemplaza el padrón de OSPM con el CSV/TXT que manda la obra social.
+
+    Formato: `AFILIADO, DU, CUIT, ACTIVO`, separador `;` o `,`, con encabezado
+    opcional. Es una operación del Colegio, no del prestador: pide el scope
+    administrativo.
+
+    Escribe en `padron_ospm` (tabla nueva). **No toca `clientes_ospm`**, que
+    sigue siendo del sistema legacy y se importa por separado desde el PHP.
+    """
+    if SCOPE_ADMIN not in (user.get("scopes") or []):
+        raise HTTPException(403, "Sólo el Colegio puede importar el padrón de OSPM.")
+    return await service.importar_padron_ospm(db, archivo)
 
 
 @router.post("/prestaciones/{prestacion_id}/orden", response_model=PrestacionOut)

@@ -19,7 +19,9 @@ from app.modules.medicos.helpers import (
 from typing import Any, DefaultDict, Literal, Optional, Dict, List
 from fastapi import APIRouter, Body, Depends, File, Form, Query, HTTPException, Request, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import case, delete, desc, func, literal, select, or_, cast, String, Integer, update
+from sqlalchemy import case, delete, desc, func, literal, select, or_, cast, String, Integer, text, update
+
+from app.modules.medicos import auditoria
 from app.core.passwords import hash_password, validate_new_password
 from app.db.database import get_db
 from app.db.models import (
@@ -1562,3 +1564,37 @@ async def listar_conceptos_medico(medico_id: int, db: AsyncSession = Depends(get
             aplicaciones=apps_by_nro.get(n, []),
         ))
     return out
+
+
+# ── Control de calidad del padrón ─────────────────────────────────────────────
+# Sólo lectura: señala legajos con problemas, no corrige nada. Ver el docstring
+# de `auditoria.py` para el criterio.
+
+@router.get(
+    "/auditoria/resumen",
+    dependencies=[Depends(require_scope("medicos:leer"))],
+    summary="Chequeos de calidad del padrón, con la cantidad de casos de cada uno",
+)
+async def auditoria_resumen(db: AsyncSession = Depends(get_db)):
+    return {
+        "total": int(
+            (await db.execute(text("SELECT COUNT(*) FROM listado_medico"))).scalar_one()
+            or 0
+        ),
+        "chequeos": await auditoria.contar(db),
+    }
+
+
+@router.get(
+    "/auditoria/{chequeo_id}",
+    dependencies=[Depends(require_scope("medicos:leer"))],
+    summary="Legajos afectados por un chequeo",
+)
+async def auditoria_detalle(
+    chequeo_id: str,
+    limit: int = Query(50, ge=1, le=auditoria.MAX_FILAS),
+    db: AsyncSession = Depends(get_db),
+):
+    if chequeo_id not in auditoria.POR_ID:
+        raise HTTPException(404, "Chequeo inexistente")
+    return await auditoria.detalle(db, chequeo_id, limit=limit)

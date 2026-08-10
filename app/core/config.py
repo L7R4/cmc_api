@@ -52,6 +52,41 @@ class Settings(BaseSettings):
     SANCOR_PASAPORTE_TEST: str = "8"
     SANCOR_PASAPORTE_PROD: str = "0"
     SANCOR_TIMEOUT: int = 30
+
+    # ── Nobis Salud (O.S. 402) — WSGeCROS ────────────────────────────────────
+    # Mismo criterio que Sancor: arranca en "simulado" y no sale ningún request
+    # hasta cambiarlo a propósito. Insertar una orden (y anularla) es un efecto
+    # real en el sistema de Nobis.
+    #   simulado   → no sale ningún request; se devuelve una respuesta armada
+    #   test       → wstest.nobissalud.com:7004
+    #   produccion → servicioweb.nobissalud.com.ar
+    NOBIS_MODO: str = "simulado"
+    NOBIS_URL_TEST: str = "https://wstest.nobissalud.com:7004/WSGecrosNet.asmx"
+    NOBIS_URL_PROD: str = "https://servicioweb.nobissalud.com.ar/WSGecrosNet.asmx"
+    # Credenciales del Colegio ante el WS. Las de producción están en el .env;
+    # estos defaults son los del ambiente de prueba documentado en el legacy.
+    NOBIS_USUARIO: str = "CMCORR"
+    NOBIS_CLAVE: str = "nobis2025"
+    # Fijo por convenio: "90692 - Colegio Medico de Corrientes" es la entidad
+    # efectora de todas las órdenes.
+    NOBIS_COD_ENTIDAD_EFECTORA: str = "90692"
+    # Tipo de solicitante que espera Gecros para los profesionales del Colegio.
+    NOBIS_TIPO_SOLIC: str = "12221"
+    NOBIS_TIMEOUT: int = 30
+
+    # ── OSPJN · Poder Judicial (O.S. 151) — REST ─────────────────────────────
+    # Mismo criterio que Sancor y Nobis: arranca en "simulado".
+    #   simulado   → no sale ningún request; se devuelve una respuesta armada
+    #   test       → api-test.ospjn.gov.ar
+    #   produccion → api.ospjn.gov.ar  (⚠️ SIN CONFIRMAR — ver InfoValidaciones/ospjn.md)
+    OSPJN_MODO: str = "simulado"
+    OSPJN_URL_TEST: str = "https://api-test.ospjn.gov.ar/ospjn.prestadores.api/PrestadorService.svc/rest"
+    OSPJN_URL_PROD: str = "https://api.ospjn.gov.ar/ospjn.prestadores.api/PrestadorService.svc/rest"
+    # Usuario de API del Colegio (no del prestador). El token sale de /Ingresar
+    # con estas credenciales; las de producción van en el .env.
+    OSPJN_USUARIO: str = "api-cmc-test"
+    OSPJN_PASSWORD: str = "CMed.usertest!"
+    OSPJN_TIMEOUT: int = 30
     @property
     def MYSQL_URL(self) -> str:
         return (

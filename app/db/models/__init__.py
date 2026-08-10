@@ -37,6 +37,8 @@ from app.db.models.beneficios import Beneficio
 # AvisoPush (tabla avisos_push) — NO confundir con el `Avisos` legacy de arriba.
 from app.db.models.avisos_push import AvisoPush
 from app.db.models.dispositivos_push import DispositivoPush
+# Padrón propio de OSPM (tabla nueva) — NO es `clientes_ospm`, la del legacy.
+from app.db.models.padron_ospm import PadronOspm
 from app.db.models.cmc_facturacion import (
     DetalleFacturacionCMC, FacturacionCMC, Afiliado, PeriodoMedicoActual,
 )
@@ -88,6 +90,7 @@ __all__ = [
     "AvisoPush",
     # tokens de dispositivo del app móvil (destinatarios del push)
     "DispositivoPush",
+    "PadronOspm",
     # cmc_facturacion (detalle/facturacion CMC + padrón afiliado + período médico)
     "DetalleFacturacionCMC", "FacturacionCMC", "Afiliado", "PeriodoMedicoActual",
     # nomenclador / valores (sistema nuevo)

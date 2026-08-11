@@ -25,8 +25,8 @@ ninguna factura ni liquidación (todo el circuito filtra `estado='A'`).
 
 Alcance actual — las seis obras sociales integradas del panel: carga manual
 (Boreal 285, Omint 243), en línea (Sancor 411, Nobis 402, OSPJN 151) y contra
-padrón propio (OSPM 433, tabla `padron_ospm` — nunca `clientes_ospm`, que es la
-del legacy). Cualquier otra obra social cae en `obra_manual_o_error()`.
+padrón (OSPM 433, contra `clientes_ospm` — el mismo padrón que usa el legacy, no
+una copia). Cualquier otra obra social cae en `obra_manual_o_error()`.
 """
 import csv
 import datetime
@@ -44,12 +44,12 @@ import uuid
 
 from app.common.files import UPLOAD_ROOT, url_archivo
 from app.common.money import quantize_money
-from app.db.models import DetalleFacturacionCMC, ListadoMedico, PadronOspm
 from app.common.uploads import validate_upload
+from app.db.models import ClientesOspm, DetalleFacturacionCMC, ListadoMedico
+from app.db.models.padron_ospm import OSPM_ACTIVO, OSPM_INACTIVO
+from app.db.models.nomenclador_cmc import NomencladorCMC, Valor
 
 _SOLO_PDF = frozenset({".pdf"})
-from app.db.models import DetalleFacturacionCMC, ListadoMedico
-from app.db.models.nomenclador_cmc import NomencladorCMC, Valor
 from app.modules.facturacion.service import (
     ORIGEN_MEDICO,
     _cleanup_factura_si_vacia,
@@ -678,12 +678,14 @@ def _ospm_parsear_padron(contenido: bytes) -> list[dict]:
             continue  # el padrón trae repetidos; gana el primero
         vistos.add(documento)
 
+        # Se mapea a las columnas del legacy (`clientes_ospm`), con SUS límites:
+        # DU varchar(8), CUIT varchar(11), AFILIADO varchar(30). Todas NOT NULL.
         filas.append(
             {
-                "documento": documento[:15],
-                "cuit": (cuit[:15] or None),
-                "nombre": (nombre[:120] or "SIN NOMBRE"),
-                "activo": activo == "S",
+                "DU": documento[:8],
+                "CUIT": cuit[:11],
+                "AFILIADO": (nombre[:30] or "SIN NOMBRE"),
+                "ACTIVO": OSPM_ACTIVO if activo == "S" else OSPM_INACTIVO,
             }
         )
 
@@ -705,11 +707,11 @@ async def importar_padron_ospm(db: AsyncSession, archivo: UploadFile) -> dict:
     contenido = await archivo.read()
     filas = _ospm_parsear_padron(contenido)
 
-    await db.execute(delete(PadronOspm))
-    db.add_all([PadronOspm(**f) for f in filas])
+    await db.execute(delete(ClientesOspm))
+    db.add_all([ClientesOspm(**f) for f in filas])
     await db.commit()
 
-    activos = sum(1 for f in filas if f["activo"])
+    activos = sum(1 for f in filas if f["ACTIVO"] == OSPM_ACTIVO)
     return {
         "importados": len(filas),
         "activos": activos,
@@ -717,23 +719,23 @@ async def importar_padron_ospm(db: AsyncSession, archivo: UploadFile) -> dict:
     }
 
 
-async def _ospm_afiliado(db: AsyncSession, documento: str) -> PadronOspm:
-    """Busca al afiliado en el padrón propio de OSPM (tabla `padron_ospm`).
+async def _ospm_afiliado(db: AsyncSession, documento: str) -> ClientesOspm:
+    """Busca al afiliado en el padrón de OSPM (`clientes_ospm`).
 
-    NO se lee `clientes_ospm`: esa es la tabla del legacy, la mantiene el PHP
-    viejo y la trunca en cada importación. El padrón nuevo se carga con
-    `importar_padron_ospm()`.
+    Es la MISMA tabla que usa el legacy: el padrón es uno solo, así que el PHP
+    viejo y la API validan siempre contra el mismo dato. La importación de este
+    módulo la reemplaza entera, igual que `importar_padron_ospm.php`.
     """
     doc = (documento or "").strip()
     if not doc:
         raise HTTPException(422, "Falta el DNI del afiliado.")
 
     fila = (
-        await db.execute(select(PadronOspm).where(PadronOspm.documento == doc))
+        await db.execute(select(ClientesOspm).where(ClientesOspm.DU == doc))
     ).scalar_one_or_none()
 
     if fila is None:
-        total = int((await db.execute(select(func.count(PadronOspm.id)))).scalar_one() or 0)
+        total = int((await db.execute(select(func.count(ClientesOspm.ID)))).scalar_one() or 0)
         if total == 0:
             # Distinguirlo importa: con el padrón vacío NADIE valida, y el
             # prestador no tiene forma de saber que el problema no es su DNI.
@@ -1118,14 +1120,9 @@ async def validar_ospjn(
     if not precio.admitido:
         raise HTTPException(422, precio.motivo or "El código no está habilitado.")
 
-    categoria = (
-        await db.execute(
-            select(NomencladorCMC.ospjn_categoria).where(NomencladorCMC.codigo == codigo)
-        )
-    ).scalar_one_or_none()
-    # Sin fila en el nomenclador, 'OTR' — que es el default del legacy para
-    # 1.019 de sus 1.034 códigos.
-    categoria = (categoria or ospjn.CATEGORIA_OTRAS).strip().upper()
+    # Se deriva del propio código (42* + 430202 = consulta; el resto 'OTR'), no de
+    # una columna: la regla es una función del número.
+    categoria = ospjn.categoria_de_codigo(codigo)
 
     try:
         res = await ospjn.validar_afiliado(

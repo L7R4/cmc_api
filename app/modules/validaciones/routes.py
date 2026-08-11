@@ -12,7 +12,7 @@ las columnas `validacion_*` de la misma fila. El módulo no tiene tablas propias
 
 Nobis (402) se autoriza en línea contra el WSGeCROS de Gecros, OSPJN (151)
 valida al afiliado por REST, y OSPM (433) valida contra padrón propio
-(`padron_ospm`), sin servicio externo.
+(`clientes_ospm`), sin servicio externo.
 
 Las seis obras sociales integradas están implementadas. `POST /prestaciones`
 responde 422 si se manda cualquier otra.
@@ -247,8 +247,9 @@ async def importar_padron_ospm(
     opcional. Es una operación del Colegio, no del prestador: pide el scope
     administrativo.
 
-    Escribe en `padron_ospm` (tabla nueva). **No toca `clientes_ospm`**, que
-    sigue siendo del sistema legacy y se importa por separado desde el PHP.
+    Reemplaza el contenido de `clientes_ospm`, el mismo padrón que carga
+    `importar_padron_ospm.php`: el padrón es uno solo, así que el legacy y la API
+    validan siempre contra el mismo dato.
     """
     if SCOPE_ADMIN not in (user.get("scopes") or []):
         raise HTTPException(403, "Sólo el Colegio puede importar el padrón de OSPM.")

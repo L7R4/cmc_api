@@ -371,6 +371,9 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     ("PUT", "/api/nomenclador/{id}"): Scope.NOMENCLADOR_EDITAR,
     ("DELETE", "/api/nomenclador/{id}"): Scope.NOMENCLADOR_ELIMINAR,
     ("PATCH", "/api/nomenclador/{id}/activar"): Scope.NOMENCLADOR_EDITAR,
+    # Separa un código compartido en una fila propia de una OS: crea catálogo y
+    # repunta valores/historial/prestaciones — es una edición estructural.
+    ("POST", "/api/nomenclador/{id}/desacoplar/{obra_social_nro}"): Scope.NOMENCLADOR_EDITAR,
     ("GET", "/api/nomenclador/{id}/especialidades"): Scope.NOMENCLADOR_LEER,
     ("POST", "/api/nomenclador/{id}/especialidades"): Scope.NOMENCLADOR_EDITAR,
     ("DELETE", "/api/nomenclador/{id}/especialidades/{esp_id}"): Scope.NOMENCLADOR_ELIMINAR,

@@ -47,9 +47,14 @@ def slugify_codigo(nombre: str) -> str:
 class NomencladorCreate(BaseModel):
     codigo: str
     descripcion: str
+    # NULL = código compartido del Colegio/Nacional. Con número, el código es propio de
+    # esa obra social y solo se resuelve cuando se opera sobre ella.
+    obra_social_nro: Optional[int] = None
     categoria: Optional[str] = None
     complejidad: Optional[Literal["baja", "media", "alta"]] = None
     sin_restriccion_especialidad: bool = False
+    # Default del Colegio; cada OS lo pisa con Valor.requiere_autorizacion
+    requiere_autorizacion: bool = False
     unidades_honorarios: Optional[Decimal] = None
     unidades_ayudante: Optional[Decimal] = None
     unidades_gastos: Optional[Decimal] = None
@@ -61,6 +66,7 @@ class NomencladorUpdate(BaseModel):
     categoria: Optional[str] = None
     complejidad: Optional[Literal["baja", "media", "alta"]] = None
     sin_restriccion_especialidad: Optional[bool] = None
+    requiere_autorizacion: Optional[bool] = None
     unidades_honorarios: Optional[Decimal] = None
     unidades_ayudante: Optional[Decimal] = None
     unidades_gastos: Optional[Decimal] = None
@@ -71,10 +77,13 @@ class NomencladorUpdate(BaseModel):
 class NomencladorOut(BaseModel):
     id: int
     codigo: str
+    # NULL = compartido; N = propio de esa obra social
+    obra_social_nro: Optional[int] = None
     descripcion: str
     categoria: Optional[str]
     complejidad: Optional[str]
     sin_restriccion_especialidad: bool
+    requiere_autorizacion: bool = False
     unidades_honorarios: Optional[Decimal]
     unidades_ayudante: Optional[Decimal]
     unidades_gastos: Optional[Decimal]
@@ -86,12 +95,25 @@ class NomencladorOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class DesacoplarOut(BaseModel):
+    """Resultado de separar un código compartido en una fila propia de una OS."""
+    nomenclador: NomencladorOut
+    origen_id: int
+    especialidades_clonadas: int
+    valores_repuntados: int
+    historial_repuntado: int
+    prestaciones_repuntadas: int
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # NomencladorEspecialidad
 # ─────────────────────────────────────────────────────────────────────────────
 
 class NomencladorEspecialidadCreate(BaseModel):
     especialidad_id_colegio: int
+    # NULL = regla del Colegio (vale para todas las OS); N = regla propia de esa obra
+    # social, que REEMPLAZA a las compartidas para ella.
+    obra_social_nro: Optional[int] = None
     observacion: Optional[str] = None
 
 
@@ -99,6 +121,8 @@ class NomencladorEspecialidadOut(BaseModel):
     id: int
     nomenclador_id: int
     especialidad_id_colegio: int
+    # NULL = regla compartida; N = propia de esa obra social
+    obra_social_nro: Optional[int] = None
     activo: bool
     observacion: Optional[str]
     created_at: datetime.datetime
@@ -119,6 +143,7 @@ class NomencladorEspecialidadResumenOut(BaseModel):
     descripcion: str
     especialidad_id_colegio: int
     especialidad: Optional[str] = None
+    obra_social_nro: Optional[int] = None
     activo: bool
     observacion: Optional[str] = None
     created_at: datetime.datetime
@@ -550,6 +575,11 @@ class ValorCreate(BaseModel):
     descripcion: Optional[str] = None
     nivel: Optional[int] = None
     complejidad: Optional[Literal["baja", "media", "alta"]] = None
+    # Override de categoría por OS; NULL hereda la del nomenclador
+    categoria: Optional[str] = None
+    # Override por OS; NULL hereda nm_nomenclador.requiere_autorizacion. No es lo mismo
+    # que False: False = "esta OS dice que no", NULL = "esta OS no opinó".
+    requiere_autorizacion: Optional[bool] = None
     # Perfil que cobra esta variante: NULL = sin especialidad; N = exige esa especialidad.
     # Solo lo admite NE (NNE/NN van NULL).
     especialidad_id_colegio: Optional[int] = None
@@ -579,6 +609,8 @@ class ValorUpdate(BaseModel):
     descripcion: Optional[str] = None
     nivel: Optional[int] = None
     complejidad: Optional[Literal["baja", "media", "alta"]] = None
+    categoria: Optional[str] = None
+    requiere_autorizacion: Optional[bool] = None
     cantidad_ayudantes: Optional[int] = Field(None, ge=0)
     observacion: Optional[str] = None
 
@@ -591,6 +623,8 @@ class ValorCerrarYCrearIn(BaseModel):
     descripcion: Optional[str] = None
     nivel: Optional[int] = None
     complejidad: Optional[Literal["baja", "media", "alta"]] = None
+    categoria: Optional[str] = None
+    requiere_autorizacion: Optional[bool] = None
     cantidad_ayudantes: Optional[int] = Field(None, ge=0)
     observacion: Optional[str] = None
 
@@ -607,9 +641,14 @@ class ValorOut(BaseModel):
     nomenclador_id: int
     origen: str
     codigo: str
+    # Override de esta OS. NULL = hereda del catálogo — para MOSTRAR usar
+    # `descripcion_efectiva`, que ya resuelve la herencia.
     descripcion: Optional[str]
+    descripcion_efectiva: str = ""
     nivel: Optional[int]
     complejidad: Optional[str]
+    categoria: Optional[str] = None
+    requiere_autorizacion: Optional[bool] = None
     especialidad_id_colegio: Optional[int]
     por_presupuesto: bool = False
     cantidad_ayudantes: Optional[int] = None
@@ -775,6 +814,9 @@ class LookupPrecioOut(BaseModel):
     variante_especialidad_id: Optional[int] = None
     # True → código por presupuesto: precio 0, el monto lo carga el operador a mano
     por_presupuesto: bool = False
+    # True → la práctica necesita autorización previa de la OS. El front lo usa para
+    # marcar el código y pedir el nro; el backend lo exige cuando carga el médico.
+    requiere_autorizacion: bool = False
     fecha_practica: datetime.date
     precio_base: Decimal            # = precio_total (ya no hay opcionales)
     precio_total: Decimal           # suma de los 3 componentes

@@ -31,11 +31,11 @@ import datetime
 import os
 import shutil
 from decimal import Decimal
-from typing import Optional
+from typing import Optional, Sequence
 
 from fastapi import HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import uuid
@@ -46,13 +46,14 @@ from app.common.uploads import validate_upload
 
 _SOLO_PDF = frozenset({".pdf"})
 from app.db.models import DetalleFacturacionCMC, ListadoMedico
-from app.db.models.nomenclador_cmc import NomencladorCMC
+from app.db.models.nomenclador_cmc import NomencladorCMC, Valor
 from app.modules.facturacion.service import (
     ORIGEN_MEDICO,
     _cleanup_factura_si_vacia,
     _ensure_factura_abierta,
     _gate_carga,
     _get_factura,
+    _validar_autorizacion_medico,
     asegurar_periodo_medico_vigente,
     calcular_importe_total,
     derivar_tipo,
@@ -60,6 +61,7 @@ from app.modules.facturacion.service import (
     resolver_precio,
     tpo_funcion_derivado,
 )
+from app.modules.nomenclador import service as service_nm
 from app.modules.validaciones import sancor
 
 CERO = Decimal("0.00")
@@ -215,19 +217,90 @@ async def get_medico(db: AsyncSession, nro_socio: int) -> ListadoMedico:
     return medico
 
 
-async def _descripciones(db: AsyncSession, codigos: list[str]) -> dict[str, str]:
-    """Descripción del nomenclador para un lote de códigos. `detalle_facturacion`
-    guarda el código, no el texto: se resuelve al listar para no desnormalizar."""
-    if not codigos:
+def _os_nro(cod_obr: Optional[str]) -> Optional[int]:
+    """`detalle_facturacion.cod_obr` es varchar; el nomenclador usa int."""
+    try:
+        return int(cod_obr) if cod_obr else None
+    except (TypeError, ValueError):
+        return None
+
+
+async def _descripciones(
+    db: AsyncSession, filas: Sequence[DetalleFacturacionCMC]
+) -> dict[int, str]:
+    """Descripción de cada prestación, resuelta contra SU obra social.
+
+    `detalle_facturacion` guarda el código, no el texto: se resuelve al listar para no
+    desnormalizar. El código no es identidad global — el mismo número puede ser una
+    práctica compartida del Colegio o una propia de esa OS —, así que la fila del
+    catálogo sale de `nomenclador_id` y el texto preferido es el que la obra social
+    pactó en su `nm_valores` (ver service_nm.descripcion_efectiva).
+
+    Devuelve un dict por `id_detalle_prestaciones`, no por código: dos filas con el
+    mismo `cod_nom` y distinta OS pueden tener descripciones distintas.
+    """
+    if not filas:
         return {}
-    filas = (
-        await db.execute(
-            select(NomencladorCMC.codigo, NomencladorCMC.descripcion).where(
-                NomencladorCMC.codigo.in_(set(codigos))
+
+    ids_catalogo = {f.nomenclador_id for f in filas if f.nomenclador_id}
+    # Filas viejas sin backfill (código que ya no existe en el catálogo): se intenta
+    # igual por código contra los compartidos.
+    codigos_sueltos = {f.cod_nom for f in filas if not f.nomenclador_id and f.cod_nom}
+
+    condiciones = []
+    if ids_catalogo:
+        condiciones.append(NomencladorCMC.id.in_(ids_catalogo))
+    if codigos_sueltos:
+        condiciones.append(
+            and_(
+                NomencladorCMC.codigo.in_(codigos_sueltos),
+                NomencladorCMC.obra_social_nro.is_(None),
             )
         )
-    ).all()
-    return {c: (d or "") for c, d in filas}
+
+    por_id: dict[int, NomencladorCMC] = {}
+    por_codigo: dict[str, NomencladorCMC] = {}
+    if condiciones:
+        for nom in (
+            await db.execute(select(NomencladorCMC).where(or_(*condiciones)))
+        ).scalars():
+            por_id[nom.id] = nom
+            if nom.obra_social_nro is None:
+                por_codigo[nom.codigo] = nom
+
+    # Descripción pactada por (OS, código) para las combinaciones que aparecen.
+    pares = {
+        (os_nro, f.nomenclador_id)
+        for f in filas
+        if f.nomenclador_id and (os_nro := _os_nro(f.cod_obr)) is not None
+    }
+    desc_os: dict[tuple[int, int], str] = {}
+    if pares:
+        filas_valor = (
+            await db.execute(
+                select(
+                    Valor.obra_social_nro,
+                    Valor.nomenclador_id,
+                    func.max(Valor.descripcion),
+                )
+                .where(
+                    tuple_(Valor.obra_social_nro, Valor.nomenclador_id).in_(pares),
+                    Valor.estado == "activo",
+                    Valor.descripcion.is_not(None),
+                    Valor.descripcion != "",
+                )
+                .group_by(Valor.obra_social_nro, Valor.nomenclador_id)
+            )
+        ).all()
+        desc_os = {(os_nro, nom_id): desc for os_nro, nom_id, desc in filas_valor}
+
+    salida: dict[int, str] = {}
+    for f in filas:
+        nom = por_id.get(f.nomenclador_id) if f.nomenclador_id else por_codigo.get(f.cod_nom or "")
+        os_nro = _os_nro(f.cod_obr)
+        texto = desc_os.get((os_nro, f.nomenclador_id)) if f.nomenclador_id else None
+        salida[f.id_detalle_prestaciones] = texto or (nom.descripcion if nom else "") or ""
+    return salida
 
 
 def _to_dict(f: DetalleFacturacionCMC, descripcion: str = "") -> dict:
@@ -287,8 +360,8 @@ async def listar_prestaciones(
         .scalars()
         .all()
     )
-    descripciones = await _descripciones(db, [f.cod_nom or "" for f in filas])
-    return [_to_dict(f, descripciones.get(f.cod_nom or "", "")) for f in filas]
+    descripciones = await _descripciones(db, filas)
+    return [_to_dict(f, descripciones.get(f.id_detalle_prestaciones, "")) for f in filas]
 
 
 async def listar_periodos(
@@ -336,18 +409,31 @@ async def buscar_codigos(
     medico = await get_medico(db, nro_socio)
     hoy = datetime.date.today()
 
-    stmt = select(NomencladorCMC.codigo, NomencladorCMC.descripcion)
+    stmt = select(NomencladorCMC.codigo, NomencladorCMC.descripcion).where(
+        # Códigos compartidos del Colegio + los propios de esta obra social.
+        service_nm.filtro_pertenencia(obra_social_id)
+    )
     termino = (q or "").strip()
     if termino:
         like = f"%{termino}%"
         stmt = stmt.where(
             NomencladorCMC.codigo.like(like) | NomencladorCMC.descripcion.like(like)
         )
-    stmt = stmt.order_by(NomencladorCMC.codigo).limit(limite)
+    # La fila propia de la OS antes que la compartida; el dedupe de abajo se queda con
+    # la primera que aparece de cada código.
+    stmt = stmt.order_by(
+        NomencladorCMC.codigo, NomencladorCMC.obra_social_key.desc()
+    ).limit(limite * 2)
     filas = (await db.execute(stmt)).all()
 
     salida: list[dict] = []
+    vistos: set[str] = set()
     for codigo, descripcion in filas:
+        if codigo in vistos:
+            continue
+        vistos.add(codigo)
+        if len(salida) >= limite:
+            break
         try:
             precio = await resolver_precio(db, str(obra_social_id), medico, codigo, hoy)
         except HTTPException:
@@ -423,13 +509,19 @@ async def _grabar_prestacion(
     cabecera = await _get_factura(db, str(obra_social_id), periodo)
     version_destino = cabecera.version if cabecera is not None else 1
 
+    # Fila del catálogo con la que se cotizó: el código puede ser propio de esta OS.
+    nomenclador = await service_nm.resolver_nomenclador(db, codigo, obra_social_id)
+
     fila = DetalleFacturacionCMC(
         periodo=periodo,
         cod_obr=str(obra_social_id),
         cod_med=str(medico.NRO_SOCIO),
         cod_nom=codigo,
+        nomenclador_id=nomenclador.id if nomenclador else None,
         nro_orden="0",  # placeholder — la columna es NOT NULL; se espeja el PK abajo
-        tipo=await derivar_tipo(db, codigo, bool(medico.es_organizacion)),
+        tipo=await derivar_tipo(
+            db, codigo, bool(medico.es_organizacion), str(obra_social_id)
+        ),
         # tpo_funcion derivado SOLO para coexistencia (liquidación/lotes lo leen).
         tpo_funcion=tpo_funcion_derivado(honorarios, gastos, CERO),
         sesion=SESION_UNICA,
@@ -490,6 +582,11 @@ async def crear_prestacion_manual(
         raise HTTPException(422, f"{obra.nombre} necesita el número de autorización.")
     if obra.requiere_nombre and not nombre_afiliado.strip():
         raise HTTPException(422, "Falta el nombre del afiliado.")
+    # Chequeo por CÓDIGO, independiente del de arriba: el de `obra` es un todo-o-nada
+    # de la obra social, éste marca prácticas puntuales que necesitan autorización
+    # previa. No se aplica en el flujo Sancor porque ahí la autorización la emite la
+    # obra social dentro de la misma llamada.
+    await _validar_autorizacion_medico(db, codigo, str(obra.nro), nro_autorizacion)
 
     medico = await get_medico(db, nro_socio)
     hoy = datetime.date.today()
@@ -673,8 +770,8 @@ async def adjuntar_orden(
     fila.orden_path = destino.replace("\\", "/")
     await db.commit()
     await db.refresh(fila)
-    descripciones = await _descripciones(db, [fila.cod_nom or ""])
-    return _to_dict(fila, descripciones.get(fila.cod_nom or "", ""))
+    descripciones = await _descripciones(db, [fila])
+    return _to_dict(fila, descripciones.get(fila.id_detalle_prestaciones, ""))
 
 
 async def eliminar_prestacion(db: AsyncSession, prestacion_id: int, nro_socio: int) -> None:

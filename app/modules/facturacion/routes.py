@@ -92,19 +92,17 @@ async def buscar_obras_sociales(
 @router.get("/nomenclador")
 async def buscar_nomenclador(
     q: str = Query(..., min_length=1),
+    cod_obra: str = Query(..., description="Obra social en la que se está cargando (cod_obr)"),
     limit: int = Query(20, ge=1, le=20),
     db: AsyncSession = Depends(get_db),
 ):
-    N = NomencladorCMC
-    rows = (
-        await db.execute(
-            select(N).where(
-                N.activo.is_(True),
-                or_(N.codigo.ilike(f"{q}%"), N.descripcion.ilike(f"%{q}%")),
-            ).limit(limit)
-        )
-    ).scalars().all()
-    return [{"codigo": n.codigo, "descripcion": n.descripcion} for n in rows]
+    """Autocomplete de códigos para una obra social.
+
+    `cod_obra` es obligatorio: el mismo código puede ser una práctica del Colegio o una
+    propia de la obra social, con descripciones distintas. Devuelve los códigos
+    compartidos más los propios de esa OS, con el texto que usa esa obra social.
+    """
+    return await service.buscar_nomenclador(db, q, cod_obra, limit)
 
 
 @router.get("/medico/{nro_socio}/codigos-habilitados", response_model=list[CodigoHabilitadoOut])

@@ -74,6 +74,37 @@ def _componentes_presupuesto_cero() -> list[dict]:
 
 # ─── helpers ─────────────────────────────────────────────────────────────────
 
+async def _valores_out(db: AsyncSession, valores: list[Valor]) -> list[ValorOut]:
+    """ValorOut con `descripcion_efectiva` resuelta.
+
+    `Valor.descripcion` es el override de la OS y normalmente viene NULL (hereda del
+    catálogo), así que el ABM necesita el texto ya resuelto para mostrar. Se traen las
+    descripciones del catálogo en un solo query, no una por fila.
+    """
+    if not valores:
+        return []
+    ids = {v.nomenclador_id for v in valores}
+    catalogo = {
+        nid: desc
+        for nid, desc in (await db.execute(
+            select(NomencladorCMC.id, NomencladorCMC.descripcion)
+            .where(NomencladorCMC.id.in_(ids))
+        )).all()
+    }
+    salida = []
+    for v in valores:
+        out = ValorOut.model_validate(v)
+        out.descripcion_efectiva = (
+            v.descripcion if (v.descripcion or "").strip() else (catalogo.get(v.nomenclador_id) or "")
+        )
+        salida.append(out)
+    return salida
+
+
+async def _valor_out(db: AsyncSession, valor: Valor) -> ValorOut:
+    return (await _valores_out(db, [valor]))[0]
+
+
 def _cond_variante_valor(origen: str, especialidad_id: Optional[int]):
     cond = Valor.origen == origen
     if especialidad_id is None:
@@ -178,6 +209,8 @@ async def _crear_valor_con_componentes(
     observacion: Optional[str],
     por_presupuesto: bool = False,
     cantidad_ayudantes: Optional[int] = None,
+    categoria: Optional[str] = None,
+    requiere_autorizacion: Optional[bool] = None,
 ) -> Valor:
     nom = await db.get(NomencladorCMC, nomenclador_id)
     if not nom:
@@ -188,9 +221,13 @@ async def _crear_valor_con_componentes(
         nomenclador_id=nomenclador_id,
         origen=origen,
         codigo=nom.codigo,
-        descripcion=descripcion or nom.descripcion,
+        # Sin copia con avidez: NULL = hereda del catálogo (service.descripcion_efectiva).
+        # Copiarla haría que corregir el catálogo nunca propague.
+        descripcion=descripcion or None,
         nivel=nivel,
         complejidad=complejidad,
+        categoria=categoria,
+        requiere_autorizacion=requiere_autorizacion,
         especialidad_id_colegio=especialidad_id_colegio,
         por_presupuesto=por_presupuesto,
         cantidad_ayudantes=cantidad_ayudantes,
@@ -282,6 +319,8 @@ async def _clonar_valor(
         descripcion=origen.descripcion,
         nivel=nivel if nivel is not None else origen.nivel,
         complejidad=origen.complejidad,
+        categoria=origen.categoria,
+        requiere_autorizacion=origen.requiere_autorizacion,
         especialidad_id_colegio=origen.especialidad_id_colegio,
         cantidad_ayudantes=origen.cantidad_ayudantes,
         vigencia_desde=vigencia_desde,
@@ -351,7 +390,7 @@ async def list_valores(
         )
     stmt = stmt.offset((page - 1) * size).limit(size)
     result = await db.execute(stmt)
-    return result.scalars().all()
+    return await _valores_out(db, list(result.scalars().all()))
 
 
 @router.get("/por_vigencia")
@@ -489,13 +528,15 @@ async def create_valor(body: ValorCreate, db: AsyncSession = Depends(get_db)):
         observacion=body.observacion,
         por_presupuesto=body.por_presupuesto,
         cantidad_ayudantes=body.cantidad_ayudantes,
+        categoria=body.categoria,
+        requiere_autorizacion=body.requiere_autorizacion,
     )
 
     await service.regenerar_historial_por_valores(valor.id, None, db, motivo="carga_inicial")
 
     await db.commit()
     await db.refresh(valor)
-    return valor
+    return await _valor_out(db, valor)
 
 
 @router.post("/generar_nn_por_rangos", response_model=GenerarValoresNNResult)
@@ -546,7 +587,7 @@ async def get_valor(id: int, db: AsyncSession = Depends(get_db)):
     obj = await db.get(Valor, id)
     if not obj:
         raise HTTPException(404, "Valor no encontrado")
-    return obj
+    return await _valor_out(db, obj)
 
 
 @router.put("/{id}", response_model=ValorOut)
@@ -572,7 +613,7 @@ async def update_valor_metadata(id: int, body: ValorUpdate, db: AsyncSession = D
         setattr(obj, field, value)
     await db.commit()
     await db.refresh(obj)
-    return obj
+    return await _valor_out(db, obj)
 
 
 @router.post("/{id}/actualizar", response_model=ValorOut)
@@ -625,6 +666,11 @@ async def actualizar_valor(
             body.cantidad_ayudantes if body.cantidad_ayudantes is not None
             else anterior.cantidad_ayudantes
         ),
+        categoria=body.categoria if body.categoria is not None else anterior.categoria,
+        requiere_autorizacion=(
+            body.requiere_autorizacion if body.requiere_autorizacion is not None
+            else anterior.requiere_autorizacion
+        ),
     )
 
     await service.regenerar_historial_por_valores(
@@ -633,7 +679,7 @@ async def actualizar_valor(
 
     await db.commit()
     await db.refresh(nuevo)
-    return nuevo
+    return await _valor_out(db, nuevo)
 
 
 @router.delete("/{id}", status_code=204)
@@ -1130,10 +1176,11 @@ async def lookup_precio(body: LookupPrecioIn, db: AsyncSession = Depends(get_db)
     nomenclador_id: Optional[int] = None
 
     if body.codigo_colegio:
-        stmt = select(NomencladorCMC).where(
-            NomencladorCMC.codigo == body.codigo_colegio, NomencladorCMC.activo == True
+        # Resuelve contra la OS del pedido: si esa obra social tiene una fila propia
+        # para el código, gana sobre la compartida del Colegio.
+        nom = await service.resolver_nomenclador(
+            db, body.codigo_colegio, body.obra_social_nro
         )
-        nom = (await db.execute(stmt)).scalar_one_or_none()
         if not nom:
             raise HTTPException(404, f"Código '{body.codigo_colegio}' no encontrado en el nomenclador")
         nomenclador_id = nom.id
@@ -1355,7 +1402,7 @@ async def importar_valores_csv(
                 nomenclador_id=nom.id,
                 origen=origen,
                 codigo=nom.codigo,
-                descripcion=data["descripcion"] or nom.descripcion,
+                descripcion=data["descripcion"] or None,  # NULL = hereda del catálogo
                 nivel=nivel_valor,
                 complejidad=prev.complejidad if prev else None,
                 especialidad_id_colegio=especialidad,

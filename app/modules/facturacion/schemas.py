@@ -257,6 +257,9 @@ class PrecioResponse(BaseModel):
     # True → código por presupuesto: H/G/A vienen en 0; el monto lo carga el
     # operador a mano (lo informa la OS). Ver _montos_de_item.
     por_presupuesto: bool = False
+    # True → la práctica necesita autorización previa de la obra social. El front lo usa
+    # para pedir el nro de autorización; cuando carga el médico, el backend lo exige.
+    requiere_autorizacion: bool = False
     # Máximo de ayudantes admitidos para este código+OS (informativo, para que el front
     # limite el armado del equipo). NULL/0 = no lleva ayudantes.
     cantidad_ayudantes: Optional[int] = None

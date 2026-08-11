@@ -65,6 +65,20 @@ class NomencladorCMC(Base):
     unidades_ayudante: Mapped[Optional[Decimal]] = mapped_column(DECIMAL(10, 2), nullable=True)
     unidades_gastos: Mapped[Optional[Decimal]] = mapped_column(DECIMAL(10, 2), nullable=True)
     activo: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="1")
+    # ── Flags por convenio ───────────────────────────────────────────────────
+    # OJO CON EL NOMBRE: este flag es EXCLUSIVO de OSPJN (O.S. 151) y codifica la
+    # regla de OSPJN. Si mañana otra obra social necesita algo parecido pero con
+    # criterio propio, va en SU PROPIA columna — no se reusa esta ni se la
+    # renombra a algo genérico. Compartirlas haría que un cambio de convenio de
+    # una obra social altere el de la otra en silencio.
+    #
+    # Es la categoría de 3 letras que OSPJN espera en
+    # `CodigoPrestacion` al validar — no el código del Colegio. Sólo hay dos
+    # valores: 'CON' (consultas) y 'OTR' (el resto), que es el default.
+    # Reemplaza a `nomenclador.CODIGOJUDICIALES` del legacy.
+    ospjn_categoria: Mapped[str] = mapped_column(
+        String(3), nullable=False, default="OTR", server_default="OTR"
+    )
     observacion: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.now()

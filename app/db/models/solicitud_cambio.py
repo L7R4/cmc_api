@@ -12,7 +12,7 @@ módulo propios.
 import datetime
 from typing import Optional
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import JSON, DateTime, Enum, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
 
@@ -46,6 +46,16 @@ class SolicitudCambioMedico(Base):
     campo: Mapped[str] = mapped_column(String(40), nullable=False)
     valor_actual: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     valor_propuesto: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    # Solicitud de FORMULARIO COMPLETO: el médico revisa todo su legajo y manda
+    # de una todos los campos que quiere corregir.
+    #
+    #   {"tele_particular": {"actual": "3794...", "propuesto": "3795..."}, ...}
+    #
+    # Convive con `campo`/`valor_propuesto`, que siguen siendo el contrato de la
+    # app móvil (un campo por solicitud). Cuando `cambios` viene poblado, esas
+    # tres columnas guardan el PRIMER cambio, para que la bandeja y los listados
+    # viejos sigan mostrando algo con sentido sin tocarlos.
+    cambios: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     mensaje: Mapped[str] = mapped_column(Text, nullable=False)
     estado: Mapped[str] = mapped_column(
         Enum(*ESTADOS_SOLICITUD_CAMBIO, name="estado_solicitud_cambio"),
@@ -56,6 +66,12 @@ class SolicitudCambioMedico(Base):
     # no queremos que borrar un admin bloquee/altere la solicitud.
     revisado_por: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     revisado_at: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime, nullable=True)
+    # Cuándo se ESCRIBIERON los cambios en listado_medico. Distinto de
+    # `revisado_at`: una solicitud puede aprobarse y, si ningún campo era
+    # aplicable, no modificar nada. NULL = no se aplicó nada.
+    aplicado_at: Mapped[Optional[datetime.datetime]] = mapped_column(
+        DateTime, nullable=True
+    )
     respuesta_admin: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.now()

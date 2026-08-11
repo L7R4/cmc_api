@@ -2,6 +2,7 @@
 del caller (igual que modules/nomenclador/service.py): no hacen commit."""
 from __future__ import annotations
 
+import datetime
 from typing import Optional, Sequence
 
 from fastapi import HTTPException
@@ -77,4 +78,28 @@ async def listar_activos(db: AsyncSession) -> Sequence[Beneficio]:
         .where(Beneficio.activo == True)  # noqa: E712
         .order_by(Beneficio.categoria.asc(), Beneficio.titulo.asc())
     )
+    return (await db.execute(stmt)).scalars().all()
+
+
+async def listar_vigentes(
+    db: AsyncSession, limit: Optional[int] = None
+) -> Sequence[Beneficio]:
+    """Los que ve el socio en el portal web (Inicio médico).
+
+    A diferencia de `listar_activos` (móvil), descarta los que ya vencieron: el
+    portal es una vidriera y mandar a un socio a un comercio con un descuento
+    caído es peor que no mostrarlo. `vigencia_hasta` NULL = sin vencimiento.
+    Los vencidos siguen visibles en el ABM del admin, marcados para que los baje.
+    """
+    hoy = datetime.date.today()
+    stmt = (
+        select(Beneficio)
+        .where(
+            Beneficio.activo == True,  # noqa: E712
+            or_(Beneficio.vigencia_hasta.is_(None), Beneficio.vigencia_hasta >= hoy),
+        )
+        .order_by(Beneficio.categoria.asc(), Beneficio.titulo.asc())
+    )
+    if limit is not None:
+        stmt = stmt.limit(limit)
     return (await db.execute(stmt)).scalars().all()

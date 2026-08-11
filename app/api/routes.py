@@ -9,6 +9,7 @@ from app.modules.nomenclador.routes_reportes import router as reportes_nm_router
 from app.modules.archivos.routes import router as archivos_router
 from app.modules.avisos.routes import router as avisos_router
 from app.modules.beneficios.routes import router as beneficios_router
+from app.modules.beneficios.routes import router_socio as beneficios_socio_router
 from app.modules.auditoria.routes import router as auditoria_router
 from app.modules.catalogs.routes_especialidades import router as especialidades_router
 from app.modules.catalogs.routes_obras_sociales import router as obras_social_router
@@ -21,6 +22,8 @@ from app.modules.contenido.routes_publicidad import router as publicidades_medic
 from app.modules.deducciones.routes import router as deducciones_router
 from app.modules.deducciones.routes_descuentos import router as descuentos_router
 from app.modules.exports.routes import router as exports_router
+from app.modules.reportes.routes import router as reportes_router
+from app.modules.reportes.routes import router_socio as reportes_socio_router
 from app.modules.facturacion.routes import router as facturacion_router
 from app.modules.liquidacion.routes import router as liquidacion_router
 from app.modules.lotes.routes import router as lotes_router
@@ -30,6 +33,9 @@ from app.modules.pagos.routes import router as pagos_router
 from app.modules.rbac.routes import router as rbac_router
 from app.modules.solicitudes.routes import router as solicitudes_router
 from app.modules.solicitudes_cambio.routes import router as solicitudes_cambio_router
+from app.modules.solicitudes_cambio.routes import (
+    router_socio as solicitudes_cambio_socio_router,
+)
 from app.modules.validaciones.routes import router as validaciones_router
 
 # Mobile app (cmc-app) BFF — read-only, additive; see app/modules/mobile/routes.py
@@ -55,14 +61,32 @@ api_router.include_router(deducciones_router, prefix="/deducciones", tags=["Dedu
 api_router.include_router(descuentos_router, prefix="/descuentos", tags=["Descuentos"])
 
 api_router.include_router(solicitudes_router, prefix="/solicitudes", tags=["Solicitudes"])
+# Los routers "socio" van ANTES que el ABM correspondiente: comparten prefijo y
+# el ABM tiene rutas con parámetro (/{id}) que si no podrían ganarle el match.
+api_router.include_router(
+    solicitudes_cambio_socio_router,
+    prefix="/solicitudes-cambio",
+    tags=["Solicitudes de Cambio"],
+)
 api_router.include_router(
     solicitudes_cambio_router, prefix="/solicitudes-cambio", tags=["Solicitudes de Cambio"]
+)
+api_router.include_router(
+    beneficios_socio_router, prefix="/beneficios", tags=["Beneficios"]
 )
 api_router.include_router(beneficios_router, prefix="/beneficios", tags=["Beneficios"])
 api_router.include_router(avisos_router, prefix="/avisos", tags=["Avisos"])
 api_router.include_router(noticias_router, prefix="/noticias", tags=["Noticias"])
 api_router.include_router(publicidades_medico_router, prefix="/publicidad-medicos", tags=["publicidad-medicos"])
 api_router.include_router(exports_router, prefix="/exports", tags=["exports"])
+# El router del socio va PRIMERO: comparte prefijo con el del Colegio y sus
+# rutas (/mios/*) no deben quedar tapadas por nada del otro.
+api_router.include_router(
+    reportes_socio_router, prefix="/reportes", tags=["Reportes y Estadísticas"]
+)
+api_router.include_router(
+    reportes_router, prefix="/reportes", tags=["Reportes y Estadísticas"]
+)
 
 api_router.include_router(rbac_router, prefix="/admin/rbac", tags=["Rbac"])
 api_router.include_router(auditoria_router, prefix="/auditoria", tags=["Auditoría"])

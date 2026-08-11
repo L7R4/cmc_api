@@ -1,13 +1,17 @@
 """ABM de beneficios / convenios para socios (web admin).
 
-Todo el módulo exige el scope `beneficios:gestionar`. La lectura pública de los
-beneficios activos la sirve el BFF móvil (GET /api/mobile/beneficios), no acá.
+El ABM entero exige el scope `beneficios:gestionar`. Aparte va `router_socio`,
+de sólo lectura, que es lo que consume el portal del socio (Inicio médico): un
+médico no tiene ese scope y no debe verse obligado a pedirlo para mirar la
+vidriera de convenios. La app móvil tiene su propia lectura en el BFF
+(GET /api/mobile/beneficios).
 """
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, Path, Query, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth.deps import get_current_user, require_scope
 from app.db.database import get_db
 from app.db.models.beneficios import CATEGORIAS_BENEFICIO, Beneficio
 from app.modules.beneficios import service
@@ -19,7 +23,28 @@ from app.modules.beneficios.schemas import (
 
 router = APIRouter()  # El scope lo declara app/auth/authz.py::SCOPES_POR_RUTA (fuente unica de autorizacion).
 
+# Sólo autenticación: cualquier socio logueado puede leer los convenios vigentes.
+router_socio = APIRouter()
+
 MAX_PAGE_SIZE = 200
+
+# Tope de la vidriera del portal. El Inicio médico muestra un puñado, no el
+# catálogo entero — para eso irá su propia pantalla más adelante.
+MAX_VIGENTES = 24
+
+
+@router_socio.get("/vigentes", response_model=List[BeneficioOut])
+async def listar_vigentes(
+    limit: int = Query(MAX_VIGENTES, ge=1, le=MAX_VIGENTES),
+    db: AsyncSession = Depends(get_db),
+    _=Depends(get_current_user),
+):
+    """Convenios activos y no vencidos, para el portal del socio.
+
+    Sin scope de administración a propósito (ver docstring del módulo). No
+    pagina: el tope es `MAX_VIGENTES` y la vidriera muestra menos todavía.
+    """
+    return await service.listar_vigentes(db, limit=limit)
 
 
 @router.get("/categorias", response_model=List[str])

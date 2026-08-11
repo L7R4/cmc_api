@@ -23,10 +23,12 @@ pendientes se graban con importe 0 y `estado='X'` — el mismo marcador que usa 
 borrado de facturación—, así el prestador ve qué pasó pero la fila no entra a
 ninguna factura ni liquidación (todo el circuito filtra `estado='A'`).
 
-Alcance actual: obras sociales de **carga manual** (Boreal 285, Omint 243) y
-Sancor (411) en línea. Las demás todavía no están implementadas — ver
-`OBRAS_MANUALES` y `obra_manual_o_error()`.
+Alcance actual — las seis obras sociales integradas del panel: carga manual
+(Boreal 285, Omint 243), en línea (Sancor 411, Nobis 402, OSPJN 151) y contra
+padrón propio (OSPM 433, tabla `padron_ospm` — nunca `clientes_ospm`, que es la
+del legacy). Cualquier otra obra social cae en `obra_manual_o_error()`.
 """
+import csv
 import datetime
 import os
 import shutil
@@ -35,13 +37,14 @@ from typing import Optional, Sequence
 
 from fastapi import HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
-from sqlalchemy import and_, func, or_, select, tuple_
+from sqlalchemy import and_, func, or_, select, tuple_, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import uuid
 
 from app.common.files import UPLOAD_ROOT, url_archivo
 from app.common.money import quantize_money
+from app.db.models import DetalleFacturacionCMC, ListadoMedico, PadronOspm
 from app.common.uploads import validate_upload
 
 _SOLO_PDF = frozenset({".pdf"})
@@ -62,7 +65,7 @@ from app.modules.facturacion.service import (
     tpo_funcion_derivado,
 )
 from app.modules.nomenclador import service as service_nm
-from app.modules.validaciones import sancor
+from app.modules.validaciones import sancor, nobis, ospjn
 
 CERO = Decimal("0.00")
 
@@ -85,9 +88,24 @@ SESION_UNICA = 1
 PORCENTAJE_COMPLETO = 100
 CALCULO_AUTOMATICO = "A"  # `manual` = 'A': el monto lo puso el lookup, no el operador
 
-# Obras sociales cuyo validador consultamos en línea. Por ahora sólo Sancor.
+# Obras sociales cuyo validador consultamos en línea.
 SANCOR_OS = 411
-OBRAS_ONLINE = {SANCOR_OS: "Sancor Salud"}
+NOBIS_OS = 402
+OSPJN_OS = 151
+OBRAS_ONLINE = {
+    SANCOR_OS: "Sancor Salud",
+    NOBIS_OS: "Nobis Salud",
+    OSPJN_OS: "OSPJN · Poder Judicial",
+}
+
+# OSPM valida contra padrón propio, sin servicio externo: no entra en
+# OBRAS_ONLINE (no hay a quién consultar) ni en OBRAS_MANUALES (el prestador no
+# trae un número de autorización de afuera — lo resuelve el sistema).
+OSPM_OS = 433
+
+# Sólo los códigos de consulta (42*) tienen el tope de uno por afiliado y día.
+# Es una regla del convenio de OSPM, replicada de grabar_prestacion_ospm_1.php.
+OSPM_PREFIJO_CONSULTA = "42"
 
 
 class ObraManual:
@@ -136,6 +154,7 @@ def obra_manual_o_error(nro: int) -> ObraManual:
     if obra is None:
         implementadas = [f"{o.nombre} ({o.nro})" for o in OBRAS_MANUALES.values()]
         implementadas += [f"{n} ({k}, en línea)" for k, n in OBRAS_ONLINE.items()]
+        implementadas.append(f"OSPM ({OSPM_OS}, contra padrón)")
         raise HTTPException(
             422,
             f"La obra social {nro} todavía no está implementada en el panel. "
@@ -619,6 +638,235 @@ async def crear_prestacion_manual(
     return _to_dict(fila, precio.descripcion or "")
 
 
+def _ospm_parsear_padron(contenido: bytes) -> list[dict]:
+    """Parsea el CSV/TXT del padrón que manda OSPM.
+
+    Formato heredado de `importar_padron_ospm.php`: columnas
+    `AFILIADO, DU, CUIT, ACTIVO`, separador `;` o `,` (se detecta con la primera
+    línea), encabezado opcional que arranca con `AYN` o `AFILIADO`, y texto en
+    ISO-8859-1. Se intenta UTF-8 primero porque los archivos nuevos ya vienen
+    así; si falla, latin-1, que nunca rompe.
+    """
+    try:
+        texto = contenido.decode("utf-8")
+    except UnicodeDecodeError:
+        texto = contenido.decode("latin-1")
+
+    lineas = [ln for ln in texto.splitlines() if ln.strip()]
+    if not lineas:
+        raise HTTPException(422, "El archivo del padrón está vacío.")
+
+    delimitador = ";" if ";" in lineas[0] else ","
+    filas: list[dict] = []
+    vistos: set[str] = set()
+
+    for i, linea in enumerate(csv.reader(lineas, delimiter=delimitador)):
+        if not linea:
+            continue
+        primera = (linea[0] or "").strip().upper()
+        if i == 0 and primera in ("AYN", "AFILIADO"):
+            continue
+
+        nombre = (linea[0] or "").strip() if len(linea) > 0 else ""
+        documento = (linea[1] or "").strip() if len(linea) > 1 else ""
+        cuit = (linea[2] or "").strip() if len(linea) > 2 else ""
+        activo = (linea[3] or "").strip().upper() if len(linea) > 3 else ""
+
+        if not documento:
+            continue  # fila sin DNI: no se puede buscar por ella, no sirve
+        if documento in vistos:
+            continue  # el padrón trae repetidos; gana el primero
+        vistos.add(documento)
+
+        filas.append(
+            {
+                "documento": documento[:15],
+                "cuit": (cuit[:15] or None),
+                "nombre": (nombre[:120] or "SIN NOMBRE"),
+                "activo": activo == "S",
+            }
+        )
+
+    if not filas:
+        raise HTTPException(
+            422, "No se encontró ninguna fila válida. Se espera AFILIADO, DU, CUIT, ACTIVO."
+        )
+    return filas
+
+
+async def importar_padron_ospm(db: AsyncSession, archivo: UploadFile) -> dict:
+    """Reemplaza el padrón de OSPM con el del archivo.
+
+    A diferencia del legacy —que hace `TRUNCATE` y recién después parsea, así
+    que un archivo malo deja el padrón vacío y nadie valida— acá se parsea
+    **primero** y el borrado va en la misma transacción que la carga: si algo
+    falla, el padrón anterior queda intacto.
+    """
+    contenido = await archivo.read()
+    filas = _ospm_parsear_padron(contenido)
+
+    await db.execute(delete(PadronOspm))
+    db.add_all([PadronOspm(**f) for f in filas])
+    await db.commit()
+
+    activos = sum(1 for f in filas if f["activo"])
+    return {
+        "importados": len(filas),
+        "activos": activos,
+        "inactivos": len(filas) - activos,
+    }
+
+
+async def _ospm_afiliado(db: AsyncSession, documento: str) -> PadronOspm:
+    """Busca al afiliado en el padrón propio de OSPM (tabla `padron_ospm`).
+
+    NO se lee `clientes_ospm`: esa es la tabla del legacy, la mantiene el PHP
+    viejo y la trunca en cada importación. El padrón nuevo se carga con
+    `importar_padron_ospm()`.
+    """
+    doc = (documento or "").strip()
+    if not doc:
+        raise HTTPException(422, "Falta el DNI del afiliado.")
+
+    fila = (
+        await db.execute(select(PadronOspm).where(PadronOspm.documento == doc))
+    ).scalar_one_or_none()
+
+    if fila is None:
+        total = int((await db.execute(select(func.count(PadronOspm.id)))).scalar_one() or 0)
+        if total == 0:
+            # Distinguirlo importa: con el padrón vacío NADIE valida, y el
+            # prestador no tiene forma de saber que el problema no es su DNI.
+            raise HTTPException(
+                422,
+                "El padrón de OSPM todavía no fue importado. Avisá al Colegio "
+                "para que cargue el padrón vigente.",
+            )
+        raise HTTPException(422, f"El DNI {doc} no figura en el padrón de OSPM.")
+
+    return fila
+
+
+async def _ospm_duplicado(
+    db: AsyncSession,
+    *,
+    codigo: str,
+    nro_afiliado: str,
+    fecha: datetime.date,
+) -> bool:
+    """¿Ya hay una consulta cargada para ese afiliado, código y día?
+
+    Por convenio OSPM admite una sola consulta (códigos 42*) por afiliado y
+    fecha. Se mira sobre `detalle_facturacion` —no sobre `guardar_atencion`, que
+    es del legacy— y se ignoran las anuladas/fuera de factura: si la anterior se
+    dio de baja, el cupo del día vuelve a estar libre.
+    """
+    if not codigo.startswith(OSPM_PREFIJO_CONSULTA):
+        return False
+
+    existe = (
+        await db.execute(
+            select(DetalleFacturacionCMC.id_detalle_prestaciones)
+            .where(
+                DetalleFacturacionCMC.cod_obr == str(OSPM_OS),
+                DetalleFacturacionCMC.cod_nom == codigo,
+                DetalleFacturacionCMC.dni_p == nro_afiliado,
+                DetalleFacturacionCMC.fecha_practica == fecha,
+                DetalleFacturacionCMC.estado == DETALLE_ACTIVO,
+            )
+            .limit(1)
+        )
+    ).first()
+    return existe is not None
+
+
+async def validar_ospm(
+    db: AsyncSession,
+    *,
+    nro_socio: int,
+    codigo: str,
+    documento: str,
+    cantidad: int,
+    usuario_carga: int,
+) -> dict:
+    """Valida contra el padrón de OSPM (433) y graba la prestación.
+
+    OSPM no tiene servicio de autorización: se resuelve con un solo dato local,
+    **el afiliado**, buscado en `padron_ospm` por DNI. Si no está, no se graba
+    nada.
+
+    De ahí salen dos desenlaces:
+
+    | Afiliado | Resultado |
+    |---|---|
+    | activo | `pendiente` — el afiliado gestiona la autorización en la O.S. |
+    | inactivo | `rechazada` |
+
+    Que un código pueda saltearse la autorización es criterio por convenio y
+    todavía no está resuelto acá, así que se toma siempre el caso restrictivo:
+    mejor mandar a gestionar de más que dar por autorizado algo que la obra
+    social después rechaza.
+
+    Como en el resto del módulo, **siempre** queda una fila: las que no se
+    autorizaron van con importe 0 y `estado='X'`, visibles para el prestador
+    pero fuera de toda factura.
+    """
+    medico = await get_medico(db, nro_socio)
+    hoy = datetime.date.today()
+    periodo = await periodo_actual(db, OSPM_OS)
+    await _gate_periodo(db, OSPM_OS, periodo)
+
+    afiliado = await _ospm_afiliado(db, documento)
+    doc = afiliado.documento
+
+    if await _ospm_duplicado(db, codigo=codigo, nro_afiliado=doc, fecha=hoy):
+        raise HTTPException(
+            422,
+            f"Por convenio, el afiliado {doc} y la prestación {codigo} no pueden "
+            "cargarse más de una vez en la misma fecha.",
+        )
+
+    precio = await resolver_precio(db, str(OSPM_OS), medico, codigo, hoy)
+    if not precio.admitido:
+        raise HTTPException(422, precio.motivo or "El código no está habilitado.")
+
+    if not afiliado.activo:
+        estado, detalle = "rechazada", "El afiliado no figura activo en el padrón de OSPM."
+    else:
+        estado, detalle = "pendiente", "Gestionar autorización en la obra social."
+
+    fila = await _grabar_prestacion(
+        db,
+        medico=medico,
+        obra_social_id=OSPM_OS,
+        periodo=periodo,
+        codigo=codigo,
+        precio=precio,
+        cantidad=cantidad,
+        coseguro=CERO,  # OSPM no cobra coseguro (el legacy lo fija en 0)
+        nro_afiliado=doc,
+        nombre_afiliado=afiliado.nombre,
+        # Sin nº de autorización: la da la obra social cuando el afiliado la
+        # gestiona, no el Colegio.
+        nro_autorizacion=None,
+        validacion_estado=estado,
+        validacion_detalle=detalle,
+        validacion_respuesta={
+            "padron": {
+                "documento": doc,
+                "activo": afiliado.activo,
+                "importado_at": afiliado.importado_at.isoformat(),
+            },
+        },
+        fecha=hoy,
+        usuario_carga=usuario_carga,
+    )
+
+    # No se asigna número de validación: ninguna prestación de OSPM queda
+    # autorizada acá, la autorización la da la obra social.
+    return _to_dict(fila, precio.descripcion or "")
+
+
 async def validar_sancor(
     db: AsyncSession,
     *,
@@ -733,6 +981,198 @@ async def validar_sancor(
     )
 
 
+async def validar_nobis(
+    db: AsyncSession,
+    *,
+    nro_socio: int,
+    codigo: str,
+    nro_afiliado: str,
+    token: str,
+    cantidad: int,
+    usuario_carga: int,
+) -> dict:
+    """Pide la autorización a Nobis (WSGeCROS) y guarda el resultado.
+
+    Nobis devuelve tres estados, y los tres se graban:
+
+    | `<Estado>` | `validacion_estado` | ¿Factura? |
+    |---|---|---|
+    | `A-Autorizado` | `autorizada` | sí |
+    | `P-Pendiente`  | `pendiente`  | no — importe 0, `estado='X'` |
+    | `R-Rechazada`  | `rechazada`  | no — importe 0, `estado='X'` |
+
+    El **pendiente es el caso normal** en Nobis, no una excepción: la orden real
+    documentada en el legacy volvió `P-Pendiente` con su número. Queda esperando
+    resolución de la obra social, así que no puede facturarse todavía.
+
+    En `autorizacion` se guarda el **número de orden** (`Num`), que es lo que
+    identifica la orden en Nobis; el código de autorización (`Cod`) queda en la
+    traza, porque es lo que después pide la anulación.
+    """
+    if not nro_afiliado.strip():
+        raise HTTPException(422, "Falta el número de afiliado.")
+    # El legacy exige el token en la pantalla pero NUNCA lo manda al WS: sólo lo
+    # guarda. Se mantiene el requisito para no cambiarle la regla al prestador.
+    if not token.strip():
+        raise HTTPException(422, "Nobis exige el token de la credencial del afiliado.")
+
+    medico = await get_medico(db, nro_socio)
+    hoy = datetime.date.today()
+    periodo = await periodo_actual(db, NOBIS_OS)
+    # Antes de hablar con Nobis: insertar una orden es un efecto real, no la
+    # pedimos si después no vamos a poder grabar la prestación.
+    await _gate_periodo(db, NOBIS_OS, periodo)
+
+    precio = await resolver_precio(db, str(NOBIS_OS), medico, codigo, hoy)
+    if not precio.admitido:
+        raise HTTPException(422, precio.motivo or "El código no está habilitado.")
+
+    try:
+        res = await nobis.insertar_autorizacion(
+            numero_afiliado=nro_afiliado.strip(),
+            mat_prov=str(medico.MATRICULA_PROV or ""),
+            codigo_practica=codigo,
+            cantidad=cantidad,
+            fecha_prescripcion=hoy,
+            fecha_realizacion=hoy,
+        )
+    except nobis.NobisError as e:
+        # No se llegó a crear la orden: no inventamos una fila autorizada.
+        raise HTTPException(502, str(e)) from e
+
+    if res.autorizada:
+        estado = "autorizada"
+    elif res.requiere_gestion:
+        estado = "pendiente"
+    else:
+        estado = "rechazada"
+
+    fila = await _grabar_prestacion(
+        db,
+        medico=medico,
+        obra_social_id=NOBIS_OS,
+        periodo=periodo,
+        codigo=codigo,
+        precio=precio,
+        # El coseguro que informa Nobis lo paga el afiliado de su bolsillo; no
+        # se descuenta de lo que se le factura a la obra social. Queda en la
+        # traza para que el prestador sepa cuánto cobrarle al paciente.
+        coseguro=CERO,
+        cantidad=cantidad,
+        nro_afiliado=nro_afiliado.strip(),
+        nombre_afiliado=res.nombre_afiliado or "",
+        nro_autorizacion=res.nro_orden,
+        validacion_estado=estado,
+        validacion_detalle=res.estado_detalle,
+        validacion_respuesta={
+            "modo": res.modo,
+            "estado": res.estado,
+            "nro_orden": res.nro_orden,
+            # Lo pide AnularOrdenNroCod: sin esto no se puede dar de baja.
+            "cod_autorizacion": res.cod_autorizacion,
+            "coseguro_informado": res.coseguro,
+            "token_ingresado": token.strip(),
+            "mensaje_enviado": res.enviado,
+            "respuesta": res.crudo,
+        },
+        fecha=hoy,
+        usuario_carga=usuario_carga,
+    )
+    return _to_dict(fila, precio.descripcion or "")
+
+
+async def validar_ospjn(
+    db: AsyncSession,
+    *,
+    nro_socio: int,
+    codigo: str,
+    nro_afiliado: str,
+    barra_afiliado: str,
+    cantidad: int,
+    usuario_carga: int,
+) -> dict:
+    """Valida el afiliado contra OSPJN y graba la prestación.
+
+    OSPJN **valida al afiliado**, no autoriza una práctica: se le manda una
+    *categoría* de prestación ('CON' consultas / 'OTR' el resto) y contesta si
+    está en condiciones, con un `NroConsulta` que acredita la validación. Por
+    eso no hay nada que anular después: eliminar la prestación es una baja local.
+
+    | Respuesta | `validacion_estado` | ¿Factura? |
+    |---|---|---|
+    | `NroConsulta` distinto de 0 | `autorizada` | sí |
+    | INACTIVO / SUSPENDIDO / no encontrado | `rechazada` | no — importe 0, `estado='X'` |
+
+    A OSPJN se le manda la categoría; el precio y lo que se guarda usan
+    **siempre el código del Colegio**.
+    """
+    if not nro_afiliado.strip():
+        raise HTTPException(422, "Falta el número de afiliado.")
+
+    medico = await get_medico(db, nro_socio)
+    hoy = datetime.date.today()
+    periodo = await periodo_actual(db, OSPJN_OS)
+    await _gate_periodo(db, OSPJN_OS, periodo)
+
+    precio = await resolver_precio(db, str(OSPJN_OS), medico, codigo, hoy)
+    if not precio.admitido:
+        raise HTTPException(422, precio.motivo or "El código no está habilitado.")
+
+    categoria = (
+        await db.execute(
+            select(NomencladorCMC.ospjn_categoria).where(NomencladorCMC.codigo == codigo)
+        )
+    ).scalar_one_or_none()
+    # Sin fila en el nomenclador, 'OTR' — que es el default del legacy para
+    # 1.019 de sus 1.034 códigos.
+    categoria = (categoria or ospjn.CATEGORIA_OTRAS).strip().upper()
+
+    try:
+        res = await ospjn.validar_afiliado(
+            numero_afiliado=nro_afiliado.strip(),
+            barra_afiliado=barra_afiliado.strip(),
+            categoria_prestacion=categoria,
+            fecha=hoy,
+        )
+    except ospjn.OspjnError as e:
+        # No se llegó a validar: no inventamos una fila autorizada.
+        raise HTTPException(502, str(e)) from e
+
+    afiliado = (
+        f"{nro_afiliado.strip()}/{barra_afiliado.strip()}"
+        if barra_afiliado.strip()
+        else nro_afiliado.strip()
+    )
+
+    fila = await _grabar_prestacion(
+        db,
+        medico=medico,
+        obra_social_id=OSPJN_OS,
+        periodo=periodo,
+        codigo=codigo,
+        precio=precio,
+        cantidad=cantidad,
+        coseguro=CERO,  # OSPJN no descuenta coseguro
+        nro_afiliado=afiliado,
+        nombre_afiliado=res.nombre_afiliado or "",
+        nro_autorizacion=res.nro_consulta,
+        validacion_estado="autorizada" if res.validado else "rechazada",
+        validacion_detalle=res.estado_detalle,
+        validacion_respuesta={
+            "modo": res.modo,
+            "categoria_enviada": categoria,
+            "estado": res.estado,
+            "nro_consulta": res.nro_consulta,
+            "nro_documento": res.nro_documento,
+            "mensaje_enviado": res.enviado,
+            "respuesta": res.crudo,
+        },
+        fecha=hoy,
+        usuario_carga=usuario_carga,
+    )
+    return _to_dict(fila, precio.descripcion or "")
+
+
 async def _prestacion_del_socio(
     db: AsyncSession, prestacion_id: int, nro_socio: int
 ) -> DetalleFacturacionCMC:
@@ -811,6 +1251,38 @@ async def eliminar_prestacion(db: AsyncSession, prestacion_id: int, nro_socio: i
         traza["anulacion"] = {"modo": res.modo, "respuesta": res.crudo}
         fila.validacion_respuesta = traza
         fila.validacion_detalle = res.estado_detalle[:255]
+
+    # Nobis: también hay que anular la orden allá. Ojo con la diferencia contra
+    # Sancor — acá NO alcanza con las autorizadas: una orden en `P-Pendiente`
+    # existe igual en Nobis y hay que darla de baja, si no queda viva.
+    if obra_social_id == NOBIS_OS and fila.validacion_estado in ("autorizada", "pendiente"):
+        traza = dict(fila.validacion_respuesta or {})
+        # AnularOrdenNroCod exige pCodAut; el número de orden es opcional.
+        cod_aut = (traza.get("cod_autorizacion") or "").strip()
+        if cod_aut:
+            try:
+                res = await nobis.anular_orden(
+                    cod_autorizacion=cod_aut,
+                    nro_orden=fila.autorizacion or "",
+                )
+            except nobis.NobisError as e:
+                raise HTTPException(
+                    502,
+                    f"No se pudo anular la orden en Nobis, así que no se eliminó: {e}",
+                ) from e
+
+            traza["anulacion"] = {"modo": res.modo, "respuesta": res.crudo}
+            fila.validacion_respuesta = traza
+            fila.validacion_detalle = res.estado_detalle[:255]
+        else:
+            # Sin cod_aut no hay forma de anularla en Nobis. Se da de baja acá
+            # igual —si no, la prestación queda trabada para siempre— pero se
+            # deja dicho, porque alguien va a tener que anularla a mano.
+            traza["anulacion"] = {
+                "pendiente_en_nobis": True,
+                "motivo": "La orden no guardó cod_autorizacion: anular manualmente en Nobis.",
+            }
+            fila.validacion_respuesta = traza
 
     facturaba = fila.estado == DETALLE_ACTIVO
     fila.validacion_anulada = True

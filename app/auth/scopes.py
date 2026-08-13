@@ -128,6 +128,12 @@ class Scope(StrEnum):
     AUDITORIA_PURGAR = "auditoria:purgar"
     EXPORT_GENERAR = "export:generar"
 
+    # TEMPORAL — habilita a un médico puntual a quedarse en el panel nuevo
+    # después del login en vez de ir al legacy. No gatea ningún endpoint: la
+    # API ya autoriza por rol `medico`. Se otorga nominalmente vía
+    # `UserPermission.allow`, nunca por rol. Borrar al cerrar la prueba.
+    PANEL_INGRESAR = "panel:ingresar"
+
 
 # ── Permisos que no se otorgan por rol ───────────────────────────────────────
 # Se conceden nominalmente por usuario vía `UserPermission.allow`, que el motor
@@ -247,7 +253,10 @@ ROLES: dict[str, set[Scope]] = {
     },
 
     # Todo salvo los nominales de CRITICOS (se resuelve abajo).
-    "admin": set(Scope) - CRITICOS,
+    # PANEL_INGRESAR queda afuera también: es la bandera temporal de la prueba
+    # controlada del panel nuevo, y si `admin` la llevara, los administradores
+    # dejarían de ir al legacy tras el login, que es donde hacen su trabajo real.
+    "admin": set(Scope) - CRITICOS - {Scope.PANEL_INGRESAR},
 }
 
 
@@ -360,4 +369,5 @@ DESCRIPCIONES: dict[Scope, str] = {
     Scope.AUDITORIA_LEER: "Consultar el registro de auditoría",
     Scope.AUDITORIA_PURGAR: "Purgar el registro de auditoría",
     Scope.EXPORT_GENERAR: "Generar exportaciones a Excel",
+    Scope.PANEL_INGRESAR: "Ingreso al panel nuevo (prueba controlada, temporal)",
 }

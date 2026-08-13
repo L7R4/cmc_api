@@ -19,6 +19,7 @@ El sistema legacy sigue funcionando en paralelo y no se toca. Ojo con validar
 dos veces la misma prestación desde los dos sistemas.
 """
 import datetime
+import html
 import logging
 import random
 import re
@@ -46,8 +47,14 @@ class RespuestaSancor:
     estado_detalle: str
     nro_autorizacion: Optional[str] = None
     nombre_afiliado: Optional[str] = None
-    # `True` cuando la práctica hay que gestionarla en oficinas de la O.S.
+    # `True` cuando Sancor no rechazó ni autorizó: el afiliado tiene que
+    # gestionarlo con la obra social (tope, autorización manual, plan no
+    # convenido — ver CODIGOS_PENDIENTE). Mismo patrón que `nobis.py`.
     requiere_gestion: bool = False
+    # Código de ZAU-3 (ej. "B000", "M117", "M024"). "" si no se pudo leer el
+    # segmento ZAU. Es lo que `service.py` usa para clasificar autorizada /
+    # pendiente / rechazada / error de token — ver CODIGOS_PENDIENTE abajo.
+    codigo_resultado: str = ""
     # Mensaje HL7 crudo, para soporte. No se expone al prestador.
     crudo: str = ""
     modo: str = MODO_SIMULADO
@@ -72,11 +79,37 @@ SUSTITUCIONES: dict[tuple[str, int], str] = {
     ("070660", 16): "070715",
 }
 
-# Códigos que Sancor no autoriza por esta vía.
-CODIGOS_NO_ADMITIDOS = {"180127"}
+# Códigos que Sancor no autoriza por esta vía. Unificado con el front (antes
+# 180150/180164 sólo se bloqueaban ahí, ver docs/api/validaciones/sancor.md).
+CODIGOS_NO_ADMITIDOS = {"180127", "180150", "180164"}
 
 # El afiliado tiene que tramitarla en las oficinas de Sancor.
 CODIGOS_GESTION_PRESENCIAL = {"070660"}
+
+# ── Clasificación de la respuesta real de Sancor ──────────────────────────────
+# Relevado de `mensajeria_sancor.txt`: ~14.130 respuestas reales del autorizador
+# en producción (2024-2026). El estado real vive en ZAU-3 ("<código>^<descripción>"),
+# no en si el texto "AUTORIZADA" aparece en algún lado del mensaje.
+#
+#   B*     21.062 casos — autorizada (incluye variantes como "AUTORIZADO- Recuerde
+#          adjuntar informe médico" y "AUTORIZADO - Sujeto a Auditoría Posterior":
+#          lo que importa es el prefijo B, no el texto exacto "AUTORIZADA").
+#   M117    2.042 casos — error de lo que tipeó el prestador (token ya usado,
+#          inválido, vencido, de largo ≠ 4). No es un rechazo de la prestación:
+#          se corta con 422 antes de grabar nada, mismo criterio que el 422 de
+#          "falta el token" que ya tira validar_sancor().
+#   resto (M024/M087/M233/M030/M026/M144, ~250 casos) — el afiliado tiene que
+#          gestionarlo en Sancor (tope, requiere autorización manual, plan no
+#          convenido). No es un rechazo: pendiente, no factura.
+#   cualquier otro M*  — rechazada.
+
+# Prefijo de "autorizada". Sancor no documenta un catálogo cerrado de códigos B*;
+# en 21.062 respuestas reales todas empezaron así.
+PREFIJO_AUTORIZADA = "B"
+
+CODIGOS_ERROR_TOKEN = {"M117"}
+
+CODIGOS_PENDIENTE = {"M024", "M087", "M233", "M030", "M026", "M144"}
 
 
 def sustituir_codigo(codigo: str, especialidades: list[int]) -> tuple[str, Optional[str]]:
@@ -134,15 +167,29 @@ def construir_mensaje_autorizacion(
     )
 
 
-def construir_mensaje_anulacion(*, nro_autorizacion: str, nro_matricula: int, processing_id: str) -> str:
-    """Mensaje HL7 v2.4 ZQA^Z04 (anulación de una autorización)."""
+def construir_mensaje_anulacion(*, nro_autorizacion: str, processing_id: str) -> str:
+    """Mensaje HL7 v2.4 ZQA^Z04 (anulación de una autorización).
+
+    El legacy (`borra_atencion_colegio_sancor.php`) separa los segmentos con
+    espacios en vez de CR — probablemente por eso este camino nunca tiene una
+    sola respuesta registrada en 15 MB de log real (`mensajeria_sancor.txt`):
+    Sancor nunca llegó a interpretar el mensaje como HL7 válido. Acá se separa
+    con `\\r`, igual que exige el estándar y que hace `interpretar_respuesta()`
+    al leer la respuesta.
+
+    `PRD|PS^Prestador Solicitante` lleva el código de prestador del Colegio
+    (`settings.SANCOR_PRESTADOR`), no la matrícula del médico — así lo devuelve
+    Sancor en cada una de las ~14.000 respuestas reales relevadas.
+    """
     ts = f"{datetime.datetime.now():%Y%m%d%H%M%S}"
-    return (
-        f"MSH|^~\\&|SANCOR_SALUD|SANCOR_SALUD^604940^IIN|SANCOR_SALUD|"
-        f"SANCOR_SALUD^604940^IIN|{ts}||ZQA^Z04^ZQA_Z04|{_control_id()}|"
-        f"{processing_id}|2.4|||NE|AL|ARG "
-        f"ZAU||{nro_autorizacion} "
-        f"PRD|PS^Prestador Solicitante||||||{nro_matricula}^PR"
+    return "\r".join(
+        [
+            f"MSH|^~\\&|SANCOR_SALUD|SANCOR_SALUD^604940^IIN|SANCOR_SALUD|"
+            f"SANCOR_SALUD^604940^IIN|{ts}||ZQA^Z04^ZQA_Z04|{_control_id()}|"
+            f"{processing_id}|2.4|||NE|AL|ARG",
+            f"ZAU||{nro_autorizacion}",
+            f"PRD|PS^Prestador Solicitante||||||{settings.SANCOR_PRESTADOR}^PR",
+        ]
     )
 
 
@@ -159,61 +206,112 @@ def _envolver_soap(mensaje: str, pasaporte: str) -> str:
 
 
 # ── Lectura de la respuesta ───────────────────────────────────────────────────
+#
+# La respuesta real de Sancor viene envuelta en SOAP con los segmentos HL7
+# separados por `&#xD;`/`&#xd;` (CR **XML-escapado**), no por CR real:
+#
+#   <resultado>MSH|...|2.4|||NE|AL|ARG&#xD;MSA|AA|...&#xD;ZAU||133790447|B000^AUTORIZADA&#xD;
+#   PRD|...&#xD;PID|1|59681210^^^^Doc. Nac. Identidad|2371388^01^9999^^HC||
+#   IAN BENJAMIN^MARTINEZ ALFARO||20230504|M&#xD;...</resultado>
+#
+# Sin desescapar primero, cualquier regex con `[^\r\n]*` matchea el mensaje
+# HL7 entero en vez de un segmento — por eso `_extraer_hl7()` corre antes que
+# cualquier otro parseo.
 
-def _texto_estado(respuesta: str) -> str:
-    """Motivo que devolvió Sancor.
+def _extraer_hl7(cuerpo_soap: str) -> str:
+    """Recorta `<resultado>…</resultado>` del sobre SOAP y desescapa entidades
+    XML (`&#xD;` → CR, `&amp;` → `&`). Si no encuentra el tag, devuelve el
+    cuerpo tal cual — mejor un mensaje sucio que perder la respuesta."""
+    m = re.search(r"<resultado>(.*?)</resultado>", cuerpo_soap, re.DOTALL | re.IGNORECASE)
+    crudo = m.group(1) if m else cuerpo_soap
+    return html.unescape(crudo)
 
-    El legacy compara la respuesta contra ~70 strings fijos y, si no coincide
-    ninguno, no guarda nada ni avisa. Acá se lee el texto del segmento que lo
-    trae (ZAU/MSA/ERR) y, si no se puede, se devuelve un genérico — pero nunca
-    se pierde el caso en silencio.
+
+def _campos_segmento(hl7: str, tipo: str) -> Optional[list[str]]:
+    """Campos del **último** segmento `tipo` (p.ej. "ZAU", "PID"), ya
+    separados por `|`. `campos[i]` es el campo HL7 `tipo.{i+1}` — p.ej. para
+    `ZAU||133790447|B000^AUTORIZADA`, `campos[1]` es el nro de autorización
+    (ZAU-2) y `campos[2]` el código de resultado (ZAU-3). `None` si el
+    segmento no aparece en el mensaje.
+
+    El último y no el primero: en ~10.000 respuestas reales con una práctica
+    aceptada para evaluación, Sancor manda **dos** ZAU — uno genérico "de
+    cabecera" (`M000^PRESTACIONES RECHAZADAS`) y, después de PR1/AUT, el
+    específico de esa práctica (`M024^REQUIERE AUTORIZACION`). Quedarse con
+    el primero clasifica como rechazada una prestación que en realidad
+    requiere gestión del afiliado. Cuando Sancor corta antes de llegar a
+    evaluar la práctica (token inválido, afiliado inexistente) sólo hay un
+    ZAU, y ese es el que se usa.
     """
-    # ZAU-4/ZAU-5 suele traer el código y la descripción del resultado.
-    m = re.search(r"ZAU\|[^\r\n]*", respuesta)
-    if m:
-        campos = m.group(0).split("|")
-        # El texto descriptivo es el campo más largo con letras.
-        candidatos = [c.strip() for c in campos if re.search(r"[A-Za-zÁÉÍÓÚáéíóúÑñ]{4,}", c)]
-        if candidatos:
-            return max(candidatos, key=len)[:250]
+    coincidencias = re.findall(rf"(?:^|\r){re.escape(tipo)}\|(.*?)(?:\r|$)", hl7)
+    if not coincidencias:
+        return None
+    return coincidencias[-1].split("|")
 
+
+def _texto_estado(hl7: str) -> str:
+    """Fallback cuando ZAU no trae descripción: intenta MSA/ERR y, si
+    tampoco, un genérico. Nunca se pierde el caso en silencio."""
     for seg in ("ERR", "MSA"):
-        m = re.search(rf"{seg}\|[^\r\n]*", respuesta)
-        if m:
-            campos = [c.strip() for c in m.group(0).split("|") if c.strip()]
-            if len(campos) > 1:
-                return " ".join(campos[1:])[:250]
-
+        campos = _campos_segmento(hl7, seg)
+        if campos:
+            texto = " ".join(c.strip() for c in campos if c.strip())
+            if texto:
+                return texto[:250]
     return "Sancor no devolvió un motivo reconocible."
 
 
-def interpretar_respuesta(respuesta: str) -> RespuestaSancor:
-    """Traduce el HL7 de vuelta a un resultado tipado."""
-    texto = respuesta or ""
+def interpretar_respuesta(respuesta_soap: str) -> RespuestaSancor:
+    """Traduce la respuesta SOAP/HL7 de Sancor a un resultado tipado.
 
-    autorizada = "AUTORIZADA" in texto.upper() and "NO AUTORIZAD" not in texto.upper()
+    El estado real vive en ZAU-3 (`<código>^<descripción>`, p.ej.
+    `B000^AUTORIZADA` o `M117^El Token ya fue utilizado.`) — no en si la
+    palabra "AUTORIZADA" aparece en algún lado del mensaje: hay ~21.000
+    respuestas reales que autorizan con textos distintos
+    (`B000^AUTORIZADO- Recuerde adjuntar informe médico.`) y ninguna respuesta
+    de rechazo real contiene la palabra "AUTORIZADA" sola. Ver
+    CODIGOS_PENDIENTE / CODIGOS_ERROR_TOKEN más arriba para la clasificación
+    completa por código.
+    """
+    hl7 = _extraer_hl7(respuesta_soap or "")
 
+    codigo_resultado = ""
+    descripcion = ""
     nro_autorizacion = None
+
+    campos_zau = _campos_segmento(hl7, "ZAU")
+    if campos_zau and len(campos_zau) >= 3:
+        # ZAU-2: "0" es el centinela de "sin autorización" que usa Sancor.
+        crudo_nro = (campos_zau[1] or "").strip()
+        nro_autorizacion = crudo_nro[:30] if crudo_nro and crudo_nro != "0" else None
+        codigo_resultado, _, descripcion = campos_zau[2].partition("^")
+        codigo_resultado = codigo_resultado.strip()
+        descripcion = descripcion.strip()
+
+    autorizada = codigo_resultado.upper().startswith(PREFIJO_AUTORIZADA)
+
+    if not descripcion:
+        descripcion = _texto_estado(hl7)
+
+    # PID-5: nombre del afiliado. Mismo índice de campo tanto en lo que
+    # mandamos (PID|||nro^barra^token^SANCOR_SALUD^HC^SANCOR_SALUD||UNKNOWN)
+    # como en lo que Sancor responde (PID|1|dni|credencial||APELLIDO^NOMBRE||
+    # fecha_nac|sexo): en ambos casos el campo 5 es el nombre.
     nombre_afiliado = None
-
-    if autorizada:
-        # ZAU||<nro de autorización>|... — hay que cortar en el separador de
-        # campo, si no se arrastra el campo siguiente.
-        m = re.search(r"ZAU\|\|([^|\r\n]{1,30})", texto)
-        if m:
-            nro_autorizacion = m.group(1).strip()[:30]
-
-        # El nombre del afiliado viene después del identificador de la credencial.
-        m = re.search(r"HC\^\s*SANCOR_SALUD\|\|([^|\r\n^]{1,60})", texto)
-        if m:
-            nombre_afiliado = m.group(1).strip()[:100]
+    campos_pid = _campos_segmento(hl7, "PID")
+    if campos_pid and len(campos_pid) >= 5:
+        nombre = campos_pid[4].replace("^", " ").strip()
+        if nombre and nombre.upper() not in ("UNKNOWN", "UNKNOWN UNKNOWN"):
+            nombre_afiliado = nombre[:100]
 
     return RespuestaSancor(
         autorizada=autorizada,
-        estado_detalle=("AUTORIZADA" if autorizada else _texto_estado(texto)),
+        estado_detalle=descripcion[:250],
         nro_autorizacion=nro_autorizacion,
         nombre_afiliado=nombre_afiliado,
-        crudo=texto[:8000],
+        requiere_gestion=(not autorizada and codigo_resultado in CODIGOS_PENDIENTE),
+        codigo_resultado=codigo_resultado,
+        crudo=hl7[:8000],
     )
 
 
@@ -223,8 +321,8 @@ def _destino() -> tuple[str, str, str]:
     """(url, pasaporte, processing_id) según el modo configurado."""
     modo = (settings.SANCOR_MODO or MODO_SIMULADO).strip().lower()
     if modo == MODO_PRODUCCION:
-        return (settings.SANCOR_URL_PROD, settings.SANCOR_PASAPORTE_PROD, "P")
-    return (settings.SANCOR_URL_TEST, settings.SANCOR_PASAPORTE_TEST, "D")
+        return (settings.SANCOR_URL_PROD, settings.SANCOR_PASAPORTE_PROD.get_secret_value(), "P")
+    return (settings.SANCOR_URL_TEST, settings.SANCOR_PASAPORTE_TEST.get_secret_value(), "D")
 
 
 def modo_actual() -> str:
@@ -237,7 +335,15 @@ async def _postear(url: str, cuerpo: str) -> str:
             r = await cli.post(url, content=cuerpo.encode("utf-8"),
                                headers={"Content-Type": "application/xml"})
             r.raise_for_status()
-            return r.text
+            # Decodificación explícita en vez de `r.text`: Sancor no siempre manda
+            # un charset correcto en el header, y `r.text` adivina mal a veces
+            # (mojibake tipo "inválido" → "inv�lido" en las respuestas reales
+            # observadas). UTF-8 primero porque es lo que se ve más seguido en
+            # producción; ISO-8859-1 nunca falla como fallback.
+            try:
+                return r.content.decode("utf-8")
+            except UnicodeDecodeError:
+                return r.content.decode("latin-1")
     except httpx.TimeoutException as e:
         raise SancorError("Sancor no respondió a tiempo. Reintentá en unos minutos.") from e
     except httpx.HTTPError as e:
@@ -292,7 +398,7 @@ async def autorizar(
     return resultado
 
 
-async def anular(*, nro_autorizacion: str, nro_matricula: int) -> RespuestaSancor:
+async def anular(*, nro_autorizacion: str) -> RespuestaSancor:
     """Anula una autorización previa (ZQA^Z04).
 
     Igual que `autorizar`, en modo simulado no sale nada. En test/producción
@@ -303,7 +409,6 @@ async def anular(*, nro_autorizacion: str, nro_matricula: int) -> RespuestaSanco
 
     mensaje = construir_mensaje_anulacion(
         nro_autorizacion=nro_autorizacion,
-        nro_matricula=nro_matricula,
         processing_id=processing_id,
     )
 

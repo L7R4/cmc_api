@@ -14,8 +14,10 @@ Nobis (402) se autoriza en línea contra el WSGeCROS de Gecros, OSPJN (151)
 valida al afiliado por REST, y OSPM (433) valida contra padrón propio
 (`clientes_ospm`), sin servicio externo.
 
-Las seis obras sociales integradas están implementadas. `POST /prestaciones`
-responde 422 si se manda cualquier otra.
+Las seis obras sociales integradas están implementadas — cada una en
+`app/modules/validaciones/obras/<os>/`, registrada en `obras.VALIDADORES`.
+`POST /prestaciones` responde 422 si se manda cualquier otra
+(`obras.obtener_o_error`).
 
 Autorización: el prestador es el dueño del token. El personal del Colegio que
 carga en nombre de un médico puede mandar `nro_socio`, pero necesita el scope
@@ -23,14 +25,19 @@ carga en nombre de un médico puede mandar `nro_socio`, pero necesita el scope
 """
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, Query, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.deps import get_current_user
 from app.auth.ownership import socio_objetivo
-from app.core.config import settings
 from app.db.database import get_db
-from app.modules.validaciones import sancor, service
+from app.modules.validaciones import obras
+from app.modules.validaciones.core import pipeline
+from app.modules.validaciones.core.consultas import buscar_codigos as _buscar_codigos
+from app.modules.validaciones.core.consultas import listar_periodos as _listar_periodos
+from app.modules.validaciones.core.consultas import listar_prestaciones as _listar_prestaciones
+from app.modules.validaciones.core.medicos import get_medico
+from app.modules.validaciones.core.periodos import partes_periodo, periodo_actual, periodo_cerrado
 from app.modules.validaciones.schemas import (
     CodigoOut,
     PeriodoActualOut,
@@ -56,27 +63,6 @@ def _socio_objetivo(user: dict, pedido: Optional[int]) -> int:
     return socio_objetivo(user, pedido)
 
 
-@router.get("/sancor/estado")
-async def estado_sancor(user=Depends(get_current_user)):
-    """Contra qué autorizador de Sancor está apuntando el backend.
-
-    `simulado` no manda nada a Sancor: sirve para probar la pantalla completa.
-    `test`/`produccion` sí generan autorizaciones reales — `produccion` consume
-    el token del afiliado de verdad.
-    """
-    modo = sancor.modo_actual()
-    destino = {
-        sancor.MODO_SIMULADO: "no se envía nada (respuesta armada localmente)",
-        sancor.MODO_TEST: settings.SANCOR_URL_TEST,
-        sancor.MODO_PRODUCCION: settings.SANCOR_URL_PROD,
-    }.get(modo, "modo desconocido — se trata como test")
-    return {
-        "modo": modo,
-        "destino": destino,
-        "genera_autorizaciones_reales": modo in (sancor.MODO_TEST, sancor.MODO_PRODUCCION),
-    }
-
-
 @router.get("/prestador", response_model=PrestadorOut)
 async def obtener_prestador(
     nro_socio: Optional[int] = Query(None),
@@ -85,7 +71,7 @@ async def obtener_prestador(
 ):
     """Datos de cabecera del prestador (nombre y matrícula)."""
     socio = _socio_objetivo(user, nro_socio)
-    medico = await service.get_medico(db, socio)
+    medico = await get_medico(db, socio)
     return PrestadorOut(
         nro_socio=medico.NRO_SOCIO,
         nombre=medico.NOMBRE,
@@ -106,9 +92,9 @@ async def obtener_periodo_actual(
     no del mes calendario: es el mismo período en el que caen las cargas del
     médico desde facturación.
     """
-    periodo = await service.periodo_actual(db, obra_social)
-    mes, anio = service.partes_periodo(periodo)
-    cerrado = await service.periodo_cerrado(db, obra_social, periodo)
+    periodo = await periodo_actual(db, obra_social)
+    mes, anio = partes_periodo(periodo)
+    cerrado = await periodo_cerrado(db, obra_social, periodo)
     return PeriodoActualOut(mes=mes, anio=anio, cerrado=cerrado)
 
 
@@ -122,7 +108,7 @@ async def listar_prestaciones(
     user=Depends(get_current_user),
 ):
     socio = _socio_objetivo(user, nro_socio)
-    return await service.listar_prestaciones(db, socio, obra_social, mes, anio)
+    return await _listar_prestaciones(db, socio, obra_social, mes, anio)
 
 
 @router.get("/periodos", response_model=List[PeriodoOut])
@@ -134,7 +120,7 @@ async def listar_periodos(
 ):
     """Totales por período cargado, el más reciente primero."""
     socio = _socio_objetivo(user, nro_socio)
-    return await service.listar_periodos(db, socio, obra_social)
+    return await _listar_periodos(db, socio, obra_social)
 
 
 @router.get("/codigos", response_model=List[CodigoOut])
@@ -152,7 +138,7 @@ async def buscar_codigos(
     vea lo que efectivamente se le va a liquidar.
     """
     socio = _socio_objetivo(user, nro_socio)
-    return await service.buscar_codigos(db, obra_social, socio, q, limit)
+    return await _buscar_codigos(db, obra_social, socio, q, limit)
 
 
 @router.post("/prestaciones", response_model=PrestacionOut, status_code=status.HTTP_201_CREATED)
@@ -170,90 +156,19 @@ async def cargar_prestacion(
     prestación es del médico la cargue él o el Colegio en su nombre, y por eso la
     controla la fase médico del período. Quién la tipeó se distingue igual: la
     fila guarda al médico en `cod_med` y al operador del token en `usuario`.
+
+    Despacha por `obras.POR_NRO` (ver `app/modules/validaciones/obras/`):
+    agregar una obra social nueva es sumarla ahí, no tocar este endpoint.
     """
     propio = int(user["nro_socio"])
     socio = _socio_objetivo(user, payload.nro_socio)
 
-    if payload.obra_social == service.SANCOR_OS:
-        return await service.validar_sancor(
-            db,
-            nro_socio=socio,
-            codigo=payload.codigo.strip(),
-            nro_afiliado=payload.nro_afiliado,
-            barra_afiliado=payload.barra_afiliado,
-            token=payload.token,
-            cantidad=payload.cantidad,
-            usuario_carga=propio,
+    if payload.obra_social in obras.POR_NRO:
+        return await pipeline.crear_prestacion(
+            db, payload=payload, nro_socio=socio, usuario_carga=propio
         )
 
-    if payload.obra_social == service.OSPJN_OS:
-        return await service.validar_ospjn(
-            db,
-            nro_socio=socio,
-            codigo=payload.codigo.strip(),
-            nro_afiliado=payload.nro_afiliado,
-            barra_afiliado=payload.barra_afiliado,
-            cantidad=payload.cantidad,
-            usuario_carga=propio,
-        )
-
-    if payload.obra_social == service.NOBIS_OS:
-        return await service.validar_nobis(
-            db,
-            nro_socio=socio,
-            codigo=payload.codigo.strip(),
-            nro_afiliado=payload.nro_afiliado,
-            token=payload.token,
-            cantidad=payload.cantidad,
-            usuario_carga=propio,
-        )
-
-    if payload.obra_social == service.OSPM_OS:
-        # OSPM no consulta a nadie: valida contra su padrón propio. El DNI viaja
-        # en `nro_afiliado`, que es el campo que manda el formulario.
-        return await service.validar_ospm(
-            db,
-            nro_socio=socio,
-            codigo=payload.codigo.strip(),
-            documento=payload.nro_afiliado,
-            cantidad=payload.cantidad,
-            usuario_carga=propio,
-        )
-
-    obra = service.obra_manual_o_error(payload.obra_social)
-    return await service.crear_prestacion_manual(
-        db,
-        nro_socio=socio,
-        obra=obra,
-        codigo=payload.codigo.strip(),
-        nombre_afiliado=payload.nombre_afiliado,
-        nro_afiliado=payload.nro_afiliado,
-        nro_autorizacion=payload.nro_validacion,
-        coseguro=payload.coseguro,
-        cantidad=payload.cantidad,
-        usuario_carga=propio,
-    )
-
-
-@router.post("/ospm/padron")
-async def importar_padron_ospm(
-    archivo: UploadFile = File(...),
-    db: AsyncSession = Depends(get_db),
-    user=Depends(get_current_user),
-):
-    """Reemplaza el padrón de OSPM con el CSV/TXT que manda la obra social.
-
-    Formato: `AFILIADO, DU, CUIT, ACTIVO`, separador `;` o `,`, con encabezado
-    opcional. Es una operación del Colegio, no del prestador: pide el scope
-    administrativo.
-
-    Reemplaza el contenido de `clientes_ospm`, el mismo padrón que carga
-    `importar_padron_ospm.php`: el padrón es uno solo, así que el legacy y la API
-    validan siempre contra el mismo dato.
-    """
-    if SCOPE_ADMIN not in (user.get("scopes") or []):
-        raise HTTPException(403, "Sólo el Colegio puede importar el padrón de OSPM.")
-    return await service.importar_padron_ospm(db, archivo)
+    obras.obtener_o_error(payload.obra_social)  # siempre levanta 422
 
 
 @router.post("/prestaciones/{prestacion_id}/orden", response_model=PrestacionOut)
@@ -266,7 +181,7 @@ async def adjuntar_orden(
 ):
     """Sube la orden/receta en PDF de una prestación (hoy lo usa Boreal)."""
     socio = _socio_objetivo(user, nro_socio)
-    return await service.adjuntar_orden(db, prestacion_id, socio, archivo)
+    return await pipeline.adjuntar_orden(db, prestacion_id, socio, archivo)
 
 
 @router.delete("/prestaciones/{prestacion_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -277,7 +192,27 @@ async def eliminar_prestacion(
     user=Depends(get_current_user),
 ):
     """Baja lógica: la fila queda con `validacion_anulada=1` y `estado='X'`, así
-    sale de la factura sin perder la traza. En Sancor además anula la
-    autorización en la obra social antes de marcar nada (ver el service)."""
+    sale de la factura sin perder la traza. En Sancor/Nobis además intenta
+    anular la autorización en la obra social antes de marcar nada (ver
+    `ValidadorOS.anular` de cada obra en `obras/`)."""
     socio = _socio_objetivo(user, nro_socio)
-    await service.eliminar_prestacion(db, prestacion_id, socio)
+    await pipeline.eliminar_prestacion(db, prestacion_id, socio)
+
+
+# Endpoints propios de una obra social (hoy: `GET /sancor/estado`,
+# `POST /ospm/padron`). Cada paquete de `obras/` los declara en su propio
+# `routes.py` y acá sólo se montan — así no crece un if/elif por endpoint
+# especial. Validado al IMPORTAR, no en runtime: un prefijo que pise una ruta
+# genérica de arriba dejaría endpoints inalcanzables sin que nadie se entere
+# (los decoradores de las rutas genéricas ya corrieron cuando se llega acá, así
+# que ganan los empates — mismo criterio que `app/api/routes.py`).
+_RESERVADOS = frozenset(
+    {"/prestaciones", "/periodos", "/periodo-actual", "/codigos", "/prestador"}
+)
+
+for _obra in obras.VALIDADORES:
+    if _obra.router is None:
+        continue
+    if not _obra.prefijo.startswith("/") or _obra.prefijo in _RESERVADOS:
+        raise RuntimeError(f"Prefijo inválido para {_obra.nombre}: {_obra.prefijo!r}")
+    router.include_router(_obra.router, prefix=_obra.prefijo)

@@ -361,6 +361,9 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     ("DELETE", "/api/validaciones/prestaciones/{prestacion_id}"): Scope.VALIDACION_CARGAR,
     ("POST", "/api/validaciones/prestaciones/{prestacion_id}/orden"): Scope.VALIDACION_CARGAR,
     ("GET", "/api/validaciones/sancor/estado"): Scope.VALIDACION_CARGAR,
+    # Importar el padrón de OSPM: operación del Colegio, no del prestador —
+    # mismo scope que el resto de las mutaciones de padrón.
+    ("POST", "/api/validaciones/ospm/padron"): Scope.PADRON_EDITAR,
 
     # ── Nomenclador ──────────────────────────────────────────────────────────
     ("GET", "/api/nomenclador/"): Scope.NOMENCLADOR_LEER,

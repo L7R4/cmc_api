@@ -149,7 +149,7 @@ async def _ingresar(cli: httpx.AsyncClient) -> str:
     datos = await _postear(
         cli,
         "Ingresar",
-        {"Username": settings.OSPJN_USUARIO, "Password": settings.OSPJN_PASSWORD},
+        {"Username": settings.OSPJN_USUARIO, "Password": settings.OSPJN_PASSWORD.get_secret_value()},
     )
     token = (datos.get("Token") or "").strip()
     if not token:

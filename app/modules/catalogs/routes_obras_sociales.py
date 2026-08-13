@@ -208,7 +208,7 @@ async def list_obras_sociales(
     le entrega solo la identificación de la obra social, y el resto requiere
     `catalogo:leer`.
     """
-    query = select(ObrasSociales).order_by(ObrasSociales.OBRA_SOCIAL.asc())
+    query = select(ObrasSociales).order_by(ObrasSociales.OBRA_SOCIAL.desc())
     if nro_obra_social is not None:
         query = query.where(ObrasSociales.NRO_OBRASOCIAL == nro_obra_social)
     if nombre is not None:

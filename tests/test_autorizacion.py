@@ -151,6 +151,9 @@ def test_convencion_de_nombres():
         "refacturar", "periodo", "complementar", "masivo", "gestionar",
         "purgar", "generar", "resolver", "documento", "leer_sensible",
         "leer_propio", "editar_bancario",
+        # `ingresar` es de panel:ingresar, la bandera temporal de la prueba
+        # controlada del panel nuevo (ver Scope.PANEL_INGRESAR).
+        "ingresar",
     }
     malos = []
     for s in Scope:

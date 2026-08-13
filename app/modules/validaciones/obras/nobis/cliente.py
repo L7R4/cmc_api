@@ -373,7 +373,7 @@ async def _postear(metodo: str, parametros: dict[str, str]) -> str:
 
 
 def _credenciales() -> dict[str, str]:
-    return {"pUsuario": settings.NOBIS_USUARIO, "pClave": settings.NOBIS_CLAVE}
+    return {"pUsuario": settings.NOBIS_USUARIO, "pClave": settings.NOBIS_CLAVE.get_secret_value()}
 
 
 async def consultar_afiliado(

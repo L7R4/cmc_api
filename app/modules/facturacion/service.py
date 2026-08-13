@@ -1521,9 +1521,12 @@ async def listar_prestaciones(
         await db.execute(select(func.count()).select_from(M).where(*filtros))
     ).scalar_one()
 
+    # Orden por id (autoincremental) = orden de carga, no de fecha_practica —
+    # el médico puede cargar hoy una prestación de hace semanas y tiene que
+    # aparecer primera igual.
     stmt = (
         select(M).where(*filtros)
-        .order_by(M.fecha_practica.desc(), M.id_detalle_prestaciones.desc())
+        .order_by(M.id_detalle_prestaciones.desc())
         .limit(limit).offset(offset)
     )
     rows = (await db.execute(stmt)).scalars().all()

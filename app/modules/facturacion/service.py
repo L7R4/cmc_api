@@ -125,7 +125,15 @@ async def buscar_medicos(db: AsyncSession, q: str, limit: int) -> list[dict]:
     cond = M.NOMBRE.ilike(f"%{q}%")
     if q.isdigit():
         cond = or_(M.NRO_SOCIO == int(q), M.MATRICULA_PROV == int(q), cond)
-    rows = list((await db.execute(select(M).where(cond).limit(limit))).scalars().all())
+    # NOMBRE es obligatorio en la respuesta (MedicoBuscarOut.nombre: str). Hay
+    # filas legacy con NOMBRE NULL (dato incompleto, no un médico usable en un
+    # selector) que igual pueden calzar por NRO_SOCIO/MATRICULA — sin este
+    # filtro, buscar exactamente ese número tira un 500 de validación.
+    rows = list(
+        (await db.execute(select(M).where(cond, M.NOMBRE.isnot(None)).limit(limit)))
+        .scalars()
+        .all()
+    )
     return await _medicos_con_especialidades(db, rows)
 
 
@@ -133,9 +141,17 @@ async def listar_medicos_todos(db: AsyncSession) -> list[dict]:
     """Precarga completa para `GET /medicos/todos`: el front de Carga de
     Facturación trae la tabla entera una vez (~4.500 filas) y filtra en memoria,
     en vez de un pedido por cada tecleo. Mismo shape que `buscar_medicos`, sin
-    filtro de texto ni tope de fila."""
+    filtro de texto ni tope de fila.
+
+    Excluye NOMBRE NULL — ver el comentario en `buscar_medicos`. Ahí un dato
+    incompleto era invisible (ningún texto/número lo matchea por accidente);
+    acá, sin filtro de texto, entraba siempre y tiraba 500 en cada carga."""
     M = ListadoMedico
-    rows = list((await db.execute(select(M).order_by(M.NOMBRE))).scalars().all())
+    rows = list(
+        (await db.execute(select(M).where(M.NOMBRE.isnot(None)).order_by(M.NOMBRE)))
+        .scalars()
+        .all()
+    )
     return await _medicos_con_especialidades(db, rows)
 
 

@@ -27,6 +27,7 @@ from app.modules.validaciones.core.grabado import (
 )
 from app.modules.validaciones.core.medicos import get_medico
 from app.modules.validaciones.core.periodos import gate_periodo, periodo_actual, periodo_cerrado
+from app.modules.validaciones.legacy import espejo as espejo_legacy
 from app.modules.validaciones.schemas import PrestacionCreate
 
 _SOLO_PDF = frozenset({".pdf"})
@@ -74,6 +75,13 @@ async def crear_prestacion(
         fecha=ctx.fecha,
         usuario_carga=usuario_carga,
     )
+
+    # TEMPORAL — puente con el sistema viejo. Corre después del commit de
+    # `grabar_prestacion` y falla abierto: si no puede espejar, la prestación
+    # queda cargada igual. Para apagarlo: borrar esta llamada, la de
+    # `eliminar_prestacion` y la carpeta `validaciones/legacy/`.
+    await espejo_legacy.replicar_alta(db, fila, medico)
+
     return to_dict(fila, resultado.precio.descripcion or "")
 
 
@@ -154,3 +162,7 @@ async def eliminar_prestacion(db: AsyncSession, prestacion_id: int, nro_socio: i
         # abierta (mismo invariante que `anular_prestacion` de facturación).
         await _cleanup_factura_si_vacia(db, fila.cod_obr, fila.periodo)
     await db.commit()
+
+    # TEMPORAL — misma baja lógica en la tabla del sistema viejo (`EXISTE='N'`).
+    # Ver la nota de `crear_prestacion`.
+    await espejo_legacy.replicar_baja(db, fila)

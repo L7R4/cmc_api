@@ -1,6 +1,10 @@
-"""Nobis Salud (O.S. 402) — WSGeCROS. Inserta una orden real (`InsertarAutorizacionAmb`)
+"""Nobis Salud (O.S. 62) — WSGeCROS. Inserta una orden real (`InsertarAutorizacionAmb`)
 y traduce el estado que devuelve Nobis. `anular()` da de baja la orden
 (`AnularOrdenNroCod`).
+
+El número es **62**, no 402: es el que tiene en `obras_sociales`, bajo el que
+están cargados sus precios y el único que conoce el sistema viejo. Ver el
+comentario de `__init__` antes de cambiarlo.
 """
 from typing import Optional
 
@@ -20,7 +24,17 @@ from app.modules.validaciones.obras.nobis.schemas import EntradaNobis
 
 class ValidadorNobis(ValidadorOS):
     def __init__(self):
-        super().__init__(nro=402, nombre="Nobis Salud", entrada=EntradaNobis)
+        # 62 y no 402. El 402 llegó como número de relleno en un docstring de
+        # cuando Nobis todavía no estaba implementada (commit 7081e4f, 2026-08-02)
+        # y se arrastró hasta acá al implementarla. No existe en ninguna parte:
+        # ni en `obras_sociales`, ni en `valor_prestacion`, ni en `nm_valores`,
+        # ni en el sistema viejo. Con 402 el lookup de precios no encontraba
+        # nada y **toda** carga de Nobis moría en 422 "Sin precio registrado".
+        #
+        # El número es sólo la clave interna del Colegio: lo que Nobis recibe
+        # por el WSGeCROS son `NOBIS_COD_ENTIDAD_EFECTORA` (90692) y
+        # `NOBIS_TIPO_SOLIC`, que no dependen de esto.
+        super().__init__(nro=62, nombre="Nobis Salud", entrada=EntradaNobis)
 
     async def validar(self, ctx: Contexto, entrada: EntradaNobis) -> ResultadoValidacion:
         """Nobis devuelve tres estados, y los tres se graban:

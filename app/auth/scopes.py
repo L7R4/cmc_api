@@ -200,6 +200,10 @@ ROLES: dict[str, set[Scope]] = {
         Scope.FACTURACION_CARGAR,
         Scope.FACTURACION_CERRAR,
         Scope.FACTURACION_COMPLEMENTAR,
+        # Carga validaciones en nombre de un médico (selector de socio en
+        # Validaciones). Ya tenía MEDICO_LEER, que es lo que exige
+        # `ownership.socio_objetivo` para pedir la matrícula de otro.
+        Scope.VALIDACION_CARGAR,
         Scope.SOLICITUD_LEER,
         *_LECTURA_COMUN,
     },

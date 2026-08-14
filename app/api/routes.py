@@ -23,7 +23,6 @@ from app.modules.deducciones.routes import router as deducciones_router
 from app.modules.deducciones.routes_descuentos import router as descuentos_router
 from app.modules.exports.routes import router as exports_router
 from app.modules.reportes.routes import router as reportes_router
-from app.modules.reportes.routes import router_socio as reportes_socio_router
 from app.modules.facturacion.routes import router as facturacion_router
 from app.modules.liquidacion.routes import router as liquidacion_router
 from app.modules.lotes.routes import router as lotes_router
@@ -79,11 +78,6 @@ api_router.include_router(avisos_router, prefix="/avisos", tags=["Avisos"])
 api_router.include_router(noticias_router, prefix="/noticias", tags=["Noticias"])
 api_router.include_router(publicidades_medico_router, prefix="/publicidad-medicos", tags=["publicidad-medicos"])
 api_router.include_router(exports_router, prefix="/exports", tags=["exports"])
-# El router del socio va PRIMERO: comparte prefijo con el del Colegio y sus
-# rutas (/mios/*) no deben quedar tapadas por nada del otro.
-api_router.include_router(
-    reportes_socio_router, prefix="/reportes", tags=["Reportes y Estadísticas"]
-)
 api_router.include_router(
     reportes_router, prefix="/reportes", tags=["Reportes y Estadísticas"]
 )

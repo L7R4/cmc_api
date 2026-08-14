@@ -121,6 +121,16 @@ class Settings(BaseSettings):
     # legítimo no falla 8 veces seguidas en 15 minutos.
     RATE_LIMIT_MAX_PER_SOCIO: int = 8
 
+    # ── Facturación — carga sin precio ───────────────────────────────────────
+    # False por defecto: un código sin precio vigente para esa OS/fecha/perfil del
+    # médico rechaza la carga con 422 (ver `resolver_precio` en
+    # modules/facturacion/service.py). True permite cargar la prestación igual,
+    # con honorarios/gastos/ayudante en 0 — pensado para probar el flujo de carga
+    # sin depender de que el nomenclador esté completo. NO evita otros rechazos
+    # (habilitación del médico, fecha inválida, vía no aplicable): esos siguen
+    # bloqueando igual.
+    CARGA_SIN_PRECIO: bool = False
+
     @property
     def IS_PRODUCTION(self) -> bool:
         return self.ENV.strip().lower() in {"production", "prod"}
@@ -150,7 +160,7 @@ class Settings(BaseSettings):
     SANCOR_PASAPORTE_PROD: SecretStr = SecretStr("")
     SANCOR_TIMEOUT: int = 30
 
-    # ── Nobis Salud (O.S. 402) — WSGeCROS ────────────────────────────────────
+    # ── Nobis Salud (O.S. 62) — WSGeCROS ─────────────────────────────────────
     # Mismo criterio que Sancor: sin default. Insertar una orden (y anularla) es
     # un efecto real en el sistema de Nobis.
     #   simulado   → no sale ningún request; se devuelve una respuesta armada

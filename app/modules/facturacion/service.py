@@ -10,6 +10,7 @@ from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import func, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.common.money import quantize_money
 from app.common.files import url_archivo
 from app.common.uploads import DOCUMENTOS, validate_upload
@@ -746,6 +747,16 @@ async def resolver_precio(
             nomenclador.id, obra_social_nro, fecha, medico.ID, db, via=via,
         )
     except PrecioLookupError as e:
+        # CARGA_SIN_PRECIO sólo perdona la falta de precio (e.sin_precio) — no
+        # habilitación, fecha inválida ni vía no aplicable, que siguen rechazando
+        # igual. Admitido=True con montos en 0 para que la carga siga su curso
+        # normal (mismo camino que un código "por presupuesto").
+        if settings.CARGA_SIN_PRECIO and e.sin_precio:
+            return PrecioResponse(
+                admitido=True, motivo=e.message,
+                honorarios=Decimal("0"), gastos=Decimal("0"), ayudante=Decimal("0"),
+                descripcion="", fuente=FUENTE_PRECIO, via=via,
+            )
         return PrecioResponse(
             admitido=False, motivo=e.message,
             honorarios=Decimal("0"), gastos=Decimal("0"), ayudante=Decimal("0"),

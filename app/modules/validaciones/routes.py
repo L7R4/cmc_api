@@ -10,7 +10,7 @@ misma tabla y el mismo puntero que usa la carga del médico desde facturación,
 así que entra derecho a la liquidación. Lo que respondió la obra social va en
 las columnas `validacion_*` de la misma fila. El módulo no tiene tablas propias.
 
-Nobis (402) se autoriza en línea contra el WSGeCROS de Gecros, OSPJN (151)
+Nobis (62) se autoriza en línea contra el WSGeCROS de Gecros, OSPJN (151)
 valida al afiliado por REST, y OSPM (433) valida contra padrón propio
 (`clientes_ospm`), sin servicio externo.
 

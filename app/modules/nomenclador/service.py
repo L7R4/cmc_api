@@ -1049,9 +1049,13 @@ async def buscar_galeno_vigente(
 # ─────────────────────────────────────────────────────────────────────────────
 
 class LookupError(Exception):
-    def __init__(self, message: str, status_code: int = 422):
+    def __init__(self, message: str, status_code: int = 422, sin_precio: bool = False):
         self.message = message
         self.status_code = status_code
+        # True SOLO cuando el rechazo es por falta de precio (no habilitación, no
+        # fecha, no código/médico inexistente) — es lo único que
+        # `settings.CARGA_SIN_PRECIO` puede pasar por alto. Ver resolver_precio.
+        self.sin_precio = sin_precio
         super().__init__(message)
 
 
@@ -1327,7 +1331,9 @@ async def lookup_precio(
     )
     filas = (await db.execute(stmt_hist)).scalars().all()
     if not filas:
-        raise LookupError("Sin precio registrado para ese código, obra social y fecha")
+        raise LookupError(
+            "Sin precio registrado para ese código, obra social y fecha", sin_precio=True
+        )
 
     # Una fila por variante (origen, especialidad): la más reciente (filas viene desc)
     por_variante: dict = {}
@@ -1349,7 +1355,8 @@ async def lookup_precio(
     if not candidatas:
         raise LookupError(
             "Sin precio para el perfil del médico: las variantes vigentes exigen "
-            "una especialidad que no posee y no hay variante sin especialidad"
+            "una especialidad que no posee y no hay variante sin especialidad",
+            sin_precio=True,
         )
 
     def _orden(fila):

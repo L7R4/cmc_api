@@ -1,4 +1,4 @@
-"""Cliente del autorizador de Nobis Salud (O.S. 402) — WSGeCROS de Gecros.
+"""Cliente del autorizador de Nobis Salud (O.S. 62) — WSGeCROS de Gecros.
 
 Nobis expone un **SOAP 1.2** cuyos métodos reciben y devuelven **XML embebido
 como string** dentro del parámetro/resultado. O sea: hay dos capas de XML — el

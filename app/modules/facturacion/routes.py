@@ -59,6 +59,14 @@ async def buscar_medicos(
     return await service.buscar_medicos(db, q, limit)
 
 
+@router.get("/medicos/todos", response_model=list[MedicoBuscarOut])
+async def listar_medicos_todos(db: AsyncSession = Depends(get_db)):
+    """Precarga completa (médicos + clínicas) para el formulario de Carga de
+    Facturación: el front la pide una sola vez al entrar y filtra en memoria en
+    vez de pegarle a `/medicos` en cada tecleo. Ver `service.listar_medicos_todos`."""
+    return await service.listar_medicos_todos(db)
+
+
 @router.get("/clinicas", response_model=list[ClinicaBuscarOut])
 async def buscar_clinicas(
     q: str = Query(..., min_length=1),
@@ -82,6 +90,20 @@ async def buscar_obras_sociales(
         cond = or_(O.NRO_OBRASOCIAL == int(q), cond)
     rows = (
         await db.execute(select(O).where(cond).limit(limit))
+    ).scalars().all()
+    return [
+        {"id": o.ID, "nro_obra_social": o.NRO_OBRASOCIAL, "nombre": o.OBRA_SOCIAL}
+        for o in rows
+    ]
+
+
+@router.get("/obras-sociales/todas")
+async def listar_obras_sociales_todas(db: AsyncSession = Depends(get_db)):
+    """Precarga completa (~140 filas) para el mismo formulario — ver
+    `/medicos/todos`."""
+    O = ObrasSociales
+    rows = (
+        await db.execute(select(O).order_by(O.OBRA_SOCIAL))
     ).scalars().all()
     return [
         {"id": o.ID, "nro_obra_social": o.NRO_OBRASOCIAL, "nombre": o.OBRA_SOCIAL}

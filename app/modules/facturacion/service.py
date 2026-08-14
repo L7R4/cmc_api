@@ -126,7 +126,20 @@ async def buscar_medicos(db: AsyncSession, q: str, limit: int) -> list[dict]:
     if q.isdigit():
         cond = or_(M.NRO_SOCIO == int(q), M.MATRICULA_PROV == int(q), cond)
     rows = list((await db.execute(select(M).where(cond).limit(limit))).scalars().all())
+    return await _medicos_con_especialidades(db, rows)
 
+
+async def listar_medicos_todos(db: AsyncSession) -> list[dict]:
+    """Precarga completa para `GET /medicos/todos`: el front de Carga de
+    Facturación trae la tabla entera una vez (~4.500 filas) y filtra en memoria,
+    en vez de un pedido por cada tecleo. Mismo shape que `buscar_medicos`, sin
+    filtro de texto ni tope de fila."""
+    M = ListadoMedico
+    rows = list((await db.execute(select(M).order_by(M.NOMBRE))).scalars().all())
+    return await _medicos_con_especialidades(db, rows)
+
+
+async def _medicos_con_especialidades(db: AsyncSession, rows: list) -> list[dict]:
     # Especialidades de cada médico (desde conceps_espec), + ids a resolver en batch.
     espec_por_medico: dict[int, list[dict]] = {}
     ids_especialidad: set[int] = set()

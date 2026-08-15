@@ -1,9 +1,14 @@
 """Reportes y Estadísticas.
 
-Un único router, para el Colegio. Exige el scope **`facturas:ver`** (hoy sólo
+Un único router, para el Colegio. Exige el scope **`reporte:leer`** (hoy sólo
 lo tiene el rol `admin`), porque cruza la facturación de TODOS los médicos:
 quién facturó más, qué códigos, contra qué obra social. Es información
 sensible entre colegas.
+
+El scope lo declara `app/auth/authz.py::SCOPES_POR_RUTA`, que es la fuente
+única de autorización. Antes estaba acá como `require_scope("facturas:ver")`,
+un código del catálogo viejo que la limpieza de `permissions` borró: nadie lo
+llevaba en el token y el módulo entero respondía 403, admin incluido.
 
 El módulo es de SOLO LECTURA: no escribe en ninguna tabla.
 """
@@ -13,7 +18,6 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth.deps import require_scope
 from app.db.database import get_db
 from app.modules.reportes import service
 from app.modules.reportes.schemas import (
@@ -25,16 +29,14 @@ from app.modules.reportes.schemas import (
     ResumenOut,
 )
 
-SCOPE_REPORTES = "facturas:ver"
-
-router = APIRouter(dependencies=[Depends(require_scope(SCOPE_REPORTES))])
+router = APIRouter()  # El scope lo declara app/auth/authz.py::SCOPES_POR_RUTA.
 
 # YYYYMM. Se valida en el Query para que una cadena rara no llegue al WHERE.
 PERIODO = Query(..., min_length=6, max_length=6, pattern=r"^\d{6}$", description="YYYYMM")
 PERIODO_OPC = Query(None, min_length=6, max_length=6, pattern=r"^\d{6}$")
 
 
-# ═══════════════════════ Colegio (scope facturas:ver) ═══════════════════════
+# ═══════════════════════ Colegio (scope reporte:leer) ═══════════════════════
 
 @router.get("/resumen", response_model=ResumenOut)
 async def resumen(

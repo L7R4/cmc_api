@@ -19,7 +19,14 @@ Dos familias:
 import pytest
 from sqlalchemy import text
 
-from app.auth.authz import MAQUINA, SCOPES_POR_RUTA, SOLO_AUTENTICADO
+from app.auth.authz import (
+    MAQUINA,
+    SCOPES_POR_RUTA,
+    SOLO_AUTENTICADO,
+    TODOS,
+    _alcanza,
+    _Todos,
+)
 from app.auth.public import PUBLIC_ROUTES
 from app.auth.scopes import CRITICOS, DESCRIPCIONES, ROLES, ROLES_OBSOLETOS, Scope
 
@@ -137,13 +144,53 @@ def test_las_alternativas_de_scope_son_del_catalogo():
             continue
         if not all(isinstance(s, Scope) for s in req):
             malos.append(f"{metodo} {ruta}: la tupla tiene algo que no es Scope")
-        if len(req) > 2:
+        # Un `TODOS(...)` restringe en vez de aflojar, así que la cota de dos no
+        # le aplica: pedir tres permisos a la vez no debilita nada.
+        if not isinstance(req, _Todos) and len(req) > 2:
             malos.append(f"{metodo} {ruta}: {len(req)} scopes alternativos, revisar")
     assert not malos, "\n".join(malos)
 
 
+def test_todos_exige_todos_y_la_tupla_pelada_cualquiera():
+    """`TODOS(A, B)` es Y; `(A, B)` es O.
+
+    Las dos formas son tuplas y se distinguen solo por el tipo, así que un
+    `isinstance(req, tuple)` en el orden equivocado dentro de `_alcanza`
+    convertiría silenciosamente todos los Y en O — que es exactamente el error
+    que aflojaría `GET /api/deducciones/export` sin que se note en el diff.
+    """
+    a, b = Scope.DEDUCCION_LEER, Scope.EXPORT_GENERAR
+
+    assert _alcanza(TODOS(a, b), [a, b])
+    assert not _alcanza(TODOS(a, b), [a])
+    assert not _alcanza(TODOS(a, b), [b])
+
+    assert _alcanza((a, b), [a])
+    assert _alcanza((a, b), [b])
+    assert not _alcanza((a, b), [])
+
+    assert _alcanza(a, [a])
+    assert not _alcanza(a, [b])
+
+
+def test_el_export_de_deducciones_exige_los_dos_permisos():
+    """Vuelca el histórico completo sin paginar: no alcanza con `export:generar`."""
+    req = SCOPES_POR_RUTA[("GET", "/api/deducciones/export")]
+    assert isinstance(req, _Todos), "tiene que ser TODOS(...), no una tupla pelada"
+    assert set(req) == {Scope.DEDUCCION_LEER, Scope.EXPORT_GENERAR}
+
+
 def test_convencion_de_nombres():
-    """`<recurso>:<accion>`, recurso en singular y acción del conjunto cerrado."""
+    """`<recurso>:<accion>`, recurso en singular y acción del conjunto cerrado.
+
+    Se exceptúan los códigos que **no son nuestros**: los lee el front legacy
+    por su nombre literal, así que renombrarlos para que entren en la
+    convención rompe PHP que no está en este repo. Ver `Scope.SYSTEM_NEW_ACCESS`.
+    """
+    # Códigos heredados que el front legacy consume por nombre. La lista sólo
+    # debería achicarse, y sólo cuando el legacy deje de mirarlos.
+    exentos = {Scope.SYSTEM_NEW_ACCESS}
+
     acciones_validas = {
         "leer", "crear", "editar", "eliminar",
         # específicas: operaciones irreversibles o con efecto financiero
@@ -157,6 +204,8 @@ def test_convencion_de_nombres():
     }
     malos = []
     for s in Scope:
+        if s in exentos:
+            continue
         if s.value.count(":") != 1:
             malos.append(f"{s.value}: debe tener exactamente un ':'")
             continue

@@ -65,6 +65,25 @@ SOLO_AUTENTICADO: Final = _Marca("<solo-autenticado>")
 MAQUINA: Final = _Marca("<auth-de-maquina>")
 
 
+class _Todos(tuple):
+    """Tupla con semántica **Y**: hacen falta todos los scopes, no cualquiera.
+
+    Una tupla pelada en la matriz significa "cualquiera de estos alcanza", que
+    es lo correcto para `(medico:leer, medico:leer_propio)` — dos permisos sobre
+    el mismo endpoint que se distinguen por el alcance. Pero para los exports
+    hace falta lo contrario: `export:generar` **se suma** al permiso de lectura
+    del dominio, no lo reemplaza. Sin esto, poner `export:generar` a secas en
+    `GET /api/deducciones/export` dejaba que alguien volcara el histórico
+    completo de deducciones sin tener `deduccion:leer`.
+    """
+    __slots__ = ()
+
+
+def TODOS(*scopes: Scope) -> _Todos:
+    """`TODOS(A, B)` — el usuario tiene que tener A **y** B."""
+    return _Todos(scopes)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Matriz de autorización — (método, template de ruta) → scope
 #
@@ -107,6 +126,9 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     ("DELETE", "/api/auditoria/purge"): Scope.AUDITORIA_PURGAR,
 
     # ── Sistema: exports ─────────────────────────────────────────────────────
+    # Este no lee nada de la base: recibe el JSON que el front ya tiene en
+    # pantalla y devuelve el .xlsx. `export:generar` a secas es todo lo que
+    # corresponde — no hay dominio que proteger además del formateo.
     ("POST", "/api/exports/exportar_excel_for_liquidacion"): Scope.EXPORT_GENERAR,
 
     # ── Adjuntos ─────────────────────────────────────────────────────────────
@@ -135,6 +157,10 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     ("GET", "/api/beneficios/{beneficio_id}"): Scope.BENEFICIO_GESTIONAR,
     ("PATCH", "/api/beneficios/{beneficio_id}"): Scope.BENEFICIO_GESTIONAR,
     ("DELETE", "/api/beneficios/{beneficio_id}"): Scope.BENEFICIO_GESTIONAR,
+    # La vitrina del socio, no la administración: devuelve sólo los convenios
+    # vigentes y no acepta filtros. `beneficio:gestionar` es del editor web y el
+    # rol `medico` no lo tiene — exigirlo acá dejaba la pantalla en 403.
+    ("GET", "/api/beneficios/vigentes"): SOLO_AUTENTICADO,
 
     # ── Catálogos: boletín / observaciones ───────────────────────────────────
     ("GET", "/api/boletin/observaciones"): Scope.CATALOGO_LEER,
@@ -203,6 +229,15 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     ("GET", "/api/solicitudes-cambio/{solicitud_id}"): Scope.SOLICITUD_LEER,
     ("POST", "/api/solicitudes-cambio/{solicitud_id}/approve"): Scope.SOLICITUD_RESOLVER,
     ("POST", "/api/solicitudes-cambio/{solicitud_id}/reject"): Scope.SOLICITUD_RESOLVER,
+    # `router_socio` del mismo módulo: el médico abre y consulta SUS reclamos
+    # desde "Mi perfil". No llevan scope porque el filtro es el propio token —
+    # los cuatro handlers salen de `user.NRO_SOCIO` / `user.ID` y no aceptan un
+    # id ajeno por parámetro. Es el mismo criterio que
+    # ("POST", "/api/mobile/solicitudes-cambio"), que es su gemelo en el BFF.
+    ("POST", "/api/solicitudes-cambio/"): SOLO_AUTENTICADO,
+    ("POST", "/api/solicitudes-cambio/formulario"): SOLO_AUTENTICADO,
+    ("GET", "/api/solicitudes-cambio/campos-editables"): SOLO_AUTENTICADO,
+    ("GET", "/api/solicitudes-cambio/mias"): SOLO_AUTENTICADO,
 
     # ── Médicos ──────────────────────────────────────────────────────────────
     ("GET", "/api/medicos"): Scope.MEDICO_LEER,
@@ -230,6 +265,26 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     ("POST", "/api/medicos/{medico_id}/especialidades"): Scope.MEDICO_EDITAR,
     ("PATCH", "/api/medicos/{medico_id}/especialidades/{id_colegio}"): Scope.MEDICO_EDITAR,
     ("DELETE", "/api/medicos/{medico_id}/especialidades/{id_colegio}"): Scope.MEDICO_EDITAR,
+    # Control de calidad del padrón: sólo lectura, señala legajos con problemas.
+    # Traían `require_scope("medicos:leer")` hardcodeado — un código del catálogo
+    # viejo que ya no existe en `permissions`, o sea 403 para todos, admin
+    # incluido. El scope correcto es el del padrón administrativo.
+    ("GET", "/api/medicos/auditoria/resumen"): Scope.MEDICO_LEER,
+    ("GET", "/api/medicos/auditoria/{chequeo_id}"): Scope.MEDICO_LEER,
+
+    # ── Reportes y estadísticas ──────────────────────────────────────────────
+    # Todo el módulo cruza la facturación de todos los colegiados. Traía
+    # `require_scope("facturas:ver")` a nivel router — otro código muerto del
+    # catálogo viejo. Ver la nota de Scope.REPORTE_LEER sobre por qué no reusa
+    # `facturacion:leer`.
+    ("GET", "/api/reportes/resumen"): Scope.REPORTE_LEER,
+    ("GET", "/api/reportes/codigos"): Scope.REPORTE_LEER,
+    ("GET", "/api/reportes/codigos/{codigo}/medicos"): Scope.REPORTE_LEER,
+    ("GET", "/api/reportes/medicos"): Scope.REPORTE_LEER,
+    ("GET", "/api/reportes/medicos/{nro_socio}/codigos"): Scope.REPORTE_LEER,
+    ("GET", "/api/reportes/obras-sociales"): Scope.REPORTE_LEER,
+    ("GET", "/api/reportes/prestaciones"): Scope.REPORTE_LEER,
+    ("GET", "/api/reportes/evolucion"): Scope.REPORTE_LEER,
 
     # ── Padrones ─────────────────────────────────────────────────────────────
     ("GET", "/api/padrones/catalogo"): Scope.CATALOGO_LEER,
@@ -288,7 +343,10 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     # ── Deducciones ──────────────────────────────────────────────────────────
     ("GET", "/api/deducciones/"): Scope.DEDUCCION_LEER,
     ("POST", "/api/deducciones/"): Scope.DEDUCCION_CREAR,
-    ("GET", "/api/deducciones/export"): Scope.DEDUCCION_LEER,
+    # Sí lee de la base, y sin paginación: es el histórico completo de
+    # deducciones en una sola respuesta. Por eso va con los dos permisos —
+    # `deduccion:leer` por los datos, `export:generar` por el volcado.
+    ("GET", "/api/deducciones/export"): TODOS(Scope.DEDUCCION_LEER, Scope.EXPORT_GENERAR),
     ("GET", "/api/deducciones/top-deudores"): Scope.DEDUCCION_LEER,
     ("GET", "/api/deducciones/por_pago/{pago_id}"): Scope.DEDUCCION_LEER,
     ("GET", "/api/deducciones/por_pago/{pago_id}/aplicadas"): Scope.DEDUCCION_LEER,
@@ -485,13 +543,18 @@ def scope_requerido(metodo: str, ruta: str) -> Scope | tuple[Scope, ...] | _Marc
 
 
 def _alcanza(requerido: Scope | tuple[Scope, ...], scopes: list[str]) -> bool:
-    """Un scope, o cualquiera de una tupla."""
+    """Un scope, todos los de un `TODOS(...)`, o cualquiera de una tupla pelada."""
+    # `_Todos` hereda de tuple: el orden de los `isinstance` importa.
+    if isinstance(requerido, _Todos):
+        return all(s in scopes for s in requerido)
     if isinstance(requerido, tuple):
         return any(s in scopes for s in requerido)
     return requerido in scopes
 
 
 def _nombre(requerido: Scope | tuple[Scope, ...]) -> str:
+    if isinstance(requerido, _Todos):
+        return " y ".join(s.value for s in requerido)
     if isinstance(requerido, tuple):
         return " o ".join(s.value for s in requerido)
     return str(requerido)

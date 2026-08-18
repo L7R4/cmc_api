@@ -105,6 +105,13 @@ LECTURA_MEDICO: Final = (Scope.MEDICO_LEER, Scope.MEDICO_LEER_PROPIO)
 LECTURA_PADRON: Final = (Scope.PADRON_LEER, Scope.MEDICO_LEER_PROPIO)
 LECTURA_DOCUMENTOS: Final = (Scope.MEDICO_DOCUMENTO, Scope.MEDICO_LEER_PROPIO)
 
+# Facturación: la administrativa (cualquier médico) y la propia (solo el del
+# token). **Solo se usa en rutas donde el handler realmente acota**, o sea las
+# que llaman a `socio_objetivo()` / `filtro_socio()`, más los punteros de
+# período, que no exponen datos de nadie. Poner esta tupla en una ruta que no
+# filtra le abre al socio la facturación de todos los colegas.
+LECTURA_FACTURACION: Final = (Scope.FACTURACION_LEER, Scope.FACTURACION_LEER_PROPIO)
+
 SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     # ── Sistema: RBAC ────────────────────────────────────────────────────────
     ("GET", "/api/admin/rbac/permissions"): Scope.RBAC_GESTIONAR,
@@ -385,13 +392,19 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     ("GET", "/api/facturacion/obras-sociales/todas"): Scope.CATALOGO_LEER,
     ("GET", "/api/facturacion/nomenclador"): Scope.NOMENCLADOR_LEER,
     ("GET", "/api/facturacion/nomenclador/precio"): Scope.NOMENCLADOR_LEER,
-    ("GET", "/api/facturacion/medico/{nro_socio}/codigos-habilitados"): Scope.FACTURACION_LEER,
-    ("POST", "/api/facturacion/medico/prestaciones"): Scope.FACTURACION_CARGAR,
+    # `socio_objetivo()`: el {nro_socio} del path se valida contra el del token.
+    ("GET", "/api/facturacion/medico/{nro_socio}/codigos-habilitados"): LECTURA_FACTURACION,
+    # Carga del **médico** desde el portal (actor=ORIGEN_MEDICO), no del
+    # circuito administrativo. Va con el permiso del prestador: el rol
+    # `medico` ya no lleva `facturacion:cargar`, que además habilitaba editar
+    # y borrar prestaciones de cualquiera.
+    ("POST", "/api/facturacion/medico/prestaciones"): Scope.VALIDACION_CARGAR,
     ("GET", "/api/facturacion/facturas"): Scope.FACTURACION_LEER,
     ("GET", "/api/facturacion/facturas/{id}/detalle"): Scope.FACTURACION_LEER,
     ("POST", "/api/facturacion/facturas/complemento"): Scope.FACTURACION_COMPLEMENTAR,
     ("POST", "/api/facturacion/prestaciones-complementaria"): Scope.FACTURACION_COMPLEMENTAR,
-    ("GET", "/api/facturacion/prestaciones"): Scope.FACTURACION_LEER,
+    # `filtro_socio()`: sin `medico:leer` el filtro se fuerza al socio del token.
+    ("GET", "/api/facturacion/prestaciones"): LECTURA_FACTURACION,
     ("POST", "/api/facturacion/prestaciones"): Scope.FACTURACION_CARGAR,
     ("GET", "/api/facturacion/prestaciones/recientes"): Scope.FACTURACION_LEER,
     ("PATCH", "/api/facturacion/prestaciones/revisado"): Scope.FACTURACION_CARGAR,
@@ -401,9 +414,9 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     ("POST", "/api/facturacion/cierre"): Scope.FACTURACION_CERRAR,
     ("POST", "/api/facturacion/cierre-doctor"): Scope.FACTURACION_CERRAR,
     ("GET", "/api/facturacion/cierre/preview"): Scope.FACTURACION_LEER,
-    ("GET", "/api/facturacion/periodo-activo"): Scope.FACTURACION_LEER,
-    ("GET", "/api/facturacion/periodo-colegio"): Scope.FACTURACION_LEER,
-    ("GET", "/api/facturacion/periodo-medico"): Scope.FACTURACION_LEER,
+    ("GET", "/api/facturacion/periodo-activo"): LECTURA_FACTURACION,
+    ("GET", "/api/facturacion/periodo-colegio"): LECTURA_FACTURACION,
+    ("GET", "/api/facturacion/periodo-medico"): LECTURA_FACTURACION,
     ("GET", "/api/facturacion/periodo-medico/punteros"): Scope.FACTURACION_LEER,
     ("POST", "/api/facturacion/periodo-medico/avanzar"): Scope.FACTURACION_PERIODO,
     ("POST", "/api/facturacion/periodo-medico/set"): Scope.FACTURACION_PERIODO,

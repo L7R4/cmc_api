@@ -403,6 +403,17 @@ async def anular(*, nro_autorizacion: str) -> RespuestaSancor:
 
     Igual que `autorizar`, en modo simulado no sale nada. En test/producción
     esto **da de baja la autorización en Sancor**, no sólo en nuestra base.
+
+    Devuelve la respuesta **sin interpretar el resultado de negocio**: para el
+    Z04, igual que para el Z02, quien decide si salió bien es
+    `ValidadorSancor.anular()` leyendo `codigo_resultado` / `autorizada`. Este
+    módulo sólo transporta y parsea.
+
+    Antes se le anteponía "ANULADA EN SANCOR · " al detalle acá mismo, sin
+    mirar nada — afirmaba algo que el transporte no está en condiciones de
+    saber. Con la respuesta real de Sancor test el campo quedaba
+    autocontradictorio: "ANULADA EN SANCOR · No se puede anular una
+    autorización facturada".
     """
     url, pasaporte, processing_id = _destino()
     modo = modo_actual()
@@ -413,8 +424,13 @@ async def anular(*, nro_autorizacion: str) -> RespuestaSancor:
     )
 
     if modo == MODO_SIMULADO:
+        # `autorizada=True` porque en simulado no hay nada que anular: se
+        # devuelve el final feliz para que el flujo de baja se pueda probar
+        # entero sin tocar Sancor. Con `False` se marcaría cada baja simulada
+        # como pendiente de anular a mano, que es justo lo contrario.
         return RespuestaSancor(
-            autorizada=False,
+            autorizada=True,
+            codigo_resultado="B000",
             estado_detalle="ANULACIÓN SIMULADA (no se consultó a Sancor)",
             modo=modo,
             enviado=mensaje,
@@ -423,7 +439,11 @@ async def anular(*, nro_autorizacion: str) -> RespuestaSancor:
     log.info("Sancor [%s] → anulación autorización=%s", modo, nro_autorizacion)
     crudo = await _postear(url, _envolver_soap(mensaje, pasaporte))
     resultado = interpretar_respuesta(crudo)
-    resultado.estado_detalle = f"ANULADA EN SANCOR · {resultado.estado_detalle}"
     resultado.modo = modo
     resultado.enviado = mensaje
+    if not resultado.autorizada:
+        log.warning(
+            "Sancor [%s] rechazó la anulación de %s: %s^%s — la autorización sigue viva allá.",
+            modo, nro_autorizacion, resultado.codigo_resultado, resultado.estado_detalle,
+        )
     return resultado

@@ -136,10 +136,27 @@ class ValidadorSancor(ValidadorOS):
         """Si la prestación tenía una autorización de Sancor, se intenta
         anularla allá (ZQA^Z04) — es lo que hace el legacy en
         `borra_atencion_colegio_sancor.php`, para que la autorización no quede
-        viva en la obra social. Si Sancor no contesta, la baja local sigue
-        igual: no hay evidencia de que ese camino funcione (ver `sancor.anular`),
-        y trabar la baja por eso sería peor que dejar una anulación pendiente
-        para hacer a mano.
+        viva en la obra social.
+
+        **La baja local nunca se bloquea**, conteste lo que conteste Sancor:
+        trabarla dejaría la prestación imposible de sacar de la factura. Lo que
+        sí cambia es qué se deja anotado, y hay tres finales distintos:
+
+        1. Sancor confirma (ZAU-3 `B*`) → anulación hecha de las dos puntas.
+        2. Sancor contesta pero **rechaza** (ZAU-3 `M*`) → la autorización sigue
+           viva allá. Se marca `pendiente_en_sancor` para que alguien la anule a
+           mano.
+        3. Sancor no contesta (`SancorError`) → no sabemos en qué quedó. Mismo
+           tratamiento que 2.
+
+        El caso 2 es el que faltaba: el transporte había funcionado, así que no
+        levantaba `SancorError`, y la respuesta se guardaba como si la baja
+        hubiera salido bien. Probado contra Sancor test el 2026-08-17: un Z04
+        sobre una autorización recién emitida vuelve con
+        `M227^No se puede anular una autorización facturada`, dentro de un
+        HTTP 200 y con `MSA|AA` — Sancor entendió el pedido y se negó. El
+        resultado de negocio vive en ZAU-3, no en el nivel de transporte ni en
+        el MSA, exactamente igual que en el Z02 de `validar()`.
         """
         if not (fila.validacion_estado == "autorizada" and fila.autorizacion):
             return None
@@ -148,14 +165,31 @@ class ValidadorSancor(ValidadorOS):
         try:
             res = await sancor.anular(nro_autorizacion=fila.autorizacion)
         except sancor.SancorError as e:
-            # A diferencia de Nobis, el camino Z04 nunca tuvo una sola respuesta
-            # verificada en producción (15 MB de log real, cero anulaciones): no
-            # hay evidencia de que funcione. Bloquear la baja acá dejaría la
-            # prestación trabada para siempre si Sancor no contesta. Se da de
-            # baja igual y se deja dicho — alguien va a tener que anularla a
-            # mano en Sancor si el token ya se consumió.
             traza["anulacion"] = {"pendiente_en_sancor": True, "motivo": str(e)}
             return Anulacion(traza=traza)
 
-        traza["anulacion"] = {"modo": res.modo, "respuesta": res.crudo}
+        if not res.autorizada:
+            # Rechazo lógico. `res.autorizada` es el prefijo `B` de ZAU-3, la
+            # misma regla con la que se clasifica una autorización.
+            #
+            # OJO — que un Z04 exitoso vuelva con `B*` es simetría con el Z02,
+            # no una confirmación: no hay una sola respuesta afirmativa a un Z04
+            # ni en las pruebas ni en los 15 MB de log real. Si aparece una con
+            # otro prefijo, ajustar acá.
+            traza["anulacion"] = {
+                "pendiente_en_sancor": True,
+                "modo": res.modo,
+                "codigo": res.codigo_resultado,
+                "motivo": res.estado_detalle,
+                "respuesta": res.crudo,
+            }
+            motivo = res.estado_detalle or f"Sancor rechazó la anulación ({res.codigo_resultado})."
+            return Anulacion(traza=traza, detalle=f"BAJA LOCAL · {motivo}"[:255])
+
+        traza["anulacion"] = {
+            "pendiente_en_sancor": False,
+            "modo": res.modo,
+            "codigo": res.codigo_resultado,
+            "respuesta": res.crudo,
+        }
         return Anulacion(traza=traza, detalle=res.estado_detalle[:255])

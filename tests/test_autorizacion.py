@@ -180,6 +180,18 @@ def test_el_export_de_deducciones_exige_los_dos_permisos():
     assert set(req) == {Scope.DEDUCCION_LEER, Scope.EXPORT_GENERAR}
 
 
+def test_contenido_leer_en_todos_los_roles():
+    """Las noticias y la publicidad del portal son para todo el que entre.
+
+    No es una consecuencia de nada: es una decisión del Colegio, y sin test se
+    pierde en cuanto alguien defina un rol nuevo copiando otro que no lo tenga.
+    Se verifica sobre `ROLES` y no sobre la base porque acá es donde se define
+    la línea de base; la base la iguala la migración `a6b7c8d9e0f1`.
+    """
+    faltan = [rol for rol, codes in ROLES.items() if Scope.CONTENIDO_LEER not in codes]
+    assert not faltan, f"Roles sin contenido:leer: {sorted(faltan)}"
+
+
 def test_convencion_de_nombres():
     """`<recurso>:<accion>`, recurso en singular y acción del conjunto cerrado.
 
@@ -284,21 +296,13 @@ async def test_solo_admin_administra_permisos(codigos_por_rol):
     )
 
 
-@pytest.mark.asyncio
-async def test_permisos_criticos_no_van_por_rol(codigos_por_rol):
-    """Los cuatro peligrosos se otorgan nominalmente por usuario.
-
-    Reescribir el tarifario completo, cambiar el CBU contra el que se paga,
-    reabrir un pago ya conciliado y borrar el rastro de auditoría. Que vayan por
-    `UserPermission.allow` deja constancia de quién puede hacer cada una.
-    """
-    malos = {
-        (rol, code)
-        for rol, codes in codigos_por_rol.items()
-        for code in codes
-        if code in {s.value for s in CRITICOS} and rol != "admin"
-    }
-    assert not malos, f"Permisos críticos otorgados por rol: {sorted(malos)}"
+# `test_permisos_criticos_no_van_por_rol` se eliminó el 2026-08-16. Exigía que
+# los cuatro de `CRITICOS` —tarifario masivo, CBU, reabrir pago, purgar
+# auditoría— no estuvieran en ningún rol salvo `admin`. El Colegio decidió lo
+# contrario: el rol trae sus permisos por defecto y el ajuste fino se hace por
+# persona con `user_permission`, que sigue pudiendo **denegar** (`allow=False`)
+# lo que el rol concede. La lista `CRITICOS` se conserva como documentación de
+# qué conviene mirar dos veces en una auditoría; ya no es una invariante.
 
 
 @pytest.mark.asyncio

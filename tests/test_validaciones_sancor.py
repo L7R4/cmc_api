@@ -357,3 +357,54 @@ def test_mensaje_anulacion_usa_prestador_del_colegio_no_matricula_del_medico():
 
     mensaje = sancor.construir_mensaje_anulacion(nro_autorizacion="1", processing_id="D")
     assert f"{settings.SANCOR_PRESTADOR}^PR" in mensaje
+
+
+# ── Respuesta al Z04 ──────────────────────────────────────────────────────────
+#
+# Capturadas contra Sancor test el 2026-08-17 anulando una autorización recién
+# emitida (nº 125225483). Es la primera respuesta verificada a un Z04: en 15 MB
+# de log real del legacy no hay ninguna, porque separaba los segmentos con
+# espacios y Sancor nunca llegó a interpretar el mensaje.
+
+ANULACION_RECHAZADA_M227 = _envolver(
+    "MSH|^~\\&amp;|SANCOR_SALUD|SANCOR_SALUD^604940^IIN|SANCOR_SALUD|SANCOR_SALUD|"
+    "20260817132959||ZPA^Z04^ZPA_Z04|4901|P|2.4|||NE|AL|ARG&#xd;"
+    "MSA|AA|26081713295525171619&#xd;"
+    "ZAU||125225483|M227^No se puede anular una autorizaci\xf3n facturada&#xd;"
+    "PRD|PS^Prestador Solicitante|UNKNOWN^UNKNOWN|||||46632^PR&#xd;"
+    "PID|1|null|||UNKNOWN^UNKNOWN||00000000|U&#xd;"
+    "IN1|1||604940&#xd;ZIN|N&#xd;"
+)
+
+
+def test_anulacion_rechazada_no_se_lee_como_exitosa():
+    """`MSA|AA` dice "entendí el mensaje", no "lo hice". El resultado de
+    negocio está en ZAU-3, igual que en el Z02: `M227` es un rechazo, y la
+    autorización sigue viva en Sancor.
+
+    Antes esto entraba por el camino feliz —el transporte había funcionado, así
+    que no levantaba `SancorError`— y la baja se guardaba como confirmada.
+    """
+    r = sancor.interpretar_respuesta(ANULACION_RECHAZADA_M227)
+    assert r.autorizada is False
+    assert r.codigo_resultado == "M227"
+    assert "No se puede anular" in r.estado_detalle
+    # Sin el prefijo que `cliente.anular()` pegaba sin mirar nada: el detalle
+    # tiene que ser lo que dijo Sancor, no una conclusión del transporte.
+    assert not r.estado_detalle.startswith("ANULADA EN SANCOR")
+
+
+def test_anulacion_confirmada_se_lee_como_exitosa():
+    """Contracara del anterior. No hay una respuesta afirmativa real relevada:
+    se asume el prefijo `B` por simetría con el Z02 (ver la nota en
+    `ValidadorSancor.anular`)."""
+    r = sancor.interpretar_respuesta(
+        _envolver(
+            "MSH|^~\\&amp;|SANCOR_SALUD|SANCOR_SALUD^604940^IIN|SANCOR_SALUD|SANCOR_SALUD|"
+            "20260817133000||ZPA^Z04^ZPA_Z04|4902|P|2.4|||NE|AL|ARG&#xd;"
+            "MSA|AA|26081713300025171620&#xd;"
+            "ZAU||125225483|B000^ANULADA&#xd;"
+        )
+    )
+    assert r.autorizada is True
+    assert r.codigo_resultado == "B000"

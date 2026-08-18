@@ -51,6 +51,13 @@ class Scope(StrEnum):
     LIQUIDACION_LEER = "liquidacion:leer"
     LIQUIDACION_CREAR = "liquidacion:crear"
     LIQUIDACION_ELIMINAR = "liquidacion:eliminar"
+    # La contracara de LIQUIDACION_LEER para el socio: su propia liquidación en
+    # "Mi perfil". **Todavía no gatea ningún endpoint** — la API no tiene hoy un
+    # "mi liquidación"; se da de alta para que el front lo tenga disponible
+    # cuando exista, igual que se hizo con PANEL_INGRESAR. Cuando ese endpoint
+    # se escriba, va a la matriz como tupla junto a LIQUIDACION_LEER y el
+    # handler acota con ownership, no la matriz.
+    LIQUIDACION_LEER_PROPIO = "liquidacion:leer_propio"
 
     # ── Financiero: deducciones y descuentos ──────────────────────────────────
     DEDUCCION_LEER = "deduccion:leer"
@@ -78,6 +85,16 @@ class Scope(StrEnum):
     # Mover el puntero de período afecta a todos los médicos a la vez.
     FACTURACION_PERIODO = "facturacion:periodo"
     FACTURACION_COMPLEMENTAR = "facturacion:complementar"
+    # La contracara de FACTURACION_LEER para el socio. Antes el rol `medico`
+    # llevaba `facturacion:leer` a secas y lo que lo acotaba a lo propio era
+    # `ownership.filtro_socio()`, o sea el mismo scope significaba dos cosas
+    # distintas según quién lo tuviera. Ahora el alcance se lee en el token.
+    #
+    # **Solo va en rutas con control de propiedad efectivo.** `GET /facturas`,
+    # `/prestaciones/{id}` y `/prestaciones/recientes` NO lo llevan: no reciben
+    # el usuario, así que no filtran por socio, y dárselo al médico ahí sería
+    # abrirle la facturación de todos los colegas.
+    FACTURACION_LEER_PROPIO = "facturacion:leer_propio"
 
     # El permiso base del médico prestador.
     VALIDACION_CARGAR = "validacion:cargar"
@@ -160,15 +177,22 @@ class Scope(StrEnum):
     SYSTEM_NEW_ACCESS = "system_new:access"
 
 
-# ── Permisos que no se otorgan por rol ───────────────────────────────────────
-# Se conceden nominalmente por usuario vía `UserPermission.allow`, que el motor
-# ya soporta. Son las cuatro operaciones más peligrosas del sistema: reescribir
-# el tarifario completo, cambiar el CBU contra el que se paga, reabrir un pago
-# ya conciliado y borrar el rastro de auditoría. Que sean nominales deja
-# constancia de quién puede hacer cada una.
+# ── Las cuatro operaciones más peligrosas ────────────────────────────────────
+# Reescribir el tarifario completo, cambiar el CBU contra el que se paga,
+# reabrir un pago ya conciliado y borrar el rastro de auditoría.
 #
-# `test_permisos_criticos_no_van_por_rol` verifica que ningún rol salvo admin
-# los tenga en la base.
+# **Hasta el 2026-08-16 no se otorgaban por rol**: iban solo por
+# `UserPermission.allow`, para que quedara constancia nominal de quién podía
+# hacer cada una. Se cambió por decisión del Colegio: el rol tiene que traer sus
+# permisos por defecto al asignarlo, y el ajuste fino se hace después sacando o
+# agregando permisos a la persona. El mecanismo de ajuste ya existe y no cambió
+# — `UserPermission.allow=False` **deniega** aunque el rol lo conceda, que es
+# como se le quita el CBU a alguien puntual sin sacarle el rol entero.
+#
+# El frozenset se conserva porque lo importa la migración `z9a0b1c2d3e4`, y
+# porque sigue siendo la lista de lo que conviene mirar dos veces en una
+# auditoría. Ya no es una invariante: `test_permisos_criticos_no_van_por_rol` se
+# eliminó junto con la regla.
 CRITICOS: frozenset[Scope] = frozenset({
     Scope.MEDICO_EDITAR_BANCARIO,
     Scope.NOMENCLADOR_MASIVO,
@@ -178,20 +202,31 @@ CRITICOS: frozenset[Scope] = frozenset({
 
 
 # ── Composición de roles ─────────────────────────────────────────────────────
-# ATENCIÓN: esto NO es la autoridad en runtime. La autorización se resuelve
-# contra MySQL en `get_effective_permission_codes()`; este dict solo genera el
-# seed de la migración y documenta la línea de base en un lugar revisable.
+# Desde el 2026-08-16 esto es la **línea de base fija** de cada rol, definida por
+# el Colegio, y la migración `a6b7c8d9e0f1` hace que `role_permission` sea
+# exactamente igual a este dict en las dos bases.
 #
-# La divergencia con `role_permission` es esperable y legítima: el módulo RBAC
-# permite ajustar roles en caliente desde la pantalla de administración. Por eso
-# no hay ningún test que exija igualdad — solo las invariantes de `CRITICOS` y
+# Sigue sin ser la autoridad en runtime: la autorización se resuelve contra MySQL
+# en `get_effective_permission_codes()`, y la pantalla de administración puede
+# mover `role_permission` en caliente. Por eso tampoco ahora hay un test de
+# igualdad — un test así se rompería la primera vez que alguien usa la pantalla,
+# que es justamente para lo que está. Lo que sí sigue habiendo es la invariante
 # de `RBAC_GESTIONAR`. Ver `docs/api/RBAC_PROPUESTA.md` §5.1 y §5.2.
+#
+# El ajuste por persona va por `user_permission`, que se resuelve encima del rol:
+# `allow=True` concede lo que el rol no da, `allow=False` deniega lo que el rol
+# sí da.
 
 _LECTURA_COMUN = {
     Scope.CATALOGO_LEER,
     Scope.CONTENIDO_LEER,
     Scope.NOMENCLADOR_LEER,
 }
+
+# `contenido:leer` va en **todos** los roles, por decisión del Colegio: las
+# noticias y la publicidad del portal son para cualquiera que entre al sistema,
+# no un módulo de un área. Si aparece un rol nuevo, tiene que llevarlo.
+# `test_contenido_leer_en_todos_los_roles` lo verifica.
 
 ROLES: dict[str, set[Scope]] = {
     # El rol de base, el más numeroso (~4.500 colegiados). Todo lo que ve está
@@ -207,34 +242,50 @@ ROLES: dict[str, set[Scope]] = {
     # mismos endpoints acotados a su propia fila.
     "medico": {
         Scope.MEDICO_LEER_PROPIO,
+        # Los dos "propio" reemplazan al `facturacion:leer` a secas que llevaba
+        # antes: el alcance ahora se lee en el token y no depende de que el
+        # handler se acuerde de llamar a ownership.
+        Scope.FACTURACION_LEER_PROPIO,
+        Scope.LIQUIDACION_LEER_PROPIO,
+        # Es el permiso del prestador: le abre /api/validaciones/* completo y la
+        # carga del portal (POST /api/facturacion/medico/prestaciones). Sustituye
+        # a FACTURACION_CARGAR, que además le habilitaba editar y borrar
+        # prestaciones del circuito administrativo.
         Scope.VALIDACION_CARGAR,
-        Scope.FACTURACION_LEER,
-        Scope.FACTURACION_CARGAR,
-        Scope.PADRON_LEER,
         *_LECTURA_COMUN,
     },
 
-    # Carga administrativa. No lleva FACTURACION_PERIODO (mueve el puntero de
-    # todos los médicos) ni nada financiero.
+    # Carga administrativa. Lleva FACTURACION_PERIODO (mueve el puntero de todos
+    # los médicos) y el mantenimiento del nomenclador y los catálogos.
     "facturador": {
         Scope.MEDICO_LEER,
+        Scope.MEDICO_EDITAR,
+        Scope.MEDICO_EDITAR_BANCARIO,
         Scope.MEDICO_DOCUMENTO,
-        Scope.PADRON_LEER,
-        Scope.PADRON_EDITAR,
         Scope.FACTURACION_LEER,
         Scope.FACTURACION_CARGAR,
         Scope.FACTURACION_CERRAR,
+        Scope.FACTURACION_PERIODO,
         Scope.FACTURACION_COMPLEMENTAR,
         # Carga validaciones en nombre de un médico (selector de socio en
         # Validaciones). Ya tenía MEDICO_LEER, que es lo que exige
         # `ownership.socio_objetivo` para pedir la matrícula de otro.
         Scope.VALIDACION_CARGAR,
-        Scope.SOLICITUD_LEER,
-        *_LECTURA_COMUN,
+        Scope.NOMENCLADOR_LEER,
+        Scope.NOMENCLADOR_EDITAR,
+        Scope.NOMENCLADOR_ELIMINAR,
+        Scope.NOMENCLADOR_MASIVO,
+        Scope.CATALOGO_LEER,
+        Scope.CATALOGO_EDITAR,
+        Scope.EXPORT_GENERAR,
+        # Ve el padrón por obra social, no lo edita: `padron:editar` sigue
+        # siendo de `admin`.
+        Scope.PADRON_LEER,
+        Scope.CONTENIDO_LEER,
     },
 
-    # Arma la liquidación; no la sella ni la revierte. Sin PAGO_CERRAR,
-    # PAGO_REABRIR ni RECIBO_ANULAR.
+    # Arma, sella y revierte la liquidación: lleva PAGO_CERRAR, PAGO_REABRIR y
+    # RECIBO_ANULAR. Sin PAGO_ELIMINAR, que queda solo en `admin`.
     "liquidador": {
         Scope.LIQUIDACION_LEER,
         Scope.LIQUIDACION_CREAR,
@@ -245,16 +296,34 @@ ROLES: dict[str, set[Scope]] = {
         Scope.LOTE_ELIMINAR,
         Scope.LOTE_REFACTURAR,
         Scope.DEDUCCION_LEER,
+        Scope.DEDUCCION_CREAR,
+        Scope.DEDUCCION_EDITAR,
+        Scope.DEDUCCION_ELIMINAR,
         Scope.DEDUCCION_APLICAR,
+        Scope.DESCUENTO_LEER,
+        Scope.DESCUENTO_CREAR,
+        Scope.DESCUENTO_EDITAR,
+        Scope.DESCUENTO_ELIMINAR,
+        Scope.PAGO_LEER,
+        Scope.PAGO_CREAR,
+        Scope.PAGO_EDITAR,
+        Scope.PAGO_CERRAR,
+        Scope.PAGO_REABRIR,
         Scope.RECIBO_LEER,
         Scope.RECIBO_EMITIR,
-        Scope.PAGO_LEER,
-        Scope.FACTURACION_LEER,
-        Scope.FACTURACION_PERIODO,
+        Scope.RECIBO_ANULAR,
         Scope.MEDICO_LEER,
-        Scope.PADRON_LEER,
+        Scope.MEDICO_EDITAR,
+        Scope.MEDICO_EDITAR_BANCARIO,
+        Scope.MEDICO_DOCUMENTO,
+        # No estaba en la lista del Colegio y se agrega igual: sin esto se
+        # rompe el botón "Exportar" de Deducciones, porque
+        # `GET /api/deducciones/export` pide `deduccion:leer` **y**
+        # `export:generar`. Decir "el liquidador gestiona deducciones" y no
+        # dejarlo exportarlas no era la intención.
         Scope.EXPORT_GENERAR,
-        *_LECTURA_COMUN,
+        Scope.PADRON_LEER,
+        Scope.CONTENIDO_LEER,
     },
 
     # El rol `contador` se eliminó (A14). Era el único fuera de `admin` que
@@ -281,11 +350,23 @@ ROLES: dict[str, set[Scope]] = {
         Scope.CATALOGO_LEER,
     },
 
-    # Todo salvo los nominales de CRITICOS (se resuelve abajo).
-    # PANEL_INGRESAR queda afuera también: es la bandera temporal de la prueba
+    # "Administrativo: todo". Desde el 2026-08-16 incluye también los cuatro de
+    # CRITICOS, que antes quedaban afuera para otorgarse nominalmente.
+    #
+    # Siguen afuera los dos "propio", que no son permisos administrativos sino
+    # la versión acotada de otros que `admin` ya tiene enteros: dárselos no
+    # agregaría ningún acceso y sí ensuciaría el token con scopes que en un
+    # admin no significan nada.
+    #
+    # PANEL_INGRESAR también queda afuera: es la bandera temporal de la prueba
     # controlada del panel nuevo, y si `admin` la llevara, los administradores
     # dejarían de ir al legacy tras el login, que es donde hacen su trabajo real.
-    "admin": set(Scope) - CRITICOS - {Scope.PANEL_INGRESAR},
+    "admin": set(Scope) - {
+        Scope.PANEL_INGRESAR,
+        Scope.MEDICO_LEER_PROPIO,
+        Scope.FACTURACION_LEER_PROPIO,
+        Scope.LIQUIDACION_LEER_PROPIO,
+    },
 }
 
 
@@ -357,6 +438,7 @@ DESCRIPCIONES: dict[Scope, str] = {
     Scope.LIQUIDACION_LEER: "Ver liquidaciones por obra social",
     Scope.LIQUIDACION_CREAR: "Crear liquidaciones por obra social",
     Scope.LIQUIDACION_ELIMINAR: "Eliminar liquidaciones por obra social",
+    Scope.LIQUIDACION_LEER_PROPIO: "Ver únicamente la liquidación propia",
     Scope.DEDUCCION_LEER: "Ver deducciones, export y top de deudores",
     Scope.DEDUCCION_CREAR: "Crear deducciones",
     Scope.DEDUCCION_EDITAR: "Editar deducciones",
@@ -376,6 +458,7 @@ DESCRIPCIONES: dict[Scope, str] = {
     Scope.FACTURACION_CERRAR: "Cerrar el período de facturación",
     Scope.FACTURACION_PERIODO: "Mover el puntero de período (afecta a todos los médicos)",
     Scope.FACTURACION_COMPLEMENTAR: "Emitir facturas y prestaciones complementarias",
+    Scope.FACTURACION_LEER_PROPIO: "Ver únicamente la facturación y prestaciones propias",
     Scope.VALIDACION_CARGAR: "Validar y cargar prestaciones contra obras sociales",
     Scope.REPORTE_LEER: "Ver reportes y estadísticas de facturación de todo el Colegio",
     Scope.NOMENCLADOR_LEER: "Ver nomenclador, galenos, valores y homologador",

@@ -47,10 +47,7 @@ limpieza manual de la tabla dejó a medio camino. Cinco cosas, todas idempotente
 
   4. **Lo que le falta a cada rol** según `ROLES`:
 
-       * `admin` ← `medico:leer_propio` (sólo en dev; en la práctica no cambia
-         nada porque `admin` ya tiene `medico:leer`, que es el permiso ancho,
-         pero deja el diff DB↔código en cero), `reporte:leer` y
-         `system_new:access`.
+       * `admin` ← `reporte:leer` y `system_new:access`.
        * `facturador` ← `validacion:cargar` (sólo en producción). El rol carga
          validaciones en nombre de un médico desde la pantalla de Validaciones
          y ya tiene `medico:leer`, que es lo que `ownership.socio_objetivo`
@@ -117,7 +114,6 @@ DESASIGNAR = (("admin", "auditoria:purgar"),)
 # (rol, código) que hay que agregar. Cubre lo que le falta a dev, a producción o
 # a las dos — el INSERT ... SELECT es idempotente y no hace nada si ya está.
 ASIGNAR = (
-    ("admin", "medico:leer_propio"),
     ("admin", Scope.REPORTE_LEER.value),
     ("admin", Scope.SYSTEM_NEW_ACCESS.value),
     ("facturador", Scope.VALIDACION_CARGAR.value),

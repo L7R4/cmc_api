@@ -179,6 +179,19 @@ def _autorizar(relativa: Path, user: dict) -> None:
             raise HTTPException(403, f"Falta el permiso '{Scope.CATALOGO_LEER}'")
         return
 
+    if seccion == "planillas":
+        # uploads/planillas/<nombre>.pdf — las planillas de consulta que el
+        # Colegio publica para todos los colegiados. No tienen dueño: son
+        # material publicado, y lo ve quien puede leer contenido, el mismo
+        # scope que exige `GET /api/planillas/`.
+        #
+        # No van en PUBLICOS: el legacy las servía sin login desde la raíz del
+        # sitio, pero eso era una consecuencia de dónde estaba el archivo, no
+        # una decisión. Acá quedan detrás del token como el resto del portal.
+        if Scope.CONTENIDO_LEER not in scopes:
+            raise HTTPException(403, f"Falta el permiso '{Scope.CONTENIDO_LEER}'")
+        return
+
     if seccion == "facturas":
         # uploads/facturas/{FacturacionCMC.id_prestaciones}/comprobante
         #

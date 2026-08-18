@@ -4,6 +4,9 @@ from app.modules.nomenclador.routes_nomenclador import router as nomenclador_rou
 from app.modules.nomenclador.routes_homologador import router as homologador_router
 from app.modules.nomenclador.routes_galenos import router as galenos_router
 from app.modules.nomenclador.routes_valores import router as valores_nm_router
+from app.modules.nomenclador.routes_valores_documentos import (
+    router as valores_nm_documentos_router,
+)
 from app.modules.nomenclador.routes_reportes import router as reportes_nm_router
 
 from app.modules.archivos.routes import router as archivos_router
@@ -30,6 +33,7 @@ from app.modules.lotes.routes import router as lotes_router
 from app.modules.medicos.routes import router as medicos_router
 from app.modules.padrones.routes import router as padrones_router
 from app.modules.pagos.routes import router as pagos_router
+from app.modules.planillas.routes import router as planillas_router
 from app.modules.rbac.routes import router as rbac_router
 from app.modules.solicitudes.routes import router as solicitudes_router
 from app.modules.solicitudes_cambio.routes import router as solicitudes_cambio_router
@@ -77,6 +81,7 @@ api_router.include_router(
 api_router.include_router(beneficios_router, prefix="/beneficios", tags=["Beneficios"])
 api_router.include_router(avisos_router, prefix="/avisos", tags=["Avisos"])
 api_router.include_router(noticias_router, prefix="/noticias", tags=["Noticias"])
+api_router.include_router(planillas_router, prefix="/planillas", tags=["Planillas de Consulta"])
 api_router.include_router(publicidades_medico_router, prefix="/publicidad-medicos", tags=["publicidad-medicos"])
 api_router.include_router(exports_router, prefix="/exports", tags=["exports"])
 # El router del socio va PRIMERO: comparte prefijo con el del Colegio y sus
@@ -98,6 +103,9 @@ api_router.include_router(archivos_router, prefix="/archivos", tags=["Archivos"]
 api_router.include_router(nomenclador_router,  prefix="/nomenclador",     tags=["Nomenclador"])
 api_router.include_router(homologador_router,  prefix="/homologador",     tags=["Homologador"])
 api_router.include_router(galenos_router,      prefix="/galenos",         tags=["Galenos"])
+# Antes que `valores_nm_router`: comparten prefijo y ese router tiene `/{id}`,
+# que le ganaría el match a `/documentos` (y respondería 422, no 404).
+api_router.include_router(valores_nm_documentos_router, prefix="/valores_nm", tags=["Valores"])
 api_router.include_router(valores_nm_router,   prefix="/valores_nm",      tags=["Valores"])
 api_router.include_router(reportes_nm_router,  prefix="/reportes_nm",     tags=["Reportes Valores"])
 

@@ -28,7 +28,7 @@ from app.modules.medicos import auditoria
 from app.core.passwords import hash_password, validate_new_password
 from sqlalchemy import case, delete, desc, func, literal, select, or_, cast, String, Integer, update
 from app.auth import sessions
-from app.auth.deps import get_current_user
+from app.auth.deps import get_current_user, require_scope
 from app.auth.ownership import medico_objetivo
 from app.core.passwords import hash_password, hash_password_inicial, validate_new_password
 from app.db.database import get_db

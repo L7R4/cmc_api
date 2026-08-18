@@ -96,7 +96,7 @@ def test_las_reglas_cubren_todos_los_subdirectorios_reales():
 
     con_regla = {
         "medicos", "validaciones", "obras_sociales",
-        "boletin_valores_eticos", "facturas",
+        "boletin_valores_eticos", "facturas", "planillas",
     } | set(PUBLICOS)
 
     raiz = Path("uploads")

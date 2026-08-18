@@ -506,3 +506,49 @@ class HistorialPrecioCodigo(Base):
         Index("ix_nm_historial_motivo", "motivo_cambio"),
         Index("ix_nm_historial_fecha_cambio", "fecha_cambio"),
     )
+
+
+class ValorDocumento(Base):
+    """Documento respaldatorio de una vigencia de valores de una obra social.
+
+    Cada actualización de valores tiene **dos registros** que hay que poder
+    mirar juntos: los precios cargados en `nm_valores` (la grilla) y el papel
+    con el que llegaron —la nota de la obra social, el Excel que mandó, el CSV
+    que se importó—. Hasta ahora sólo quedaba lo primero, y cuando alguien
+    preguntaba de dónde salía un valor de hace ocho meses no había nada que
+    mostrar.
+
+    La clave es `(obra_social_nro, vigencia_desde)` y **no** un FK a
+    `nm_valores.id`: el documento respalda la actualización entera —cientos de
+    filas de `nm_valores` que comparten `vigencia_desde`—, no un código suelto.
+    Atarlo a una fila obligaría a elegir una arbitrariamente y a perder el
+    adjunto si esa fila se borra.
+
+    Se admite más de un documento por vigencia a propósito: es habitual que la
+    OS mande la nota en PDF y la lista de precios en Excel por separado.
+    """
+    __tablename__ = "nm_valores_documentos"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    obra_social_nro: Mapped[int] = mapped_column(Integer, nullable=False)
+    # La misma fecha que agrupa las filas de nm_valores de esa actualización.
+    vigencia_desde: Mapped[datetime.date] = mapped_column(Date, nullable=False)
+    # Nombre con el que el usuario subió el archivo; es lo que se muestra.
+    nombre_original: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Ruta relativa dentro de `uploads/`. Se sirve por /api/archivos/…
+    path: Mapped[str] = mapped_column(String(300), nullable=False)
+    content_type: Mapped[str] = mapped_column(String(120), nullable=False)
+    size: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Nota opcional del operador: "addenda al convenio", "lista corregida", etc.
+    descripcion: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    # ListadoMedico.ID del usuario que lo subió, si se pudo resolver.
+    subido_por: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        # El único acceso real: "los documentos de esta OS", ordenados por
+        # vigencia. La pantalla del historial no consulta por ninguna otra cosa.
+        Index("ix_nm_valores_doc_os_vigencia", "obra_social_nro", "vigencia_desde"),
+    )

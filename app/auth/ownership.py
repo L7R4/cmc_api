@@ -133,11 +133,9 @@ def filtro_socio(
     return socio_objetivo(user, pedido, scope_admin=scope_admin)
 
 
-def puede_ver_sensible(user: dict) -> bool:
-    """Si el response debe incluir DNI, CUIT, CBU y contacto particular.
-
-    Complementa al control de propiedad: un `facturador` necesita ver el padrón
-    entero para trabajar —no puede estar acotado a lo propio— pero no necesita el
-    CBU de nadie. Sobre los datos propios siempre se devuelve todo.
-    """
-    return Scope.MEDICO_LEER_SENSIBLE in (user.get("scopes") or [])
+# `puede_ver_sensible()` se eliminó junto con `medico:leer_sensible`
+# (2026-08-15). Describía un control que no existía: la función no tenía ni un
+# llamador, así que documento, CUIT, CBU, domicilio y teléfono particular ya
+# salían en el response para cualquiera con `medico:leer`. Si vuelve a hacer
+# falta esconderlos, el lugar es el serializer del módulo de médicos — no un
+# helper que nadie invoca. Ver la nota en `Scope.MEDICO_CREAR`.

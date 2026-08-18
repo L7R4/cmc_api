@@ -35,6 +35,33 @@ class PrestacionOut(BaseModel):
     orden: Optional[str] = None
 
 
+class EntradaBase(BaseModel):
+    """Lo que toda obra social necesita sí o sí, ya validado.
+
+    Cada obra social integrada declara su propia subclase (`obras/<os>/schemas.py`)
+    con los campos y reglas de formato que le hacen falta a ella —
+    `core/entrada.py::parsear_entrada()` construye la subclase correcta a partir
+    del `PrestacionCreate` que mandó el front.
+    """
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    # El código que tipeó el médico. El que efectivamente se cotiza y se graba
+    # sale de `ResultadoValidacion.codigo` — algunas O.S. (Sancor) lo sustituyen.
+    codigo: str = Field(..., min_length=1, max_length=20)
+    cantidad: int = Field(1, ge=1, le=999)
+
+
+class EntradaManual(EntradaBase):
+    """Boreal y Omint: la obra social ya autorizó por fuera del panel, acá
+    sólo se registra el resultado."""
+
+    nombre_afiliado: str = Field("", max_length=100)
+    nro_afiliado: str = Field("", max_length=30)
+    nro_validacion: str = Field("", max_length=30)
+    coseguro: Decimal = Field(Decimal("0"), ge=0)
+
+
 class PrestacionCreate(BaseModel):
     """Alta de prestación.
 

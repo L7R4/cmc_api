@@ -1,4 +1,4 @@
-"""Cliente del autorizador de Nobis Salud (O.S. 402) — WSGeCROS de Gecros.
+"""Cliente del autorizador de Nobis Salud (O.S. 62) — WSGeCROS de Gecros.
 
 Nobis expone un **SOAP 1.2** cuyos métodos reciben y devuelven **XML embebido
 como string** dentro del parámetro/resultado. O sea: hay dos capas de XML — el
@@ -373,7 +373,7 @@ async def _postear(metodo: str, parametros: dict[str, str]) -> str:
 
 
 def _credenciales() -> dict[str, str]:
-    return {"pUsuario": settings.NOBIS_USUARIO, "pClave": settings.NOBIS_CLAVE}
+    return {"pUsuario": settings.NOBIS_USUARIO, "pClave": settings.NOBIS_CLAVE.get_secret_value()}
 
 
 async def consultar_afiliado(

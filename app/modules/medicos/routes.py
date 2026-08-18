@@ -271,22 +271,32 @@ async def listar_medicos_full(
         else:
             select_cols.append(col.label(field))
 
-    stmt = (
-        select(*select_cols)
-        .select_from(ListadoMedico)
-        .order_by(ListadoMedico.NOMBRE.asc())
-    )
+    stmt = select(*select_cols).select_from(ListadoMedico)
 
     filters = []
 
-    if q:
-        like = f"%{q.strip()}%"
+    # Orden final: siempre alfabético descendente por nombre. Si `q` es numérico,
+    # antepone un criterio de prioridad — matrícula matcheada primero, nro_socio
+    # después — para que buscar "1234" no mezcle al azar un médico por matrícula
+    # con otro que solo coincide por nro_socio.
+    order_criteria = []
+    q_stripped = q.strip() if q else ""
+    if q_stripped:
+        like = f"%{q_stripped}%"
         filters.append(or_(
             ListadoMedico.NOMBRE.ilike(like),
             cast(ListadoMedico.NRO_SOCIO, String).ilike(like),
             cast(ListadoMedico.MATRICULA_PROV, String).ilike(like),
             cast(ListadoMedico.DOCUMENTO, String).ilike(like),
         ))
+        if q_stripped.isdigit():
+            prioridad = case(
+                (cast(ListadoMedico.MATRICULA_PROV, String).ilike(like), 0),
+                (cast(ListadoMedico.NRO_SOCIO, String).ilike(like), 1),
+                else_=2,
+            )
+            order_criteria.append(prioridad.asc())
+    order_criteria.append(ListadoMedico.NOMBRE.desc())
 
     if estado:
         if estado == "activos":
@@ -445,7 +455,7 @@ async def listar_medicos_full(
     if filters:
         stmt = stmt.where(*filters)
 
-    stmt = stmt.offset(skip).limit(limit if limit is not None else 50)
+    stmt = stmt.order_by(*order_criteria).offset(skip).limit(limit if limit is not None else 50)
 
     rows = (await db.execute(stmt)).mappings().all()
     return [dict(r) for r in rows]
@@ -1635,7 +1645,6 @@ async def listar_conceptos_medico(
 
 @router.get(
     "/auditoria/resumen",
-    dependencies=[Depends(require_scope("medicos:leer"))],
     summary="Chequeos de calidad del padrón, con la cantidad de casos de cada uno",
 )
 async def auditoria_resumen(db: AsyncSession = Depends(get_db)):
@@ -1650,7 +1659,6 @@ async def auditoria_resumen(db: AsyncSession = Depends(get_db)):
 
 @router.get(
     "/auditoria/{chequeo_id}",
-    dependencies=[Depends(require_scope("medicos:leer"))],
     summary="Legajos afectados por un chequeo",
 )
 async def auditoria_detalle(

@@ -19,7 +19,14 @@ Dos familias:
 import pytest
 from sqlalchemy import text
 
-from app.auth.authz import MAQUINA, SCOPES_POR_RUTA, SOLO_AUTENTICADO
+from app.auth.authz import (
+    MAQUINA,
+    SCOPES_POR_RUTA,
+    SOLO_AUTENTICADO,
+    TODOS,
+    _alcanza,
+    _Todos,
+)
 from app.auth.public import PUBLIC_ROUTES
 from app.auth.scopes import CRITICOS, DESCRIPCIONES, ROLES, ROLES_OBSOLETOS, Scope
 
@@ -137,13 +144,65 @@ def test_las_alternativas_de_scope_son_del_catalogo():
             continue
         if not all(isinstance(s, Scope) for s in req):
             malos.append(f"{metodo} {ruta}: la tupla tiene algo que no es Scope")
-        if len(req) > 2:
+        # Un `TODOS(...)` restringe en vez de aflojar, así que la cota de dos no
+        # le aplica: pedir tres permisos a la vez no debilita nada.
+        if not isinstance(req, _Todos) and len(req) > 2:
             malos.append(f"{metodo} {ruta}: {len(req)} scopes alternativos, revisar")
     assert not malos, "\n".join(malos)
 
 
+def test_todos_exige_todos_y_la_tupla_pelada_cualquiera():
+    """`TODOS(A, B)` es Y; `(A, B)` es O.
+
+    Las dos formas son tuplas y se distinguen solo por el tipo, así que un
+    `isinstance(req, tuple)` en el orden equivocado dentro de `_alcanza`
+    convertiría silenciosamente todos los Y en O — que es exactamente el error
+    que aflojaría `GET /api/deducciones/export` sin que se note en el diff.
+    """
+    a, b = Scope.DEDUCCION_LEER, Scope.EXPORT_GENERAR
+
+    assert _alcanza(TODOS(a, b), [a, b])
+    assert not _alcanza(TODOS(a, b), [a])
+    assert not _alcanza(TODOS(a, b), [b])
+
+    assert _alcanza((a, b), [a])
+    assert _alcanza((a, b), [b])
+    assert not _alcanza((a, b), [])
+
+    assert _alcanza(a, [a])
+    assert not _alcanza(a, [b])
+
+
+def test_el_export_de_deducciones_exige_los_dos_permisos():
+    """Vuelca el histórico completo sin paginar: no alcanza con `export:generar`."""
+    req = SCOPES_POR_RUTA[("GET", "/api/deducciones/export")]
+    assert isinstance(req, _Todos), "tiene que ser TODOS(...), no una tupla pelada"
+    assert set(req) == {Scope.DEDUCCION_LEER, Scope.EXPORT_GENERAR}
+
+
+def test_contenido_leer_en_todos_los_roles():
+    """Las noticias y la publicidad del portal son para todo el que entre.
+
+    No es una consecuencia de nada: es una decisión del Colegio, y sin test se
+    pierde en cuanto alguien defina un rol nuevo copiando otro que no lo tenga.
+    Se verifica sobre `ROLES` y no sobre la base porque acá es donde se define
+    la línea de base; la base la iguala la migración `a6b7c8d9e0f1`.
+    """
+    faltan = [rol for rol, codes in ROLES.items() if Scope.CONTENIDO_LEER not in codes]
+    assert not faltan, f"Roles sin contenido:leer: {sorted(faltan)}"
+
+
 def test_convencion_de_nombres():
-    """`<recurso>:<accion>`, recurso en singular y acción del conjunto cerrado."""
+    """`<recurso>:<accion>`, recurso en singular y acción del conjunto cerrado.
+
+    Se exceptúan los códigos que **no son nuestros**: los lee el front legacy
+    por su nombre literal, así que renombrarlos para que entren en la
+    convención rompe PHP que no está en este repo. Ver `Scope.SYSTEM_NEW_ACCESS`.
+    """
+    # Códigos heredados que el front legacy consume por nombre. La lista sólo
+    # debería achicarse, y sólo cuando el legacy deje de mirarlos.
+    exentos = {Scope.SYSTEM_NEW_ACCESS}
+
     acciones_validas = {
         "leer", "crear", "editar", "eliminar",
         # específicas: operaciones irreversibles o con efecto financiero
@@ -151,9 +210,14 @@ def test_convencion_de_nombres():
         "refacturar", "periodo", "complementar", "masivo", "gestionar",
         "purgar", "generar", "resolver", "documento", "leer_sensible",
         "leer_propio", "editar_bancario",
+        # `ingresar` es de panel:ingresar, la bandera temporal de la prueba
+        # controlada del panel nuevo (ver Scope.PANEL_INGRESAR).
+        "ingresar",
     }
     malos = []
     for s in Scope:
+        if s in exentos:
+            continue
         if s.value.count(":") != 1:
             malos.append(f"{s.value}: debe tener exactamente un ':'")
             continue
@@ -232,21 +296,13 @@ async def test_solo_admin_administra_permisos(codigos_por_rol):
     )
 
 
-@pytest.mark.asyncio
-async def test_permisos_criticos_no_van_por_rol(codigos_por_rol):
-    """Los cuatro peligrosos se otorgan nominalmente por usuario.
-
-    Reescribir el tarifario completo, cambiar el CBU contra el que se paga,
-    reabrir un pago ya conciliado y borrar el rastro de auditoría. Que vayan por
-    `UserPermission.allow` deja constancia de quién puede hacer cada una.
-    """
-    malos = {
-        (rol, code)
-        for rol, codes in codigos_por_rol.items()
-        for code in codes
-        if code in {s.value for s in CRITICOS} and rol != "admin"
-    }
-    assert not malos, f"Permisos críticos otorgados por rol: {sorted(malos)}"
+# `test_permisos_criticos_no_van_por_rol` se eliminó el 2026-08-16. Exigía que
+# los cuatro de `CRITICOS` —tarifario masivo, CBU, reabrir pago, purgar
+# auditoría— no estuvieran en ningún rol salvo `admin`. El Colegio decidió lo
+# contrario: el rol trae sus permisos por defecto y el ajuste fino se hace por
+# persona con `user_permission`, que sigue pudiendo **denegar** (`allow=False`)
+# lo que el rol concede. La lista `CRITICOS` se conserva como documentación de
+# qué conviene mirar dos veces en una auditoría; ya no es una invariante.
 
 
 @pytest.mark.asyncio

@@ -101,15 +101,17 @@ class EspeCod(Base):
 
 
 class EspeCodSwiss(Base):
+    # El modelo declaraba `C_P_H_S`, que NO existe en la tabla real (rompía todo
+    # SELECT con error 1054), y le faltaba `ID_ESPE`. Las columnas reales son las
+    # tres de abajo.
     __tablename__ = 'espe_cod_swiss'
     __table_args__ = (
         Index('CODIGO', 'CODIGO'),
-        Index('C_P_H_S', 'C_P_H_S')
     )
 
     ID: Mapped[int] = mapped_column(INTEGER(11), primary_key=True)
+    ID_ESPE: Mapped[int] = mapped_column(INTEGER(11), nullable=False)
     CODIGO: Mapped[str] = mapped_column(String(8, 'utf8_spanish2_ci'), nullable=False, server_default=text("''"))
-    C_P_H_S: Mapped[str] = mapped_column(String(1, 'utf8_spanish2_ci'), nullable=False, server_default=text("'C'"))
 
 
 class GuardarIoscor(Base):

@@ -5,43 +5,50 @@ OSPM no expone ningún servicio: la validación es contra este padrón, que el
 Colegio importa periódicamente desde el CSV que manda la obra social. Sin
 padrón cargado no valida nadie.
 
-Tabla NUEVA — no confundir con `clientes_ospm`, que es la del sistema legacy
-(`importar_padron_ospm.php`) y sigue existiendo en paralelo para el PHP viejo.
-Esta no se toca desde el legacy ni al revés: se cargan por separado. Columnas en
-lower_case, como el resto de las tablas nuevas.
+Se usa **`clientes_ospm`, la tabla del sistema legacy** (la que carga
+`importar_padron_ospm.php`), no una tabla nueva: el padrón es uno solo y tenerlo
+duplicado significaba que el PHP viejo y la API pudieran validar contra padrones
+distintos. Por eso las columnas están en UPPER_CASE y con los tipos originales
+—`DU` varchar(8), `AFILIADO` varchar(30)—, que el importador respeta.
 """
-import datetime
-from typing import Optional
-
-from sqlalchemy import DateTime, Index, Integer, String
+from sqlalchemy import Index, String
+from sqlalchemy.dialects.mysql import INTEGER
 from sqlalchemy.orm import Mapped, mapped_column
-from sqlalchemy.sql import func
 
 from app.db.base import Base
 
+# `ACTIVO` es un varchar(1) del legacy: sólo un afiliado en 'S' valida.
+OSPM_ACTIVO = "S"
+OSPM_INACTIVO = "N"
 
-class PadronOspm(Base):
-    __tablename__ = "padron_ospm"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    # DNI del afiliado — la clave con la que busca el validador. UNIQUE: el
-    # padrón trae una fila por afiliado y la importación reemplaza el lote
-    # entero, así que un duplicado es un archivo mal armado y conviene que falle.
-    documento: Mapped[str] = mapped_column(String(15), nullable=False, unique=True)
-    cuit: Mapped[Optional[str]] = mapped_column(String(15), nullable=True)
-    # El legacy recortaba a 20 al grabar la prestación; acá se guarda completo y
-    # el recorte queda donde corresponde (al escribir en detalle_facturacion).
-    nombre: Mapped[str] = mapped_column(String(120), nullable=False)
-    # Sólo un afiliado activo valida. El CSV trae 'S'/'N'; se normaliza a bool
-    # en la importación para no arrastrar el varchar(1) del legacy.
-    activo: Mapped[bool] = mapped_column(nullable=False, default=False)
-    # De qué importación vino cada fila. Permite auditar "¿con qué padrón se
-    # validó esto?" cuando la obra social discute una prestación meses después.
-    importado_at: Mapped[datetime.datetime] = mapped_column(
-        DateTime, nullable=False, server_default=func.now()
-    )
+class ClientesOspm(Base):
+    __tablename__ = "clientes_ospm"
+
+    ID: Mapped[int] = mapped_column(INTEGER(11), primary_key=True, autoincrement=True)
+    # DNI del afiliado — la clave con la que busca el validador.
+    DU: Mapped[str] = mapped_column(String(8), nullable=False)
+    CUIT: Mapped[str] = mapped_column(String(11), nullable=False)
+    # Nombre y apellido, tal como lo manda la obra social.
+    AFILIADO: Mapped[str] = mapped_column(String(30), nullable=False)
+    ACTIVO: Mapped[str] = mapped_column(String(1), nullable=False)
 
     __table_args__ = (
-        # El validador busca por documento y filtra por activo.
-        Index("ix_padron_ospm_documento_activo", "documento", "activo"),
+        # El validador busca por documento; el índice de AFILIADO ya viene del legacy.
+        Index("ix_clientes_ospm_du", "DU"),
     )
+
+    # ── Accesores con el nombre del dominio ──────────────────────────────────
+    # El resto del módulo habla de documento/nombre/activo; estas propiedades
+    # evitan que las mayúsculas del legacy se filtren a la lógica.
+    @property
+    def documento(self) -> str:
+        return self.DU
+
+    @property
+    def nombre(self) -> str:
+        return self.AFILIADO
+
+    @property
+    def activo(self) -> bool:
+        return (self.ACTIVO or "").strip().upper() == OSPM_ACTIVO

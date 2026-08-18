@@ -49,6 +49,25 @@ MODO_PRODUCCION = "produccion"
 CATEGORIA_CONSULTA = "CON"
 CATEGORIA_OTRAS = "OTR"
 
+# Los códigos de consulta: el rango 42* completo más el 430202, que el legacy
+# clasificaba a mano.
+_PREFIJO_CONSULTA = "42"
+_CONSULTAS_EXTRA = frozenset({"430202"})
+
+
+def categoria_de_codigo(codigo: str) -> str:
+    """Categoría que espera OSPJN en `CodigoPrestacion`, derivada del código.
+
+    Se deriva y NO se guarda: la regla es una función del número (42* + 430202),
+    así que una columna en `nm_nomenclador` sería un dato duplicado que puede
+    quedar desincronizado — y encima una columna de UNA obra social dentro de la
+    tabla compartida por todas.
+    """
+    limpio = (codigo or "").strip()
+    if limpio.startswith(_PREFIJO_CONSULTA) or limpio in _CONSULTAS_EXTRA:
+        return CATEGORIA_CONSULTA
+    return CATEGORIA_OTRAS
+
 # Respuestas conocidas que NO son una validación válida. El WS las manda en
 # `Mensaje` o en `EstadoDescripcion` (ver validarjudial_1.php).
 MENSAJE_SIN_TOKEN = "No se encuentra token de autenticación"
@@ -130,7 +149,7 @@ async def _ingresar(cli: httpx.AsyncClient) -> str:
     datos = await _postear(
         cli,
         "Ingresar",
-        {"Username": settings.OSPJN_USUARIO, "Password": settings.OSPJN_PASSWORD},
+        {"Username": settings.OSPJN_USUARIO, "Password": settings.OSPJN_PASSWORD.get_secret_value()},
     )
     token = (datos.get("Token") or "").strip()
     if not token:

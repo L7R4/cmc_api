@@ -10,6 +10,7 @@ from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import func, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.common.money import quantize_money
 from app.common.files import url_archivo
 from app.common.uploads import DOCUMENTOS, validate_upload
@@ -23,6 +24,7 @@ from app.db.models import (
     NomencladorCMC,
     ObrasSociales,
     PeriodoMedicoActual,
+    Valor,
 )
 from app.modules.medicos.helpers import parse_conceps_espec
 from app.modules.nomenclador import service as service_nm
@@ -123,8 +125,37 @@ async def buscar_medicos(db: AsyncSession, q: str, limit: int) -> list[dict]:
     cond = M.NOMBRE.ilike(f"%{q}%")
     if q.isdigit():
         cond = or_(M.NRO_SOCIO == int(q), M.MATRICULA_PROV == int(q), cond)
-    rows = list((await db.execute(select(M).where(cond).limit(limit))).scalars().all())
+    # NOMBRE es obligatorio en la respuesta (MedicoBuscarOut.nombre: str). Hay
+    # filas legacy con NOMBRE NULL (dato incompleto, no un médico usable en un
+    # selector) que igual pueden calzar por NRO_SOCIO/MATRICULA — sin este
+    # filtro, buscar exactamente ese número tira un 500 de validación.
+    rows = list(
+        (await db.execute(select(M).where(cond, M.NOMBRE.isnot(None)).limit(limit)))
+        .scalars()
+        .all()
+    )
+    return await _medicos_con_especialidades(db, rows)
 
+
+async def listar_medicos_todos(db: AsyncSession) -> list[dict]:
+    """Precarga completa para `GET /medicos/todos`: el front de Carga de
+    Facturación trae la tabla entera una vez (~4.500 filas) y filtra en memoria,
+    en vez de un pedido por cada tecleo. Mismo shape que `buscar_medicos`, sin
+    filtro de texto ni tope de fila.
+
+    Excluye NOMBRE NULL — ver el comentario en `buscar_medicos`. Ahí un dato
+    incompleto era invisible (ningún texto/número lo matchea por accidente);
+    acá, sin filtro de texto, entraba siempre y tiraba 500 en cada carga."""
+    M = ListadoMedico
+    rows = list(
+        (await db.execute(select(M).where(M.NOMBRE.isnot(None)).order_by(M.NOMBRE)))
+        .scalars()
+        .all()
+    )
+    return await _medicos_con_especialidades(db, rows)
+
+
+async def _medicos_con_especialidades(db: AsyncSession, rows: list) -> list[dict]:
     # Especialidades de cada médico (desde conceps_espec), + ids a resolver en batch.
     espec_por_medico: dict[int, list[dict]] = {}
     ids_especialidad: set[int] = set()
@@ -646,12 +677,81 @@ async def resolver_prestador(
     )
 
 
-async def _get_nomenclador_by_codigo(db: AsyncSession, codigo: str) -> NomencladorCMC:
-    stmt = select(NomencladorCMC).where(NomencladorCMC.codigo == codigo)
-    nom = (await db.execute(stmt)).scalar_one_or_none()
+async def _get_nomenclador_by_codigo(
+    db: AsyncSession, codigo: str, obra_social_nro: int
+) -> NomencladorCMC:
+    """Código → fila del catálogo, en el contexto de una obra social.
+
+    El código no es identidad global: delega en `service_nm.resolver_nomenclador`, que
+    prefiere la fila propia de la OS sobre la compartida.
+    """
+    nom = await service_nm.resolver_nomenclador(db, codigo, obra_social_nro)
     if not nom:
         raise HTTPException(404, f"Código '{codigo}' no encontrado en el nomenclador")
     return nom
+
+
+async def buscar_nomenclador(
+    db: AsyncSession, q: str, cod_obra: str, limit: int = 20
+) -> list[dict]:
+    """Autocomplete de códigos para una obra social.
+
+    Muestra los códigos compartidos del Colegio más los propios de esa OS, y devuelve
+    la descripción con la que esa obra social nombra el código (la de su `nm_valores`
+    si la hay). Sin el contexto de la OS el autocomplete mostraba un texto y el
+    cotizador otro para el mismo código.
+    """
+    obra_social_nro = _cod_obra_to_int(cod_obra)
+    N = NomencladorCMC
+
+    # Descripción pactada con esta OS, una por código. Un mismo (OS, código) puede tener
+    # varias variantes de precio (origen/especialidad) pero todas nombran la misma
+    # práctica, así que cualquiera sirve como texto.
+    desc_os = (
+        select(
+            Valor.nomenclador_id.label("nomenclador_id"),
+            func.max(Valor.descripcion).label("descripcion"),
+        )
+        .where(
+            Valor.obra_social_nro == obra_social_nro,
+            Valor.estado == "activo",
+            Valor.descripcion.is_not(None),
+            Valor.descripcion != "",
+        )
+        .group_by(Valor.nomenclador_id)
+        .subquery()
+    )
+
+    stmt = (
+        select(N, desc_os.c.descripcion)
+        .outerjoin(desc_os, desc_os.c.nomenclador_id == N.id)
+        .where(
+            N.activo.is_(True),
+            service_nm.filtro_pertenencia(obra_social_nro),
+            or_(
+                N.codigo.ilike(f"{q}%"),
+                N.descripcion.ilike(f"%{q}%"),
+                desc_os.c.descripcion.ilike(f"%{q}%"),
+            ),
+        )
+        # La fila propia de la OS antes que la compartida, para el dedupe de abajo.
+        .order_by(N.obra_social_key.desc(), N.codigo)
+        .limit(limit * 2)
+    )
+
+    vistos: set[str] = set()
+    salida: list[dict] = []
+    for nom, descripcion_os in (await db.execute(stmt)).all():
+        if nom.codigo in vistos:
+            continue  # ya salió la fila propia de la OS para este código
+        vistos.add(nom.codigo)
+        salida.append({
+            "codigo": nom.codigo,
+            "descripcion": descripcion_os or nom.descripcion,
+        })
+        if len(salida) >= limit:
+            break
+    return salida
 
 
 # ── Resolución de precio — wrapper sobre lookup_precio ───────────────────────
@@ -669,13 +769,23 @@ async def resolver_precio(
     Falta de precio / habilitación / fecha / vía no aplicable → admitido=False + motivo.
     """
     obra_social_nro = _cod_obra_to_int(cod_obra)
-    nomenclador = await _get_nomenclador_by_codigo(db, codigo)
+    nomenclador = await _get_nomenclador_by_codigo(db, codigo, obra_social_nro)
 
     try:
         out = await service_nm.lookup_precio(
             nomenclador.id, obra_social_nro, fecha, medico.ID, db, via=via,
         )
     except PrecioLookupError as e:
+        # CARGA_SIN_PRECIO sólo perdona la falta de precio (e.sin_precio) — no
+        # habilitación, fecha inválida ni vía no aplicable, que siguen rechazando
+        # igual. Admitido=True con montos en 0 para que la carga siga su curso
+        # normal (mismo camino que un código "por presupuesto").
+        if settings.CARGA_SIN_PRECIO and e.sin_precio:
+            return PrecioResponse(
+                admitido=True, motivo=e.message,
+                honorarios=Decimal("0"), gastos=Decimal("0"), ayudante=Decimal("0"),
+                descripcion="", fuente=FUENTE_PRECIO, via=via,
+            )
         return PrecioResponse(
             admitido=False, motivo=e.message,
             honorarios=Decimal("0"), gastos=Decimal("0"), ayudante=Decimal("0"),
@@ -702,6 +812,7 @@ async def resolver_precio(
         snapshot=[c.model_dump(mode="json") for c in out.componentes],
         admitido=True,
         por_presupuesto=out.por_presupuesto,
+        requiere_autorizacion=out.requiere_autorizacion,
         cantidad_ayudantes=cantidad_ayudantes,
         via=out.via,
         nivel_cotizado=out.nivel_cotizado,
@@ -720,13 +831,92 @@ async def codigos_habilitados_medico(
 
 # ── Tope de ayudantes por (código, OS) ───────────────────────────────────────
 # ── Categorización (`tipo`) ──────────────────────────────────────────────────
-async def _get_categoria(db: AsyncSession, codigo: str) -> Optional[str]:
-    stmt = select(NomencladorCMC.categoria).where(NomencladorCMC.codigo == codigo)
-    return (await db.execute(stmt)).scalar_one_or_none()
+async def _get_categoria(
+    db: AsyncSession, codigo: str, cod_obra: Optional[str]
+) -> Optional[str]:
+    """Categoría del código para una obra social.
+
+    Precedencia: el override de `nm_valores.categoria` de esa OS > la del catálogo.
+    Con el catálogo compartido la categoría era única para todas las obras sociales, y
+    de ella dependen el `tipo` de la prestación y el forzado de gastos a 0: la misma
+    práctica puede ser 'Practica' para una OS y 'Honorarios individuales' para otra.
+    """
+    obra_social_nro = _cod_obra_to_int(cod_obra) if cod_obra else None
+    nom = await service_nm.resolver_nomenclador(db, codigo, obra_social_nro)
+    if nom is None:
+        return None
+
+    valor = None
+    if obra_social_nro is not None:
+        valor = (
+            await db.execute(
+                select(Valor)
+                .where(
+                    Valor.obra_social_nro == obra_social_nro,
+                    Valor.nomenclador_id == nom.id,
+                    Valor.estado == "activo",
+                    Valor.categoria.is_not(None),
+                    Valor.categoria != "",
+                )
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+    return service_nm.categoria_efectiva(valor, nom)
+
+
+# ── Autorización previa de la obra social ────────────────────────────────────
+MOTIVO_REQUIERE_AUTORIZACION = "Requiere autorización. Gestionar con obra social"
+
+
+async def _requiere_autorizacion(
+    db: AsyncSession, codigo: str, cod_obra: Optional[str]
+) -> bool:
+    """¿Este código, para esta obra social, necesita autorización previa?
+
+    Override de `nm_valores.requiere_autorizacion` > default del catálogo
+    (ver service_nm.requiere_autorizacion_efectiva).
+    """
+    obra_social_nro = _cod_obra_to_int(cod_obra) if cod_obra else None
+    nom = await service_nm.resolver_nomenclador(db, codigo, obra_social_nro)
+    if nom is None:
+        return False
+
+    valor = None
+    if obra_social_nro is not None:
+        valor = (
+            await db.execute(
+                select(Valor)
+                .where(
+                    Valor.obra_social_nro == obra_social_nro,
+                    Valor.nomenclador_id == nom.id,
+                    Valor.estado == "activo",
+                    Valor.requiere_autorizacion.is_not(None),
+                )
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+    return service_nm.requiere_autorizacion_efectiva(valor, nom)
+
+
+async def _validar_autorizacion_medico(
+    db: AsyncSession, codigo: str, cod_obra: Optional[str], autorizacion: Optional[str]
+) -> None:
+    """Corta la carga del MÉDICO si el código exige autorización y no vino el número.
+
+    Solo aplica a `origen_carga='medico'`: del lado del Colegio se presupone que la
+    prestación ya fue autorizada y el operador puede completarla después.
+    """
+    if autorizacion and autorizacion.strip():
+        return
+    if await _requiere_autorizacion(db, codigo, cod_obra):
+        raise HTTPException(422, MOTIVO_REQUIERE_AUTORIZACION)
 
 
 async def derivar_tipo(
-    db: AsyncSession, cod_nomenclador: str, tipo_forzado: Optional[str]
+    db: AsyncSession,
+    cod_nomenclador: str,
+    tipo_forzado: Optional[str],
+    cod_obra: Optional[str] = None,
 ) -> Optional[str]:
     """`tipo` único de la prestación. Lo decide el prestador
     (`resolver_prestador`) y, si éste no fuerza nada, la `categoria` del código
@@ -736,16 +926,23 @@ async def derivar_tipo(
     prestador → 'Sanatorio'; el médico con clínica como ámbito → 'Honorarios
     individuales'.
 
+    `cod_obra` desambigua el código y habilita el override de categoría por obra
+    social; omitirlo resuelve solo contra el catálogo compartido.
+
     Nota (2026-07-31): antes el driver era `payee.es_organizacion`. Hoy el payee
     (`cod_med`) es siempre un médico y la clínica vive en `cod_clinica`.
     """
     if tipo_forzado:
         return tipo_forzado
-    return await _get_categoria(db, cod_nomenclador)
+    return await _get_categoria(db, cod_nomenclador, cod_obra)
 
 
 async def _gasto_forzado_a_cero(
-    db: AsyncSession, cod_nomenclador: str, es_sanatorio: bool, tipo_calculo: str
+    db: AsyncSession,
+    cod_nomenclador: str,
+    es_sanatorio: bool,
+    tipo_calculo: str,
+    cod_obra: Optional[str] = None,
 ) -> bool:
     """True → los gastos de la fila deben guardarse en 0.
 
@@ -758,7 +955,8 @@ async def _gasto_forzado_a_cero(
     """
     if not es_sanatorio or tipo_calculo != "A":
         return False
-    return await _get_categoria(db, cod_nomenclador) == CATEGORIA_HONORARIOS_INDIVIDUALES
+    categoria = await _get_categoria(db, cod_nomenclador, cod_obra)
+    return categoria == CATEGORIA_HONORARIOS_INDIVIDUALES
 
 
 
@@ -960,6 +1158,16 @@ async def _insertar_prestaciones(
     # (viene en la respuesta del precio); el operador puede cargar los ayudantes que
     # necesite sin bloqueo (decisión usuario 2026-07-19).
 
+    # Autorización previa: se valida TODO el payload ANTES de insertar nada —
+    # `detalle_facturacion` es MyISAM y no revierte, así que cortar en el item 3 dejaría
+    # los dos primeros escritos. Solo para el médico: del lado del Colegio se presupone
+    # que la prestación ya vino autorizada.
+    if actor == ORIGEN_MEDICO:
+        for item in items:
+            await _validar_autorizacion_medico(
+                db, item.cod_nomenclador, cod_obra, item.autorizacion
+            )
+
     ids: list[int] = []
     total_acum = Decimal("0")
     filas: list[DetalleFacturacionCMC] = []
@@ -990,14 +1198,19 @@ async def _insertar_prestaciones(
         # Sanatorio + Honorarios individuales + automático ⇒ los gastos los factura la
         # clínica: se fuerzan a 0 antes de aplicar el porcentaje.
         if await _gasto_forzado_a_cero(
-            db, item.cod_nomenclador, prestador.es_sanatorio, item.tipo_calculo
+            db, item.cod_nomenclador, prestador.es_sanatorio, item.tipo_calculo, cod_obra
         ):
             g_base = Decimal("0")
         h, g, a = _aplicar_porcentaje(h_base, g_base, a_base, item.porcentaje)
         total = calcular_importe_total(h, g, a, item.cantidad, item.sesion)
         # Importe 0 permitido: un concepto en 0 no afecta la suma de la liquidación.
 
-        tipo = await derivar_tipo(db, item.cod_nomenclador, prestador.tipo)
+        tipo = await derivar_tipo(db, item.cod_nomenclador, prestador.tipo, cod_obra)
+        # Fila del catálogo con la que se cotizó: `cod_nom` solo desambigua junto con
+        # `cod_obr` desde que el código puede ser propio de una OS.
+        nomenclador = await service_nm.resolver_nomenclador(
+            db, item.cod_nomenclador, _cod_obra_to_int(cod_obra)
+        )
 
         row = DetalleFacturacionCMC(
             calculo_snapshot=snapshot,
@@ -1009,6 +1222,7 @@ async def _insertar_prestaciones(
             cod_med_ejecutor=None,
             nro_orden="0",  # placeholder — la columna es NOT NULL; se espeja el PK abajo
             cod_nom=item.cod_nomenclador,
+            nomenclador_id=nomenclador.id if nomenclador else None,
             via=item.via,
             tipo=tipo,
             grupo_equipo_id=item.grupo_equipo_id,
@@ -1347,9 +1561,12 @@ async def listar_prestaciones(
         await db.execute(select(func.count()).select_from(M).where(*filtros))
     ).scalar_one()
 
+    # Orden por id (autoincremental) = orden de carga, no de fecha_practica —
+    # el médico puede cargar hoy una prestación de hace semanas y tiene que
+    # aparecer primera igual.
     stmt = (
         select(M).where(*filtros)
-        .order_by(M.fecha_practica.desc(), M.id_detalle_prestaciones.desc())
+        .order_by(M.id_detalle_prestaciones.desc())
         .limit(limit).offset(offset)
     )
     rows = (await db.execute(stmt)).scalars().all()
@@ -1501,6 +1718,12 @@ async def editar_prestacion(
         if src in data:
             setattr(row, dst, data[src])
 
+    # Mismo gate que en la carga, con el estado ya aplicado: si el médico cambió el
+    # código por uno que exige autorización, o borró el número, corta. El Colegio puede
+    # editar libremente (se presupone autorizada).
+    if row.origen_carga == ORIGEN_MEDICO and ({"cod_nomenclador", "autorizacion"} & data.keys()):
+        await _validar_autorizacion_medico(db, row.cod_nom, row.cod_obr, row.autorizacion)
+
     # Prestador: se reconstruye la selección tal como la habría enviado el front —
     # desde la fila si el PATCH no la toca, con lo que vino si sí. `resolver_prestador`
     # reasigna cod_med / cod_clinica / tipo_orden / tipo en los tres casos.
@@ -1534,7 +1757,12 @@ async def editar_prestacion(
 
     # Recalcular `tipo` si cambió el prestador (clínica/ámbito) o el código (su categoría).
     if cambio_prestador or "cod_nomenclador" in data:
-        row.tipo = await derivar_tipo(db, row.cod_nom, prestador.tipo)
+        row.tipo = await derivar_tipo(db, row.cod_nom, prestador.tipo, row.cod_obr)
+    if "cod_nomenclador" in data:
+        nomenclador = await service_nm.resolver_nomenclador(
+            db, row.cod_nom, _cod_obra_to_int(row.cod_obr)
+        )
+        row.nomenclador_id = nomenclador.id if nomenclador else None
 
     # Recalcular importe con el estado resultante
     tipo_calculo = row.manual or "A"
@@ -1574,7 +1802,7 @@ async def editar_prestacion(
     # Va FUERA del bloque de recotización — si no, un PATCH que no toca ningún campo de
     # precio (ej. solo `cantidad`) dejaría gastos viejos en una fila que pasó a sanatorio.
     # Forzar a 0 es idempotente y no depende del porcentaje (0 escalado sigue siendo 0).
-    if await _gasto_forzado_a_cero(db, row.cod_nom, es_sanatorio, tipo_calculo):
+    if await _gasto_forzado_a_cero(db, row.cod_nom, es_sanatorio, tipo_calculo, row.cod_obr):
         row.gastos = Decimal("0")
         row.tpo_funcion = tpo_funcion_derivado(
             row.honorarios or Decimal("0"), Decimal("0"), row.ayudante or Decimal("0")

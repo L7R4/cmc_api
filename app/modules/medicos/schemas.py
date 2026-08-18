@@ -98,6 +98,9 @@ class UserOut(BaseModel):
     nombre: Optional[str] = None
     scopes: List[str] = []
     role: Optional[str] = None
+    # `listado_medico.INGRESAR` — 'D' = médico, 'E'/'A' = personal del Colegio.
+    # El front lo usa para elegir nav y home dentro de /panel (isMedico()).
+    ingresar: Optional[str] = None
     es_organizacion: bool = False
     adherente: bool = False
     # Especialidades del médico (ID_COLEGIO_ESPE) en orden de prioridad: principal

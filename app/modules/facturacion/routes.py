@@ -59,6 +59,14 @@ async def buscar_medicos(
     return await service.buscar_medicos(db, q, limit)
 
 
+@router.get("/medicos/todos", response_model=list[MedicoBuscarOut])
+async def listar_medicos_todos(db: AsyncSession = Depends(get_db)):
+    """Precarga completa (médicos + clínicas) para el formulario de Carga de
+    Facturación: el front la pide una sola vez al entrar y filtra en memoria en
+    vez de pegarle a `/medicos` en cada tecleo. Ver `service.listar_medicos_todos`."""
+    return await service.listar_medicos_todos(db)
+
+
 @router.get("/clinicas", response_model=list[ClinicaBuscarOut])
 async def buscar_clinicas(
     q: str = Query(..., min_length=1),
@@ -89,22 +97,34 @@ async def buscar_obras_sociales(
     ]
 
 
+@router.get("/obras-sociales/todas")
+async def listar_obras_sociales_todas(db: AsyncSession = Depends(get_db)):
+    """Precarga completa (~140 filas) para el mismo formulario — ver
+    `/medicos/todos`."""
+    O = ObrasSociales
+    rows = (
+        await db.execute(select(O).order_by(O.OBRA_SOCIAL))
+    ).scalars().all()
+    return [
+        {"id": o.ID, "nro_obra_social": o.NRO_OBRASOCIAL, "nombre": o.OBRA_SOCIAL}
+        for o in rows
+    ]
+
+
 @router.get("/nomenclador")
 async def buscar_nomenclador(
     q: str = Query(..., min_length=1),
+    cod_obra: str = Query(..., description="Obra social en la que se está cargando (cod_obr)"),
     limit: int = Query(20, ge=1, le=20),
     db: AsyncSession = Depends(get_db),
 ):
-    N = NomencladorCMC
-    rows = (
-        await db.execute(
-            select(N).where(
-                N.activo.is_(True),
-                or_(N.codigo.ilike(f"{q}%"), N.descripcion.ilike(f"%{q}%")),
-            ).limit(limit)
-        )
-    ).scalars().all()
-    return [{"codigo": n.codigo, "descripcion": n.descripcion} for n in rows]
+    """Autocomplete de códigos para una obra social.
+
+    `cod_obra` es obligatorio: el mismo código puede ser una práctica del Colegio o una
+    propia de la obra social, con descripciones distintas. Devuelve los códigos
+    compartidos más los propios de esa OS, con el texto que usa esa obra social.
+    """
+    return await service.buscar_nomenclador(db, q, cod_obra, limit)
 
 
 @router.get("/medico/{nro_socio}/codigos-habilitados", response_model=list[CodigoHabilitadoOut])

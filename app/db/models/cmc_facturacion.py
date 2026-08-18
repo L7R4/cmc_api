@@ -26,6 +26,12 @@ class DetalleFacturacionCMC(Base):
     nro_orden: Mapped[Optional[str]] = mapped_column(String(30))
     cod_obr: Mapped[Optional[str]] = mapped_column(String(10))
     cod_nom: Mapped[Optional[str]] = mapped_column(String(20))
+    # Fila de nm_nomenclador con la que se cotizó la prestación. `cod_nom` dejó de ser
+    # identidad suficiente: el mismo código puede pertenecer al Colegio o ser propio de
+    # una OS (ver NomencladorCMC.obra_social_nro), así que el string solo desambigua
+    # junto con `cod_obr`. Sin FK real — la tabla es co-propiedad de CMC. NULL en las
+    # filas importadas cuyo código ya no existe en el catálogo.
+    nomenclador_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
     # Vía quirúrgica de la prestación: 'T' tradicional, 'L' laparoscópica, NULL = no
     # aplica. Reemplaza el diseño anterior de "un código por técnica" (ver
     # app/modules/nomenclador/service_vias.py). No confundir con las columnas legacy

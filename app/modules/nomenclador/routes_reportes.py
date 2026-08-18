@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.database import get_db
 from app.db.models.catalogs import ObrasSociales
 from app.db.models.nomenclador_cmc import HistorialPrecioCodigo, NomencladorCMC, Valor
-from app.modules.nomenclador import service_vias
+from app.modules.nomenclador import service, service_vias
 from app.modules.nomenclador.service import prioridad_origen
 from app.modules.nomenclador.schemas import (
     Origen,
@@ -105,11 +105,21 @@ async def boletin(
         stmt = stmt.where(HistorialPrecioCodigo.obra_social_nro == obra_social_nro)
 
     if codigo:
-        stmt_nom = select(NomencladorCMC).where(NomencladorCMC.codigo == codigo)
-        nom = (await db.execute(stmt_nom)).scalar_one_or_none()
-        if not nom:
-            raise HTTPException(404, f"Código '{codigo}' no encontrado")
-        stmt = stmt.where(HistorialPrecioCodigo.nomenclador_id == nom.id)
+        if obra_social_nro:
+            # Con OS en contexto el código resuelve a una sola fila (propia > compartida).
+            nom = await service.resolver_nomenclador(db, codigo, obra_social_nro)
+            if not nom:
+                raise HTTPException(404, f"Código '{codigo}' no encontrado")
+            stmt = stmt.where(HistorialPrecioCodigo.nomenclador_id == nom.id)
+        else:
+            # Sin OS el mismo código puede existir compartido y propio de varias obras
+            # sociales; el boletín las muestra todas en vez de elegir una arbitraria.
+            ids = (await db.execute(
+                select(NomencladorCMC.id).where(NomencladorCMC.codigo == codigo)
+            )).scalars().all()
+            if not ids:
+                raise HTTPException(404, f"Código '{codigo}' no encontrado")
+            stmt = stmt.where(HistorialPrecioCodigo.nomenclador_id.in_(ids))
 
     stmt = stmt.order_by(HistorialPrecioCodigo.obra_social_nro, HistorialPrecioCodigo.nomenclador_id)
     result = await db.execute(stmt)
@@ -122,7 +132,7 @@ async def boletin(
         items.append(BoletinItemOut(
             codigo=nom.codigo if nom else str(h.nomenclador_id),
             origen=h.origen,
-            descripcion=valor.descripcion if valor else None,
+            descripcion=service.descripcion_efectiva(valor, nom),
             nivel=valor.nivel if valor else None,
             por_presupuesto=bool(valor and valor.por_presupuesto),
             precio_total=h.precio_total,
@@ -207,7 +217,7 @@ async def tabla_valores(
             codigo=nom.codigo if nom else str(h.nomenclador_id),
             origen=h.origen,
             especialidad_id_colegio=h.especialidad_id_colegio,
-            descripcion=valor.descripcion if valor else None,
+            descripcion=service.descripcion_efectiva(valor, nom),
             nivel=valor.nivel if valor else None,
             por_presupuesto=bool(valor and valor.por_presupuesto),
             precio_total=precio_total,
@@ -224,8 +234,9 @@ async def tabla_valores(
         | (HistorialPrecioCodigo.vigencia_hasta >= fecha_ref),
     ]
     if codigo:
-        stmt_nom = select(NomencladorCMC).where(NomencladorCMC.codigo == codigo)
-        nom = (await db.execute(stmt_nom)).scalar_one_or_none()
+        # La tabla es siempre de una OS: el código resuelve a su fila propia si la
+        # tiene, y si no a la compartida.
+        nom = await service.resolver_nomenclador(db, codigo, obra_social_nro)
         if not nom:
             return []  # código inexistente → sin resultados
         base_filters.append(HistorialPrecioCodigo.nomenclador_id == nom.id)

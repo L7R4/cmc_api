@@ -40,6 +40,7 @@ from app.db.models.nomenclador_cmc import (
     NomencladorCMC,
     NomencladorEspecialidad,
 )
+from app.modules.nomenclador import service as service_nm
 from app.modules.nomenclador.routes_reportes import tabla_valores as _tabla_valores
 from app.modules.nomenclador.service import _especialidades_medico
 from app.modules.nomenclador.schemas import TablaValoresItem
@@ -172,6 +173,14 @@ async def obras_sociales(
 @router.get("/nomenclador", response_model=List[NomencladorItem])
 async def nomenclador(
     q: str = Query(..., min_length=2, description="Código o descripción a buscar"),
+    obra_social_nro: Optional[int] = Query(
+        None,
+        description=(
+            "Obra social en contexto. Con ella se incluyen los códigos propios de esa "
+            "OS y se devuelve la descripción que ella usa; sin ella, solo los códigos "
+            "compartidos del Colegio."
+        ),
+    ),
     db: AsyncSession = Depends(get_db),
     dep=Depends(get_current_user_with_scopes_and_role),
 ):
@@ -201,11 +210,20 @@ async def nomenclador(
             & vigencia_ok
         )
 
-    esp_habilitada = exists().where(
-        (NomencladorEspecialidad.nomenclador_id == NomencladorCMC.id)
-        & (NomencladorEspecialidad.especialidad_id_colegio.in_(especialidades))
-        & (NomencladorEspecialidad.activo == True)  # noqa: E712
-    )
+    # Con OS en contexto se acotan las reglas a las visibles por esa obra social
+    # (propias + compartidas). Más permisivo que el gate de cotización a propósito: acá
+    # es un listado; el rechazo fino, con precedencia, ocurre al cotizar.
+    cond_esp = [
+        NomencladorEspecialidad.nomenclador_id == NomencladorCMC.id,
+        NomencladorEspecialidad.especialidad_id_colegio.in_(especialidades),
+        NomencladorEspecialidad.activo == True,  # noqa: E712
+    ]
+    if obra_social_nro is not None:
+        cond_esp.append(or_(
+            NomencladorEspecialidad.obra_social_nro.is_(None),
+            NomencladorEspecialidad.obra_social_nro == obra_social_nro,
+        ))
+    esp_habilitada = exists().where(*cond_esp)
 
     stmt = (
         select(NomencladorCMC)
@@ -213,6 +231,9 @@ async def nomenclador(
             NomencladorCMC.activo == True,  # noqa: E712
             NomencladorCMC.codigo.contains(term)
             | NomencladorCMC.descripcion.contains(term),
+            # Códigos compartidos + los propios de la OS en contexto (ver
+            # NomencladorCMC.obra_social_nro).
+            service_nm.filtro_pertenencia(obra_social_nro),
             ~_override_vigente("inhabilita"),
             or_(
                 _override_vigente("habilita"),
@@ -220,10 +241,23 @@ async def nomenclador(
                 esp_habilitada,
             ),
         )
-        .order_by(NomencladorCMC.codigo)
-        .limit(15)
+        # La fila propia de la OS antes que la compartida, para el dedupe de abajo.
+        .order_by(NomencladorCMC.obra_social_key.desc(), NomencladorCMC.codigo)
+        .limit(30)
     )
-    return (await db.execute(stmt)).scalars().all()
+    filas = (await db.execute(stmt)).scalars().all()
+
+    # Un mismo código puede venir dos veces (compartido + propio de la OS): gana el propio.
+    vistos: set[str] = set()
+    salida: List[NomencladorCMC] = []
+    for nom in filas:
+        if nom.codigo in vistos:
+            continue
+        vistos.add(nom.codigo)
+        salida.append(nom)
+        if len(salida) >= 15:
+            break
+    return salida
 
 
 @router.get("/tabla-valores", response_model=List[TablaValoresItem])

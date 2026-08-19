@@ -19,6 +19,12 @@ class Avisos(Base):
     ARCHIVO: Mapped[str] = mapped_column(String(50, 'utf8_spanish2_ci'), nullable=False, server_default=text("'#'"))
     FECHA: Mapped[str] = mapped_column(String(10, 'utf8_spanish2_ci'), nullable=False, server_default=text("'--'"))
     EXISTE: Mapped[str] = mapped_column(String(1, 'utf8_spanish2_ci'), nullable=False, server_default=text("'S'"))
+    # A = aviso del portal legacy · P = planilla de consulta. La columna ya
+    # existía en la base (`AVISO_PLANILLA varchar(1) NOT NULL DEFAULT 'A'`) y
+    # faltaba en el modelo, así que no se podía filtrar desde la API. Es lo que
+    # discrimina las dos cosas que conviven en esta tabla; ver
+    # app/modules/planillas/routes.py.
+    AVISO_PLANILLA: Mapped[str] = mapped_column(String(1, 'utf8_spanish2_ci'), nullable=False, server_default=text("'A'"))
     AVISO: Mapped[Optional[str]] = mapped_column(LONGTEXT)
 
 

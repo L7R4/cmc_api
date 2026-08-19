@@ -214,6 +214,13 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     ("GET", "/api/noticias/{id}/documentos"): Scope.CONTENIDO_LEER,
     ("DELETE", "/api/noticias/{noticia_id}/documentos/{doc_id}"): Scope.CONTENIDO_EDITAR,
 
+    # ── Contenido: planillas de consulta ─────────────────────────────────────
+    # Las lee el médico (CONTENIDO_LEER está en _LECTURA_COMUN) y las publica
+    # quien administra contenido, igual que las noticias.
+    ("GET", "/api/planillas/"): Scope.CONTENIDO_LEER,
+    ("POST", "/api/planillas/"): Scope.CONTENIDO_EDITAR,
+    ("DELETE", "/api/planillas/{planilla_id}"): Scope.CONTENIDO_EDITAR,
+
     # ── Contenido: publicidad ────────────────────────────────────────────────
     ("GET", "/api/publicidad-medicos/"): Scope.CONTENIDO_LEER,
     ("POST", "/api/publicidad-medicos/"): Scope.CONTENIDO_EDITAR,
@@ -258,6 +265,9 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     ("POST", "/api/medicos/admin/register/{medico_id}/document"): Scope.MEDICO_DOCUMENTO,
     ("PATCH", "/api/medicos/{medico_id}/attach"): Scope.MEDICO_EDITAR,
     ("PATCH", "/api/medicos/{medico_id}/existe"): Scope.MEDICO_EDITAR,
+    # Marca un socio como organización (clínica/sanatorio/servicio). Es editar
+    # un campo del legajo, mismo scope que el resto de la edición.
+    ("PATCH", "/api/medicos/{medico_id}/organizacion"): Scope.MEDICO_EDITAR,
     ("POST", "/api/medicos/{medico_id}/reset-password"): Scope.MEDICO_EDITAR,
     ("GET", "/api/medicos/{medico_id}/conceptos"): LECTURA_PADRON,
     ("GET", "/api/medicos/{medico_id}/deuda"): LECTURA_MEDICO,
@@ -494,6 +504,11 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     ("GET", "/api/valores_nm/codigos_por_vigencia"): Scope.NOMENCLADOR_LEER,
     ("GET", "/api/valores_nm/por_vigencia"): Scope.NOMENCLADOR_LEER,
     ("POST", "/api/valores_nm/lookup"): Scope.NOMENCLADOR_LEER,
+    # Respaldo documental de cada vigencia de valores. Mismos scopes que los
+    # valores que respalda: quien puede cargar precios puede adjuntar la nota.
+    ("GET", "/api/valores_nm/documentos"): Scope.NOMENCLADOR_LEER,
+    ("POST", "/api/valores_nm/documentos"): Scope.NOMENCLADOR_EDITAR,
+    ("DELETE", "/api/valores_nm/documentos/{doc_id}"): Scope.NOMENCLADOR_EDITAR,
     ("GET", "/api/valores_nm/{id}"): Scope.NOMENCLADOR_LEER,
     ("PUT", "/api/valores_nm/{id}"): Scope.NOMENCLADOR_EDITAR,
     ("DELETE", "/api/valores_nm/{id}"): Scope.NOMENCLADOR_ELIMINAR,

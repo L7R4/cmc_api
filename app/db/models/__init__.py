@@ -46,7 +46,7 @@ from app.db.models.cmc_facturacion import (
 from app.db.models.nomenclador_cmc import (
     NomencladorCMC, NomencladorEspecialidad, MedicoCodigoHabilitado,
     Homologador, Galeno, GalenoPlantilla, Valor, ValorComponente,
-    HistorialPrecioCodigo,
+    HistorialPrecioCodigo, ValorDocumento,
 )
 
 __all__ = [
@@ -99,6 +99,6 @@ __all__ = [
     # nomenclador / valores (sistema nuevo)
     "NomencladorCMC", "NomencladorEspecialidad", "MedicoCodigoHabilitado",
     "Homologador", "Galeno", "GalenoPlantilla", "Valor", "ValorComponente",
-    "HistorialPrecioCodigo",
+    "HistorialPrecioCodigo", "ValorDocumento",
     # validaciones con obras sociales (tablas propias, no legacy)
 ]

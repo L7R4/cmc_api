@@ -265,6 +265,9 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     ("POST", "/api/medicos/admin/register/{medico_id}/document"): Scope.MEDICO_DOCUMENTO,
     ("PATCH", "/api/medicos/{medico_id}/attach"): Scope.MEDICO_EDITAR,
     ("PATCH", "/api/medicos/{medico_id}/existe"): Scope.MEDICO_EDITAR,
+    # Marca un socio como organización (clínica/sanatorio/servicio). Es editar
+    # un campo del legajo, mismo scope que el resto de la edición.
+    ("PATCH", "/api/medicos/{medico_id}/organizacion"): Scope.MEDICO_EDITAR,
     ("POST", "/api/medicos/{medico_id}/reset-password"): Scope.MEDICO_EDITAR,
     ("GET", "/api/medicos/{medico_id}/conceptos"): LECTURA_PADRON,
     ("GET", "/api/medicos/{medico_id}/deuda"): LECTURA_MEDICO,

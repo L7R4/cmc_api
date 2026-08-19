@@ -41,7 +41,8 @@ from app.modules.medicos.schemas import (
     CEAppOut, CEBundleOut, CEBundlePatchIn, CEStoreOut, ConceptRecordOut, ConceptoAplicacionOut,
     DoctorStatsPointOut, ExisteIn, MedicoBase, MedicoConceptoOut, MedicoDebtOut, MedicoDocOut,
     MedicoEspecialidadOut, MedicoListRow, MedicoDetailOut, MedicoPartialIn, MedicoUpdateIn,
-    NuevaDeudaIn, PatchCEIn, RegisterIn, RegisterOut, ResetPasswordIn, SaveContinueOut,
+    NuevaDeudaIn, OrganizacionIn, PatchCEIn, RegisterIn, RegisterOut, ResetPasswordIn,
+    SaveContinueOut,
     _coerce_existe, _coerce_sexo,
 )
 from app.services.email import send_email_resend
@@ -1433,6 +1434,34 @@ async def set_existe(medico_id: int, body: ExisteIn, db: AsyncSession = Depends(
     await db.flush()
     await db.commit()
     return {"ok": True, "medico_id": medico_id, "EXISTE": med.EXISTE}
+
+
+@router.patch("/{medico_id}/organizacion")
+async def set_organizacion(
+    medico_id: int, body: OrganizacionIn, db: AsyncSession = Depends(get_db)
+):
+    """Marca o desmarca un socio como organización (clínica, sanatorio, servicio).
+
+    Es lo que consume la pantalla `/panel/servicios`, que arma su listado con
+    `GET /api/medicos/all?es_organizacion=1`. El endpoint faltaba: el front ya
+    lo llamaba y recibía 404, así que el toggle no guardaba nada.
+
+    Va como PATCH de un solo campo —mismo criterio que `/{medico_id}/existe`— y
+    no reusando `PUT /{medico_id}`: ese espera el legajo y pisaría con `None`
+    cualquier campo que no venga, que es justo lo que no se quiere para un
+    toggle de una casilla.
+    """
+    med = await db.get(ListadoMedico, medico_id)
+    if not med:
+        raise HTTPException(404, "Médico no encontrado")
+
+    med.es_organizacion = body.es_organizacion
+    await db.commit()
+    return {
+        "ok": True,
+        "medico_id": medico_id,
+        "es_organizacion": bool(med.es_organizacion),
+    }
 
 
 @router.post("/{medico_id}/reset-password")

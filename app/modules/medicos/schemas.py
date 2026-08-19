@@ -564,6 +564,17 @@ class ExisteIn(BaseModel):
     existe: Literal["S", "N"]
 
 
+class OrganizacionIn(BaseModel):
+    """Marca/desmarca un `listado_medico` como organización (clínica, sanatorio,
+    laboratorio) en vez de un profesional individual.
+
+    Se acepta int además de bool porque el front manda 0/1: la columna es un
+    booleano en el modelo pero el resto de la app la trata como flag numérico
+    (`GET /api/medicos/all?es_organizacion=1`).
+    """
+    es_organizacion: bool
+
+
 class ResetPasswordIn(BaseModel):
     # Opcional: sin valor, la cuenta vuelve a PASSWORD_INICIAL. Es el caso
     # habitual del mostrador —"me olvidé la contraseña"— y evita que el

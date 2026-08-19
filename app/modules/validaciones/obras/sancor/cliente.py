@@ -65,19 +65,11 @@ class SancorError(Exception):
     """Falla de transporte o respuesta ininteligible del autorizador."""
 
 
-# ── Sustituciones de código por especialidad ──────────────────────────────────
-# Sancor no acepta ciertos códigos del nomenclador tal cual: según la
-# especialidad del efector hay que mandar otro. Replicado de `validarsancor_1.php`.
-#
-# OJO — inconsistencia del legacy: para 420130 + especialidad 33, la primera
-# rama del PHP manda 420351 (con 305001 comentado) y las otras tres mandan
-# 305001. Acá se unificó en 305001, que es lo que hacen 3 de las 4 ramas.
-# Si Sancor espera 420351, cambiar el valor de esta tabla.
-SUSTITUCIONES: dict[tuple[str, int], str] = {
-    ("420302", 41): "420351",
-    ("420130", 33): "305001",
-    ("070660", 16): "070715",
-}
+# Las sustituciones de código por especialidad se mudaron a
+# `obras/sancor/homologador.py`, donde el Colegio las edita a mano y donde
+# las leen tanto el alta como cualquier consulta. Acá vivían como
+# `SUSTITUCIONES` / `sustituir_codigo()`, mezcladas con el transporte, y ese
+# era justamente el motivo por el que el buscador de códigos no las aplicaba.
 
 # Códigos que Sancor no autoriza por esta vía. Unificado con el front (antes
 # 180150/180164 sólo se bloqueaban ahí, ver docs/api/validaciones/sancor.md).
@@ -110,15 +102,6 @@ PREFIJO_AUTORIZADA = "B"
 CODIGOS_ERROR_TOKEN = {"M117"}
 
 CODIGOS_PENDIENTE = {"M024", "M087", "M233", "M030", "M026", "M144"}
-
-
-def sustituir_codigo(codigo: str, especialidades: list[int]) -> tuple[str, Optional[str]]:
-    """Devuelve (código a enviar, código original si hubo sustitución)."""
-    for esp in especialidades:
-        reemplazo = SUSTITUCIONES.get((codigo, esp))
-        if reemplazo:
-            return (reemplazo, codigo)
-    return (codigo, None)
 
 
 # ── Armado del mensaje ────────────────────────────────────────────────────────
@@ -347,7 +330,16 @@ async def _postear(url: str, cuerpo: str) -> str:
     except httpx.TimeoutException as e:
         raise SancorError("Sancor no respondió a tiempo. Reintentá en unos minutos.") from e
     except httpx.HTTPError as e:
-        raise SancorError(f"No se pudo contactar al autorizador de Sancor: {e}") from e
+        # El detalle de httpx va al log, no al mensaje: `SancorError` termina
+        # como `detail` de un 502 y lo lee un médico en pantalla. Un
+        # "[SSL: CERTIFICATE_VERIFY_FAILED]" ahí no le dice nada y no puede
+        # hacer nada con eso. Para soporte queda en el log, con la excepción
+        # encadenada por el `from e`.
+        log.error("Sancor: falla de transporte contra %s — %r", url, e)
+        raise SancorError(
+            "No pudimos conectarnos con Sancor. Reintentá en unos minutos; "
+            "si sigue igual, avisá al Colegio."
+        ) from e
 
 
 async def autorizar(

@@ -385,6 +385,7 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     ("GET", "/api/facturacion/afiliados"): Scope.FACTURACION_LEER,
     ("POST", "/api/facturacion/afiliados"): Scope.FACTURACION_CARGAR,
     ("GET", "/api/facturacion/afiliados/{dni:path}"): Scope.FACTURACION_LEER,
+    ("DELETE", "/api/facturacion/afiliados/{dni:path}"): Scope.FACTURACION_CARGAR,
     ("GET", "/api/facturacion/clinicas"): Scope.FACTURACION_LEER,
     ("GET", "/api/facturacion/medicos"): Scope.FACTURACION_LEER,
     ("GET", "/api/facturacion/medicos/todos"): Scope.FACTURACION_LEER,

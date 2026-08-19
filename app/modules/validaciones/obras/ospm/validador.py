@@ -42,8 +42,14 @@ class ValidadorOspm(ValidadorOS):
 
         | Afiliado | Resultado |
         |---|---|
-        | activo | `pendiente` — el afiliado gestiona la autorización en la O.S. |
-        | inactivo | `rechazada` |
+        | activo | `rechazada` — el afiliado gestiona la autorización en la O.S. |
+        | inactivo | `rechazada` — no figura en el padrón |
+
+        Los dos desenlaces graban `rechazada` y se distinguen por el motivo. El
+        afiliado activo era `pendiente` hasta que se unificó el criterio: acá no
+        se autoriza nada, así que la prestación no se factura, y un estado
+        propio hacía leer como "en trámite" algo que el Colegio no está
+        tramitando.
 
         Que un código pueda saltearse la autorización es criterio por convenio y
         todavía no está resuelto acá, así que se toma siempre el caso restrictivo:
@@ -65,7 +71,11 @@ class ValidadorOspm(ValidadorOS):
         if not afiliado.activo:
             estado, detalle = "rechazada", "El afiliado no figura activo en el padrón de OSPM."
         else:
-            estado, detalle = "pendiente", "Gestionar autorización en la obra social."
+            estado, detalle = (
+                "rechazada",
+                "Pendiente de autorización de la obra social. El afiliado tiene que "
+                "gestionarla en OSPM.",
+            )
 
         return ResultadoValidacion(
             estado=estado,
@@ -79,10 +89,19 @@ class ValidadorOspm(ValidadorOS):
             nro_autorizacion=None,
             coseguro=CERO,  # OSPM no cobra coseguro (el legacy lo fija en 0)
             traza={
+                # `clientes_ospm` es la tabla del legacy: DU, CUIT, AFILIADO,
+                # ACTIVO y nada más. No guarda cuándo se importó el padrón, así
+                # que la traza deja lo que sí se sabe — con qué fila se resolvió
+                # el afiliado y en qué estado figuraba al momento de validar.
+                #
+                # Acá había un `afiliado.importado_at.isoformat()` sobre un
+                # atributo que el modelo nunca tuvo: **toda** carga de OSPM
+                # moría con AttributeError → 500. Ver el docstring del módulo.
                 "padron": {
                     "documento": doc,
+                    "cuit": afiliado.CUIT,
+                    "nombre": afiliado.nombre,
                     "activo": afiliado.activo,
-                    "importado_at": afiliado.importado_at.isoformat(),
                 },
             },
         )

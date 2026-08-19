@@ -30,11 +30,16 @@ from app.modules.validaciones.schemas import EntradaBase
 class ResultadoValidacion:
     """Lo que produce cualquier O.S. y consume `grabar_prestacion`."""
 
-    estado: str  # autorizada | rechazada | pendiente | cargada
+    # autorizada | rechazada | cargada. Lo que la O.S. deja a la espera de que
+    # el afiliado lo gestione va como `rechazada` con el motivo adelante — ver
+    # `core/grabado.py`. "pendiente" ya no se emite; sobrevive sólo en filas
+    # viejas.
+    estado: str
     detalle: str
-    # El código que se cotiza y se graba. En Sancor es el SUSTITUTO (ver
-    # `obras/sancor/reglas.py`), no el que tipeó el médico: es lo que Sancor
-    # autoriza y lo que el Colegio factura. El original queda en `traza`.
+    # El código que se cotiza y se graba: **siempre el del Colegio**, el que
+    # eligió el médico. Cuando la obra social exige otro (ver `homologar` más
+    # abajo), el homologado sólo viaja en el mensaje a la O.S. y queda anotado
+    # en `traza["codigo_enviado"]`.
     codigo: str
     precio: PrecioResponse
     nro_afiliado: str  # ya formateado ("123/01")
@@ -80,6 +85,17 @@ class Contexto:
     def especialidades(self) -> list[int]:
         return especialidades_de(self.medico)
 
+    def especialidad_principal(self) -> Optional[int]:
+        """`NRO_ESPECIALIDAD`, la del slot 1. Es la que decide la homologación.
+
+        Distinta de `especialidades()`, que devuelve las 6 y la usa el lookup de
+        precios: para homologar alcanza y sobra con la principal. De 101 médicos
+        activos con las especialidades homologadas hoy, uno solo la tiene en un
+        slot secundario y nunca cargó esos códigos.
+        """
+        esp = getattr(self.medico, "NRO_ESPECIALIDAD", None)
+        return int(esp) if esp else None
+
 
 class ValidadorOS:
     """Una obra social integrada. Se instancia una vez, en `obras/<os>/__init__.py`.
@@ -111,10 +127,36 @@ class ValidadorOS:
         """Precondiciones sobre el médico, ANTES de tocar el período. Default: ninguna."""
         return None
 
+    def homologar(self, codigo: str, especialidad: Optional[int]) -> tuple[str, Optional[str]]:
+        """Con qué código hay que hablarle a esta obra social.
+
+        Devuelve `(código a enviar, código del Colegio si hubo homologación)`.
+        **Default: identidad** — la mayoría de las obras sociales acepta el
+        código del Colegio tal cual. Hoy sólo Sancor lo sobreescribe, con la
+        tabla de `obras/sancor/homologador.py`.
+
+        Homologar cambia **sólo lo que se transmite**. Lo que se cotiza, se
+        graba y se factura es siempre el código del Colegio; por eso este hook
+        lo usan tanto el alta como el buscador de códigos, y no puede volver a
+        haber dos criterios como cuando la sustitución vivía dentro del cliente
+        de Sancor.
+
+        Recibe la especialidad y no el `Contexto` a propósito: el buscador de
+        códigos resuelve sobre un médico, sin período ni fecha, así que armar
+        un `Contexto` sólo para consultar la tabla sería de más.
+        """
+        return (codigo, None)
+
     async def validar(self, ctx: Contexto, entrada: EntradaBase) -> ResultadoValidacion:
         raise NotImplementedError(f"{self.nombre} no implementó validar()")
 
     async def anular(self, fila: DetalleFacturacionCMC) -> Optional[Anulacion]:
         """Anula en la O.S. la autorización de `fila`. Default: no-op — la baja
-        es sólo local, no hay nada que avisarle a la obra social."""
+        es sólo local, no hay nada que avisarle a la obra social.
+
+        Puede **vetar la baja** levantando una `HTTPException`: corre antes de
+        que `core/pipeline.py::eliminar_prestacion()` toque la fila, así que la
+        excepción deja todo como estaba. Es lo que hace Sancor cuando el Z04 no
+        vuelve confirmado — sin OK de la obra social no se borra de este lado.
+        """
         return None

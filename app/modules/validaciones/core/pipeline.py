@@ -135,6 +135,11 @@ async def eliminar_prestacion(db: AsyncSession, prestacion_id: int, nro_socio: i
     allá (`ValidadorOS.anular`, default no-op). El lookup es `POR_NRO.get()`,
     **no** `obtener_o_error()`: una fila grabada por una O.S. que después se
     saque del registro tiene que poder darse de baja igual.
+
+    Esa llamada puede **vetar la baja**: si la O.S. exige confirmar la anulación
+    de su lado y no la confirma, `anular()` levanta un 409 y la excepción sale
+    de acá con la fila intacta — todavía no se tocó nada ni se hizo commit. Hoy
+    lo usa Sancor (ver `obras/sancor/validador.py::ValidadorSancor.anular`).
     """
     fila = await _prestacion_del_socio(db, prestacion_id, nro_socio)
     obra_social_id = int(fila.cod_obr)

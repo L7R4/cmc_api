@@ -6,7 +6,12 @@ from typing import Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field
 
 # `cargada` = la prestación se autorizó por fuera y acá sólo se registró
-# (Boreal, Omint). Los otros tres salen de la respuesta del validador.
+# (Boreal, Omint). `autorizada` y `rechazada` salen de la respuesta del validador.
+#
+# `pendiente` **ya no lo emite ningún validador**: lo que la obra social deja a
+# la espera de gestión del afiliado se graba como `rechazada` con el motivo
+# adelante (ver `core/grabado.py`). Se conserva en el Literal porque hay filas
+# grabadas antes del cambio y el listado las tiene que poder devolver.
 EstadoPrestacion = Literal["autorizada", "rechazada", "pendiente", "cargada"]
 
 
@@ -46,8 +51,9 @@ class EntradaBase(BaseModel):
 
     model_config = ConfigDict(str_strip_whitespace=True)
 
-    # El código que tipeó el médico. El que efectivamente se cotiza y se graba
-    # sale de `ResultadoValidacion.codigo` — algunas O.S. (Sancor) lo sustituyen.
+    # El código que tipeó el médico. Es el que se cotiza y se graba; si la obra
+    # social exige otro para autorizar, eso lo resuelve `ValidadorOS.homologar()`
+    # y sólo afecta al mensaje que se le manda.
     codigo: str = Field(..., min_length=1, max_length=20)
     cantidad: int = Field(1, ge=1, le=999)
 
@@ -109,6 +115,10 @@ class CodigoOut(BaseModel):
     # precio vigente para esa obra social; `motivo` explica por qué.
     admitido: bool = True
     motivo: Optional[str] = None
+    # Código con el que la obra social conoce esta práctica, cuando exige uno
+    # distinto (ver `obras/<os>/homologador.py`). `None` = se manda tal cual.
+    # Es informativo: el precio y lo que se factura son los de `codigo`.
+    se_envia: Optional[str] = None
 
 
 class PrestadorOut(BaseModel):

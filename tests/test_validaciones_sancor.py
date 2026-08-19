@@ -6,10 +6,13 @@ Las respuestas HL7 usadas como fixtures son recortes reales de
 paciente están anonimizados; el resto del mensaje (segmentos, códigos de
 resultado, formato) es tal cual lo devolvió Sancor.
 
-Cubre `app/modules/validaciones/sancor.py`: parseo de la respuesta real
-(desescapado, último ZAU, nombre desde PID-5), sustitución de código por
-especialidad y la lista de códigos bloqueados/gestión presencial. No requiere
-base de datos — son todas funciones puras.
+Cubre `obras/sancor/cliente.py`: parseo de la respuesta real (desescapado,
+último ZAU, nombre desde PID-5), armado del mensaje y la lista de códigos
+bloqueados/gestión presencial. No requiere base de datos — son todas
+funciones puras.
+
+La homologación de códigos por especialidad se mudó a
+`tests/test_validaciones_homologador.py`.
 """
 import pytest
 
@@ -281,42 +284,6 @@ def test_estrategia_de_decodificacion_utf8_con_fallback_latin1():
         crudo.decode("utf-8")
 
     assert crudo.decode("latin-1") == texto_con_tildes
-
-
-# ── Sustitución de código por especialidad ────────────────────────────────────
-
-class TestSustituirCodigo:
-    def test_420302_con_especialidad_41_se_sustituye(self):
-        envio, colegio = sancor.sustituir_codigo("420302", [41])
-        assert envio == "420351"
-        assert colegio == "420302"
-
-    def test_420130_con_especialidad_33_se_sustituye(self):
-        envio, colegio = sancor.sustituir_codigo("420130", [33])
-        assert envio == "305001"
-        assert colegio == "420130"
-
-    def test_070660_con_especialidad_16_se_sustituye(self):
-        envio, colegio = sancor.sustituir_codigo("070660", [16])
-        assert envio == "070715"
-        assert colegio == "070660"
-
-    def test_070660_sin_especialidad_16_no_se_sustituye(self):
-        """El caso que dispara gestión presencial: sin la especialidad que
-        habilita el sustituto, el código queda igual."""
-        envio, colegio = sancor.sustituir_codigo("070660", [7, 47, 65])
-        assert envio == "070660"
-        assert colegio is None
-
-    def test_codigo_sin_regla_no_cambia(self):
-        envio, colegio = sancor.sustituir_codigo("420132", [41, 33, 16])
-        assert envio == "420132"
-        assert colegio is None
-
-    def test_especialidades_vacias_no_sustituye(self):
-        envio, colegio = sancor.sustituir_codigo("420302", [])
-        assert envio == "420302"
-        assert colegio is None
 
 
 # ── Códigos bloqueados / gestión presencial ───────────────────────────────────

@@ -175,6 +175,19 @@ async def crear_afiliado(
     return await service.crear_afiliado(db, payload, _usuario(user))
 
 
+# `{dni:path}` por el mismo motivo que el GET de arriba: el identificador puede
+# traer barras ("1231233/00").
+@router.delete("/afiliados/{dni:path}", status_code=status.HTTP_204_NO_CONTENT)
+async def eliminar_afiliado(
+    dni: str,
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Borra un afiliado del padrón. 404 si no existe; 409 si tiene prestaciones
+    no anuladas que lo referencian (hay que anularlas antes)."""
+    await service.eliminar_afiliado(db, dni)
+
+
 # ── Grupo B — Período y precio ───────────────────────────────────────────────
 @router.get("/periodo-activo", response_model=PeriodoActivoResponse)
 async def periodo_activo(
@@ -297,6 +310,12 @@ async def listar_prestaciones(
     fecha_hasta: Optional[datetime.date] = Query(None),
     revisado: Optional[bool] = Query(None, description="Filtro por checkbox de auditoría"),
     q: Optional[str] = Query(None, description="Búsqueda libre: médico, código, paciente, nro_orden"),
+    solo_facturas_abiertas: bool = Query(
+        False,
+        description="Devuelve sólo prestaciones cuya cabecera de facturación sigue "
+                    "abierta, mirando `facturacion.estado` en vez del `estado` copiado "
+                    "en la prestación. Usar en la tabla del formulario de carga.",
+    ),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
@@ -315,6 +334,7 @@ async def listar_prestaciones(
         tipo=tipo, grupo_equipo_id=grupo_equipo_id,
         dni_paciente=dni_paciente, nombre_paciente=nombre_paciente,
         fecha_desde=fecha_desde, fecha_hasta=fecha_hasta, revisado=revisado, q=q,
+        solo_facturas_abiertas=solo_facturas_abiertas,
         limit=limit, offset=offset,
     )
     response.headers["X-Total-Count"] = str(total)

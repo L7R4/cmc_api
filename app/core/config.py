@@ -129,6 +129,15 @@ class Settings(BaseSettings):
     # sin depender de que el nomenclador esté completo. NO evita otros rechazos
     # (habilitación del médico, fecha inválida, vía no aplicable): esos siguen
     # bloqueando igual.
+    #
+    # ⚠️ Es un permiso de FACTURACIÓN y nada más. **El módulo de validaciones lo
+    # ignora**: ahí un código que cotiza $ 0 se rechaza siempre, con este flag en
+    # true o en false (`validaciones/core/contrato.py::factura_en_cero`). La
+    # diferencia es quién carga y qué puede hacer después: en facturación el
+    # operador del Colegio ve el 0 y lo corrige antes de cerrar el período; en el
+    # panel del prestador la fila se graba sola, entra a la liquidación y el
+    # médico se entera cuando cobra de menos — y si la obra social valida en
+    # línea, la autorización ya consumió el token del afiliado.
     CARGA_SIN_PRECIO: bool = False
 
     @property

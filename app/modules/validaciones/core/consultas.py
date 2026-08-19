@@ -14,6 +14,7 @@ from app.db.models import DetalleFacturacionCMC
 from app.db.models.nomenclador_cmc import NomencladorCMC, Valor
 from app.modules.facturacion.service import resolver_precio
 from app.modules.nomenclador import service as service_nm
+from app.modules.validaciones.core.contrato import factura_en_cero
 from app.modules.validaciones.core.grabado import to_dict
 from app.modules.validaciones.core.medicos import get_medico
 from app.modules.validaciones.core.periodos import partes_periodo, periodo_cerrado
@@ -193,6 +194,12 @@ async def buscar_codigos(
     servía para que intentara elegirlos. Como efecto secundario, el `limite`
     ahora rinde — una búsqueda corta podía gastar las 20 filas en códigos
     inservibles y esconder los que sí servían.
+
+    **Los que cotizan $ 0 tampoco se devuelven**, con el mismo criterio: es lo
+    que `Contexto.precio()` rechaza con 422 al cargar, así que ofrecerlos sería
+    ofrecer algo que no se puede usar. Es el caso que dejaba pasar
+    `CARGA_SIN_PRECIO=true`, y el que hacía que un médico con especialidad 33
+    viera `420130` a $ 0,00 y lo cargara igual.
     """
     medico = await get_medico(db, nro_socio)
     hoy = datetime.date.today()
@@ -239,7 +246,7 @@ async def buscar_codigos(
             precio = await resolver_precio(db, str(obra_social_id), medico, codigo, hoy)
         except HTTPException:
             continue
-        if not precio.admitido:
+        if not precio.admitido or factura_en_cero(precio):
             continue
         # Informativo: si la O.S. exige otro código, el prestador tiene que
         # saber que lo que se autoriza allá se llama distinto. El precio y lo

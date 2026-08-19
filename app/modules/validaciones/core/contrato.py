@@ -57,6 +57,28 @@ class Anulacion:
     detalle: Optional[str] = None  # si viene, pisa `validacion_detalle`
 
 
+def factura_en_cero(precio: PrecioResponse) -> bool:
+    """`True` si cotizar este código no le deja plata al médico.
+
+    Cubre los tres caminos que terminan en cero:
+
+    * no hay valor vigente y `CARGA_SIN_PRECIO` lo dejó pasar con montos en 0;
+    * hay una fila de convenio pero con todos los componentes en 0;
+    * el código es `por_presupuesto` — el monto lo carga a mano un operador del
+      Colegio desde facturación, y el panel del prestador no tiene dónde.
+    """
+    return (precio.honorarios + precio.gastos) <= CERO
+
+
+# Mensaje único del bloqueo. El motivo del lookup va adelante cuando lo hay
+# ("La obra social no tiene un valor vigente para este código a esa fecha"),
+# porque es lo que le explica al médico por qué justo ese código no le sale.
+_SIN_VALOR = (
+    "no tiene un valor vigente para esta obra social, así que no se puede "
+    "validar. Avisá al Colegio para que lo carguen."
+)
+
+
 @dataclass
 class Contexto:
     """Lo que cualquier validador necesita para operar, ya resuelto."""
@@ -74,12 +96,30 @@ class Contexto:
         Lo llama el validador, no el pipeline: Sancor lo necesita DOS veces con
         tolerancias distintas — el camino de gestión presencial no factura, así
         que tolera un código sin precio vigente antes que perder la constancia.
+
+        **Validaciones no carga en cero.** Cuando este precio va a facturarse
+        (`exigir_admitido=True`, el caso normal), un código que cotice $ 0 se
+        rechaza con 422 — pase lo que pase con `settings.CARGA_SIN_PRECIO`, que
+        es un permiso de *facturación* y acá no aplica: en facturación el
+        operador del Colegio ve el 0 y puede corregirlo antes de cerrar el
+        período, mientras que en el panel del prestador la fila se graba sola,
+        entra a la liquidación y el médico se entera cuando cobra de menos. Peor
+        todavía en las obras sociales en línea, donde la autorización ya consumió
+        el token del afiliado: la prestación queda hecha y facturada en cero.
+
+        El chequeo NO corre con `exigir_admitido=False`: ese camino existe para
+        dejar constancia de algo que no factura (gestión presencial de Sancor),
+        y ahí el cero es el resultado esperado, no un error.
         """
         precio = await resolver_precio(
             self.db, str(self.obra_social), self.medico, codigo, self.fecha
         )
-        if exigir_admitido and not precio.admitido:
-            raise HTTPException(422, precio.motivo or "El código no está habilitado.")
+        if exigir_admitido:
+            if not precio.admitido:
+                raise HTTPException(422, precio.motivo or "El código no está habilitado.")
+            if factura_en_cero(precio):
+                motivo = f" {precio.motivo}." if precio.motivo else ""
+                raise HTTPException(422, f"El código {codigo} {_SIN_VALOR}{motivo}")
         return precio
 
     def especialidades(self) -> list[int]:

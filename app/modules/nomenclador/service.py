@@ -1115,7 +1115,7 @@ async def _validar_habilitacion_medico(
         vigencia_ok,
     )
     if (await db.execute(stmt_inh)).first():
-        raise LookupError("Médico inhabilitado para este código")
+        raise LookupError("El médico está inhabilitado para este código")
 
     stmt_hab = select(MedicoCodigoHabilitado.id).where(
         MedicoCodigoHabilitado.medico_id == medico.ID,
@@ -1132,13 +1132,16 @@ async def _validar_habilitacion_medico(
 
     especialidades = _especialidades_medico(medico)
     if not especialidades:
-        raise LookupError("Médico sin especialidades cargadas; sin habilitación para este código")
+        raise LookupError(
+            "El médico no tiene especialidades cargadas en el Colegio, "
+            "y este código se habilita por especialidad"
+        )
 
     # Las reglas propias de esta OS, si las hay, reemplazan a las del Colegio: la misma
     # práctica puede exigir distinta especialidad según la obra social.
     habilitadas = await especialidades_habilitadas_de(db, nomenclador.id, obra_social_nro)
     if not habilitadas & set(especialidades):
-        raise LookupError("Médico sin habilitación por especialidad para este código")
+        raise LookupError("Este código no corresponde a las especialidades del médico")
 
 
 async def listar_codigos_habilitados(
@@ -1332,7 +1335,8 @@ async def lookup_precio(
     filas = (await db.execute(stmt_hist)).scalars().all()
     if not filas:
         raise LookupError(
-            "Sin precio registrado para ese código, obra social y fecha", sin_precio=True
+            "La obra social no tiene un valor vigente para este código a esa fecha",
+            sin_precio=True,
         )
 
     # Una fila por variante (origen, especialidad): la más reciente (filas viene desc)
@@ -1354,8 +1358,8 @@ async def lookup_precio(
     candidatas = [f for f in por_variante.values() if _aplicable(f)]
     if not candidatas:
         raise LookupError(
-            "Sin precio para el perfil del médico: las variantes vigentes exigen "
-            "una especialidad que no posee y no hay variante sin especialidad",
+            "El valor vigente de este código exige una especialidad que el médico "
+            "no tiene cargada",
             sin_precio=True,
         )
 

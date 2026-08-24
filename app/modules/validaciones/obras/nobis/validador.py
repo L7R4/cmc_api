@@ -21,6 +21,15 @@ from app.modules.validaciones.core.contrato import (
 )
 from app.modules.validaciones.obras.nobis.schemas import EntradaNobis
 
+# Letras de `<Estado>` con las que Nobis **creó la orden** de verdad: hay algo
+# que dar de baja allá. Es lo que decide si `anular()` tiene trabajo, y no
+# `validacion_estado`, que desde que el `P-Pendiente` se graba como `rechazada`
+# ya no distingue una orden viva de un rechazo liso.
+_LETRAS_CON_ORDEN = frozenset({nobis.ESTADO_AUTORIZADO, nobis.ESTADO_PENDIENTE})
+
+# Filas anteriores a ese cambio: ahí `validacion_estado` sí era el discriminador.
+_ESTADOS_CON_ORDEN_HISTORICOS = frozenset({"autorizada", "pendiente"})
+
 
 class ValidadorNobis(ValidadorOS):
     def __init__(self):
@@ -42,13 +51,19 @@ class ValidadorNobis(ValidadorOS):
         | `<Estado>` | `validacion_estado` | ¿Factura? |
         |---|---|---|
         | `A-Autorizado` | `autorizada` | sí |
-        | `P-Pendiente`  | `pendiente`  | no — importe 0, `estado='X'` |
+        | `P-Pendiente`  | `rechazada`  | no — importe 0, `estado='X'` |
         | `R-Rechazada`  | `rechazada`  | no — importe 0, `estado='X'` |
 
-        El **pendiente es el caso normal** en Nobis, no una excepción: la orden
-        real documentada en el legacy volvió `P-Pendiente` con su número. Queda
-        esperando resolución de la obra social, así que no puede facturarse
-        todavía.
+        El **`P-Pendiente` es el caso normal** en Nobis, no una excepción: la
+        orden real documentada en el legacy volvió `P-Pendiente` con su número.
+        Queda esperando resolución de la obra social, así que no se puede
+        facturar.
+
+        Por eso se graba como `rechazada`, con el motivo adelante: para el
+        Colegio "pendiente" y "rechazada" terminan igual —importe 0, fuera de la
+        factura— y un estado propio invitaba a leerlo como "todavía puede
+        salir". La letra que devolvió Nobis queda en `traza["estado"]`, que es
+        lo que distingue una orden que existe allá de una que no (ver `anular`).
 
         En `nro_autorizacion` se guarda el **número de orden** (`Num`), que es
         lo que identifica la orden en Nobis; el código de autorización (`Cod`)
@@ -70,15 +85,16 @@ class ValidadorNobis(ValidadorOS):
             raise HTTPException(502, str(e)) from e
 
         if res.autorizada:
-            estado = "autorizada"
+            estado, detalle = "autorizada", res.estado_detalle
         elif res.requiere_gestion:
-            estado = "pendiente"
-        else:
             estado = "rechazada"
+            detalle = f"Pendiente de autorización de la obra social. {res.estado_detalle}"
+        else:
+            estado, detalle = "rechazada", res.estado_detalle
 
         return ResultadoValidacion(
             estado=estado,
-            detalle=res.estado_detalle,
+            detalle=detalle,
             codigo=entrada.codigo,
             precio=precio,
             nro_afiliado=entrada.nro_afiliado,
@@ -105,11 +121,21 @@ class ValidadorNobis(ValidadorOS):
         """También hay que anular la orden allá. Ojo con la diferencia contra
         Sancor — acá NO alcanza con las autorizadas: una orden en `P-Pendiente`
         existe igual en Nobis y hay que darla de baja, si no queda viva.
-        """
-        if fila.validacion_estado not in ("autorizada", "pendiente"):
-            return None
 
+        Y justamente por eso el filtro mira la **letra que devolvió Nobis**
+        (`traza["estado"]`), no `validacion_estado`: desde que el `P-Pendiente`
+        se graba como `rechazada`, filtrar por el estado local saltearía la baja
+        de órdenes que sí existen en Nobis — la falla más cara posible acá,
+        porque quedan vivas sin que nadie se entere.
+        """
         traza = dict(fila.validacion_respuesta or {})
+        letra = (traza.get("estado") or "").strip().upper()
+        hay_orden = (
+            letra in _LETRAS_CON_ORDEN
+            or fila.validacion_estado in _ESTADOS_CON_ORDEN_HISTORICOS
+        )
+        if not hay_orden:
+            return None
         # AnularOrdenNroCod exige pCodAut; el número de orden es opcional.
         cod_aut = (traza.get("cod_autorizacion") or "").strip()
         if not cod_aut:

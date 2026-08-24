@@ -7,7 +7,7 @@ from typing import NamedTuple, Optional, Sequence
 
 from fastapi import HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
-from sqlalchemy import func, or_, select, tuple_
+from sqlalchemy import and_, func, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -453,6 +453,38 @@ async def crear_afiliado(db: AsyncSession, payload: AfiliadoCreate, usuario: str
     await db.commit()
     await db.refresh(af)
     return af
+
+
+async def eliminar_afiliado(db: AsyncSession, dni: str) -> None:
+    """Baja del padrón de afiliados.
+
+    Se bloquea si el identificador ya está usado por alguna prestación viva (no
+    anulada): `detalle_facturacion.dni_p` es una copia del string, sin FK, así que
+    borrarlo no rompe la fila — pero sí deja huérfana la referencia, y editar esa
+    prestación después falla con 422 en `_nombre_desde_afiliado()`. Las anuladas
+    ("X") no bloquean: ya no se editan y conservan el nombre en `nom_ape_p`.
+    """
+    af = await get_afiliado_by_dni(db, dni)
+    if af is None:
+        raise HTTPException(404, f"Afiliado '{dni}' no encontrado")
+
+    usos = (await db.execute(
+        select(func.count())
+        .select_from(DetalleFacturacionCMC)
+        .where(
+            DetalleFacturacionCMC.dni_p == dni,
+            DetalleFacturacionCMC.estado != "X",
+        )
+    )).scalar_one()
+    if usos:
+        raise HTTPException(
+            409,
+            f"El afiliado '{dni}' tiene {usos} prestación/es cargada/s y no se puede "
+            "eliminar. Anulá esas prestaciones primero.",
+        )
+
+    await db.delete(af)
+    await db.commit()
 
 
 async def _nombre_desde_afiliado(db: AsyncSession, dni: Optional[str]) -> Optional[str]:
@@ -1521,6 +1553,7 @@ async def listar_prestaciones(
     fecha_hasta: Optional[datetime.date] = None,
     revisado: Optional[bool] = None,
     q: Optional[str] = None,
+    solo_facturas_abiertas: bool = False,
     limit: int = 50,
     offset: int = 0,
 ) -> tuple[list[PrestacionRead], int]:
@@ -1557,15 +1590,36 @@ async def listar_prestaciones(
             | M.nom_ape_p.ilike(like) | M.nro_orden.ilike(like)
         )
 
+    # `estado="A"` es una copia denormalizada de "mi factura está abierta", y una carga
+    # masiva por fuera de la API puede desincronizarla: en abril/2026 una reimportación
+    # metió 1.572 filas en 'A' sobre la factura 411/202601 ya cerrada, y la tabla del
+    # formulario de carga las mostró como si todavía se pudieran tocar. Con este flag el
+    # listado pregunta por el estado real de la cabecera en vez de confiar en la copia.
+    #
+    # El JOIN es INNER a propósito: una prestación sin cabecera no pertenece a ninguna
+    # factura abierta (las anuladas quedan huérfanas cuando `_cleanup_factura_si_vacia`
+    # borra la cabecera vacía) y no tiene por qué aparecer.
+    def _con_join(stmt):
+        if not solo_facturas_abiertas:
+            return stmt
+        return stmt.join(
+            FacturacionCMC,
+            and_(
+                FacturacionCMC.cod_obr == M.cod_obr,
+                FacturacionCMC.periodo == M.periodo,
+                FacturacionCMC.version == M.version,
+            ),
+        ).where(FacturacionCMC.estado == FACTURA_ESTADO_ABIERTA)
+
     total = (
-        await db.execute(select(func.count()).select_from(M).where(*filtros))
+        await db.execute(_con_join(select(func.count()).select_from(M)).where(*filtros))
     ).scalar_one()
 
     # Orden por id (autoincremental) = orden de carga, no de fecha_practica —
     # el médico puede cargar hoy una prestación de hace semanas y tiene que
     # aparecer primera igual.
     stmt = (
-        select(M).where(*filtros)
+        _con_join(select(M)).where(*filtros)
         .order_by(M.id_detalle_prestaciones.desc())
         .limit(limit).offset(offset)
     )

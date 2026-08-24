@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends
 from app.auth.deps import get_current_user
 from app.core.config import settings
 from app.modules.validaciones.obras.sancor import cliente as sancor
+from app.modules.validaciones.obras.sancor import homologador
 
 router = APIRouter()
 
@@ -19,7 +20,7 @@ async def estado_sancor(user=Depends(get_current_user)):
     `test`/`produccion` sí generan autorizaciones reales — `produccion` consume
     el token del afiliado de verdad.
 
-    También expone los códigos bloqueados y las sustituciones, que antes vivían
+    También expone los códigos bloqueados y las homologaciones, que antes vivían
     hardcodeadas en el front (`sancor_1.php`) sin que el backend supiera nada de
     ellas — un solo lugar de verdad para las dos puntas. Ver
     docs/api/validaciones/sancor.md.
@@ -36,8 +37,16 @@ async def estado_sancor(user=Depends(get_current_user)):
         "genera_autorizaciones_reales": modo in (sancor.MODO_TEST, sancor.MODO_PRODUCCION),
         "codigos_bloqueados": sorted(sancor.CODIGOS_NO_ADMITIDOS),
         "codigos_gestion_presencial": sorted(sancor.CODIGOS_GESTION_PRESENCIAL),
-        "sustituciones": [
-            {"codigo": codigo, "especialidad": especialidad, "se_envia": sustituto}
-            for (codigo, especialidad), sustituto in sancor.SUSTITUCIONES.items()
+        # Qué código recibe Sancor cuando el médico elige otro. Sólo cambia lo
+        # que se transmite: lo que se cotiza, se graba y se factura es siempre
+        # el código del Colegio. `especialidad: null` = aplica a todas.
+        "homologaciones": [
+            {
+                "codigo": codigo,
+                "especialidad": entrada["especialidad"],
+                "se_envia": entrada["codigo_homologado"],
+            }
+            for codigo, entradas in homologador.HOMOLOGACIONES.items()
+            for entrada in entradas
         ],
     }

@@ -14,9 +14,17 @@ from app.db.models import DetalleFacturacionCMC
 from app.db.models.nomenclador_cmc import NomencladorCMC, Valor
 from app.modules.facturacion.service import resolver_precio
 from app.modules.nomenclador import service as service_nm
+from app.modules.validaciones.core.contrato import factura_en_cero
 from app.modules.validaciones.core.grabado import to_dict
 from app.modules.validaciones.core.medicos import get_medico
 from app.modules.validaciones.core.periodos import partes_periodo, periodo_cerrado
+
+
+# Cuántas filas del catálogo se leen por cada una que se devuelve en
+# `buscar_codigos`. Cubre el dedupe (fila propia de la OS + compartida) y los
+# códigos que el médico no puede facturar. Subirlo mejora los resultados de un
+# médico con pocas habilitaciones a costa de más consultas de precio.
+_FACTOR_BARRIDO = 5
 
 
 def _os_nro(cod_obr: Optional[str]) -> Optional[int]:
@@ -174,13 +182,35 @@ async def listar_periodos(
 async def buscar_codigos(
     db: AsyncSession, obra_social_id: int, nro_socio: int, q: str, limite: int = 20
 ) -> list[dict]:
-    """Códigos del nomenclador nuevo con el valor que paga esa obra social.
+    """Códigos del nomenclador nuevo que **ese médico puede facturar** en esa
+    obra social, con su valor.
 
     El precio sale del mismo lookup que usa facturación, así que lo que ve el
     prestador acá es lo que después se le va a liquidar.
+
+    Los no admitidos —sin habilitación por especialidad, sin precio vigente— no
+    se devuelven. Antes salían con `admitido=False` y un motivo, y el buscador
+    los pintaba en gris: el prestador no los puede usar, así que verlos sólo
+    servía para que intentara elegirlos. Como efecto secundario, el `limite`
+    ahora rinde — una búsqueda corta podía gastar las 20 filas en códigos
+    inservibles y esconder los que sí servían.
+
+    **Los que cotizan $ 0 tampoco se devuelven**, con el mismo criterio: es lo
+    que `Contexto.precio()` rechaza con 422 al cargar, así que ofrecerlos sería
+    ofrecer algo que no se puede usar. Es el caso que dejaba pasar
+    `CARGA_SIN_PRECIO=true`, y el que hacía que un médico con especialidad 33
+    viera `420130` a $ 0,00 y lo cargara igual.
     """
     medico = await get_medico(db, nro_socio)
     hoy = datetime.date.today()
+
+    # Con qué código se le habla a esta obra social. Import perezoso: `obras`
+    # arma los seis validadores al importarse y `pipeline` es el que lo hace en
+    # el arranque — traerlo acá arriba invertiría ese orden sin necesidad.
+    from app.modules.validaciones import obras
+
+    obra = obras.POR_NRO.get(obra_social_id)
+    especialidad = int(medico.NRO_ESPECIALIDAD) if medico.NRO_ESPECIALIDAD else None
 
     stmt = select(NomencladorCMC.codigo, NomencladorCMC.descripcion).where(
         # Códigos compartidos del Colegio + los propios de esta obra social.
@@ -194,9 +224,14 @@ async def buscar_codigos(
         )
     # La fila propia de la OS antes que la compartida; el dedupe de abajo se queda con
     # la primera que aparece de cada código.
+    #
+    # Se leen más filas de las que se devuelven porque de acá se cae por dos
+    # motivos: el dedupe y, ahora, la habilitación. El techo es lo que acota el
+    # costo — `resolver_precio` es una consulta por fila —, y el `break` corta
+    # apenas se juntan `limite` códigos usables, que es el caso normal.
     stmt = stmt.order_by(
         NomencladorCMC.codigo, NomencladorCMC.obra_social_key.desc()
-    ).limit(limite * 2)
+    ).limit(limite * _FACTOR_BARRIDO)
     filas = (await db.execute(stmt)).all()
 
     salida: list[dict] = []
@@ -211,6 +246,16 @@ async def buscar_codigos(
             precio = await resolver_precio(db, str(obra_social_id), medico, codigo, hoy)
         except HTTPException:
             continue
+        if not precio.admitido or factura_en_cero(precio):
+            continue
+        # Informativo: si la O.S. exige otro código, el prestador tiene que
+        # saber que lo que se autoriza allá se llama distinto. El precio y lo
+        # que se factura siguen siendo los de `codigo`.
+        se_envia = None
+        if obra is not None:
+            homologado, _ = obra.homologar(codigo, especialidad)
+            se_envia = homologado if homologado != codigo else None
+
         salida.append(
             {
                 "codigo": codigo,
@@ -218,8 +263,9 @@ async def buscar_codigos(
                 "honorarios": precio.honorarios,
                 "gastos": precio.gastos,
                 "total": precio.honorarios + precio.gastos,
-                "admitido": precio.admitido,
+                "admitido": True,
                 "motivo": precio.motivo,
+                "se_envia": se_envia,
             }
         )
     return salida

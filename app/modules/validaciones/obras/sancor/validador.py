@@ -1,7 +1,10 @@
 """Sancor Salud (O.S. 411) — autorizador HL7 v2.4 sobre SOAP, en línea. Pide la
-autorización y guarda el resultado, salga como salga: autorizada, rechazada o
-pendiente. Las que Sancor no autorizó quedan en importe 0 y `estado='X'` — se
-ven en el panel pero no entran a la factura.
+autorización y guarda el resultado, salga como salga. Las que Sancor no
+autorizó quedan en importe 0 y `estado='X'` — se ven en el panel pero no
+entran a la factura.
+
+Qué código se le manda a Sancor lo decide `obras/sancor/homologador.py`; lo
+que se cotiza y se graba es siempre el del Colegio.
 
 El cliente de transporte (`sancor.py`, HL7/SOAP puro, sin DB) vive aparte —
 ver docs/api/validaciones/sancor.md para el detalle del protocolo.
@@ -12,6 +15,7 @@ from fastapi import HTTPException
 
 from app.db.models import DetalleFacturacionCMC, ListadoMedico
 from app.modules.validaciones.obras.sancor import cliente as sancor
+from app.modules.validaciones.obras.sancor import homologador
 from app.modules.validaciones.core.contrato import (
     CERO,
     Anulacion,
@@ -37,26 +41,44 @@ class ValidadorSancor(ValidadorOS):
         if not medico.MATRICULA_PROV:
             raise HTTPException(422, "El médico no tiene matrícula provincial cargada.")
 
-    async def validar(self, ctx: Contexto, entrada: EntradaSancor) -> ResultadoValidacion:
-        """La sustitución de código (`sancor.sustituir_codigo`) corre **antes**
-        de todo lo demás: código bloqueado, gestión presencial, precio y la
-        consulta misma usan siempre `codigo_envio` — el código que efectivamente
-        se le manda a Sancor —, nunca el que tipeó el médico. Es lo que Sancor
-        termina autorizando y lo que el Colegio termina facturando; el código
-        original queda en la traza (`codigo_colegio`) para reconstruir el caso.
-        Chequear estas reglas sobre el código del Colegio es un bug: por ejemplo
-        `070660` con especialidad 16 se sustituye a `070715`, así que el chequeo
-        de gestión presencial tiene que mirar `070715` (no está en la lista) y
-        no `070660` (si estuviera, mandaría a gestión presencial a un médico
-        cuya especialidad Sancor sí sabe resolver en línea).
-        """
-        especialidades = ctx.especialidades()
-        codigo_envio, codigo_colegio = sancor.sustituir_codigo(entrada.codigo, especialidades)
+    def homologar(self, codigo: str, especialidad: Optional[int]) -> tuple[str, Optional[str]]:
+        """Tabla de `obras/sancor/homologador.py`, por especialidad principal."""
+        return homologador.homologar(codigo, especialidad)
 
-        if codigo_envio in sancor.CODIGOS_NO_ADMITIDOS:
+    async def validar(self, ctx: Contexto, entrada: EntradaSancor) -> ResultadoValidacion:
+        """La homologación decide **sólo con qué código se le habla a Sancor**.
+
+        Todo lo demás —el precio, lo que se graba en `cod_nom` y lo que el
+        Colegio factura— usa el código del Colegio, el que eligió el médico. El
+        homologado viaja en el mensaje HL7 y queda anotado en la traza como
+        `codigo_enviado`.
+
+        Antes era al revés: se cotizaba y se grababa el sustituto, mientras que
+        el buscador de códigos cotizaba el del Colegio. Un médico con
+        especialidad 41 elegía `420302`, veía $ 0,00 y se le facturaban $ 27.560
+        de `420351`.
+
+        Los dos catálogos de reglas se evalúan sobre el código **del Colegio**,
+        que es el que el médico eligió y sobre el que se le responde:
+        `CODIGOS_NO_ADMITIDOS` son códigos que Sancor no autoriza por esta vía
+        para nadie, y `CODIGOS_GESTION_PRESENCIAL` los que el afiliado tiene que
+        tramitar en oficinas. Ninguno de los dos códigos homologados hoy
+        (`420351`, `305001`, `420101`) está en esas listas, así que el orden no
+        cambia ningún resultado.
+        """
+        codigo_envio, codigo_colegio = self.homologar(
+            entrada.codigo, ctx.especialidad_principal()
+        )
+
+        if entrada.codigo in sancor.CODIGOS_NO_ADMITIDOS:
+            # `CODIGOS_NO_ADMITIDOS` no depende de la especialidad: son códigos
+            # que Sancor no autoriza por esta vía, para cualquier médico. El
+            # mensaje decía "con esta especialidad" y mandaba al socio a buscar
+            # un problema en su legajo que no existe.
             raise HTTPException(
                 422,
-                f"El código {entrada.codigo} no está habilitado para Sancor con esta especialidad.",
+                f"Sancor no autoriza en línea el código {entrada.codigo}. "
+                "Consultá en el Colegio cómo cargar esta práctica.",
             )
 
         afiliado = (
@@ -70,12 +92,20 @@ class ValidadorSancor(ValidadorOS):
         # legacy). Va antes de exigir precio admitido: este camino no factura
         # (importe 0, estado='X'), así que tolera que el código no tenga precio
         # vigente — mejor dejar la constancia que perder el caso por un 422.
-        if codigo_envio in sancor.CODIGOS_GESTION_PRESENCIAL:
-            precio_gestion = await ctx.precio(codigo_envio, exigir_admitido=False)
+        if entrada.codigo in sancor.CODIGOS_GESTION_PRESENCIAL:
+            precio_gestion = await ctx.precio(entrada.codigo, exigir_admitido=False)
             return ResultadoValidacion(
-                estado="pendiente",
-                detalle="El paciente debe tramitar esta práctica en oficinas de Sancor.",
-                codigo=codigo_envio,
+                # Mismo criterio que el M024 de más abajo: queda como rechazada
+                # aunque nunca se haya consultado al autorizador. Si este camino
+                # siguiera siendo "pendiente", el operador vería igual un chip
+                # "Pendiente" en Sancor y volvería la ambigüedad que se quiso
+                # sacar.
+                estado="rechazada",
+                detalle=(
+                    "Pendiente de autorización de la obra social. El paciente debe "
+                    "tramitar esta práctica en oficinas de Sancor."
+                ),
+                codigo=entrada.codigo,
                 precio=precio_gestion,
                 nro_afiliado=afiliado,
                 nombre_afiliado="",
@@ -84,7 +114,9 @@ class ValidadorSancor(ValidadorOS):
                 traza={"codigo_colegio": codigo_colegio or entrada.codigo, "codigo_enviado": codigo_envio},
             )
 
-        precio = await ctx.precio(codigo_envio)
+        # El precio es el del código del Colegio, no el del homologado: es lo
+        # que se factura y lo que el buscador ya le mostró al médico.
+        precio = await ctx.precio(entrada.codigo)
 
         try:
             res = await sancor.autorizar(
@@ -107,16 +139,27 @@ class ValidadorSancor(ValidadorOS):
             raise HTTPException(422, res.estado_detalle or "Token inválido.")
 
         if res.autorizada:
-            estado = "autorizada"
+            estado, detalle = "autorizada", res.estado_detalle
         elif res.requiere_gestion:
-            estado = "pendiente"
-        else:
+            # Sancor no la rechaza: la deja a la espera de que el afiliado la
+            # gestione (M024, M087, M233, M030, M026, M144). Para el Colegio eso
+            # es lo mismo que un rechazo —no se factura, importe 0, fuera de la
+            # factura— y un estado propio "pendiente" invitaba a leerlo como
+            # "todavía puede salir". Se guarda como rechazada, con el motivo
+            # adelante para que dentro de seis meses se entienda que no fue un
+            # rechazo de la práctica sino una autorización que quedó pendiente.
+            #
+            # `requiere_gestion` y CODIGOS_PENDIENTE se conservan: siguen
+            # distinguiendo POR QUÉ, y el código de Sancor queda en la traza.
             estado = "rechazada"
+            detalle = f"Pendiente de autorización de la obra social. {res.estado_detalle}"
+        else:
+            estado, detalle = "rechazada", res.estado_detalle
 
         return ResultadoValidacion(
             estado=estado,
-            detalle=res.estado_detalle,
-            codigo=codigo_envio,
+            detalle=detalle,
+            codigo=entrada.codigo,
             precio=precio,
             nro_afiliado=afiliado,
             nombre_afiliado=res.nombre_afiliado or "",
@@ -133,30 +176,40 @@ class ValidadorSancor(ValidadorOS):
         )
 
     async def anular(self, fila: DetalleFacturacionCMC) -> Optional[Anulacion]:
-        """Si la prestación tenía una autorización de Sancor, se intenta
-        anularla allá (ZQA^Z04) — es lo que hace el legacy en
-        `borra_atencion_colegio_sancor.php`, para que la autorización no quede
-        viva en la obra social.
+        """Anula la autorización en Sancor (ZQA^Z04) **antes** de dar de baja la
+        prestación acá — es lo que hace el legacy en
+        `borra_atencion_colegio_sancor.php`.
 
-        **La baja local nunca se bloquea**, conteste lo que conteste Sancor:
-        trabarla dejaría la prestación imposible de sacar de la factura. Lo que
-        sí cambia es qué se deja anotado, y hay tres finales distintos:
+        **Sin confirmación de Sancor no hay baja local.** Si Sancor no contesta,
+        o contesta rechazando, esto levanta un 409 y `core/pipeline.py::
+        eliminar_prestacion()` corta antes de tocar la fila: la prestación queda
+        exactamente como estaba. Las dos puntas se mueven juntas o no se mueve
+        ninguna.
 
-        1. Sancor confirma (ZAU-3 `B*`) → anulación hecha de las dos puntas.
-        2. Sancor contesta pero **rechaza** (ZAU-3 `M*`) → la autorización sigue
-           viva allá. Se marca `pendiente_en_sancor` para que alguien la anule a
-           mano.
-        3. Sancor no contesta (`SancorError`) → no sabemos en qué quedó. Mismo
-           tratamiento que 2.
+        Tres finales:
 
-        El caso 2 es el que faltaba: el transporte había funcionado, así que no
-        levantaba `SancorError`, y la respuesta se guardaba como si la baja
-        hubiera salido bien. Probado contra Sancor test el 2026-08-17: un Z04
-        sobre una autorización recién emitida vuelve con
-        `M227^No se puede anular una autorización facturada`, dentro de un
-        HTTP 200 y con `MSA|AA` — Sancor entendió el pedido y se negó. El
-        resultado de negocio vive en ZAU-3, no en el nivel de transporte ni en
-        el MSA, exactamente igual que en el Z02 de `validar()`.
+        1. Sancor confirma (ZAU-3 `B*`) → se anula allá y acá.
+        2. Sancor contesta pero **rechaza** (ZAU-3 `M*`) → 409, no se borra nada.
+        3. Sancor no contesta (`SancorError`) → no sabemos en qué quedó → 409,
+           no se borra nada.
+
+        El criterio anterior era el opuesto (la baja local nunca se bloqueaba, y
+        lo que Sancor rechazaba quedaba marcado `pendiente_en_sancor` para
+        anularlo a mano). Se invirtió por pedido del Colegio el 2026-08-19: una
+        prestación dada de baja acá y viva en Sancor es una autorización
+        fantasma que nadie reconcilia.
+
+        ⚠️ **Consecuencia operativa, medida contra Sancor test el 2026-08-19:**
+        *todo* Z04 vuelve con `M227^No se puede anular una autorización
+        facturada`, incluso sobre una autorización emitida dos minutos antes
+        (probado sobre la 125225529). Con esta regla, en el entorno de test
+        **ninguna prestación autorizada de Sancor se puede eliminar**. El mensaje
+        no tiene ningún problema de formato —Sancor lo entiende: contesta
+        `MSA|AA` y devuelve el mismo número de autorización—, es un rechazo de
+        negocio. Hay que resolverlo con Sancor antes de pasar a producción.
+
+        Las filas `rechazada` (sin número de autorización) no tienen nada que
+        anular allá y se siguen borrando sin consultar nada.
         """
         if not (fila.validacion_estado == "autorizada" and fila.autorizacion):
             return None
@@ -165,8 +218,14 @@ class ValidadorSancor(ValidadorOS):
         try:
             res = await sancor.anular(nro_autorizacion=fila.autorizacion)
         except sancor.SancorError as e:
-            traza["anulacion"] = {"pendiente_en_sancor": True, "motivo": str(e)}
-            return Anulacion(traza=traza)
+            # No sabemos si Sancor llegó a procesar el pedido. Borrar acá sería
+            # apostar a que sí; no borrar deja las dos puntas coherentes y el
+            # prestador puede reintentar.
+            raise HTTPException(
+                409,
+                "No pudimos confirmar la anulación con Sancor, así que la "
+                f"prestación no se eliminó. {e} Reintentá en unos minutos.",
+            ) from e
 
         if not res.autorizada:
             # Rechazo lógico. `res.autorizada` es el prefijo `B` de ZAU-3, la
@@ -176,15 +235,13 @@ class ValidadorSancor(ValidadorOS):
             # no una confirmación: no hay una sola respuesta afirmativa a un Z04
             # ni en las pruebas ni en los 15 MB de log real. Si aparece una con
             # otro prefijo, ajustar acá.
-            traza["anulacion"] = {
-                "pendiente_en_sancor": True,
-                "modo": res.modo,
-                "codigo": res.codigo_resultado,
-                "motivo": res.estado_detalle,
-                "respuesta": res.crudo,
-            }
-            motivo = res.estado_detalle or f"Sancor rechazó la anulación ({res.codigo_resultado})."
-            return Anulacion(traza=traza, detalle=f"BAJA LOCAL · {motivo}"[:255])
+            motivo = res.estado_detalle or f"código {res.codigo_resultado}"
+            raise HTTPException(
+                409,
+                f"Sancor no autorizó la anulación ({motivo}), así que la "
+                "prestación no se eliminó. La autorización sigue vigente en la "
+                "obra social; consultá en el Colegio.",
+            )
 
         traza["anulacion"] = {
             "pendiente_en_sancor": False,

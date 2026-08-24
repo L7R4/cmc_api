@@ -16,6 +16,7 @@ from app.modules.beneficios.routes import router_socio as beneficios_socio_route
 from app.modules.auditoria.routes import router as auditoria_router
 from app.modules.catalogs.routes_especialidades import router as especialidades_router
 from app.modules.catalogs.routes_obras_sociales import router as obras_social_router
+from app.modules.catalogs.routes_os_pagos import router as os_pagos_router
 from app.modules.catalogs.routes_periodos import router as periodos_router
 from app.modules.catalogs.routes_observaciones import router as observaciones_boletin_router
 from app.modules.catalogs.routes_valores import router as valores_boletin_router
@@ -33,6 +34,8 @@ from app.modules.medicos.routes import router as medicos_router
 from app.modules.padrones.routes import router as padrones_router
 from app.modules.pagos.routes import router as pagos_router
 from app.modules.planillas.routes import router as planillas_router
+from app.modules.institucion.routes import router as institucion_router
+from app.modules.agenda.routes import router as agenda_router
 from app.modules.rbac.routes import router as rbac_router
 from app.modules.solicitudes.routes import router as solicitudes_router
 from app.modules.solicitudes_cambio.routes import router as solicitudes_cambio_router
@@ -48,6 +51,11 @@ api_router = APIRouter()
 
 api_router.include_router(medicos_router, prefix="/medicos", tags=["Medicos"])
 api_router.include_router(padrones_router, prefix="/padrones", tags=["Padrones Médico"])
+# Antes que `obras_social_router` por el mismo criterio que los documentos de
+# valores: comparten prefijo y aquel tiene `/{id}`. Acá no habría colisión real
+# —`/{id}/pagos` tiene un segmento más— pero mantener el orden evita tener que
+# volver a razonarlo cada vez que se agrega una ruta.
+api_router.include_router(os_pagos_router, prefix="/obras_social", tags=["Obras Sociales"])
 api_router.include_router(obras_social_router, prefix="/obras_social", tags=["Obras Sociales"])
 api_router.include_router(especialidades_router, prefix="/especialidades", tags=["Especialidades"])
 api_router.include_router(periodos_router, prefix="/periodos", tags=["Periodos"])
@@ -86,6 +94,12 @@ api_router.include_router(exports_router, prefix="/exports", tags=["exports"])
 api_router.include_router(
     reportes_router, prefix="/reportes", tags=["Reportes y Estadísticas"]
 )
+
+# Datos del propio Colegio (CUIT, CBU, contactos) y los tres calendarios.
+api_router.include_router(institucion_router, prefix="/institucion", tags=["Institución"])
+# `/mes` es una ruta estática y el router no tiene ningún `/{algo}` a ese nivel
+# que pueda taparla, así que el orden interno del módulo alcanza.
+api_router.include_router(agenda_router, prefix="/agenda", tags=["Agenda"])
 
 api_router.include_router(rbac_router, prefix="/admin/rbac", tags=["Rbac"])
 api_router.include_router(auditoria_router, prefix="/auditoria", tags=["Auditoría"])

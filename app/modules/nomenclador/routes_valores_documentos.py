@@ -23,7 +23,7 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Path, Query, Response, UploadFile, status
 from fastapi.concurrency import run_in_threadpool
-from sqlalchemy import select
+from sqlalchemy import bindparam, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.deps import get_current_user
@@ -32,7 +32,9 @@ from app.common.uploads import validate_upload
 from app.core.config import settings
 from app.db.database import get_db
 from app.db.models import ListadoMedico, ValorDocumento
-from app.modules.nomenclador.schemas_valores_documentos import ValorDocumentoOut
+from app.modules.nomenclador.schemas_valores_documentos import (
+    MesActualizaciones, ObraSocialActualizada, ValorDocumentoOut,
+)
 
 router = APIRouter()  # El scope lo declara app/auth/authz.py::SCOPES_POR_RUTA (fuente unica de autorizacion).
 
@@ -204,3 +206,72 @@ async def _subido_por(db: AsyncSession, token_user: dict) -> Optional[int]:
     return (
         await db.execute(select(ListadoMedico.ID).where(ListadoMedico.NRO_SOCIO == nro_socio))
     ).scalars().first()
+
+
+@router.get("/actualizaciones", response_model=List[MesActualizaciones])
+async def actualizaciones_por_mes(
+    db: AsyncSession = Depends(get_db),
+    _=Depends(get_current_user),
+):
+    """Qué obras sociales actualizaron valores, agrupadas por mes de vigencia.
+
+    Agrupa por `vigencia_desde` —cuándo rigen los precios— y no por `created_at`
+    —cuándo se cargaron—: una lista de mayo importada en agosto pertenece a mayo,
+    que es lo que se está preguntando. Los meses sin actualizaciones no aparecen:
+    salen de las filas que existen, no de recorrer un calendario.
+
+    ## Por qué la consulta está partida en tres
+
+    La primera agrupa **sólo sobre `nm_valores`**, sin JOIN y sin ORDER BY. Es
+    deliberado: con el JOIN a `obras_sociales` dentro del GROUP BY, MySQL arma
+    una tabla temporal y ordena en disco (107 ms sobre 55.000 filas); sin él usa
+    `ix_nm_valores_vigencia_os` como índice cubriente y no toca la tabla (6,6 ms).
+
+    Las otras dos resuelven los nombres y los documentos sobre los ~58 pares que
+    devolvió la primera. El resultado no crece con el tarifario sino con la
+    cantidad de actualizaciones, que son unas pocas por mes; por eso no se pagina.
+    """
+    filas = (await db.execute(text(
+        "SELECT vigencia_desde, obra_social_nro, COUNT(*) "
+        "FROM nm_valores GROUP BY vigencia_desde, obra_social_nro"
+    ))).all()
+    if not filas:
+        return []
+
+    nros = {nro for _, nro, _ in filas}
+    nombres = dict((await db.execute(
+        text("SELECT NRO_OBRASOCIAL, OBRA_SOCIAL FROM obras_sociales "
+             "WHERE NRO_OBRASOCIAL IN :nros").bindparams(bindparam("nros", expanding=True)),
+        {"nros": list(nros)},
+    )).all())
+
+    con_documento = {
+        (nro, vig)
+        for nro, vig in (await db.execute(text(
+            "SELECT obra_social_nro, vigencia_desde FROM nm_valores_documentos"
+        ))).all()
+    }
+
+    meses: dict[str, MesActualizaciones] = {}
+    for vigencia, nro, codigos in filas:
+        clave = vigencia.strftime("%Y-%m")
+        meses.setdefault(clave, MesActualizaciones(mes=clave)).obras_sociales.append(
+            ObraSocialActualizada(
+                obra_social_nro=nro,
+                # Puede faltar si la O.S. salió del catálogo y sus valores
+                # quedaron; mostrar el número es mejor que un renglón vacío.
+                nombre=(nombres.get(nro) or "").strip() or f"O.S. {nro}",
+                vigencia_desde=vigencia,
+                codigos=codigos,
+                tiene_documento=(nro, vigencia) in con_documento,
+            )
+        )
+
+    # Ordenar acá y no en SQL: son ~58 filas y en la consulta costaba un filesort
+    # sobre las 55.000 de `nm_valores`.
+    for mes in meses.values():
+        mes.obras_sociales.sort(key=lambda o: (-o.vigencia_desde.toordinal(), o.nombre))
+        mes.total_codigos = sum(o.codigos for o in mes.obras_sociales)
+        mes.total_obras_sociales = len({o.obra_social_nro for o in mes.obras_sociales})
+
+    return sorted(meses.values(), key=lambda m: m.mes, reverse=True)

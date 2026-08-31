@@ -184,6 +184,15 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     ("PATCH", "/api/obras_social/{id}"): Scope.CATALOGO_EDITAR,
     ("DELETE", "/api/obras_social/{id}"): Scope.CATALOGO_EDITAR,
     ("POST", "/api/obras_social/{id}/documentos"): Scope.CATALOGO_EDITAR,
+
+    # Pagos y deuda de la obra social (pestaña «Pagos» del perfil). Mismos
+    # scopes que el resto del perfil: es información del convenio.
+    ("GET", "/api/obras_social/{obra_id}/pagos"): Scope.CATALOGO_LEER,
+    ("POST", "/api/obras_social/{obra_id}/pagos"): Scope.CATALOGO_EDITAR,
+    ("PUT", "/api/obras_social/{obra_id}/pagos/{pago_id}"): Scope.CATALOGO_EDITAR,
+    ("DELETE", "/api/obras_social/{obra_id}/pagos/{pago_id}"): Scope.CATALOGO_EDITAR,
+    ("POST", "/api/obras_social/{obra_id}/pagos/{pago_id}/factura"): Scope.CATALOGO_EDITAR,
+    ("DELETE", "/api/obras_social/{obra_id}/pagos/{pago_id}/factura"): Scope.CATALOGO_EDITAR,
     ("DELETE", "/api/obras_social/{id}/documentos/{doc_id}"): Scope.CATALOGO_EDITAR,
 
     # ── Catálogos: especialidades y períodos ─────────────────────────────────
@@ -220,6 +229,47 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     ("GET", "/api/planillas/"): Scope.CONTENIDO_LEER,
     ("POST", "/api/planillas/"): Scope.CONTENIDO_EDITAR,
     ("DELETE", "/api/planillas/{planilla_id}"): Scope.CONTENIDO_EDITAR,
+
+    # ── Datos del propio Colegio ─────────────────────────────────────────────
+    # Se reusan los scopes de catálogo en vez de crear `institucion:*`: es el
+    # permiso del personal administrativo, que es quien mantiene el CUIT, el
+    # CBU y los contactos de la institución. No hay scope propio a propósito —
+    # un código nuevo obliga a sincronizar `permissions` y `role_permission` en
+    # las dos bases, y hasta que eso corra el endpoint queda inalcanzable para
+    # todos.
+    ("GET", "/api/institucion/"): Scope.CATALOGO_LEER,
+    ("PUT", "/api/institucion/"): Scope.CATALOGO_EDITAR,
+    ("GET", "/api/institucion/telefonos"): Scope.CATALOGO_LEER,
+    ("POST", "/api/institucion/telefonos"): Scope.CATALOGO_EDITAR,
+    ("PUT", "/api/institucion/telefonos/{telefono_id}"): Scope.CATALOGO_EDITAR,
+    ("DELETE", "/api/institucion/telefonos/{telefono_id}"): Scope.CATALOGO_EDITAR,
+    ("POST", "/api/institucion/mails"): Scope.CATALOGO_EDITAR,
+    ("PUT", "/api/institucion/mails/{mail_id}"): Scope.CATALOGO_EDITAR,
+    ("DELETE", "/api/institucion/mails/{mail_id}"): Scope.CATALOGO_EDITAR,
+
+    # Las contraseñas de las casillas van aparte y **más arriba**: hoy
+    # `rbac:gestionar` lo tiene sólo `admin`, que es el alcance pedido ("eso
+    # sólo lo verá el personal autorizado"). Es un permiso prestado, no uno
+    # propio: si algún día hace falta separar "administra permisos" de "puede
+    # ver las claves del correo", se cambia acá y en ningún otro lado — los
+    # handlers de `app/modules/institucion/routes.py` no miran scopes.
+    #
+    # `revelar` es POST y no GET para que `app/middleware/audit.py` lo registre:
+    # el middleware sólo audita métodos mutantes.
+    ("PUT", "/api/institucion/mails/{mail_id}/password"): Scope.RBAC_GESTIONAR,
+    ("POST", "/api/institucion/mails/{mail_id}/password/revelar"): Scope.RBAC_GESTIONAR,
+
+    # ── Calendarios: feriados, cumpleaños y tareas del mes ───────────────────
+    ("GET", "/api/agenda/"): Scope.CATALOGO_LEER,
+    ("GET", "/api/agenda/mes"): Scope.CATALOGO_LEER,
+    # El listado del personal del Colegio para el selector de responsable. Va
+    # con `medico:leer` —el scope administrativo para ver datos de otros— y no
+    # con `catalogo:leer`, que el rol `medico` sí tiene: un socio no tiene por
+    # qué obtener la nómina del personal.
+    ("GET", "/api/agenda/responsables"): Scope.MEDICO_LEER,
+    ("POST", "/api/agenda/"): Scope.CATALOGO_EDITAR,
+    ("PUT", "/api/agenda/{evento_id}"): Scope.CATALOGO_EDITAR,
+    ("DELETE", "/api/agenda/{evento_id}"): Scope.CATALOGO_EDITAR,
 
     # ── Contenido: publicidad ────────────────────────────────────────────────
     ("GET", "/api/publicidad-medicos/"): Scope.CONTENIDO_LEER,
@@ -524,6 +574,8 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     # Respaldo documental de cada vigencia de valores. Mismos scopes que los
     # valores que respalda: quien puede cargar precios puede adjuntar la nota.
     ("GET", "/api/valores_nm/documentos"): Scope.NOMENCLADOR_LEER,
+    # Qué obras sociales actualizaron valores, por mes de vigencia.
+    ("GET", "/api/valores_nm/actualizaciones"): Scope.NOMENCLADOR_LEER,
     ("POST", "/api/valores_nm/documentos"): Scope.NOMENCLADOR_EDITAR,
     ("DELETE", "/api/valores_nm/documentos/{doc_id}"): Scope.NOMENCLADOR_EDITAR,
     ("GET", "/api/valores_nm/{id}"): Scope.NOMENCLADOR_LEER,

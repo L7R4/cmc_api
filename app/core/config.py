@@ -79,6 +79,29 @@ class Settings(BaseSettings):
     # Secreto de máquina para endpoints llamados por el cron (no un JWT de usuario).
     CRON_SECRET: str | None = None
 
+    # Llave para cifrar los secretos que la aplicación tiene que poder MOSTRAR
+    # —hoy sólo las contraseñas de las casillas de correo del Colegio, ver
+    # app/core/secretos.py—. Cualquier string largo sirve: se deriva a la llave
+    # Fernet con SHA-256.
+    #
+    # Opcional a propósito: sin ella la API arranca igual y el módulo de
+    # institución funciona completo salvo la parte de contraseñas, que responde
+    # 503 con el motivo. Lo que NUNCA hace es guardarlas en claro.
+    #
+    # Cambiarla vuelve ilegible todo lo ya guardado.
+    SECRETOS_KEY: SecretStr | None = None
+
+    # NRO_SOCIO de las únicas personas que pueden ver y cambiar las contraseñas
+    # de las casillas de correo del Colegio, separados por coma.
+    #
+    # Es una lista nominal y no un permiso del catálogo por pedido explícito del
+    # Colegio: son dos personas concretas, no un área ni un rol. Va acá y no
+    # hardcodeada en el módulo para poder cambiarla sin desplegar.
+    #
+    # El default son ANA (29920) y GRACIELA (30140). Dejarla VACÍA no abre el
+    # acceso: nadie puede ver ninguna contraseña. Falla cerrado.
+    INSTITUCION_CLAVES_SOCIOS: str = "29920,30140"
+
     # ── Entorno ───────────────────────────────────────────────────────────────
     # "production" apaga /docs, /redoc y /openapi.json. Cualquier otro valor los
     # deja activos para desarrollo. Se setea en docker-compose.prod.yml.

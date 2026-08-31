@@ -25,7 +25,7 @@ from app.db.models.catalogs import (
     Especialidad, ObrasSociales, Periodos, ValorPrestacion,
     PeriodosDoctor, ValoresBoletin, ValoresBoletinHistorial, ValoresObrasocial,
     BoletinObservacion, BoletinObservacionPlantilla,
-    ObraSocialContacto, ObraSocialDireccion, ObraSocialDocumento,
+    ObraSocialContacto, ObraSocialDireccion, ObraSocialDocumento, ObraSocialPago,
     ValoresEticos,
 )
 from app.db.models.rbac import Role, Permission, UserRole, RolePermission, UserPermission
@@ -48,6 +48,10 @@ from app.db.models.nomenclador_cmc import (
     Homologador, Galeno, GalenoPlantilla, Valor, ValorComponente,
     HistorialPrecioCodigo, ValorDocumento,
 )
+# Datos del propio Colegio (CUIT, CBU, teléfonos, casillas de correo).
+from app.db.models.institucion import Institucion, InstitucionTelefono, InstitucionEmail
+# Calendarios del Colegio: feriados, cumpleaños y tareas del mes.
+from app.db.models.agenda import AgendaEvento
 
 __all__ = [
     "Base", "AuditMixin",
@@ -73,7 +77,7 @@ __all__ = [
     "Especialidad", "ObrasSociales", "Periodos", "PeriodosDoctor",
     "ValoresBoletin", "ValoresBoletinHistorial", "ValoresObrasocial", "ValorPrestacion",
     "BoletinObservacion", "BoletinObservacionPlantilla",
-    "ObraSocialContacto", "ObraSocialDireccion", "ObraSocialDocumento",
+    "ObraSocialContacto", "ObraSocialDireccion", "ObraSocialDocumento", "ObraSocialPago",
     "ValoresEticos",
     # rbac
     "Role", "Permission", "UserRole", "RolePermission", "UserPermission",
@@ -100,5 +104,9 @@ __all__ = [
     "NomencladorCMC", "NomencladorEspecialidad", "MedicoCodigoHabilitado",
     "Homologador", "Galeno", "GalenoPlantilla", "Valor", "ValorComponente",
     "HistorialPrecioCodigo", "ValorDocumento",
+    # datos institucionales del Colegio
+    "Institucion", "InstitucionTelefono", "InstitucionEmail",
+    # calendarios (feriados, cumpleaños, tareas del mes)
+    "AgendaEvento",
     # validaciones con obras sociales (tablas propias, no legacy)
 ]

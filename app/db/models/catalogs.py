@@ -309,3 +309,55 @@ class ValoresEticos(Base):
     pdf_path: Mapped[Optional[str]] = mapped_column(String(500))
     observaciones: Mapped[Optional[str]] = mapped_column(String(1000))
     fecha_update: Mapped[Optional[datetime.datetime]] = mapped_column(TIMESTAMP)
+
+class ObraSocialPago(Base):
+    """Una deuda de la obra social con el Colegio: fecha, monto y estado.
+
+    Registro deliberadamente mínimo, como lo pidió el Colegio. No lleva
+    concepto, período, vencimiento ni monto cobrado: lo que hace falta es saber
+    cuánto se le reclamó, cuándo, si está saldado, y poder mirar la factura.
+
+    ## El estado se guarda
+
+    A diferencia de otros diseños posibles, `estado` es una columna real. No hay
+    de dónde derivarlo: sin un "monto cobrado" contra el cual comparar el
+    adeudado, el estado es un dato propio que marca quien carga la fila.
+
+    ## La factura
+
+    Un archivo opcional —PDF o imagen escaneada— por fila. Va al mismo
+    directorio que el resto de los adjuntos de la obra social
+    (`uploads/obras_sociales/<id>/`), que ya está detrás de `/api/archivos` con
+    regla de autorización propia. No hace falta una sección nueva.
+
+    Se guarda la ruta y no el binario, igual que `ObraSocialDocumento`.
+    """
+
+    __tablename__ = "obras_sociales_pagos"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # El index lo crea MySQL solo al declarar la FK; pedirlo acá lo duplicaría.
+    obra_social_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("obras_sociales.ID", ondelete="CASCADE"), nullable=False
+    )
+
+    fecha: Mapped[datetime.date] = mapped_column(Date, nullable=False)
+    monto: Mapped[decimal.Decimal] = mapped_column(DECIMAL(14, 2), nullable=False)
+    estado: Mapped[str] = mapped_column(
+        Enum("pendiente", "parcial", "pagado", name="os_pago_estado_enum"),
+        nullable=False,
+        server_default="pendiente",
+    )
+
+    #: Ruta relativa del adjunto, servida por `/api/archivos/...`.
+    factura_url: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
+    #: El nombre con el que se subio; es lo que se muestra.
+    factura_nombre: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+
+    created_at: Mapped[Optional[datetime.datetime]] = mapped_column(
+        TIMESTAMP, server_default=func.now()
+    )
+    #: `ListadoMedico.ID` de quien lo cargo o modifico. Sin FK a proposito.
+    actualizado_por: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
+    obra_social: Mapped["ObrasSociales"] = relationship("ObrasSociales")

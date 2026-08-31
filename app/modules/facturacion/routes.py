@@ -37,6 +37,7 @@ from app.modules.facturacion.schemas import (
     SetPeriodoMedicoResponse,
     PrestacionesComplementariaCreate,
     PrestacionesCreate,
+    PrestacionFichaOut,
     PrestacionRead,
     PrestacionesRevisadoUpdate,
     PrestacionUpdate,
@@ -297,6 +298,7 @@ async def prestaciones_recientes(
 @router.get("/prestaciones", response_model=list[PrestacionRead], response_model_by_alias=False)
 async def listar_prestaciones(
     response: Response,
+    id: Optional[int] = Query(None, description="ID exacto de la prestación (PK)"),
     cod_obra: Optional[str] = Query(None),
     periodo: Optional[str] = Query(None),
     cod_medico: Optional[str] = Query(None),
@@ -310,6 +312,12 @@ async def listar_prestaciones(
     fecha_hasta: Optional[datetime.date] = Query(None),
     revisado: Optional[bool] = Query(None, description="Filtro por checkbox de auditoría"),
     q: Optional[str] = Query(None, description="Búsqueda libre: médico, código, paciente, nro_orden"),
+    orden_o_autorizacion: Optional[str] = Query(
+        None,
+        description="Busca el texto en `nro_orden` O en `autorizacion`. Segundo campo "
+                    "del buscador de la pantalla de consulta; se combina con AND con "
+                    "el resto de los filtros (incluido `q`).",
+    ),
     solo_facturas_abiertas: bool = Query(
         False,
         description="Devuelve sólo prestaciones cuya cabecera de facturación sigue "
@@ -329,11 +337,13 @@ async def listar_prestaciones(
 
     rows, total = await service.listar_prestaciones(
         db,
+        prestacion_id=id,
         cod_obra=cod_obra, periodo=periodo, cod_medico=cod_medico,
         cod_nomenclador=cod_nomenclador, estado=estado,
         tipo=tipo, grupo_equipo_id=grupo_equipo_id,
         dni_paciente=dni_paciente, nombre_paciente=nombre_paciente,
         fecha_desde=fecha_desde, fecha_hasta=fecha_hasta, revisado=revisado, q=q,
+        orden_o_autorizacion=orden_o_autorizacion,
         solo_facturas_abiertas=solo_facturas_abiertas,
         limit=limit, offset=offset,
     )
@@ -556,6 +566,24 @@ async def obtener_prestacion(id: int, db: AsyncSession = Depends(get_db)):
     """Detalle completo de una prestación — para precargar el formulario de edición
     del front. Sin restricción de estado/fase (de solo lectura)."""
     return await service.obtener_prestacion(db, id)
+
+
+@router.get(
+    "/prestaciones/{id}/ficha", response_model=PrestacionFichaOut,
+    response_model_by_alias=False,
+)
+async def obtener_prestacion_ficha(id: int, db: AsyncSession = Depends(get_db)):
+    """Ficha completa de una prestación: la fila cruda de `detalle_facturacion` (sin
+    los recortes de `PrestacionRead`) más los bloques resueltos — médico, clínica,
+    obra social, nomenclador, paciente, cabecera de factura, quién la cargó, el
+    equipo quirúrgico y el historial de auditoría.
+
+    Pantalla de consulta/soporte, **solo lectura** — no toca nada. Es una vista
+    distinta de `GET /prestaciones/{id}` (que existe para precargar el formulario de
+    edición): engordar aquel endpoint con estos bloques le sumaría varias queries a
+    cada apertura del formulario, que se llama mucho más seguido que esta ficha.
+    """
+    return await service.obtener_prestacion_ficha(db, id)
 
 
 @router.patch("/prestaciones/{id}", response_model=PrestacionRead, response_model_by_alias=False)

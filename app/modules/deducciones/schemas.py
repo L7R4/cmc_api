@@ -254,3 +254,111 @@ class DeduccionesAplicadasResponse(BaseModel):
     total_items: int
     total_aplicado: Decimal
     items: List[DeduccionAplicadaItem]
+
+
+# ---- Cobranzas (panel de deuda por concepto, solo lectura) ----
+
+class CobranzasResumen(BaseModel):
+    saldo_total: Decimal
+    saldo_liquidacion: Decimal
+    saldo_caja: Decimal
+    medicos_con_deuda: int
+    conceptos_con_deuda: int
+    cuotas_impagas: int
+
+
+class CobranzaPorConceptoItem(BaseModel):
+    descuento_id: int
+    nro_colegio: int
+    nombre: str
+    medicos_con_deuda: int
+    cuotas_impagas: int
+    saldo: Decimal
+    saldo_caja: Decimal
+    periodo_mas_antiguo: Optional[str] = None  # "MM/AAAA"
+
+
+class CobranzaPorConceptoPage(BaseModel):
+    total: int
+    items: List[CobranzaPorConceptoItem]
+
+
+class CobranzaMedicoDeudorItem(BaseModel):
+    medico_id: int
+    nro_socio: int
+    medico_nombre: str
+    cuotas_impagas: int
+    periodo_mas_antiguo: Optional[str] = None  # "MM/AAAA"
+    meses_atraso: int
+    saldo: Decimal
+    paga_por_caja: bool
+    pagador_medico_id: Optional[int] = None
+    pagador_nombre: Optional[str] = None
+
+
+class CobranzaMedicosPage(BaseModel):
+    descuento_id: int
+    descuento_nombre: str
+    total: int
+    page: int
+    size: int
+    items: List[CobranzaMedicoDeudorItem]
+
+
+class CobranzaCuotaItem(BaseModel):
+    deduccion_id: int
+    descuento_id: int
+    descuento_nombre: str
+    nro_colegio: int
+    mes_aplicar: Optional[int] = None
+    anio_aplicar: Optional[int] = None
+    calculado_total: Decimal
+    monto_aplicado: Decimal
+    saldo: Decimal
+    paga_por_caja: bool
+    estado: str
+
+
+class CobranzaMedicoDetalle(BaseModel):
+    medico_id: int
+    nro_socio: int
+    medico_nombre: str
+    saldo_total: Decimal
+    cuotas: List[CobranzaCuotaItem]
+
+
+class CobranzaExportRow(BaseModel):
+    medico_id: int
+    nro_socio: int
+    medico_nombre: str
+    descuento_id: int
+    nro_colegio: int
+    descuento_nombre: str
+    mes_aplicar: Optional[int] = None
+    anio_aplicar: Optional[int] = None
+    calculado_total: Decimal
+    monto_aplicado: Decimal
+    saldo: Decimal
+    paga_por_caja: bool
+    estado: str
+
+
+class CobranzaSocioDeudorItem(BaseModel):
+    """Fila de la pestaña "Por socio": la deuda del médico cruzando conceptos."""
+
+    medico_id: int
+    nro_socio: int
+    medico_nombre: str
+    conceptos_con_deuda: int
+    cuotas_impagas: int
+    periodo_mas_antiguo: Optional[str] = None  # "MM/AAAA"
+    meses_atraso: int
+    saldo: Decimal
+    saldo_caja: Decimal
+
+
+class CobranzaSociosPage(BaseModel):
+    total: int
+    page: int
+    size: int
+    items: List[CobranzaSocioDeudorItem]

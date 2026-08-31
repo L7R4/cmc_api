@@ -10,7 +10,7 @@ from typing import Optional
 
 from fastapi import HTTPException
 
-from app.db.models import DetalleFacturacionCMC
+from app.db.models import DetalleFacturacionCMC, ListadoMedico
 from app.modules.validaciones.obras.nobis import cliente as nobis
 from app.modules.validaciones.core.contrato import (
     CERO,
@@ -19,6 +19,7 @@ from app.modules.validaciones.core.contrato import (
     ResultadoValidacion,
     ValidadorOS,
 )
+from app.modules.validaciones.obras.nobis.routes import router as _router
 from app.modules.validaciones.obras.nobis.schemas import EntradaNobis
 
 # Letras de `<Estado>` con las que Nobis **creó la orden** de verdad: hay algo
@@ -43,7 +44,22 @@ class ValidadorNobis(ValidadorOS):
         # El número es sólo la clave interna del Colegio: lo que Nobis recibe
         # por el WSGeCROS son `NOBIS_COD_ENTIDAD_EFECTORA` (90692) y
         # `NOBIS_TIPO_SOLIC`, que no dependen de esto.
-        super().__init__(nro=62, nombre="Nobis Salud", entrada=EntradaNobis)
+        super().__init__(
+            nro=62,
+            nombre="Nobis Salud",
+            entrada=EntradaNobis,
+            router=_router,
+            prefijo="/nobis",
+        )
+
+    def verificar_prestador(self, medico: ListadoMedico) -> None:
+        """Sin matrícula provincial, `<MatProv>` sale vacío y Nobis contesta
+        "El Solicitante ingresado no existe" — 14 de 149 rechazos reales del
+        `soap.log` son justo este caso. Se corta acá, antes de gastar el
+        request, con el mismo criterio que Sancor
+        (`obras/sancor/validador.py::verificar_prestador`)."""
+        if not medico.MATRICULA_PROV:
+            raise HTTPException(422, "El médico no tiene matrícula provincial cargada.")
 
     async def validar(self, ctx: Contexto, entrada: EntradaNobis) -> ResultadoValidacion:
         """Nobis devuelve tres estados, y los tres se graban:
@@ -76,6 +92,7 @@ class ValidadorNobis(ValidadorOS):
                 numero_afiliado=entrada.nro_afiliado,
                 mat_prov=str(ctx.medico.MATRICULA_PROV or ""),
                 codigo_practica=entrada.codigo,
+                token=entrada.token,
                 cantidad=entrada.cantidad,
                 fecha_prescripcion=ctx.fecha,
                 fecha_realizacion=ctx.fecha,
@@ -127,6 +144,21 @@ class ValidadorNobis(ValidadorOS):
         se graba como `rechazada`, filtrar por el estado local saltearía la baja
         de órdenes que sí existen en Nobis — la falla más cara posible acá,
         porque quedan vivas sin que nadie se entere.
+
+        **Sin confirmación de Nobis no hay baja local.** Mismo criterio que
+        Sancor (ver `obras/sancor/validador.py::anular`): si `AnularOrdenNroCod`
+        no vuelve `Estado=OK` —rechazo lógico o lo que sea que Nobis conteste
+        que no sea un OK—, esto levanta un 409 y `core/pipeline.py::
+        eliminar_prestacion()` corta antes de tocar la fila. Antes esto no se
+        chequeaba: un `ERROR` de Nobis pasaba de largo, la prestación se
+        borraba acá igual, y la orden quedaba viva allá sin que nadie se
+        enterara — exactamente la falla que el párrafo de arriba dice que hay
+        que evitar.
+
+        `interpretar_anulacion()` ya trata "Orden Anulada" y "Orden ya
+        Anulada" como `OK` (busca "ANULADA" en el mensaje), así que reintentar
+        la baja de una orden que Nobis ya había dado de baja no queda trabado
+        acá.
         """
         traza = dict(fila.validacion_respuesta or {})
         letra = (traza.get("estado") or "").strip().upper()
@@ -154,6 +186,18 @@ class ValidadorNobis(ValidadorOS):
             raise HTTPException(
                 502, f"No se pudo anular la orden en Nobis, así que no se eliminó: {e}"
             ) from e
+
+        if res.estado != "OK":
+            # Nobis contestó pero no confirmó la baja (rechazo lógico, orden
+            # inexistente, lo que sea): no se toca la fila de este lado. Sin
+            # este chequeo la prestación se borraba igual y la orden quedaba
+            # viva en Nobis sin ningún rastro de que hiciera falta anularla a
+            # mano.
+            raise HTTPException(
+                409,
+                "Nobis no confirmó la anulación de la orden, así que la "
+                f"prestación no se eliminó: {res.estado_detalle}",
+            )
 
         traza["anulacion"] = {"modo": res.modo, "respuesta": res.crudo}
         return Anulacion(traza=traza, detalle=res.estado_detalle[:255])

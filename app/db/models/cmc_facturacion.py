@@ -83,6 +83,19 @@ class DetalleFacturacionCMC(Base):
     urgencia: Mapped[Optional[str]] = mapped_column(String(1))
     estado: Mapped[Optional[str]] = mapped_column(String(2))
     usuario: Mapped[Optional[str]] = mapped_column(String(30))
+    # Fecha/hora de CARGA de la prestación (no de práctica: para eso está
+    # `fecha_practica`). Columna física preexistente de CMC —
+    # `timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP`, sin ON UPDATE— que el ORM
+    # venía ignorando: MySQL la llenaba sola en cada INSERT. Se mapea sólo para
+    # leerla y ordenar por ella; la API nunca la escribe.
+    #
+    # `server_default` y NADA de default en Python a propósito: SQLAlchemy omite la
+    # columna del INSERT y el valor lo fija el servidor (mismo reloj para todas las
+    # filas), igual que `FacturacionCMC.created`. Y NADA de `onupdate`: un PATCH no
+    # tiene que reflotar la prestación a la cabeza del listado.
+    created: Mapped[datetime.datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
     id_especialidad: Mapped[Optional[int]] = mapped_column(Integer)
     # Desglose del cálculo del lookup (modo automático). NULL en CMC y modo manual.
     calculo_snapshot: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)

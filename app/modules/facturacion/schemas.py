@@ -1,6 +1,6 @@
 import datetime
 from decimal import Decimal
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -309,6 +309,13 @@ class PrestacionRead(BaseModel):
     nombre_paciente: Optional[str] = Field(None, alias="nom_ape_p")
     revisado: bool = False
     autorizacion: Optional[str] = None
+    # Fecha de CARGA (columna `created`) — es el criterio de orden de los listados: el
+    # ID autoincremental no sirve porque las importaciones de CMC intercalan rangos.
+    # Optional aunque la columna sea NOT NULL: un zero-date legacy ('0000-00-00')
+    # vuelve como string desde el driver y no tiene que reventar el response.
+    created_at: Optional[datetime.datetime] = Field(None, alias="created")
+    # NRO_SOCIO de quien cargó la prestación. Ya se persistía; nunca se exponía.
+    usuario: Optional[str] = None
     # Campos necesarios para precargar el formulario de edición (no se usaban en el
     # listado hasta ahora, pero ya se guardan al crear/editar la prestación).
     # Clínica bajo la que se ejecutó (NRO_SOCIO de la organización); None = el médico
@@ -336,6 +343,14 @@ class PrestacionRead(BaseModel):
     @classmethod
     def _num_to_str(cls, v):
         return str(v) if v is not None else v
+
+    @field_validator("created_at", "fecha_practica", mode="before")
+    @classmethod
+    def _zero_date_to_none(cls, v):
+        # MySQL puede devolver zero-dates ('0000-00-00') que no son fechas válidas.
+        if isinstance(v, str) and v.startswith("0000-00-00"):
+            return None
+        return v
 
     class Config:
         from_attributes = True
@@ -497,6 +512,7 @@ class PrestacionFacturaDetalleOut(BaseModel):
     fecha_practica: Optional[datetime.date] = None   # fecha de la prestación (no de carga)
     codigo: Optional[str] = None                     # cod_nom
     nro_afiliado: Optional[str] = None                # dni_p
+    nombre_paciente: Optional[str] = None             # nom_ape_p
     # Médico ejecutor — LEGACY, sólo en filas viejas (hoy el ejecutor es el cod_medico
     # del grupo, que es siempre el médico que cobra).
     cod_medico_ejecutor: Optional[str] = None
@@ -560,3 +576,167 @@ class FacturaDetalleOut(BaseModel):
     @classmethod
     def _num_to_str(cls, v):
         return str(v) if v is not None else v
+
+
+# ── Ficha completa de una prestación (pantalla de consulta, solo lectura) ────
+# A diferencia de `PrestacionRead` (pensado para precargar el formulario de edición,
+# con solo los campos que ese flujo necesita), acá se expone la fila TAL CUAL está en
+# la base — sin recortes — más los códigos resueltos a nombre. Es una pantalla de
+# auditoría/soporte: lo que se quiere ver es la columna real.
+class PrestacionCrudaOut(BaseModel):
+    id_detalle_prestaciones: int
+    periodo: str
+    periodo_label: Optional[str] = None
+    created: Optional[datetime.datetime] = None
+    usuario: Optional[str] = None
+    origen_carga: Optional[str] = None
+    estado: Optional[str] = None
+    revisado: bool = False
+    version: int = 1
+    # identificadores
+    cod_med: Optional[str] = None
+    cod_med_ejecutor: Optional[str] = None
+    cod_clinica: Optional[int] = None
+    cod_obr: Optional[str] = None
+    cod_nom: Optional[str] = None
+    nomenclador_id: Optional[int] = None
+    nro_orden: Optional[str] = None
+    autorizacion: Optional[str] = None
+    grupo_equipo_id: Optional[int] = None
+    id_especialidad: Optional[int] = None
+    # paciente
+    dni_p: Optional[str] = None
+    nom_ape_p: Optional[str] = None
+    diag: Optional[str] = None
+    # prestación
+    fecha_practica: Optional[datetime.date] = None
+    tipo: Optional[str] = None
+    tipo_orden: Optional[str] = None
+    categoria: Optional[str] = None
+    via: Optional[str] = None
+    sesion: Optional[int] = None
+    cantidad: Optional[int] = None
+    porc: Optional[int] = None
+    manual: Optional[str] = None            # 'A' automático | 'M' manual
+    tipo_prestador: Optional[str] = None    # derivado: Medico | Ayudante | Gastos
+    # montos
+    honorarios: Optional[Decimal] = None
+    gastos: Optional[Decimal] = None
+    ayudante: Optional[Decimal] = None
+    importe_total: Optional[Decimal] = None
+    coseguro: Decimal = Decimal("0")
+    # `Any`, no `dict`: es una columna JSON cruda y el desglose del cálculo se
+    # persiste como lista en algunos modos (`tipo: "fijo"` trae una lista de
+    # componentes), no siempre como objeto.
+    calculo_snapshot: Optional[Any] = None
+    # validación contra la O.S. (NULL en toda fila que no vino del módulo validaciones)
+    validacion_estado: Optional[str] = None
+    validacion_detalle: Optional[str] = None
+    validacion_respuesta: Optional[Any] = None
+    validacion_anulada: bool = False
+    orden_path: Optional[str] = None
+    orden_url: Optional[str] = None         # derivado con common.files.url_archivo
+    # legacy CMC — casi siempre NULL en filas cargadas por este módulo.
+    tpo_funcion: Optional[str] = None
+    tpo_serv: Optional[str] = None
+    cod_med_indica: Optional[str] = None
+    codigo_oms: Optional[str] = None
+    nro_vias: Optional[int] = None
+    fin_semana: Optional[str] = None
+    nocturno: Optional[str] = None
+    feriado: Optional[str] = None
+    urgencia: Optional[str] = None
+
+    # Varias son columnas ENTERAS en la DB legacy pese al String del modelo.
+    @field_validator(
+        "cod_med", "cod_med_ejecutor", "cod_obr", "cod_nom", "nro_orden",
+        "dni_p", "cod_med_indica", "codigo_oms", mode="before",
+    )
+    @classmethod
+    def _num_to_str(cls, v):
+        return str(v) if v is not None else v
+
+    @field_validator("created", "fecha_practica", mode="before")
+    @classmethod
+    def _zero_date_to_none(cls, v):
+        if isinstance(v, str) and v.startswith("0000-00-00"):
+            return None
+        return v
+
+    class Config:
+        from_attributes = True
+
+
+class SocioRefOut(BaseModel):
+    """Referencia mínima a `listado_medico`. Sin CUIT/documento a propósito: la
+    ficha la gobierna `facturacion:leer`, no `medico:leer`."""
+    nro_socio: int
+    nombre: Optional[str] = None
+    matricula_prov: Optional[int] = None
+    categoria: Optional[str] = None
+    es_organizacion: bool = False
+
+
+class ObraSocialRefOut(BaseModel):
+    nro_obrasocial: int
+    nombre: Optional[str] = None
+
+
+class NomencladorRefOut(BaseModel):
+    id: int
+    codigo: str
+    descripcion: Optional[str] = None
+    categoria: Optional[str] = None
+    complejidad: Optional[str] = None
+    obra_social_nro: Optional[int] = None   # NULL = código compartido del Colegio
+    # True cuando `detalle_facturacion.nomenclador_id` era NULL y la fila se resolvió
+    # por (cod_nom, cod_obr) en vez de venir del vínculo persistido.
+    resuelto_por_codigo: bool = False
+
+    class Config:
+        from_attributes = True
+
+
+class AfiliadoRefOut(BaseModel):
+    """Fila del padrón. `prestacion.nom_ape_p` es la copia desnormalizada al momento
+    de cargar — la ficha muestra las dos para que se vea si divergieron."""
+    id: int
+    dni: str
+    nombre: str
+
+    class Config:
+        from_attributes = True
+
+
+class AuditoriaEventoOut(BaseModel):
+    """Evento de `audit_log` sobre esta prestación.
+
+    Cobertura real, para no prometer de más en la pantalla: el middleware sólo
+    audita MUTACIONES (POST/PUT/PATCH/DELETE), nunca GETs — no hay "quién la
+    consultó". Y sólo PATCH/DELETE quedan atribuibles a esta fila por el `path`: el
+    POST que la creó audita `/prestaciones` sin el id (carga de N ítems a la vez),
+    así que "quién y cuándo la creó" salen de `prestacion.usuario` / `created`, no
+    de acá.
+    """
+    id: int
+    timestamp: datetime.datetime
+    method: str
+    status_code: int
+    nro_socio: Optional[int] = None
+    nombre: Optional[str] = None            # resuelto contra listado_medico
+    role: Optional[str] = None
+    ip: Optional[str] = None
+    request_body: Optional[str] = None
+
+
+class PrestacionFichaOut(BaseModel):
+    prestacion: PrestacionCrudaOut
+    medico: Optional[SocioRefOut] = None
+    clinica: Optional[SocioRefOut] = None
+    cargado_por: Optional[SocioRefOut] = None   # `usuario` resuelto a nombre
+    obra_social: Optional[ObraSocialRefOut] = None
+    nomenclador: Optional[NomencladorRefOut] = None
+    paciente: Optional[AfiliadoRefOut] = None
+    factura: Optional[FacturaRead] = None
+    equipo: list[PrestacionRead] = Field(default_factory=list)
+    auditoria: list[AuditoriaEventoOut] = Field(default_factory=list)

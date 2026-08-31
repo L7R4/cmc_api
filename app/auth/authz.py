@@ -391,6 +391,17 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     ("PATCH", "/api/descuentos/{desc_id}"): Scope.DESCUENTO_EDITAR,
     ("DELETE", "/api/descuentos/{desc_id}"): Scope.DESCUENTO_ELIMINAR,
 
+    # ── Cobranzas (panel de deuda por concepto, solo lectura) ────────────────
+    # Rutas estáticas antes que las dinámicas por la misma razón que en
+    # Deducciones: /export y /por_concepto tienen que matchear antes que
+    # cualquier ruta con {id}.
+    ("GET", "/api/cobranzas/resumen"): Scope.COBRANZA_LEER,
+    ("GET", "/api/cobranzas/por_concepto"): Scope.COBRANZA_LEER,
+    ("GET", "/api/cobranzas/por_socio"): Scope.COBRANZA_LEER,
+    ("GET", "/api/cobranzas/export"): TODOS(Scope.COBRANZA_LEER, Scope.EXPORT_GENERAR),
+    ("GET", "/api/cobranzas/por_concepto/{descuento_id}/medicos"): Scope.COBRANZA_LEER,
+    ("GET", "/api/cobranzas/medicos/{medico_id}"): Scope.COBRANZA_LEER,
+
     # ── Facturación ──────────────────────────────────────────────────────────
     ("GET", "/api/facturacion/afiliados"): Scope.FACTURACION_LEER,
     ("POST", "/api/facturacion/afiliados"): Scope.FACTURACION_CARGAR,
@@ -420,6 +431,11 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     ("GET", "/api/facturacion/prestaciones/recientes"): Scope.FACTURACION_LEER,
     ("PATCH", "/api/facturacion/prestaciones/revisado"): Scope.FACTURACION_CARGAR,
     ("GET", "/api/facturacion/prestaciones/{id}"): Scope.FACTURACION_LEER,
+    # Ficha completa de una prestación (pantalla de consulta, solo lectura).
+    # `facturacion:leer` a secas y NO `LECTURA_FACTURACION`: la ficha es MÁS sensible
+    # que `/prestaciones/{id}` — expone `usuario`, `calculo_snapshot` y el audit_log
+    # con IPs y bodies. Mismo criterio de acceso administrativo que ese endpoint.
+    ("GET", "/api/facturacion/prestaciones/{id}/ficha"): Scope.FACTURACION_LEER,
     ("PATCH", "/api/facturacion/prestaciones/{id}"): Scope.FACTURACION_CARGAR,
     ("DELETE", "/api/facturacion/prestaciones/{id}"): Scope.FACTURACION_CARGAR,
     ("POST", "/api/facturacion/cierre"): Scope.FACTURACION_CERRAR,
@@ -445,6 +461,7 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     ("DELETE", "/api/validaciones/prestaciones/{prestacion_id}"): Scope.VALIDACION_CARGAR,
     ("POST", "/api/validaciones/prestaciones/{prestacion_id}/orden"): Scope.VALIDACION_CARGAR,
     ("GET", "/api/validaciones/sancor/estado"): Scope.VALIDACION_CARGAR,
+    ("GET", "/api/validaciones/nobis/afiliado"): Scope.VALIDACION_CARGAR,
     # Importar el padrón de OSPM: operación del Colegio, no del prestador —
     # mismo scope que el resto de las mutaciones de padrón.
     ("POST", "/api/validaciones/ospm/padron"): Scope.PADRON_EDITAR,

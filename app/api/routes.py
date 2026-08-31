@@ -24,6 +24,7 @@ from app.modules.contenido.routes_noticias import router as noticias_router
 from app.modules.contenido.routes_publicidad import router as publicidades_medico_router
 from app.modules.deducciones.routes import router as deducciones_router
 from app.modules.deducciones.routes_descuentos import router as descuentos_router
+from app.modules.deducciones.routes_cobranzas import router as cobranzas_router
 from app.modules.exports.routes import router as exports_router
 from app.modules.reportes.routes import router as reportes_router
 from app.modules.facturacion.routes import router as facturacion_router
@@ -62,6 +63,7 @@ api_router.include_router(facturacion_router, prefix="/facturacion", tags=["Fact
 api_router.include_router(validaciones_router, prefix="/validaciones", tags=["Validaciones O.S."])
 api_router.include_router(deducciones_router, prefix="/deducciones", tags=["Deducciones - Generar"])
 api_router.include_router(descuentos_router, prefix="/descuentos", tags=["Descuentos"])
+api_router.include_router(cobranzas_router, prefix="/cobranzas", tags=["Cobranzas"])
 
 api_router.include_router(solicitudes_router, prefix="/solicitudes", tags=["Solicitudes"])
 # Los routers "socio" van ANTES que el ABM correspondiente: comparten prefijo y

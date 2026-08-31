@@ -71,6 +71,12 @@ class Scope(StrEnum):
     DESCUENTO_EDITAR = "descuento:editar"
     DESCUENTO_ELIMINAR = "descuento:eliminar"
 
+    # Panel de cobranzas: deuda agregada por concepto, solo lectura. Separado
+    # de DEDUCCION_LEER a propósito — un perfil de cobranzas no necesita el
+    # ABM de deducciones ni tocar la máquina de estados (aplicar, editar,
+    # eliminar), solo consultar quién debe, cuánto y de qué.
+    COBRANZA_LEER = "cobranza:leer"
+
     # ── Financiero: lotes de ajuste ───────────────────────────────────────────
     LOTE_LEER = "lote:leer"
     LOTE_CREAR = "lote:crear"
@@ -304,6 +310,7 @@ ROLES: dict[str, set[Scope]] = {
         Scope.DESCUENTO_CREAR,
         Scope.DESCUENTO_EDITAR,
         Scope.DESCUENTO_ELIMINAR,
+        Scope.COBRANZA_LEER,
         Scope.PAGO_LEER,
         Scope.PAGO_CREAR,
         Scope.PAGO_EDITAR,
@@ -448,6 +455,7 @@ DESCRIPCIONES: dict[Scope, str] = {
     Scope.DESCUENTO_CREAR: "Crear descuentos y asignar socios",
     Scope.DESCUENTO_EDITAR: "Editar descuentos y sus asignaciones",
     Scope.DESCUENTO_ELIMINAR: "Eliminar descuentos y desasignar socios",
+    Scope.COBRANZA_LEER: "Ver el panel de cobranzas y la deuda por concepto",
     Scope.LOTE_LEER: "Ver lotes de ajuste",
     Scope.LOTE_CREAR: "Crear lotes de ajuste e ítems",
     Scope.LOTE_EDITAR: "Editar lotes de ajuste y su estado",

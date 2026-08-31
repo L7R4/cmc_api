@@ -423,9 +423,17 @@ class ValorComponente(Base):
     galeno_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("nm_galenos.id"), nullable=True
     )
-    # 0 = precio fijo; > 0 = unidades del galeno a multiplicar
+    # 0 = precio fijo; > 0 = unidades del galeno a multiplicar.
+    #
+    # DECIMAL(16,4) — 12 dígitos enteros, el mismo rango que `valor_unitario` y
+    # `precio_total`. Era DECIMAL(10,4) hasta el 2026-08-27 y ese techo de 999.999
+    # no alcanzaba: hay obras sociales que modelan el galeno con valor_unitario 1 y
+    # ponen el importe entero acá, así que `cantidad` tiene que poder representar
+    # lo mismo que una columna de dinero. Pasarse no fallaba en producción (el
+    # sql_mode de prod no tiene STRICT_TRANS_TABLES): MySQL clavaba el valor en el
+    # máximo y seguía. 643 componentes de la OS 81 quedaron así.
     cantidad: Mapped[Decimal] = mapped_column(
-        DECIMAL(10, 4), nullable=False, default=Decimal("0"), server_default="0"
+        DECIMAL(16, 4), nullable=False, default=Decimal("0"), server_default="0"
     )
     # Solo se usa cuando galeno_id IS NULL (precio fijo embebido)
     valor_unitario: Mapped[Optional[Decimal]] = mapped_column(DECIMAL(14, 2), nullable=True)

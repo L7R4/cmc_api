@@ -11,7 +11,11 @@ nuevos para la variante laparoscópica.
 Reglas de negocio (hardcodeadas a pedido — solo aplican a los galenos de
 cirugía adulto/infantil):
 - Elegibilidad: el componente Honorarios debe ser calculable y su galeno debe
-  ser `cirugia_adulto` o `cirugia_infantil`.
+  ser `galeno_cirugia_adultos` o `galeno_cirugia_infantil`. La comparación es
+  por literal, así que el slug importa: un galeno que sea el mismo en todo menos
+  el nombre (`cirugia_adulto`, que convivió como segunda familia hasta el
+  2026-08-27) no cotiza laparoscopía y el rechazo no explica por qué. Los slugs
+  canónicos son los de `nm_galenos_plantilla.codigo`.
 - Galeno de 7 niveles: se cotiza con el nivel siguiente (nivel 5 → precio de
   nivel 6). Nivel tope (7) no admite laparoscopía.
 - Galeno de 10 niveles: +25% sobre TODOS los componentes (incluidos los que no
@@ -37,7 +41,7 @@ VIAS_VALIDAS = (VIA_TRADICIONAL, VIA_LAPAROSCOPICA)
 
 # Únicos galenos para los que existe regla de recargo/salto por laparoscopía.
 # La elegibilidad se decide por el galeno del componente Honorarios.
-GALENOS_CON_LAPAROSCOPIA = ("cirugia_adulto", "cirugia_infantil")
+GALENOS_CON_LAPAROSCOPIA = ("galeno_cirugia_adultos", "galeno_cirugia_infantil")
 
 NIVELES_SALTO_NIVEL = 7      # galeno de 7 niveles → cotiza el nivel siguiente
 NIVELES_RECARGO = 10         # galeno de 10 niveles → recargo porcentual

@@ -467,34 +467,128 @@ async def eliminar_valores_por_vigencia(
 ):
     """
     Elimina TODOS los valores (con sus componentes e historial de precios) de una
-    obra social cargados con una vigencia_desde exacta. Acotado a esa OS y vigencia:
-    no toca otras obras sociales ni otras vigencias. Pensado para revertir una carga
-    equivocada antes de volver a cargar.
+    obra social cargados con una vigencia_desde exacta, y **deja a cada código
+    cotizando el precio que tenía antes de esa carga**. Pensado para revertir una
+    carga equivocada antes de volver a cargar.
+
+    Es la versión dura de `/revertir_ultima_actualizacion`: aquella cierra, ésta
+    borra. Lo que ambas comparten —y lo que esta ruta no hacía— es que deshacer una
+    carga no es sólo sacarla: es devolver el estado anterior.
+
+    Dos cosas que corrige respecto de la versión previa, las dos aprendidas de un
+    incidente real en la obra social 62 (agosto 2026):
+
+    1. **Sólo borra el historial de los valores que elimina.** Antes la condición
+       era `valores_id IN (ids) OR (obra_social_nro = X AND vigencia_desde = Y)`, y
+       esa segunda mitad no miraba `ids`: se llevaba puestas todas las filas de
+       historial de la obra social con esa vigencia, **incluidas las de valores que
+       no se estaban eliminando**. El arrastre de una rotación de galeno escribe
+       filas con exactamente esa `vigencia_desde`: rotar los galenos de la OS 62 al
+       2026-08-01 generó 1.907 filas NN, y un DELETE de una importación NNE del día
+       siguiente se las llevó. Los valores NN quedaron activos y sin ninguna fila de
+       historial abierta, o sea sin cotizar, durante 26 días.
+
+    2. **Reactiva el valor anterior de cada variante.** Borrar la carga nueva no
+       reabre lo que esa carga había cerrado, así que la variante quedaba sin precio
+       vigente. Ahora se busca el valor inmediatamente anterior de la misma variante,
+       se lo reactiva y se le regenera el historial con motivo `reversion`, igual que
+       en `/revertir_ultima_actualizacion`. Sus componentes se repuntan al galeno
+       vigente, porque una rotación posterior pudo haber cerrado el que usaban.
+
+    Si una variante no tenía valor anterior, queda sin precio — que es lo correcto:
+    antes de esa carga tampoco lo tenía.
     """
-    ids = (
+    valores = (
         await db.execute(
-            select(Valor.id).where(
+            select(Valor).where(
                 Valor.obra_social_nro == obra_social_nro,
                 Valor.vigencia_desde == vigencia_desde,
             )
         )
     ).scalars().all()
 
-    if ids:
-        await db.execute(
-            delete(HistorialPrecioCodigo).where(
-                (HistorialPrecioCodigo.valores_id.in_(ids))
-                | (
-                    (HistorialPrecioCodigo.obra_social_nro == obra_social_nro)
-                    & (HistorialPrecioCodigo.vigencia_desde == vigencia_desde)
-                )
-            )
-        )
-        await db.execute(delete(ValorComponente).where(ValorComponente.valor_id.in_(ids)))
-        await db.execute(delete(Valor).where(Valor.id.in_(ids)))
-        await db.commit()
+    if not valores:
+        return {"eliminados": 0, "reactivados": 0, "errores": []}
 
-    return {"eliminados": len(ids)}
+    ids = [v.id for v in valores]
+
+    # Se resuelve TODO lo que hay que reactivar antes de borrar nada: después del
+    # DELETE ya no se puede saber qué variante era cada valor eliminado.
+    reactivaciones: list[tuple[Valor, list[tuple[ValorComponente, int]]]] = []
+    errores: list[dict] = []
+    for v in valores:
+        try:
+            anterior = (
+                await db.execute(
+                    select(Valor)
+                    .where(
+                        Valor.obra_social_nro == obra_social_nro,
+                        Valor.nomenclador_id == v.nomenclador_id,
+                        _cond_variante_valor(v.origen, v.especialidad_id_colegio),
+                        Valor.estado == "cerrado",
+                        Valor.id.not_in(ids),
+                        Valor.vigencia_desde < vigencia_desde,
+                    )
+                    .order_by(Valor.vigencia_desde.desc())
+                    .limit(1)
+                )
+            ).scalars().first()
+            if anterior is None:
+                continue
+
+            # Repuntes de galeno resueltos antes de mutar: si alguno no se puede
+            # resolver, esta variante no se reactiva y se informa, pero el borrado
+            # del resto sigue adelante.
+            repuntes: list[tuple[ValorComponente, int]] = []
+            for comp in await _componentes_activos(db, anterior.id):
+                if comp.galeno_id is None:
+                    continue
+                galeno = await db.get(Galeno, comp.galeno_id)
+                if galeno is None:
+                    raise ValueError(f"Componente {comp.id} apunta a un galeno inexistente")
+                if galeno.vigencia_hasta is None and galeno.activo:
+                    continue
+                vigente = await service.buscar_galeno_vigente(
+                    db, anterior.obra_social_nro, galeno.codigo, galeno.nivel
+                )
+                if not vigente:
+                    raise ValueError(
+                        f"No hay galeno vigente '{galeno.codigo}' nivel {galeno.nivel} "
+                        f"para reactivar el valor anterior"
+                    )
+                repuntes.append((comp, vigente.id))
+            reactivaciones.append((anterior, repuntes))
+        except Exception as e:  # noqa: BLE001 — se informa por variante, no corta
+            errores.append({"nomenclador_id": v.nomenclador_id, "motivo": str(e)})
+
+    # El borrado, acotado a los valores de esta carga y nada más.
+    await db.execute(
+        delete(HistorialPrecioCodigo).where(HistorialPrecioCodigo.valores_id.in_(ids))
+    )
+    await db.execute(delete(ValorComponente).where(ValorComponente.valor_id.in_(ids)))
+    await db.execute(delete(Valor).where(Valor.id.in_(ids)))
+    await db.flush()
+
+    for anterior, repuntes in reactivaciones:
+        anterior.estado = "activo"
+        anterior.vigencia_hasta = None
+        for comp, galeno_vigente_id in repuntes:
+            comp.galeno_id = galeno_vigente_id
+    await db.flush()
+
+    for anterior, _ in reactivaciones:
+        # Sin fecha_corte: la fila que había que cerrar era la de la carga borrada,
+        # y ya no existe.
+        await service.regenerar_historial_por_valores(
+            anterior.id, None, db, motivo="reversion"
+        )
+
+    await db.commit()
+    return {
+        "eliminados": len(ids),
+        "reactivados": len(reactivaciones),
+        "errores": errores,
+    }
 
 
 @router.post("/", response_model=ValorOut, status_code=201)

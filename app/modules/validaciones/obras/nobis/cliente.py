@@ -64,6 +64,66 @@ ESTADO_AUTORIZADO = "A"
 ESTADO_PENDIENTE = "P"
 ESTADO_RECHAZADO = "R"
 
+# ── Cómo se arma el <Item> ────────────────────────────────────────────────────
+#
+# Nobis homologa la práctica de su lado: acá no se traduce el código, se manda
+# tal cual lo tiene el Colegio — mismo criterio del legacy. Lo único que varía
+# por código es **bajo qué nomenclador hay que anunciarlo**, y Nobis acepta dos
+# formas de decirlo. No está documentado en ningún lado: la regla vive
+# hardcodeada en `helpers/NobisSoapLowLevel.php::buildOrdenXml()` del sistema
+# viejo, que es lo que corre en producción, y está respaldada por el
+# `soap.log` del servidor (341 requests con su respuesta, relevado el
+# 2026-08-19 y re-cruzado por código el 2026-08-30).
+#
+#   forma DIRECTA  → <TipoNomenclador>1</TipoNomenclador>
+#                    <CodPractica>420101</CodPractica>
+#                    (sin OrigenTipoNomCod ni OrigenPracticaCod)
+#
+#   forma ORIGEN   → <TipoNomenclador></TipoNomenclador><CodPractica></CodPractica>
+#                    <OrigenTipoNomCod>99</OrigenTipoNomCod>
+#                    <OrigenPracticaCod>420351</OrigenPracticaCod>
+#
+# La primera pasada (2026-08-19) miró el estado agregado por forma y encontró
+# que `99` gana lejos. Es cierto, pero mezclaba códigos: agrupar por forma sin
+# mirar el código escondía que la regla real es **por código**, no global. La
+# segunda pasada (2026-08-30) filtró por el mensaje que de verdad distingue
+# "forma equivocada" de "rechazo de negocio" — `Nomenclador o Practica <código>
+# Inexistente`, que Nobis sólo devuelve cuando busca el código en el
+# nomenclador que no es — y cruzó ese mensaje contra la forma enviada, código
+# por código:
+#
+#   | código   | falla con...        | nunca fallo así con...      |
+#   |----------|----------------------|------------------------------|
+#   | 420101   | ORIGEN 99 (1 vez)    | DIRECTA (9 A / 3 P / 2 R)    |
+#   | 420112   | ORIGEN 99 (5 veces)  | DIRECTA/ORIGEN 1 (siempre    |
+#   |          |                      | "sin valor en convenio", un  |
+#   |          |                      | rechazo de negocio, no de    |
+#   |          |                      | nomenclador)                 |
+#   | 420130   | ORIGEN 1 (1 vez)     | ORIGEN 99 (autoriza)         |
+#   | 420132   | DIRECTA y ORIGEN 1   | ORIGEN 99 (autoriza)         |
+#   | 420351   | DIRECTA y ORIGEN 1   | ORIGEN 99 (autoriza)         |
+#
+# O sea: `420101` y `420112` viven bajo el nomenclador `1` — hay que
+# anunciarlos en forma DIRECTA (o, es lo mismo para Nobis, `OrigenTipoNomCod=1`;
+# la forma DIRECTA es la que usa el PHP real). Todo el resto vive bajo `99`.
+# **`420112` faltaba en `CODIGOS_FORMA_DIRECTA`** — con `99` volvía "Nomenclador
+# o Practica 420112 Inexistente" las 5 veces que se probó; no autorizaba nunca
+# ahí, y encima hoy tampoco tiene precio cargado en `nm_valores` para la O.S. 62
+# (ver auditoría del 2026-08-30), así que la carga real de este código estaba
+# doblemente rota.
+ORIGEN_TIPO_NOM_COD = "99"
+
+# `TipoNomenclador` de la forma directa. Es el valor de todas las órdenes reales.
+TIPO_NOMENCLADOR_DIRECTO = "1"
+
+# Códigos que van en la forma DIRECTA porque Nobis los tiene en el nomenclador
+# `1`, no en el `99`. Se deja como conjunto editable a mano —mismo criterio que
+# el homologador de Sancor— porque es una tabla de convenio que el Colegio va a
+# ir ampliando a medida que aparezcan casos: con `99` estos dos códigos vuelven
+# "Inexistente"; con la forma directa, Nobis los reconoce (después puede
+# rechazarlos por otro motivo de negocio, pero ya no por el código).
+CODIGOS_FORMA_DIRECTA = frozenset({"420101", "420112"})
+
 
 @dataclass
 class RespuestaNobis:
@@ -124,6 +184,40 @@ def construir_xml_afiliado(
     )
 
 
+def _construir_item(
+    *, codigo_practica: str, cantidad: int, mat_prov: str, tipo_solic: str
+) -> str:
+    """Un `<Item>` de la orden, en la forma que Nobis acepta para ese código.
+
+    `MatEfector`/`TipoEfector` van iguales al solicitante en las dos formas: por
+    convenio el efector es siempre el mismo médico.
+    """
+    comunes = (
+        f"<Cantidad>{escape(str(cantidad))}</Cantidad>"
+        f"<MatEfector>{escape(mat_prov)}</MatEfector>"
+        f"<TipoEfector>{escape(tipo_solic)}</TipoEfector>"
+    )
+
+    if codigo_practica in CODIGOS_FORMA_DIRECTA:
+        return (
+            "<Item>"
+            f"<TipoNomenclador>{TIPO_NOMENCLADOR_DIRECTO}</TipoNomenclador>"
+            f"<CodPractica>{escape(codigo_practica)}</CodPractica>"
+            f"{comunes}"
+            "</Item>"
+        )
+
+    return (
+        "<Item>"
+        "<TipoNomenclador></TipoNomenclador>"
+        "<CodPractica></CodPractica>"
+        f"{comunes}"
+        f"<OrigenTipoNomCod>{ORIGEN_TIPO_NOM_COD}</OrigenTipoNomCod>"
+        f"<OrigenPracticaCod>{escape(codigo_practica)}</OrigenPracticaCod>"
+        "</Item>"
+    )
+
+
 def construir_xml_orden(
     *,
     numero_afiliado: str,
@@ -131,6 +225,7 @@ def construir_xml_orden(
     tipo_solic: str,
     cod_entidad_efectora: str,
     codigo_practica: str,
+    token: str = "",
     cantidad: int = 1,
     fecha_prescripcion: Optional[datetime.date] = None,
     fecha_realizacion: Optional[datetime.date] = None,
@@ -145,27 +240,31 @@ def construir_xml_orden(
       el efector son **siempre el mismo médico**.
     * `CodEntidadEfectora` es fijo: la entidad es el Colegio.
 
-    ⚠️ Rareza heredada, a propósito: `<TipoNomenclador>` y `<CodPractica>` se
-    mandan **vacíos**, y el código real viaja en `<OrigenPracticaCod>` con
-    `<OrigenTipoNomCod>1</OrigenTipoNomCod>`. Así lo arma `buildOrdenXml()` del
-    legacy —ignorando los `tipo_nomenclador`/`cod_practica` que recibe— y así es
-    como el WS aceptó las órdenes reales que quedaron documentadas. No
-    "corregir" esto sin probarlo contra Nobis.
+    El `<Item>` se arma en una de dos formas según el código — ver
+    `CODIGOS_FORMA_DIRECTA` y `ORIGEN_TIPO_NOM_COD` arriba, que es donde está
+    la evidencia. Es la misma regla que aplica el PHP que corre en producción.
+
+    ## El `<Token>` sí se manda
+
+    Durante un tiempo este módulo no lo mandaba, con la explicación de que "el
+    WSGeCROS no tiene dónde recibirlo". Es falso: el campo está documentado por
+    Gecros ("opcional dependiendo la configuración que tenga la entidad
+    efectora"), está en el builder del PHP que corre en producción, y **las 130
+    órdenes del `soap.log` del servidor lo llevan — ninguna va sin él**. Nobis
+    lo valida: 21 respuestas reales contestan "Token incorrecto".
+
+    Va entre `<Diagnostico>` y `<Items>`, que es la posición del builder real.
+    Los tokens de Nobis son de 6 dígitos (`290894`, `666766`), no de 4.
     """
     hoy = datetime.date.today()
     fecha_prescripcion = fecha_prescripcion or hoy
     fecha_realizacion = fecha_realizacion or hoy
 
-    item = (
-        "<Item>"
-        "<TipoNomenclador></TipoNomenclador>"
-        "<CodPractica></CodPractica>"
-        f"<Cantidad>{escape(str(cantidad))}</Cantidad>"
-        f"<MatEfector>{escape(mat_prov)}</MatEfector>"
-        f"<TipoEfector>{escape(tipo_solic)}</TipoEfector>"
-        "<OrigenTipoNomCod>1</OrigenTipoNomCod>"
-        f"<OrigenPracticaCod>{escape(codigo_practica)}</OrigenPracticaCod>"
-        "</Item>"
+    item = _construir_item(
+        codigo_practica=codigo_practica,
+        cantidad=cantidad,
+        mat_prov=mat_prov,
+        tipo_solic=tipo_solic,
     )
 
     return (
@@ -182,15 +281,56 @@ def construir_xml_orden(
         f"<CodigoCIE10>{escape(codigo_cie10)}</CodigoCIE10>"
         f"<FechaRealizacion>{escape(_fecha_dmy(fecha_realizacion))}</FechaRealizacion>"
         f"<Diagnostico>{escape(diagnostico)}</Diagnostico>"
+        f"<Token>{escape(token)}</Token>"
         f"<Items>{item}</Items>"
         "</Orden>"
     )
 
 
+# Orden en que cada operación declara sus parámetros en el WSDL. **No es una
+# preferencia de estilo**: el WSGeCROS los declara dentro de un `<s:sequence>`,
+# y en SOAP document/literal la secuencia es parte del contrato — un elemento
+# fuera de lugar no se liga al parámetro que corresponde.
+#
+# Está acá y no en cada llamador porque el bug ya pasó una vez: `anular_orden()`
+# armaba el diccionario con `pNroOrden` al final (se agregaba condicionalmente)
+# cuando el WSDL lo declara tercero. Con el orden centralizado, un llamador no
+# puede equivocarse aunque arme el dict como se le ocurra.
+#
+# Relevado del WSDL vivo de test y de producción el 2026-08-19 (los dos declaran
+# lo mismo).
+ORDEN_PARAMETROS: dict[str, tuple[str, ...]] = {
+    "ConsultarAfiliado": ("pUsuario", "pClave", "pXml"),
+    "InsertarAutorizacionAmb": ("pUsuario", "pClave", "pXml"),
+    "AnularOrdenNroCod": ("pUsuario", "pClave", "pNroOrden", "pCodAut", "pObservaciones"),
+    "ConsultarOrdenCompleta": ("pUsuario", "pClave", "pNroOrden"),
+}
+
+
 def _envolver_soap(metodo: str, parametros: dict[str, str]) -> str:
-    """Sobre SOAP 1.2 con el método y sus parámetros como hijos."""
+    """Sobre SOAP 1.2 con el método y sus parámetros como hijos.
+
+    Los emite en el orden que declara el WSDL (`ORDEN_PARAMETROS`), no en el que
+    vinieron en el diccionario. Un parámetro que no esté en el mapa es un error
+    de programación —un typo en el nombre llega al WS como `null` y no da error
+    de transporte, así que se corta acá— y uno declarado que no se pasó
+    simplemente se omite: todos son `minOccurs="0"`.
+    """
+    declarados = ORDEN_PARAMETROS.get(metodo)
+    if declarados is None:
+        raise NobisError(f"Operación de Nobis sin orden de parámetros declarado: {metodo!r}.")
+
+    desconocidos = set(parametros) - set(declarados)
+    if desconocidos:
+        raise NobisError(
+            f"{metodo} no declara {sorted(desconocidos)} en el WSDL. "
+            f"Los que acepta son: {list(declarados)}."
+        )
+
     cuerpo = "".join(
-        f"<{k}>{escape(v)}</{k}>" for k, v in parametros.items()
+        f"<{nombre}>{escape(parametros[nombre])}</{nombre}>"
+        for nombre in declarados
+        if nombre in parametros
     )
     return (
         '<?xml version="1.0" encoding="utf-8"?>'
@@ -350,7 +490,10 @@ async def _postear(metodo: str, parametros: dict[str, str]) -> str:
     url = _destino()
     cuerpo = _envolver_soap(metodo, parametros)
     try:
-        async with httpx.AsyncClient(timeout=settings.NOBIS_TIMEOUT, verify=False) as cli:
+        # Verificación TLS default (sin `verify=False`): los certificados de
+        # wstest.nobissalud.com:7004 y servicioweb.nobissalud.com.ar validan
+        # sin problema contra la cadena estándar — probado el 2026-08-30.
+        async with httpx.AsyncClient(timeout=settings.NOBIS_TIMEOUT) as cli:
             r = await cli.post(
                 url,
                 content=cuerpo.encode("utf-8"),
@@ -411,6 +554,7 @@ async def insertar_autorizacion(
     numero_afiliado: str,
     mat_prov: str,
     codigo_practica: str,
+    token: str = "",
     cantidad: int = 1,
     fecha_prescripcion: Optional[datetime.date] = None,
     fecha_realizacion: Optional[datetime.date] = None,
@@ -437,6 +581,7 @@ async def insertar_autorizacion(
         tipo_solic=settings.NOBIS_TIPO_SOLIC,
         cod_entidad_efectora=settings.NOBIS_COD_ENTIDAD_EFECTORA,
         codigo_practica=codigo_practica,
+        token=token,
         cantidad=cantidad,
         fecha_prescripcion=fecha_prescripcion,
         fecha_realizacion=fecha_realizacion,
@@ -461,9 +606,16 @@ async def insertar_autorizacion(
         "Nobis [%s] → InsertarAutorizacionAmb código=%s afiliado=%s matrícula=%s",
         modo, codigo_practica, numero_afiliado, mat_prov,
     )
-    # El WSDL nombra el parámetro `pXmlOrden` en las operaciones de orden.
+    # `pXml`, no `pXmlOrden`. Lo declara así el WSDL —vivo, verificado el
+    # 2026-08-19— y es lo que manda el PHP en los 331 requests del `soap.log`
+    # de producción, donde `pXmlOrden` no aparece ni una vez.
+    #
+    # El error venía de leer mal el adapter PHP: elige el nombre con un
+    # condicional (`pXmlOrden` sólo si la operación contiene "Prestacion" u
+    # "Orden") y `InsertarAutorizacionAmb` no contiene ninguno de los dos. Con
+    # el nombre equivocado el `.asmx` no falla: recibe la orden como `null`.
     embebido = await _postear(
-        "InsertarAutorizacionAmb", {**_credenciales(), "pXmlOrden": xml}
+        "InsertarAutorizacionAmb", {**_credenciales(), "pXml": xml}
     )
     r = interpretar_autorizacion(embebido)
     r.modo = modo
@@ -479,6 +631,11 @@ async def anular_orden(
     `cod_autorizacion` (pCodAut) es **obligatorio**: sin él el WS no anula (está
     remarcado en el README del legacy). En modo simulado no sale nada; en
     test/producción la baja es real.
+
+    El orden en que salen los parámetros no lo decide este diccionario sino
+    `ORDEN_PARAMETROS`: el WSDL declara `pNroOrden` **antes** que `pCodAut`, y
+    acá se armaba al revés porque el número de orden se agregaba al final de
+    forma condicional.
     """
     if not (cod_autorizacion or "").strip():
         raise NobisError("Nobis necesita el código de autorización para anular la orden.")

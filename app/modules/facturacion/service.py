@@ -16,6 +16,7 @@ from app.common.files import url_archivo
 from app.common.uploads import DOCUMENTOS, validate_upload
 from app.db.models import (
     Afiliado,
+    AuditLog,
     DetalleFacturacionCMC,
     Documento,
     Especialidad,
@@ -33,15 +34,23 @@ from app.modules.nomenclador.service import LookupError as PrecioLookupError
 
 from app.modules.facturacion.schemas import (
     AfiliadoCreate,
+    AfiliadoRefOut,
+    AuditoriaEventoOut,
+    FacturaRead,
     GuardadoResponse,
     MoverPeriodoPayload,
     MoverPeriodoResponse,
+    NomencladorRefOut,
+    ObraSocialRefOut,
     PrecioResponse,
+    PrestacionCrudaOut,
     PrestacionesComplementariaCreate,
     PrestacionesCreate,
+    PrestacionFichaOut,
     PrestacionItem,
     PrestacionRead,
     PrestacionUpdate,
+    SocioRefOut,
 )
 
 FUENTE_PRECIO = "nm_historial_precio_codigo"
@@ -79,6 +88,19 @@ TIPO_ORDEN_SANATORIO = "S"
 # dispara la regla de gasto 0 bajo sanatorio.
 TIPO_SANATORIO = "Sanatorio"
 CATEGORIA_HONORARIOS_INDIVIDUALES = "Honorarios individuales"
+TIPO_PRACTICA = "Practica"
+TIPO_CONSULTA = "Consulta"
+# Sin clínica: 0-419999 = Practica, >=420000 = Consulta (decisión usuario 2026-08-28,
+# reemplaza a la `categoria` del nomenclador como driver de `tipo` en ese caso).
+COD_MAX_PRACTICA = 419999
+
+
+def tipo_por_codigo(codigo: Optional[str]) -> Optional[str]:
+    """`tipo` derivado del rango del código cuando no hay clínica de por medio.
+    None si el código no es puramente numérico (se cae al fallback de `_get_categoria`)."""
+    if codigo is None or not codigo.isdigit():
+        return None
+    return TIPO_PRACTICA if int(codigo) <= COD_MAX_PRACTICA else TIPO_CONSULTA
 
 # Ventana por defecto cuando la OS no define `dia_corte` (20 = del 20 al 20).
 DIA_CORTE_DEFAULT = 20
@@ -640,6 +662,8 @@ async def resolver_prestador(
     cod_medico: str,
     cod_medico_ejecutor: Optional[str],
     cod_clinica: Optional[int] = None,
+    *,
+    validar_clinica: bool = True,
 ) -> PrestadorResuelto:
     """Traduce la selección del front a las columnas de la fila.
 
@@ -660,6 +684,9 @@ async def resolver_prestador(
     (marca legacy de "hubo clínica", ver `TIPO_ORDEN_SANATORIO`) y no decide nada.
 
     `cod_med_ejecutor` NO se persiste en ningún caso: es solo la señal de entrada.
+
+    `validar_clinica=False` salta el chequeo de que `cod_clinica` sea una organización.
+    Lo usa la EDICIÓN cuando la clínica no cambió — ver `editar_prestacion`.
     """
     seleccionado = await check_medico_activo(db, cod_medico)
 
@@ -690,7 +717,8 @@ async def resolver_prestador(
     # Caso 3 — médico que factura por sí mismo, con la clínica como ámbito. Lleva la
     # misma marca `tipo_orden='S'` que el caso 1 (hubo clínica); los separa `tipo`.
     if cod_clinica:  # 0 = sentinel legacy "sin clínica"
-        await check_clinica(db, cod_clinica)
+        if validar_clinica:
+            await check_clinica(db, cod_clinica)
         return PrestadorResuelto(
             cod_med=str(seleccionado.NRO_SOCIO),
             cod_clinica=int(cod_clinica),
@@ -951,22 +979,23 @@ async def derivar_tipo(
     cod_obra: Optional[str] = None,
 ) -> Optional[str]:
     """`tipo` único de la prestación. Lo decide el prestador
-    (`resolver_prestador`) y, si éste no fuerza nada, la `categoria` del código
-    (Consulta | Practica | Honorarios individuales); NULL si el código no tiene.
+    (`resolver_prestador`) y, si éste no fuerza nada, el rango del código
+    (0-419999 → Practica, ≥420000 → Consulta; decisión usuario 2026-08-28); si el
+    código no es numérico, cae a la `categoria` del catálogo como último fallback.
 
     Los dos casos que fuerzan `tipo` (ver `resolver_prestador`): la clínica como
     prestador → 'Sanatorio'; el médico con clínica como ámbito → 'Honorarios
     individuales'.
 
     `cod_obra` desambigua el código y habilita el override de categoría por obra
-    social; omitirlo resuelve solo contra el catálogo compartido.
+    social, usado solo en el fallback de código no numérico.
 
     Nota (2026-07-31): antes el driver era `payee.es_organizacion`. Hoy el payee
     (`cod_med`) es siempre un médico y la clínica vive en `cod_clinica`.
     """
     if tipo_forzado:
         return tipo_forzado
-    return await _get_categoria(db, cod_nomenclador, cod_obra)
+    return tipo_por_codigo(cod_nomenclador) or await _get_categoria(db, cod_nomenclador, cod_obra)
 
 
 async def _gasto_forzado_a_cero(
@@ -1434,27 +1463,18 @@ async def obtener_factura_detalle(db: AsyncSession, factura_id: int) -> dict:
         )).scalars().all()
         medicos = {str(m.NRO_SOCIO): m for m in med_rows}
 
-    # Batch de categorías del nomenclador — fallback para filas legacy con `tipo` NULL
-    # (la columna se puebla recién al cargar por el módulo nuevo; el histórico de CMC
-    # nunca la tuvo). Se deriva on-the-fly con la misma regla que `derivar_tipo`, sin
-    # tocar la fila persistida.
-    # cod_clinica == 0 = "sin clínica" (sentinel legacy, no clínica id real) — misma
-    # regla truthy que `derivar_tipo`.
-    codigos = {r.cod_nom for r in rows if r.tipo is None and not r.cod_clinica and r.cod_nom}
-    categorias: dict[str, str] = {}
-    if codigos:
-        cat_rows = (await db.execute(
-            select(NomencladorCMC.codigo, NomencladorCMC.categoria)
-            .where(NomencladorCMC.codigo.in_(codigos))
-        )).all()
-        categorias = {codigo: cat for codigo, cat in cat_rows if cat}
-
+    # Fallback para filas legacy con `tipo` NULL (la columna se puebla recién al cargar
+    # por el módulo nuevo; el histórico de CMC nunca la tuvo). Se deriva on-the-fly con
+    # la misma regla que `derivar_tipo`/`resolver_prestador`, sin tocar la fila persistida.
     def _tipo_de(r: DetalleFacturacionCMC) -> Optional[str]:
         if r.tipo is not None:
             return r.tipo
-        if r.cod_clinica:
-            return "Sanatorio"
-        return categorias.get(r.cod_nom)
+        med = medicos.get(str(r.cod_med))
+        if med is not None and med.es_organizacion:
+            return TIPO_SANATORIO
+        if r.cod_clinica:  # 0 = sentinel legacy "sin clínica"
+            return CATEGORIA_HONORARIOS_INDIVIDUALES
+        return tipo_por_codigo(r.cod_nom)
 
     # Agrupar por cod_med preservando el orden de aparición (ya viene ordenado por fecha).
     # cod_med puede volver como int en filas legacy (columna declarada String pero
@@ -1498,6 +1518,7 @@ async def obtener_factura_detalle(db: AsyncSession, factura_id: int) -> dict:
             "fecha_practica": r.fecha_practica,
             "codigo": r.cod_nom,
             "nro_afiliado": r.dni_p,
+            "nombre_paciente": r.nom_ape_p,
             # Médico ejecutor — legacy, sólo en filas viejas (hoy el ejecutor ES cod_med).
             "cod_medico_ejecutor": str(r.cod_med_ejecutor) if r.cod_med_ejecutor else None,
             "nombre_ejecutor": ejecutor.NOMBRE if ejecutor else None,
@@ -1540,6 +1561,7 @@ async def obtener_factura_detalle(db: AsyncSession, factura_id: int) -> dict:
 async def listar_prestaciones(
     db: AsyncSession,
     *,
+    prestacion_id: Optional[int] = None,
     cod_obra: Optional[str] = None,
     periodo: Optional[str] = None,
     cod_medico: Optional[str] = None,
@@ -1553,12 +1575,17 @@ async def listar_prestaciones(
     fecha_hasta: Optional[datetime.date] = None,
     revisado: Optional[bool] = None,
     q: Optional[str] = None,
+    orden_o_autorizacion: Optional[str] = None,
     solo_facturas_abiertas: bool = False,
     limit: int = 50,
     offset: int = 0,
 ) -> tuple[list[PrestacionRead], int]:
     M = DetalleFacturacionCMC
     filtros = []
+    # Búsqueda por ID exacto: va por PK (0 ms + COUNT instantáneo), no por LIKE.
+    # Es el primer campo del buscador de la pantalla de consulta de prestaciones.
+    if prestacion_id is not None:
+        filtros.append(M.id_detalle_prestaciones == prestacion_id)
     if revisado is not None:
         filtros.append(M.revisado == revisado)
     if cod_obra is not None:
@@ -1589,6 +1616,12 @@ async def listar_prestaciones(
             M.cod_med.ilike(like) | M.cod_nom.ilike(like)
             | M.nom_ape_p.ilike(like) | M.nro_orden.ilike(like)
         )
+    # Segundo campo del buscador de la pantalla de consulta: UN input, dos columnas.
+    # El OR es INTERNO al filtro — se combina con AND con `q` y con el resto, igual
+    # que todos los demás filtros de esta función.
+    if orden_o_autorizacion:
+        like_oa = f"%{orden_o_autorizacion.strip()}%"
+        filtros.append(M.nro_orden.ilike(like_oa) | M.autorizacion.ilike(like_oa))
 
     # `estado="A"` es una copia denormalizada de "mi factura está abierta", y una carga
     # masiva por fuera de la API puede desincronizarla: en abril/2026 una reimportación
@@ -1615,12 +1648,18 @@ async def listar_prestaciones(
         await db.execute(_con_join(select(func.count()).select_from(M)).where(*filtros))
     ).scalar_one()
 
-    # Orden por id (autoincremental) = orden de carga, no de fecha_practica —
-    # el médico puede cargar hoy una prestación de hace semanas y tiene que
-    # aparecer primera igual.
+    # Orden por fecha de CARGA (`created`), no por `fecha_practica` — el médico puede
+    # cargar hoy una prestación de hace semanas y tiene que aparecer primera igual.
+    # Tampoco por el ID autoincremental: las importaciones masivas de CMC intercalan
+    # rangos de ID que no coinciden con el orden real de carga.
+    #
+    # El desempate por ID NO es cosmético: las cargas en lote comparten `created` al
+    # segundo (hay bloques de más de 2.000 filas con el mismo timestamp) y sin
+    # desempate el orden dentro de esos bloques queda indefinido — con paginación por
+    # OFFSET eso repite y saltea filas entre páginas.
     stmt = (
         _con_join(select(M)).where(*filtros)
-        .order_by(M.id_detalle_prestaciones.desc())
+        .order_by(M.created.desc(), M.id_detalle_prestaciones.desc())
         .limit(limit).offset(offset)
     )
     rows = (await db.execute(stmt)).scalars().all()
@@ -1639,7 +1678,9 @@ async def prestaciones_recientes(
         select(M).where(*filtros)
         # 30 (no 10): la tabla bajo el formulario de carga tiene que mostrar la tanda
         # completa que viene cargando el operador, no sólo las últimas diez.
-        .order_by(M.id_detalle_prestaciones.desc()).limit(30)
+        # Orden por fecha de carga, con el ID como desempate — mismo criterio que
+        # `listar_prestaciones`, ver el comentario ahí.
+        .order_by(M.created.desc(), M.id_detalle_prestaciones.desc()).limit(30)
     )
     rows = (await db.execute(stmt)).scalars().all()
     return await _to_prestacion_read_list(db, rows)
@@ -1710,8 +1751,10 @@ async def obtener_prestacion(db: AsyncSession, prestacion_id: int) -> Prestacion
     if row is None:
         raise HTTPException(404, "Prestación no encontrada")
 
-    principal = PrestacionRead.model_validate(row)
-    principal.tipo_prestador = _tipo_prestador_de(row)
+    # Vía `_to_prestacion_read_list` (no `PrestacionRead.model_validate` a mano, como
+    # antes): así también se resuelven `nombre_obra_social`/`nombre_clinica`, que el
+    # listado ya trae y este endpoint dejaba en None por una asimetría de vieja data.
+    principal = (await _to_prestacion_read_list(db, [row]))[0]
     principal.grupo = []
     if row.grupo_equipo_id is not None:
         siblings = (await db.execute(
@@ -1723,13 +1766,181 @@ async def obtener_prestacion(db: AsyncSession, prestacion_id: int) -> Prestacion
             )
             .order_by(DetalleFacturacionCMC.id_detalle_prestaciones.asc())
         )).scalars().all()
-        grupo = []
-        for s in siblings:
-            item = PrestacionRead.model_validate(s)
-            item.tipo_prestador = _tipo_prestador_de(s)
-            grupo.append(item)
-        principal.grupo = grupo
+        principal.grupo = await _to_prestacion_read_list(db, siblings)
     return principal
+
+
+# ── Ficha completa (pantalla de consulta, solo lectura) ──────────────────────
+async def obtener_prestacion_ficha(
+    db: AsyncSession, prestacion_id: int
+) -> PrestacionFichaOut:
+    """Registro completo de `detalle_facturacion` (sin los recortes de `PrestacionRead`)
+    más los códigos resueltos: médico, clínica, obra social, nomenclador, paciente,
+    cabecera de factura, quién la cargó, el equipo quirúrgico y el historial de
+    auditoría. Pantalla de soporte/consulta — no modifica nada.
+
+    Diez consultas fijas, todas por PK o índice, sin N+1 (nada de resolver una a una
+    por fila de equipo o evento de auditoría)."""
+    row = await db.get(DetalleFacturacionCMC, prestacion_id)
+    if row is None:
+        raise HTTPException(404, "Prestación no encontrada")
+
+    # Equipo: mismos hermanos que `obtener_prestacion`, pero acá se devuelven como
+    # `PrestacionRead` completos (con nombre de OS/clínica) en vez de un ref chico —
+    # es lo que el front va a mostrar en la tabla de integrantes.
+    equipo: list[PrestacionRead] = []
+    if row.grupo_equipo_id is not None:
+        siblings = (await db.execute(
+            select(DetalleFacturacionCMC)
+            .where(
+                DetalleFacturacionCMC.grupo_equipo_id == row.grupo_equipo_id,
+                DetalleFacturacionCMC.estado != "X",
+            )
+            .order_by(DetalleFacturacionCMC.id_detalle_prestaciones.asc())
+        )).scalars().all()
+        equipo = await _to_prestacion_read_list(db, siblings)
+
+    # Un solo IN para todos los médicos que puede necesitar la ficha: quien cobra, la
+    # clínica, el ejecutor legacy y quien la cargó.
+    nros_socio: set[int] = set()
+    for cod in (row.cod_med, row.cod_clinica, row.cod_med_ejecutor, row.usuario):
+        try:
+            n = int(cod)
+        except (TypeError, ValueError):
+            continue
+        if n:  # 0 = sentinel legacy "sin clínica" — no es un socio real
+            nros_socio.add(n)
+    medicos_by_nro: dict[int, ListadoMedico] = {}
+    if nros_socio:
+        med_rows = (await db.execute(
+            select(ListadoMedico).where(ListadoMedico.NRO_SOCIO.in_(nros_socio))
+        )).scalars().all()
+        medicos_by_nro = {m.NRO_SOCIO: m for m in med_rows}
+
+    def _socio_ref(cod: Optional[str]) -> Optional[SocioRefOut]:
+        try:
+            n = int(cod)
+        except (TypeError, ValueError):
+            return None
+        m = medicos_by_nro.get(n)
+        if m is None:
+            return None
+        return SocioRefOut(
+            nro_socio=m.NRO_SOCIO, nombre=m.NOMBRE, matricula_prov=m.MATRICULA_PROV,
+            categoria=m.CATEGORIA, es_organizacion=bool(m.es_organizacion),
+        )
+
+    medico = _socio_ref(row.cod_med)
+    clinica = _socio_ref(row.cod_clinica) if row.cod_clinica else None
+    cargado_por = _socio_ref(row.usuario)
+
+    obra_social = None
+    try:
+        cod_obr_int = int(row.cod_obr)
+    except (TypeError, ValueError):
+        cod_obr_int = None
+    if cod_obr_int is not None:
+        os_row = (await db.execute(
+            select(ObrasSociales).where(ObrasSociales.NRO_OBRASOCIAL == cod_obr_int)
+        )).scalars().first()
+        if os_row is not None:
+            obra_social = ObraSocialRefOut(
+                nro_obrasocial=os_row.NRO_OBRASOCIAL, nombre=os_row.OBRA_SOCIAL,
+            )
+
+    # Nomenclador: se prefiere el vínculo persistido; si es NULL (frecuente en filas
+    # importadas de CMC) se cae al resolver por (cod_nom, cod_obr), que ya implementa
+    # la precedencia "código propio de la OS > compartido" — no se reimplementa acá.
+    nomenclador = None
+    if row.nomenclador_id is not None:
+        nom_row = await db.get(NomencladorCMC, row.nomenclador_id)
+        resuelto_por_codigo = False
+    elif row.cod_nom and cod_obr_int is not None:
+        nom_row = await service_nm.resolver_nomenclador(db, row.cod_nom, cod_obr_int)
+        resuelto_por_codigo = nom_row is not None
+    else:
+        nom_row = None
+        resuelto_por_codigo = False
+    if nom_row is not None:
+        nomenclador = NomencladorRefOut(
+            id=nom_row.id, codigo=nom_row.codigo, descripcion=nom_row.descripcion,
+            categoria=nom_row.categoria, complejidad=nom_row.complejidad,
+            obra_social_nro=nom_row.obra_social_nro,
+            resuelto_por_codigo=resuelto_por_codigo,
+        )
+
+    paciente = None
+    if row.dni_p:
+        af_row = (await db.execute(
+            select(Afiliado).where(Afiliado.dni == row.dni_p)
+        )).scalars().first()
+        if af_row is not None:
+            paciente = AfiliadoRefOut(id=af_row.id, dni=af_row.dni, nombre=af_row.nombre)
+
+    factura = None
+    if cod_obr_int is not None:
+        fact_row = (await db.execute(
+            select(FacturacionCMC).where(
+                FacturacionCMC.cod_obr == row.cod_obr,
+                FacturacionCMC.periodo == row.periodo,
+                FacturacionCMC.version == row.version,
+            )
+        )).scalars().first()
+        if fact_row is not None:
+            factura = FacturaRead.model_validate(fact_row)
+            factura.periodo_label = periodo_label(fact_row.periodo)
+
+    # Auditoría: por igualdad (no LIKE) sobre `route` (la plantilla, indexada) y
+    # `path` (la URL concreta) — sólo PATCH/DELETE quedan atribuibles a un id: el POST
+    # que la creó audita `/prestaciones` sin el id (carga de N ítems de un saque).
+    audit_rows = (await db.execute(
+        select(AuditLog)
+        .where(
+            AuditLog.route == "/api/facturacion/prestaciones/{id}",
+            AuditLog.path == f"/api/facturacion/prestaciones/{prestacion_id}",
+            AuditLog.method.in_(("PATCH", "DELETE")),
+        )
+        .order_by(AuditLog.timestamp.desc())
+        .limit(50)
+    )).scalars().all()
+    auditoria: list[AuditoriaEventoOut] = []
+    if audit_rows:
+        nros_audit = {a.nro_socio for a in audit_rows if a.nro_socio}
+        nombres_audit: dict[int, str] = {}
+        if nros_audit:
+            rows_audit = (await db.execute(
+                select(ListadoMedico.NRO_SOCIO, ListadoMedico.NOMBRE)
+                .where(ListadoMedico.NRO_SOCIO.in_(nros_audit))
+            )).all()
+            nombres_audit = {nro: nombre for nro, nombre in rows_audit}
+        auditoria = [
+            AuditoriaEventoOut(
+                id=a.id, timestamp=a.timestamp, method=a.method,
+                status_code=a.status_code, nro_socio=a.nro_socio,
+                nombre=nombres_audit.get(a.nro_socio) if a.nro_socio else None,
+                role=a.role, ip=a.ip, request_body=a.request_body,
+            )
+            for a in audit_rows
+        ]
+
+    prestacion = PrestacionCrudaOut.model_validate(row)
+    prestacion.periodo_label = periodo_label(row.periodo) if row.periodo else None
+    prestacion.tipo_prestador = _tipo_prestador_de(row)
+    if row.orden_path:
+        prestacion.orden_url = url_archivo(row.orden_path)
+
+    return PrestacionFichaOut(
+        prestacion=prestacion,
+        medico=medico,
+        clinica=clinica,
+        cargado_por=cargado_por,
+        obra_social=obra_social,
+        nomenclador=nomenclador,
+        paciente=paciente,
+        factura=factura,
+        equipo=equipo,
+        auditoria=auditoria,
+    )
 
 
 # ── Edición ──────────────────────────────────────────────────────────────────
@@ -1746,8 +1957,12 @@ async def editar_prestacion(
 
     data = payload.model_dump(exclude_unset=True)
 
-    # Campo paciente: relee nombre del padrón si cambió el DNI
-    if "dni_paciente" in data:
+    # Campo paciente: relee el nombre del padrón SÓLO si cambió el identificador. El
+    # front manda `dni_paciente` en todos los PATCH, así que reescribir siempre borraba
+    # el nombre de las filas importadas de CMC que traen `nom_ape_p` cargado con
+    # `dni_p` vacío: el paciente no está en el padrón, no hay nada que releer, y
+    # guardar una edición cualquiera (p. ej. corregir el código) lo dejaba en NULL.
+    if "dni_paciente" in data and (data["dni_paciente"] or "") != (row.dni_p or ""):
         row.dni_p = data["dni_paciente"]
         row.nom_ape_p = await _nombre_desde_afiliado(db, data["dni_paciente"])
 
@@ -1801,7 +2016,15 @@ async def editar_prestacion(
     sel_ejecutor = data.get("cod_medico_ejecutor", prev_ejecutor)
     sel_clinica = data.get("cod_clinica", prev_clinica)
 
-    prestador = await resolver_prestador(db, sel_cod, sel_ejecutor, sel_clinica)
+    # La clínica que ya venía en la fila no se revalida: las filas importadas de CMC
+    # traen `cod_clinica` apuntando a socios que no están marcados como organización
+    # (`es_organizacion=0`), y como el front reenvía el valor precargado en cada PATCH,
+    # editar cualquier otro campo moría con "El código N no es una clínica/organización".
+    # Si el PATCH la cambia por otra, esa sí se valida como siempre.
+    clinica_sin_cambios = int(sel_clinica or 0) == int(row.cod_clinica or 0)
+    prestador = await resolver_prestador(
+        db, sel_cod, sel_ejecutor, sel_clinica, validar_clinica=not clinica_sin_cambios,
+    )
     medico_precio = prestador.medico
     row.cod_med = prestador.cod_med
     row.cod_clinica = prestador.cod_clinica

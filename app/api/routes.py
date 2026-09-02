@@ -16,7 +16,9 @@ from app.modules.beneficios.routes import router_socio as beneficios_socio_route
 from app.modules.auditoria.routes import router as auditoria_router
 from app.modules.catalogs.routes_especialidades import router as especialidades_router
 from app.modules.catalogs.routes_obras_sociales import router as obras_social_router
-from app.modules.catalogs.routes_os_pagos import router as os_pagos_router
+# «Pagos» de obra social deshabilitado a pedido del Colegio — ver el docstring
+# de ObraSocialPago en app/db/models/catalogs.py para reactivarlo.
+# from app.modules.catalogs.routes_os_pagos import router as os_pagos_router
 from app.modules.catalogs.routes_periodos import router as periodos_router
 from app.modules.catalogs.routes_observaciones import router as observaciones_boletin_router
 from app.modules.catalogs.routes_valores import router as valores_boletin_router
@@ -52,11 +54,8 @@ api_router = APIRouter()
 
 api_router.include_router(medicos_router, prefix="/medicos", tags=["Medicos"])
 api_router.include_router(padrones_router, prefix="/padrones", tags=["Padrones Médico"])
-# Antes que `obras_social_router` por el mismo criterio que los documentos de
-# valores: comparten prefijo y aquel tiene `/{id}`. Acá no habría colisión real
-# —`/{id}/pagos` tiene un segmento más— pero mantener el orden evita tener que
-# volver a razonarlo cada vez que se agrega una ruta.
-api_router.include_router(os_pagos_router, prefix="/obras_social", tags=["Obras Sociales"])
+# «Pagos» de obra social deshabilitado (ver el import comentado arriba).
+# api_router.include_router(os_pagos_router, prefix="/obras_social", tags=["Obras Sociales"])
 api_router.include_router(obras_social_router, prefix="/obras_social", tags=["Obras Sociales"])
 api_router.include_router(especialidades_router, prefix="/especialidades", tags=["Especialidades"])
 api_router.include_router(periodos_router, prefix="/periodos", tags=["Periodos"])

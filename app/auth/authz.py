@@ -185,18 +185,22 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     ("DELETE", "/api/obras_social/{id}"): Scope.CATALOGO_EDITAR,
     ("POST", "/api/obras_social/{id}/documentos"): Scope.CATALOGO_EDITAR,
 
-    # Pagos y deuda de la obra social (pestaña «Pagos» del perfil). Mismos
-    # scopes que el resto del perfil: es información del convenio.
-    ("GET", "/api/obras_social/{obra_id}/pagos"): Scope.CATALOGO_LEER,
-    ("POST", "/api/obras_social/{obra_id}/pagos"): Scope.CATALOGO_EDITAR,
-    ("PUT", "/api/obras_social/{obra_id}/pagos/{pago_id}"): Scope.CATALOGO_EDITAR,
-    ("DELETE", "/api/obras_social/{obra_id}/pagos/{pago_id}"): Scope.CATALOGO_EDITAR,
-    ("POST", "/api/obras_social/{obra_id}/pagos/{pago_id}/factura"): Scope.CATALOGO_EDITAR,
-    ("DELETE", "/api/obras_social/{obra_id}/pagos/{pago_id}/factura"): Scope.CATALOGO_EDITAR,
+    # Pagos y deuda de la obra social (pestaña «Pagos» del perfil): router
+    # deshabilitado (ver app/api/routes.py), así que estas rutas no existen hoy.
+    # Reactivar el router exige descomentar estas seis entradas también, o
+    # test_no_hay_rutas_declaradas_de_mas() falla por entradas huérfanas.
+    # ("GET", "/api/obras_social/{obra_id}/pagos"): Scope.CATALOGO_LEER,
+    # ("POST", "/api/obras_social/{obra_id}/pagos"): Scope.CATALOGO_EDITAR,
+    # ("PUT", "/api/obras_social/{obra_id}/pagos/{pago_id}"): Scope.CATALOGO_EDITAR,
+    # ("DELETE", "/api/obras_social/{obra_id}/pagos/{pago_id}"): Scope.CATALOGO_EDITAR,
+    # ("POST", "/api/obras_social/{obra_id}/pagos/{pago_id}/factura"): Scope.CATALOGO_EDITAR,
+    # ("DELETE", "/api/obras_social/{obra_id}/pagos/{pago_id}/factura"): Scope.CATALOGO_EDITAR,
     ("DELETE", "/api/obras_social/{id}/documentos/{doc_id}"): Scope.CATALOGO_EDITAR,
 
     # ── Catálogos: especialidades y períodos ─────────────────────────────────
     ("GET", "/api/especialidades/"): Scope.CATALOGO_LEER,
+    ("POST", "/api/especialidades/"): Scope.CATALOGO_EDITAR,
+    ("PATCH", "/api/especialidades/{id}"): Scope.CATALOGO_EDITAR,
     ("GET", "/api/periodos/disponibles"): Scope.CATALOGO_LEER,
     ("GET", "/api/periodos/disponibles_lotes_ajustes"): Scope.CATALOGO_LEER,
 
@@ -228,6 +232,7 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     # quien administra contenido, igual que las noticias.
     ("GET", "/api/planillas/"): Scope.CONTENIDO_LEER,
     ("POST", "/api/planillas/"): Scope.CONTENIDO_EDITAR,
+    ("PATCH", "/api/planillas/{planilla_id}"): Scope.CONTENIDO_EDITAR,
     ("DELETE", "/api/planillas/{planilla_id}"): Scope.CONTENIDO_EDITAR,
 
     # ── Datos del propio Colegio ─────────────────────────────────────────────
@@ -356,6 +361,7 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     # ── Padrones ─────────────────────────────────────────────────────────────
     ("GET", "/api/padrones/catalogo"): Scope.CATALOGO_LEER,
     ("GET", "/api/padrones/obras-sociales/{nro_os}/medicos"): Scope.PADRON_LEER,
+    ("GET", "/api/padrones/obras-sociales/{nro_os}/medicos/export"): Scope.PADRON_LEER,
     ("GET", "/api/padrones/{nro_socio}"): LECTURA_PADRON,
     ("GET", "/api/padrones/{medico_id}/asignaciones"): LECTURA_PADRON,
     ("POST", "/api/padrones/{medico_id}/asignaciones/concepto"): Scope.PADRON_EDITAR,

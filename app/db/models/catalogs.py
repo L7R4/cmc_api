@@ -1,8 +1,8 @@
 import datetime
 import decimal
-from typing import List, Optional
+from typing import Any, List, Optional
 
-from sqlalchemy import DECIMAL, Date, Enum, ForeignKey, Index, Integer, String, TIMESTAMP, text
+from sqlalchemy import DECIMAL, Date, Enum, ForeignKey, Index, Integer, JSON, String, TIMESTAMP, UniqueConstraint, text
 from sqlalchemy.dialects.mysql import INTEGER
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
@@ -26,13 +26,18 @@ class ObrasSociales(Base):
     __tablename__ = 'obras_sociales'
     __table_args__ = (
         Index('MARCA', 'MARCA'),
-        Index('NRO_OBRASOCIAL', 'NRO_OBRASOCIAL'),
+        # UNIQUE y no solo un índice: antes de esto la unicidad de NRO_OBRASOCIAL
+        # la garantizaba únicamente el SELECT previo en create_obra_social(), con
+        # una ventana de carrera entre el SELECT y el INSERT. Ver auditoría O-06.
+        UniqueConstraint('NRO_OBRASOCIAL', name='uq_obras_sociales_nro'),
         Index('OBRA_SOCIAL', 'OBRA_SOCIAL')
     )
 
     ID: Mapped[int] = mapped_column(INTEGER(11), primary_key=True)
     NRO_OBRASOCIAL: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
-    OBRA_SOCIAL: Mapped[str] = mapped_column(String(45, 'utf8_spanish2_ci'), nullable=False, server_default=text("'a'"))
+    # Ampliado de 45 a 255: con 45 el nombre se truncaba en silencio (ver
+    # auditoría O-10) — varios ya quedaron cortados en la carga legacy.
+    OBRA_SOCIAL: Mapped[str] = mapped_column(String(255, 'utf8_spanish2_ci'), nullable=False, server_default=text("'a'"))
     MARCA: Mapped[str] = mapped_column(String(1, 'utf8_spanish2_ci'), nullable=False, server_default=text("'N'"))
     VER_VALOR: Mapped[str] = mapped_column(String(1, 'utf8_spanish2_ci'), nullable=False, server_default=text("'N'"))
 
@@ -61,20 +66,22 @@ class ObrasSociales(Base):
         server_default=text("CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP")
     )
 
-    contactos: Mapped[List["ObraSocialContacto"]] = relationship(
-        "ObraSocialContacto",
-        back_populates="obra_social",
-        cascade="all, delete-orphan",
-        passive_deletes=True,
-        lazy="selectin",
-    )
-    direcciones: Mapped[List["ObraSocialDireccion"]] = relationship(
-        "ObraSocialDireccion",
-        back_populates="obra_social",
-        cascade="all, delete-orphan",
-        passive_deletes=True,
-        lazy="selectin",
-    )
+    # Emails y teléfonos: `[{"tipo": "email"|"telefono", "valor": "...", "etiqueta": "..."}]`.
+    #
+    # Antes eran dos tablas satélite (`obras_sociales_contactos`,
+    # `obras_sociales_direccion`), las dos vacías en las 141 filas reales. Sin
+    # una sola fila cargada no había nada que justificara el join: acá no hay
+    # más consultas por contacto individual que las que ya hace este módulo
+    # (siempre "todos los contactos de esta obra social"), así que van como
+    # columnas JSON de la fila, igual que `conceps_espec` en `ListadoMedico`.
+    # `ObraSocialDocumento` sí sigue siendo tabla propia: administra archivos
+    # reales en disco, con su propio ciclo de vida de borrado físico.
+    contactos: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
+    # Lista de direcciones de envío de facturación. El front hoy sólo usa la
+    # primera (`direccion[0]`), pero se guarda como lista para no perder la
+    # forma que ya expone `ObraSocialOut.direccion`.
+    direcciones: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
+
     documentos: Mapped[List["ObraSocialDocumento"]] = relationship(
         "ObraSocialDocumento",
         back_populates="obra_social",
@@ -82,36 +89,6 @@ class ObrasSociales(Base):
         passive_deletes=True,
         lazy="selectin",
     )
-
-
-class ObraSocialContacto(Base):
-    __tablename__ = 'obras_sociales_contactos'
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    obra_social_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey('obras_sociales.ID', ondelete='CASCADE'), nullable=False, index=True
-    )
-    tipo: Mapped[str] = mapped_column(Enum('email', 'telefono', name='contacto_tipo_enum'), nullable=False)
-    valor: Mapped[str] = mapped_column(String(200), nullable=False)
-    etiqueta: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
-
-    obra_social: Mapped["ObrasSociales"] = relationship("ObrasSociales", back_populates="contactos")
-
-
-class ObraSocialDireccion(Base):
-    __tablename__ = 'obras_sociales_direccion'
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    obra_social_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey('obras_sociales.ID', ondelete='CASCADE'), nullable=False, index=True
-    )
-    provincia: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
-    localidad: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
-    direccion: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
-    codigo_postal: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
-    horario: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
-
-    obra_social: Mapped["ObrasSociales"] = relationship("ObrasSociales", back_populates="direcciones")
 
 
 class ObraSocialDocumento(Base):
@@ -312,6 +289,13 @@ class ValoresEticos(Base):
 
 class ObraSocialPago(Base):
     """Una deuda de la obra social con el Colegio: fecha, monto y estado.
+
+    **Feature deshabilitada** — la tabla existe (la migración
+    `ospag0s0001` quedó colgada de una rama de Alembic con dos heads, ver
+    `alembic merge` en el historial) pero el router no se registra en
+    `app/api/routes.py` ni hay pestaña en el front. Reactivar es: descomentar el
+    include_router acá referenciado, las entradas de `SCOPES_POR_RUTA` en
+    `app/auth/authz.py`, y la pestaña «Pagos» en `ObrasSocialesDetalle.tsx`.
 
     Registro deliberadamente mínimo, como lo pidió el Colegio. No lleva
     concepto, período, vencimiento ni monto cobrado: lo que hace falta es saber

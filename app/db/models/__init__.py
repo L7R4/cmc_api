@@ -25,7 +25,7 @@ from app.db.models.catalogs import (
     Especialidad, ObrasSociales, Periodos, ValorPrestacion,
     PeriodosDoctor, ValoresBoletin, ValoresBoletinHistorial, ValoresObrasocial,
     BoletinObservacion, BoletinObservacionPlantilla,
-    ObraSocialContacto, ObraSocialDireccion, ObraSocialDocumento, ObraSocialPago,
+    ObraSocialDocumento, ObraSocialPago,
     ValoresEticos,
 )
 from app.db.models.rbac import Role, Permission, UserRole, RolePermission, UserPermission
@@ -77,7 +77,7 @@ __all__ = [
     "Especialidad", "ObrasSociales", "Periodos", "PeriodosDoctor",
     "ValoresBoletin", "ValoresBoletinHistorial", "ValoresObrasocial", "ValorPrestacion",
     "BoletinObservacion", "BoletinObservacionPlantilla",
-    "ObraSocialContacto", "ObraSocialDireccion", "ObraSocialDocumento", "ObraSocialPago",
+    "ObraSocialDocumento", "ObraSocialPago",
     "ValoresEticos",
     # rbac
     "Role", "Permission", "UserRole", "RolePermission", "UserPermission",

@@ -122,7 +122,7 @@ app/
 
 #### Catalogos
 
-- **Especialidades** (`routes_especialidades.py`): Solo `GET /` — lista de `Especialidad` (campos `ID`, `ID_COLEGIO_ESPE`, `ESPECIALIDAD`). Es read-only; las especialidades son importadas del sistema legacy.
+- **Especialidades** (`routes_especialidades.py`): `GET /`, `POST /` y `PATCH /{id}` sobre `Especialidad` (campos `ID`, `ID_COLEGIO_ESPE`, `ESPECIALIDAD`). El grueso del catálogo viene importado del sistema legacy; el alta/edición manual es para completarlo. `ID` es AUTO_INCREMENT y nunca lo manda el cliente. `ID_COLEGIO_ESPE` tiene que ser único —es la clave con la que `listado_medico.NRO_ESPECIALIDAD1..6` y el JSON `conceps_espec` referencian a la especialidad— pero en la tabla es un `KEY`, no un `UNIQUE`: la unicidad la garantiza el SELECT previo en las rutas (409 si choca). **No hay DELETE a propósito**: no existe FK desde `listado_medico`, así que borrar una fila dejaría médicos apuntando a una especialidad inexistente.
 - **Obras Sociales** (`routes_obras_sociales.py`): CRUD completo. `IntegrityError` en CREATE → 409. El campo clave es `NRO_OBRASOCIAL` (entero único).
 - **Periodos** (`routes_periodos.py`): `GET /disponibles?obra_social_id=X` devuelve períodos cerrados (`CERRADO="C"`) que aún no tienen `Liquidacion` creada — usado para poblar el selector al crear una liquidación.
 - **Valores Boletín** (`routes_valores.py`): Tabla de aranceles por nivel y obra social. Campos con `@field_serializer` para serializar `Decimal` como `float` en la respuesta.

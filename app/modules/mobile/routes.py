@@ -33,6 +33,7 @@ from app.db.database import get_db
 from app.db.models import Especialidad, ListadoMedico
 from app.db.models.catalogs import ObrasSociales
 from app.db.models.legacy import MedicoObraSocial
+from app.modules.catalogs.familia_padron import mapa_codigo_a_raiz
 from app.db.models.nomenclador_cmc import (
     Galeno,
     HistorialPrecioCodigo,
@@ -343,7 +344,12 @@ async def padrones(
     dep=Depends(get_current_user_with_scopes_and_role),
 ):
     """Obras sociales en cuyo padrón está inscripto el médico logueado (solo lectura).
-    Se deduplica por OS, juntando las especialidades bajo las que figura."""
+
+    Se deduplica por OS **y por familia**: una empresa con varios planes
+    (Swiss Medical, Medife, Sancor...) es un único ítem para el médico, con
+    las especialidades/categoría de todos sus planes combinadas — ver
+    `app/modules/catalogs/familia_padron.py`. También filtra `MARCA='N'`
+    (bajas), igual que ya hace la pantalla web del padrón por obra social."""
     user, _scopes, _role = dep
     rows = (
         await db.execute(
@@ -351,16 +357,19 @@ async def padrones(
                 MedicoObraSocial.NRO_OBRASOCIAL,
                 MedicoObraSocial.CATEGORIA,
                 MedicoObraSocial.ESPECIALIDAD,
-            ).where(MedicoObraSocial.NRO_SOCIO == user.NRO_SOCIO)
+            ).where(MedicoObraSocial.NRO_SOCIO == user.NRO_SOCIO, MedicoObraSocial.MARCA == "S")
         )
     ).all()
     if not rows:
         return []
 
+    codigo_a_raiz = await mapa_codigo_a_raiz(db)
+
     por_os: dict[int, dict] = {}
     numeric_codes: set[int] = set()
     for nro, cat, esp in rows:
-        info = por_os.setdefault(nro, {"categoria": None, "esp": set()})
+        clave = codigo_a_raiz.get(nro, nro)
+        info = por_os.setdefault(clave, {"categoria": None, "esp": set()})
         c = (cat or "").strip()
         if c and c.upper() != "A" and info["categoria"] is None:
             info["categoria"] = c

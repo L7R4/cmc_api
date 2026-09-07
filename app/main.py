@@ -62,6 +62,9 @@ app.add_middleware(
         "X-Total-Count", "Content-Range", "X-Offset", "X-Limit",
         # Sin esto el navegador no deja que el front lea el id para mostrarlo.
         "X-Request-ID", "Retry-After",
+        # Sin esto el front no puede leer el nombre de archivo de una descarga
+        # (exports de facturación) — cae a un nombre genérico armado a mano.
+        "Content-Disposition",
     ],
 )
 app.add_middleware(AuditMiddleware)

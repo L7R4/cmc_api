@@ -36,6 +36,20 @@ class ClinicaBuscarOut(BaseModel):
     localidad: Optional[str] = None
 
 
+class ClinicaCreate(BaseModel):
+    """Alta rápida: solo el nombre. El resto de `listado_medico` queda en su
+    server_default; `es_organizacion` se fuerza a True y `NRO_SOCIO` se genera en el
+    service (ver `crear_clinica`)."""
+    nombre: str = Field(..., min_length=1, max_length=40)  # NOMBRE es VARCHAR(40)
+
+    @field_validator("nombre", mode="before")
+    @classmethod
+    def _normalizar(cls, v):
+        # Mayúsculas para consistencia con el resto de la tabla (todo en mayúsculas) y
+        # con lo que ya fuerza el input del front.
+        return v.strip().upper() if isinstance(v, str) else v
+
+
 class EspecialidadSimpleOut(BaseModel):
     id: int
     nombre: Optional[str] = None
@@ -171,8 +185,16 @@ class PrestacionesComplementariaCreate(BaseModel):
 
 
 class PrestacionUpdate(BaseModel):
-    """PATCH — todos los campos opcionales. No se puede cambiar periodo, cod_obra
-    ni nro_orden. Si se envía dni_paciente, se relee el nombre del padrón."""
+    """PATCH — todos los campos opcionales. No se puede cambiar nro_orden. Si se
+    envía dni_paciente, se relee el nombre del padrón.
+
+    Cambiar `cod_obra_social` y/o `periodo` MUEVE la fila a otra cabecera
+    `facturacion` (la identifican cod_obr+periodo+version) — no son campos sueltos:
+    el destino no puede estar cerrado, la fila se re-cotiza (precio/tipo/nomenclador_id
+    son scoped por OS) y se re-etiqueta con la versión del destino. Ver
+    `editar_prestacion` en el service — mismo movimiento que
+    `POST /prestaciones/mover-periodo`, pero a cualquier OS/período, no solo el
+    adyacente."""
     # Mismo trío que en la carga: `cod_medico` es el prestador seleccionado (médico o
     # clínica), `cod_medico_ejecutor` el médico cuando el prestador es una clínica, y
     # `cod_clinica` el ámbito cuando el prestador es un médico. El backend los reparte en
@@ -182,6 +204,8 @@ class PrestacionUpdate(BaseModel):
     cod_medico: Optional[str] = None
     cod_medico_ejecutor: Optional[str] = None
     cod_clinica: Optional[int] = None
+    cod_obra_social: Optional[str] = None
+    periodo: Optional[str] = Field(None, pattern=r"^\d{6}$")
     dni_paciente: Optional[str] = None
     fecha_practica: Optional[datetime.date] = None
     autorizacion: Optional[str] = Field(None, max_length=30)

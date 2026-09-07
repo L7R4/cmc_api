@@ -72,7 +72,7 @@ async def _leer_csv(archivo: UploadFile) -> tuple[bytes, int]:
     raise HTTPException(415, "El .csv no es texto legible (UTF-8 ni latin-1).")
 
 
-def _to_out(row: ValorDocumento) -> ValorDocumentoOut:
+def _to_out(row: ValorDocumento, nombre: Optional[str] = None) -> ValorDocumentoOut:
     return ValorDocumentoOut(
         id=row.id,
         obra_social_nro=row.obra_social_nro,
@@ -83,7 +83,18 @@ def _to_out(row: ValorDocumento) -> ValorDocumentoOut:
         descripcion=row.descripcion,
         url=url_archivo(row.path) or "",
         created_at=row.created_at,
+        subido_por_nombre=nombre,
     )
+
+
+async def _nombres_por_id(db: AsyncSession, ids: set[int]) -> dict[int, str]:
+    """`ListadoMedico.ID` → `NOMBRE`, para no resolver uno por uno. Ver H-10."""
+    if not ids:
+        return {}
+    filas = (await db.execute(
+        select(ListadoMedico.ID, ListadoMedico.NOMBRE).where(ListadoMedico.ID.in_(ids))
+    )).all()
+    return dict(filas)
 
 
 @router.get("/documentos", response_model=List[ValorDocumentoOut])
@@ -105,7 +116,9 @@ async def listar_documentos(
         stmt = stmt.where(ValorDocumento.vigencia_desde == vigencia_desde)
     stmt = stmt.order_by(ValorDocumento.vigencia_desde.desc(), ValorDocumento.id.desc())
 
-    return [_to_out(r) for r in (await db.execute(stmt)).scalars().all()]
+    filas = (await db.execute(stmt)).scalars().all()
+    nombres = await _nombres_por_id(db, {f.subido_por for f in filas if f.subido_por})
+    return [_to_out(r, nombres.get(r.subido_por)) for r in filas]
 
 
 @router.post("/documentos", response_model=ValorDocumentoOut, status_code=status.HTTP_201_CREATED)
@@ -170,7 +183,8 @@ async def subir_documento(
             pass
         raise
     await db.refresh(fila)
-    return _to_out(fila)
+    nombre_subio = (await _nombres_por_id(db, {fila.subido_por} if fila.subido_por else set())).get(fila.subido_por)
+    return _to_out(fila, nombre_subio)
 
 
 @router.delete("/documentos/{doc_id}", status_code=status.HTTP_204_NO_CONTENT)

@@ -223,3 +223,23 @@ class Afiliado(Base):
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.now()
     )
+
+
+class ExportPreset(Base):
+    """Combinación de opciones del panel de pre-exportación (orden, agrupación,
+    filtros, columnas) guardada con un nombre para reusar. Personal por
+    `usuario` (NRO_SOCIO, mismo patrón sin FK que `Afiliado.usuario` /
+    `DetalleFacturacionCMC.usuario`) — presets compartidos por todo el Colegio
+    quedan afuera a propósito hasta que alguien los pida."""
+    __tablename__ = "export_preset"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    usuario: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    nombre: Mapped[str] = mapped_column(String(120), nullable=False)
+    # "detalle" | "caratula" — un preset de carátula no tiene sentido aplicarlo
+    # al detalle (agrupación/columnas no existen ahí) y viceversa.
+    tipo_documento: Mapped[str] = mapped_column(String(20), nullable=False)
+    opciones: Mapped[dict] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )

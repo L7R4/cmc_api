@@ -850,6 +850,24 @@ class HistorialPrecioOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class ResumenVigenciaOut(BaseModel):
+    """Una vigencia de una obra social, ya agregada: cuántos códigos entraron y
+    cuánto varió el precio promedio contra la vigencia anterior de cada código.
+
+    Sale de `nm_historial_precio_codigo` — la tabla materializada que el motor
+    de valores ya mantiene en cada operación—, no de `nm_valores`: no hace
+    falta traer la grilla completa (con sus componentes) para responder "cuándo
+    y cuánto actualizó esta obra social". Ver auditoría H-01 / H-02.
+    """
+    vigencia_desde: datetime.date
+    #: Códigos con una fila de historial en esta vigencia.
+    cantidad: int
+    #: Promedio de variación porcentual contra la versión anterior de cada
+    #: código (mismo nomenclador_id + origen + especialidad). `None` cuando
+    #: ningún código de esta vigencia tenía una versión previa — primera carga.
+    avg_pct: Optional[float] = None
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Importar CSV
 # ─────────────────────────────────────────────────────────────────────────────

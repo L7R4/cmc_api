@@ -11,6 +11,7 @@ from sqlalchemy import and_, func, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.core.passwords import hash_password_inicial
 from app.common.money import quantize_money
 from app.common.files import url_archivo
 from app.common.uploads import DOCUMENTOS, validate_upload
@@ -36,6 +37,7 @@ from app.modules.facturacion.schemas import (
     AfiliadoCreate,
     AfiliadoRefOut,
     AuditoriaEventoOut,
+    ClinicaCreate,
     FacturaRead,
     GuardadoResponse,
     MoverPeriodoPayload,
@@ -272,6 +274,105 @@ async def buscar_clinicas(db: AsyncSession, q: str, limit: int) -> list[dict]:
         }
         for m in rows
     ]
+
+
+async def listar_clinicas_todas(db: AsyncSession) -> list[dict]:
+    """Precarga completa para `GET /clinicas/todas`: mismo criterio que
+    `buscar_clinicas` (es_organizacion=1) pero sin filtro de texto ni tope de
+    fila — el front de Carga de Facturación la trae una sola vez y filtra en
+    memoria, igual que `/medicos/todos` y `/obras-sociales/todas`."""
+    M = ListadoMedico
+    rows = list(
+        (await db.execute(
+            select(M).where(M.es_organizacion == True).order_by(M.NOMBRE)  # noqa: E712
+        )).scalars().all()
+    )
+    return [
+        {
+            "cod": m.NRO_SOCIO,
+            "nombre": m.NOMBRE,
+            "documento": str(m.DOCUMENTO) if m.DOCUMENTO else None,
+            "cuit": str(m.CUIT) if m.CUIT else None,
+            "localidad": m.localidad or None,
+        }
+        for m in rows
+    ]
+
+
+async def get_clinica_by_nombre(db: AsyncSession, nombre: str) -> Optional[ListadoMedico]:
+    """Duplicado sólo contra otras CLÍNICAS (es_organizacion=1) — no contra médicos: esta
+    tabla nunca tuvo unicidad de NOMBRE entre médicos, y no es esta alta la que debe
+    imponerla ahí. La collation utf8_spanish2_ci de NOMBRE ya hace la comparación
+    case-insensitive, sin necesidad de ilike/LOWER()."""
+    stmt = select(ListadoMedico).where(
+        ListadoMedico.es_organizacion == True,  # noqa: E712
+        ListadoMedico.NOMBRE == nombre,
+    )
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
+async def crear_clinica(db: AsyncSession, payload: ClinicaCreate) -> dict:
+    """Alta rápida de clínica — mismo patrón que `crear_afiliado`: un único campo
+    obligatorio, todo lo demás server_default. `NRO_SOCIO` no tiene generación automática
+    en esta tabla: se calcula acá como MAX(NRO_SOCIO)+1 sobre toda `listado_medico`
+    (médicos y clínicas comparten el mismo espacio de IDs — es el `cod` que se persiste
+    en `cod_clinica`). Sin lock explícito: app interna, baja concurrencia, sin precedente
+    de `SELECT...FOR UPDATE` en el resto del código (riesgo de colisión aceptado)."""
+    if await get_clinica_by_nombre(db, payload.nombre):
+        raise HTTPException(409, f"Ya existe una clínica con el nombre '{payload.nombre}'")
+
+    nuevo_cod = (await db.execute(
+        select(func.coalesce(func.max(ListadoMedico.NRO_SOCIO), 0) + 1)
+    )).scalar_one()
+
+    clinica = ListadoMedico(
+        NOMBRE=payload.nombre,
+        NRO_SOCIO=nuevo_cod,
+        es_organizacion=True,
+        # Única columna de la tabla sin server_default — sin esto el INSERT falla.
+        hashed_password=hash_password_inicial(),
+    )
+    db.add(clinica)
+    await db.commit()
+    await db.refresh(clinica)
+    return {
+        "cod": clinica.NRO_SOCIO,
+        "nombre": clinica.NOMBRE,
+        "documento": str(clinica.DOCUMENTO) if clinica.DOCUMENTO else None,
+        "cuit": str(clinica.CUIT) if clinica.CUIT else None,
+        "localidad": clinica.localidad or None,
+    }
+
+
+async def eliminar_clinica(db: AsyncSession, cod: int) -> None:
+    """Baja de una clínica. Bloquea si tiene prestaciones vivas (no anuladas) que la
+    referencian por `cod_clinica` — mismo criterio que `eliminar_afiliado`."""
+    clinica = (await db.execute(
+        select(ListadoMedico).where(
+            ListadoMedico.NRO_SOCIO == cod,
+            ListadoMedico.es_organizacion == True,  # noqa: E712
+        )
+    )).scalar_one_or_none()
+    if clinica is None:
+        raise HTTPException(404, f"Clínica '{cod}' no encontrada")
+
+    usos = (await db.execute(
+        select(func.count())
+        .select_from(DetalleFacturacionCMC)
+        .where(
+            DetalleFacturacionCMC.cod_clinica == cod,
+            DetalleFacturacionCMC.estado != "X",
+        )
+    )).scalar_one()
+    if usos:
+        raise HTTPException(
+            409,
+            f"La clínica '{clinica.NOMBRE}' tiene {usos} prestación/es cargada/s y no se "
+            "puede eliminar. Anulá esas prestaciones primero.",
+        )
+
+    await db.delete(clinica)
+    await db.commit()
 
 
 # ── Helpers de período (formato "YYYYMM") ────────────────────────────────────
@@ -1955,148 +2056,205 @@ async def editar_prestacion(
     # La fase de la cabecera (según quién cargó la prestación) debe seguir abierta.
     _gate_carga(await _get_factura(db, row.cod_obr, row.periodo), row.origen_carga)
 
-    data = payload.model_dump(exclude_unset=True)
+    # Todo lo que sigue muta `row` (y a veces otras filas/cabeceras) antes de
+    # llegar a `db.commit()`. Sin este try/except, una excepcion a mitad de
+    # camino (gate de autorizacion, precio no admitido, destino cerrado) deja lo
+    # ya mutado FLUSHEADO y COMMITEADO igual: SQLAlchemy autoflushea antes de
+    # cada SELECT posterior (resolver_precio, resolver_nomenclador, etc.), y aca
+    # no hay nada que dispare un rollback antes de que la excepcion se propague
+    # (get_db() no lo hace). El 422/409 que ve el operador prometia que nada se
+    # guardo -- sin el rollback explicito, mentia.
+    try:
+        data = payload.model_dump(exclude_unset=True)
 
-    # Campo paciente: relee el nombre del padrón SÓLO si cambió el identificador. El
-    # front manda `dni_paciente` en todos los PATCH, así que reescribir siempre borraba
-    # el nombre de las filas importadas de CMC que traen `nom_ape_p` cargado con
-    # `dni_p` vacío: el paciente no está en el padrón, no hay nada que releer, y
-    # guardar una edición cualquiera (p. ej. corregir el código) lo dejaba en NULL.
-    if "dni_paciente" in data and (data["dni_paciente"] or "") != (row.dni_p or ""):
-        row.dni_p = data["dni_paciente"]
-        row.nom_ape_p = await _nombre_desde_afiliado(db, data["dni_paciente"])
-
-    # Mapeo de campos simples. `cod_medico`/`cod_medico_ejecutor` NO van acá: no se
-    # copian tal cual a la fila, se resuelven más abajo (el médico puede terminar en
-    # `cod_med` y la clínica en `cod_clinica`).
-    simples = {
-        "cod_nomenclador": "cod_nom",
-        "via": "via",
-        "autorizacion": "autorizacion",
-        "grupo_equipo_id": "grupo_equipo_id",
-        "cantidad": "cantidad",
-        "sesion": "sesion",
-        "porcentaje": "porc",
-        "fecha_practica": "fecha_practica",
-        "tipo_calculo": "manual",
-        "honorarios": "honorarios",
-        "gastos": "gastos",
-        "ayudante": "ayudante",
-    }
-    for src, dst in simples.items():
-        if src in data:
-            setattr(row, dst, data[src])
-
-    # Mismo gate que en la carga, con el estado ya aplicado: si el médico cambió el
-    # código por uno que exige autorización, o borró el número, corta. El Colegio puede
-    # editar libremente (se presupone autorizada).
-    if row.origen_carga == ORIGEN_MEDICO and ({"cod_nomenclador", "autorizacion"} & data.keys()):
-        await _validar_autorizacion_medico(db, row.cod_nom, row.cod_obr, row.autorizacion)
-
-    # Prestador: se reconstruye la selección tal como la habría enviado el front —
-    # desde la fila si el PATCH no la toca, con lo que vino si sí. `resolver_prestador`
-    # reasigna cod_med / cod_clinica / tipo_orden / tipo en los tres casos.
-    campos_prestador = {"cod_medico", "cod_medico_ejecutor", "cod_clinica"}
-    cambio_prestador = bool(campos_prestador & data.keys())
-    # Selección persistida. El discriminador es `tipo`, NO `tipo_orden` (que vale 'S' en
-    # los dos casos con clínica).
-    if row.cod_med_ejecutor:
-        # Fila legacy (2026-07-17→30): `cod_med` era la clínica-payee y el ejecutor iba
-        # aparte. Se reconstruye con esa semántica vieja y el resolver la reacomoda al
-        # layout nuevo — editar una de estas filas la migra sola.
-        prev_cod, prev_ejecutor, prev_clinica = str(row.cod_med), str(row.cod_med_ejecutor), None
-    elif row.tipo == TIPO_SANATORIO and row.cod_clinica:
-        # Caso 1: el prestador fue la clínica; el médico que cobra es el ejecutor.
-        prev_cod, prev_ejecutor, prev_clinica = str(row.cod_clinica), str(row.cod_med), None
-    else:
-        # Casos 2 y 3: el prestador fue el médico; la clínica (si hay) es el ámbito.
-        prev_cod, prev_ejecutor, prev_clinica = str(row.cod_med), None, row.cod_clinica
-
-    sel_cod = data.get("cod_medico", prev_cod)
-    sel_ejecutor = data.get("cod_medico_ejecutor", prev_ejecutor)
-    sel_clinica = data.get("cod_clinica", prev_clinica)
-
-    # La clínica que ya venía en la fila no se revalida: las filas importadas de CMC
-    # traen `cod_clinica` apuntando a socios que no están marcados como organización
-    # (`es_organizacion=0`), y como el front reenvía el valor precargado en cada PATCH,
-    # editar cualquier otro campo moría con "El código N no es una clínica/organización".
-    # Si el PATCH la cambia por otra, esa sí se valida como siempre.
-    clinica_sin_cambios = int(sel_clinica or 0) == int(row.cod_clinica or 0)
-    prestador = await resolver_prestador(
-        db, sel_cod, sel_ejecutor, sel_clinica, validar_clinica=not clinica_sin_cambios,
-    )
-    medico_precio = prestador.medico
-    row.cod_med = prestador.cod_med
-    row.cod_clinica = prestador.cod_clinica
-    row.tipo_orden = prestador.tipo_orden
-    row.cod_med_ejecutor = None  # ya no se persiste (ver resolver_prestador)
-    es_sanatorio = prestador.es_sanatorio
-
-    # Recalcular `tipo` si cambió el prestador (clínica/ámbito) o el código (su categoría).
-    if cambio_prestador or "cod_nomenclador" in data:
-        row.tipo = await derivar_tipo(db, row.cod_nom, prestador.tipo, row.cod_obr)
-    if "cod_nomenclador" in data:
-        nomenclador = await service_nm.resolver_nomenclador(
-            db, row.cod_nom, _cod_obra_to_int(row.cod_obr)
+        # Cambio de obra social y/o período: la fila se MUEVE a otra cabecera `facturacion`
+        # (cod_obr+periodo+version la identifican) — no es un campo más. Mismo movimiento
+        # que `mover_prestaciones_periodo`, pero a cualquier destino (no solo el período
+        # adyacente) y también entre obras sociales. Se resuelve ANTES que el resto de los
+        # campos porque el precio, el `tipo` y el `nomenclador_id` están scoped por OS: todo
+        # lo que sigue debe ver ya el `cod_obr`/`periodo` nuevos.
+        cambia_ubicacion = (
+            ("cod_obra_social" in data and data["cod_obra_social"] != row.cod_obr)
+            or ("periodo" in data and data["periodo"] != row.periodo)
         )
-        row.nomenclador_id = nomenclador.id if nomenclador else None
+        if cambia_ubicacion:
+            nuevo_cod_obra = data.get("cod_obra_social", row.cod_obr)
+            nuevo_periodo = data.get("periodo", row.periodo)
+            cabecera_destino = await _get_factura(db, nuevo_cod_obra, nuevo_periodo)
+            # Mismo gate que al cargar: no se puede aterrizar en un período/fase cerrada.
+            _gate_carga(cabecera_destino, row.origen_carga)
+            cod_obra_anterior, periodo_anterior = row.cod_obr, row.periodo
+            row.cod_obr = nuevo_cod_obra
+            row.periodo = nuevo_periodo
+            # Versión propia del destino (la de su cabecera actual, o 1 si aún no tiene):
+            # una fila de una complementaria no puede quedar con una versión que no
+            # matchea la cabecera del período/OS nuevo.
+            row.version = cabecera_destino.version if cabecera_destino is not None else 1
 
-    # Recalcular importe con el estado resultante
-    tipo_calculo = row.manual or "A"
-    fecha = fecha_para_precio(row.fecha_practica)
+        # Campo paciente: relee el nombre del padrón SÓLO si cambió el identificador. El
+        # front manda `dni_paciente` en todos los PATCH, así que reescribir siempre borraba
+        # el nombre de las filas importadas de CMC que traen `nom_ape_p` cargado con
+        # `dni_p` vacío: el paciente no está en el padrón, no hay nada que releer, y
+        # guardar una edición cualquiera (p. ej. corregir el código) lo dejaba en NULL.
+        if "dni_paciente" in data and (data["dni_paciente"] or "") != (row.dni_p or ""):
+            row.dni_p = data["dni_paciente"]
+            row.nom_ape_p = await _nombre_desde_afiliado(db, data["dni_paciente"])
 
-    # Inputs de precio que disparan recotizar. Clave para NO re-factorizar (doble
-    # descuento) cuando solo se edita cantidad/sesión/fecha: los montos ya están factorizados.
-    # cod_medico/cod_medico_ejecutor entran porque cambiar el payee o el ejecutor cambia
-    # la especialidad que cotiza → puede cambiar el precio.
-    pricing_keys = {"honorarios", "gastos", "ayudante", "porcentaje", "via",
-                    "cod_nomenclador", "tipo_calculo", "cod_medico", "cod_medico_ejecutor"}
-    if pricing_keys & data.keys():
-        # Markers: qué conceptos están en > 0 tras aplicar el PATCH (rol implícito).
-        hi = row.honorarios or Decimal("0")
-        gi = row.gastos or Decimal("0")
-        ai = row.ayudante or Decimal("0")
-        if tipo_calculo == "A":
-            via = row.via or service_vias.VIA_TRADICIONAL
-            precio = await resolver_precio(db, row.cod_obr, medico_precio, row.cod_nom, fecha, via=via)
-            if not precio.admitido:
-                raise HTTPException(422, precio.motivo)
-            if precio.por_presupuesto:
+        # Mapeo de campos simples. `cod_medico`/`cod_medico_ejecutor` NO van acá: no se
+        # copian tal cual a la fila, se resuelven más abajo (el médico puede terminar en
+        # `cod_med` y la clínica en `cod_clinica`).
+        simples = {
+            "cod_nomenclador": "cod_nom",
+            "via": "via",
+            "autorizacion": "autorizacion",
+            "grupo_equipo_id": "grupo_equipo_id",
+            "cantidad": "cantidad",
+            "sesion": "sesion",
+            "porcentaje": "porc",
+            "fecha_practica": "fecha_practica",
+            "tipo_calculo": "manual",
+            "honorarios": "honorarios",
+            "gastos": "gastos",
+            "ayudante": "ayudante",
+        }
+        for src, dst in simples.items():
+            if src in data:
+                setattr(row, dst, data[src])
+
+        # Mismo gate que en la carga, con el estado ya aplicado: si el médico cambió el
+        # código por uno que exige autorización, lo movió a otra OS, o borró el número,
+        # corta. `requiere_autorizacion` es scoped por OS, así que un cambio de obra
+        # social sin tocar el código también puede activarlo. El Colegio puede editar
+        # libremente (se presupone autorizada).
+        if row.origen_carga == ORIGEN_MEDICO and (
+            {"cod_nomenclador", "autorizacion", "cod_obra_social"} & data.keys()
+        ):
+            await _validar_autorizacion_medico(db, row.cod_nom, row.cod_obr, row.autorizacion)
+
+        # Prestador: se reconstruye la selección tal como la habría enviado el front —
+        # desde la fila si el PATCH no la toca, con lo que vino si sí. `resolver_prestador`
+        # reasigna cod_med / cod_clinica / tipo_orden / tipo en los tres casos.
+        campos_prestador = {"cod_medico", "cod_medico_ejecutor", "cod_clinica"}
+        cambio_prestador = bool(campos_prestador & data.keys())
+        # Selección persistida. El discriminador es `tipo`, NO `tipo_orden` (que vale 'S' en
+        # los dos casos con clínica).
+        if row.cod_med_ejecutor:
+            # Fila legacy (2026-07-17→30): `cod_med` era la clínica-payee y el ejecutor iba
+            # aparte. Se reconstruye con esa semántica vieja y el resolver la reacomoda al
+            # layout nuevo — editar una de estas filas la migra sola.
+            prev_cod, prev_ejecutor, prev_clinica = str(row.cod_med), str(row.cod_med_ejecutor), None
+        elif row.tipo == TIPO_SANATORIO and row.cod_clinica:
+            # Caso 1: el prestador fue la clínica; el médico que cobra es el ejecutor.
+            prev_cod, prev_ejecutor, prev_clinica = str(row.cod_clinica), str(row.cod_med), None
+        else:
+            # Casos 2 y 3: el prestador fue el médico; la clínica (si hay) es el ámbito.
+            prev_cod, prev_ejecutor, prev_clinica = str(row.cod_med), None, row.cod_clinica
+
+        sel_cod = data.get("cod_medico", prev_cod)
+        sel_ejecutor = data.get("cod_medico_ejecutor", prev_ejecutor)
+        sel_clinica = data.get("cod_clinica", prev_clinica)
+
+        # La clínica que ya venía en la fila no se revalida: las filas importadas de CMC
+        # traen `cod_clinica` apuntando a socios que no están marcados como organización
+        # (`es_organizacion=0`), y como el front reenvía el valor precargado en cada PATCH,
+        # editar cualquier otro campo moría con "El código N no es una clínica/organización".
+        # Si el PATCH la cambia por otra, esa sí se valida como siempre.
+        clinica_sin_cambios = int(sel_clinica or 0) == int(row.cod_clinica or 0)
+        prestador = await resolver_prestador(
+            db, sel_cod, sel_ejecutor, sel_clinica, validar_clinica=not clinica_sin_cambios,
+        )
+        medico_precio = prestador.medico
+        row.cod_med = prestador.cod_med
+        row.cod_clinica = prestador.cod_clinica
+        row.tipo_orden = prestador.tipo_orden
+        row.cod_med_ejecutor = None  # ya no se persiste (ver resolver_prestador)
+        es_sanatorio = prestador.es_sanatorio
+
+        # Recalcular `tipo` si cambió el prestador (clínica/ámbito), el código (su categoría)
+        # o la OS (la categoría/override puede ser propio de cada obra social).
+        if cambio_prestador or "cod_nomenclador" in data or "cod_obra_social" in data:
+            row.tipo = await derivar_tipo(db, row.cod_nom, prestador.tipo, row.cod_obr)
+        # Igual con `nomenclador_id`: el mismo código puede resolver a una fila distinta
+        # de `nm_nomenclador` según la OS (propia de esa OS vs. compartida del Colegio).
+        if "cod_nomenclador" in data or "cod_obra_social" in data:
+            nomenclador = await service_nm.resolver_nomenclador(
+                db, row.cod_nom, _cod_obra_to_int(row.cod_obr)
+            )
+            row.nomenclador_id = nomenclador.id if nomenclador else None
+
+        # Recalcular importe con el estado resultante
+        tipo_calculo = row.manual or "A"
+        fecha = fecha_para_precio(row.fecha_practica)
+
+        # Inputs de precio que disparan recotizar. Clave para NO re-factorizar (doble
+        # descuento) cuando solo se edita cantidad/sesión/fecha: los montos ya están factorizados.
+        # cod_medico/cod_medico_ejecutor entran porque cambiar el payee o el ejecutor cambia
+        # la especialidad que cotiza → puede cambiar el precio. cod_obra_social entra porque
+        # el precio vigente (`nm_historial_precio_codigo`) es scoped por OS: dejar los montos
+        # de la OS anterior sería facturarle a la nueva la tarifa que no le corresponde.
+        # `periodo` NO dispara recotizar: no participa del lookup de precio (que usa
+        # `fecha_practica`, independiente del período contable).
+        pricing_keys = {"honorarios", "gastos", "ayudante", "porcentaje", "via",
+                        "cod_nomenclador", "tipo_calculo", "cod_medico", "cod_medico_ejecutor",
+                        "cod_obra_social"}
+        if pricing_keys & data.keys():
+            # Markers: qué conceptos están en > 0 tras aplicar el PATCH (rol implícito).
+            hi = row.honorarios or Decimal("0")
+            gi = row.gastos or Decimal("0")
+            ai = row.ayudante or Decimal("0")
+            if tipo_calculo == "A":
+                via = row.via or service_vias.VIA_TRADICIONAL
+                precio = await resolver_precio(db, row.cod_obr, medico_precio, row.cod_nom, fecha, via=via)
+                if not precio.admitido:
+                    raise HTTPException(422, precio.motivo)
+                if precio.por_presupuesto:
+                    hb, gb, ab = hi, gi, ai
+                else:
+                    hb = precio.honorarios if hi > 0 else Decimal("0")
+                    gb = precio.gastos if gi > 0 else Decimal("0")
+                    ab = precio.ayudante if ai > 0 else Decimal("0")
+                row.calculo_snapshot = precio.snapshot
+            else:  # manual
                 hb, gb, ab = hi, gi, ai
-            else:
-                hb = precio.honorarios if hi > 0 else Decimal("0")
-                gb = precio.gastos if gi > 0 else Decimal("0")
-                ab = precio.ayudante if ai > 0 else Decimal("0")
-            row.calculo_snapshot = precio.snapshot
-        else:  # manual
-            hb, gb, ab = hi, gi, ai
-            row.calculo_snapshot = None
-        h, g, a = _aplicar_porcentaje(hb, gb, ab, row.porc or 100)
-        row.honorarios, row.gastos, row.ayudante = h, g, a
-        row.tpo_funcion = tpo_funcion_derivado(h, g, a)
+                row.calculo_snapshot = None
+            h, g, a = _aplicar_porcentaje(hb, gb, ab, row.porc or 100)
+            row.honorarios, row.gastos, row.ayudante = h, g, a
+            row.tpo_funcion = tpo_funcion_derivado(h, g, a)
 
-    # Misma regla que en la carga: bajo sanatorio los gastos los factura la clínica.
-    # Va FUERA del bloque de recotización — si no, un PATCH que no toca ningún campo de
-    # precio (ej. solo `cantidad`) dejaría gastos viejos en una fila que pasó a sanatorio.
-    # Forzar a 0 es idempotente y no depende del porcentaje (0 escalado sigue siendo 0).
-    if await _gasto_forzado_a_cero(db, row.cod_nom, es_sanatorio, tipo_calculo, row.cod_obr):
-        row.gastos = Decimal("0")
-        row.tpo_funcion = tpo_funcion_derivado(
-            row.honorarios or Decimal("0"), Decimal("0"), row.ayudante or Decimal("0")
+        # Misma regla que en la carga: bajo sanatorio los gastos los factura la clínica.
+        # Va FUERA del bloque de recotización — si no, un PATCH que no toca ningún campo de
+        # precio (ej. solo `cantidad`) dejaría gastos viejos en una fila que pasó a sanatorio.
+        # Forzar a 0 es idempotente y no depende del porcentaje (0 escalado sigue siendo 0).
+        if await _gasto_forzado_a_cero(db, row.cod_nom, es_sanatorio, tipo_calculo, row.cod_obr):
+            row.gastos = Decimal("0")
+            row.tpo_funcion = tpo_funcion_derivado(
+                row.honorarios or Decimal("0"), Decimal("0"), row.ayudante or Decimal("0")
+            )
+
+        # importe_total siempre se recalcula con los montos y cantidad/sesión. (0 permitido.)
+        row.importe_total = calcular_importe_total(
+            row.honorarios or Decimal("0"), row.gastos or Decimal("0"),
+            row.ayudante or Decimal("0"), row.cantidad or 1, row.sesion or 1,
         )
 
-    # importe_total siempre se recalcula con los montos y cantidad/sesión. (0 permitido.)
-    row.importe_total = calcular_importe_total(
-        row.honorarios or Decimal("0"), row.gastos or Decimal("0"),
-        row.ayudante or Decimal("0"), row.cantidad or 1, row.sesion or 1,
-    )
+        # Sin tope de ayudantes: el máximo del Valor es solo referencia, no se valida (ver
+        # nota en `_insertar_prestaciones`).
 
-    # Sin tope de ayudantes: el máximo del Valor es solo referencia, no se valida (ver
-    # nota en `_insertar_prestaciones`).
+        if cambia_ubicacion:
+            # Mantener el invariante cabecera ⟺ prestaciones abiertas: crear la del
+            # destino y eliminar la del origen si quedó vacía. flush() primero para que
+            # el conteo de `_cleanup_factura_si_vacia` (SELECT crudo, no ve la sesión ORM
+            # sin flushear) ya no cuente esta fila en la cabecera anterior.
+            await db.flush()
+            await _ensure_factura_abierta(db, row.cod_obr, row.periodo, row.usuario)
+            await _cleanup_factura_si_vacia(db, cod_obra_anterior, periodo_anterior)
 
-    await db.commit()
-    await db.refresh(row)
-    return row
+        await db.commit()
+        await db.refresh(row)
+        return row
+    except Exception:
+        await db.rollback()
+        raise
 
 
 # ── Auditoría (checkbox "revisado") ──────────────────────────────────────────

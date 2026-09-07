@@ -402,6 +402,12 @@ class Valor(Base):
         Index("ix_nm_valores_origen", "origen"),
         Index("ix_nm_valores_codigo", "codigo"),
         Index("ix_nm_valores_vigencia", "vigencia_desde", "vigencia_hasta"),
+        # Índice cubriente de GET /api/valores_nm/actualizaciones: agrupa por
+        # (vigencia_desde, obra_social_nro) sin tocar la tabla. Ya existía en
+        # la base (migración vigos1dx0001) pero faltaba declararlo acá — un
+        # autogenerate lo habría visto como índice de más y propuesto borrarlo.
+        # Ver auditoría A-02.
+        Index("ix_nm_valores_vigencia_os", "vigencia_desde", "obra_social_nro"),
         Index("ix_nm_valores_nivel", "nivel"),
         Index("ix_nm_valores_complejidad", "complejidad"),
         Index("ix_nm_valores_estado", "estado"),

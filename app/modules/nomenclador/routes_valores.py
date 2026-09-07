@@ -33,6 +33,7 @@ from app.modules.nomenclador.schemas import (
     Origen,
     ReplicarEstructuraIn,
     ReplicarObrasSocialesIn,
+    ResumenVigenciaOut,
     RevertirActualizacionIn,
     ValorCerrarYCrearIn,
     ValorComponenteOut,
@@ -368,6 +369,9 @@ async def list_valores(
     especialidad_id_colegio: Optional[int] = Query(None),
     estado: Optional[str] = Query(None),
     vigente_a: Optional[datetime.date] = Query(None),
+    vigencia_desde: Optional[datetime.date] = Query(
+        None, description="Filtra por la vigencia exacta (no 'vigente a', la fecha exacta que abrió esa versión)."
+    ),
     page: int = Query(1, ge=1),
     size: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
@@ -383,14 +387,88 @@ async def list_valores(
         stmt = stmt.where(Valor.especialidad_id_colegio == especialidad_id_colegio)
     if estado:
         stmt = stmt.where(Valor.estado == estado)
+    if vigencia_desde:
+        # La pantalla de historial pedía TODA la obra social y filtraba acá la
+        # vigencia elegida en el navegador — para NOBIS MEDICAL, 3.334 filas
+        # para mostrar sólo las ~1.266 de una fecha. Con este filtro pide
+        # únicamente lo que va a mostrar. Ver auditoría H-01.
+        stmt = stmt.where(Valor.vigencia_desde == vigencia_desde)
     if vigente_a:
         stmt = stmt.where(
             Valor.vigencia_desde <= vigente_a,
             (Valor.vigencia_hasta.is_(None)) | (Valor.vigencia_hasta >= vigente_a),
         )
+    # Sin esto el orden de las páginas no está definido por el motor: nada
+    # garantizaba que recorrer página a página no repitiera o saltara una fila
+    # si algo se escribía entre medio. (vigencia_desde, id) además es el orden
+    # que espera quien pagina por vigencia. Ver auditoría H-03.
+    stmt = stmt.order_by(Valor.vigencia_desde, Valor.id)
     stmt = stmt.offset((page - 1) * size).limit(size)
     result = await db.execute(stmt)
     return await _valores_out(db, list(result.scalars().all()))
+
+
+@router.get("/resumen_por_vigencia", response_model=List[ResumenVigenciaOut])
+async def resumen_por_vigencia(
+    obra_social_nro: int = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Cuándo y cuánto actualizó esta obra social, sin bajar la grilla completa.
+
+    Antes esta pregunta la respondía el front: descargaba TODOS los valores de
+    la obra social —para NOBIS MEDICAL (N° 62), 3.334 filas con sus componentes
+    en 17 requests y 4,29 MB— sólo para calcular, en el navegador, una docena de
+    renglones de fecha + cantidad + variación. Acá se calcula lo mismo contra
+    `nm_historial_precio_codigo`, la tabla que el motor de valores ya mantiene
+    materializada en cada alta/actualización: sin componentes, sin duplicar la
+    grilla, y agrupando por la clave real de una variante — `(nomenclador_id,
+    origen, especialidad_key)`, sin `nivel`, que no forma parte de la identidad
+    de la variante (ver H-05: el front lo incluía y por eso una obra social que
+    le cambiaba el nivel a un código perdía la comparación contra la versión
+    anterior).
+
+    MySQL 5.7 no tiene funciones de ventana (`LAG`), así que el encadenamiento
+    de versiones se arma en Python — barato acá porque son unos pocos miles de
+    filas por obra social, no las ~58.000 de toda la tabla.
+    """
+    filas = (await db.execute(
+        select(
+            HistorialPrecioCodigo.nomenclador_id,
+            HistorialPrecioCodigo.origen,
+            HistorialPrecioCodigo.especialidad_key,
+            HistorialPrecioCodigo.vigencia_desde,
+            HistorialPrecioCodigo.precio_total,
+        ).where(HistorialPrecioCodigo.obra_social_nro == obra_social_nro)
+    )).all()
+
+    if not filas:
+        return []
+
+    cadenas: dict[tuple, list[tuple[datetime.date, Decimal]]] = {}
+    for nomenclador_id, origen, especialidad_key, vigencia_desde, precio_total in filas:
+        clave = (nomenclador_id, origen, especialidad_key)
+        cadenas.setdefault(clave, []).append((vigencia_desde, precio_total))
+
+    por_vigencia: dict[datetime.date, dict] = {}
+    for cadena in cadenas.values():
+        cadena.sort(key=lambda par: par[0])
+        for i, (vigencia, precio) in enumerate(cadena):
+            acumulado = por_vigencia.setdefault(vigencia, {"cantidad": 0, "pcts": []})
+            acumulado["cantidad"] += 1
+            if i > 0:
+                anterior = cadena[i - 1][1]
+                if anterior > 0:
+                    acumulado["pcts"].append(float((precio - anterior) / anterior * 100))
+
+    salida = [
+        ResumenVigenciaOut(
+            vigencia_desde=vigencia,
+            cantidad=datos["cantidad"],
+            avg_pct=(sum(datos["pcts"]) / len(datos["pcts"])) if datos["pcts"] else None,
+        )
+        for vigencia, datos in por_vigencia.items()
+    ]
+    return sorted(salida, key=lambda r: r.vigencia_desde, reverse=True)
 
 
 @router.get("/por_vigencia")

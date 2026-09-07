@@ -464,6 +464,9 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     ("GET", "/api/facturacion/afiliados/{dni:path}"): Scope.FACTURACION_LEER,
     ("DELETE", "/api/facturacion/afiliados/{dni:path}"): Scope.FACTURACION_CARGAR,
     ("GET", "/api/facturacion/clinicas"): Scope.FACTURACION_LEER,
+    ("GET", "/api/facturacion/clinicas/todas"): Scope.FACTURACION_LEER,
+    ("POST", "/api/facturacion/clinicas"): Scope.FACTURACION_CARGAR,
+    ("DELETE", "/api/facturacion/clinicas/{cod}"): Scope.FACTURACION_CARGAR,
     ("GET", "/api/facturacion/medicos"): Scope.FACTURACION_LEER,
     ("GET", "/api/facturacion/medicos/todos"): Scope.FACTURACION_LEER,
     ("GET", "/api/facturacion/obras-sociales"): Scope.CATALOGO_LEER,
@@ -480,6 +483,15 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     ("GET", "/api/facturacion/facturas"): Scope.FACTURACION_LEER,
     ("GET", "/api/facturacion/facturas/{id}/detalle"): Scope.FACTURACION_LEER,
     ("POST", "/api/facturacion/facturas/complemento"): Scope.FACTURACION_COMPLEMENTAR,
+    # Exportables (detalle + carátula) de una factura — mismos scopes que el
+    # export ya existente de deducciones/cobranzas (`TODOS(..., EXPORT_GENERAR)`).
+    ("GET", "/api/facturacion/facturas/{id}/export/detalle.pdf"): TODOS(Scope.FACTURACION_LEER, Scope.EXPORT_GENERAR),
+    ("GET", "/api/facturacion/facturas/{id}/export/detalle.xlsx"): TODOS(Scope.FACTURACION_LEER, Scope.EXPORT_GENERAR),
+    ("GET", "/api/facturacion/facturas/{id}/export/caratula.pdf"): TODOS(Scope.FACTURACION_LEER, Scope.EXPORT_GENERAR),
+    ("GET", "/api/facturacion/facturas/{id}/export/caratula.xlsx"): TODOS(Scope.FACTURACION_LEER, Scope.EXPORT_GENERAR),
+    ("GET", "/api/facturacion/export-presets"): Scope.FACTURACION_LEER,
+    ("POST", "/api/facturacion/export-presets"): Scope.FACTURACION_LEER,
+    ("DELETE", "/api/facturacion/export-presets/{preset_id}"): Scope.FACTURACION_LEER,
     ("POST", "/api/facturacion/prestaciones-complementaria"): Scope.FACTURACION_COMPLEMENTAR,
     # `filtro_socio()`: sin `medico:leer` el filtro se fuerza al socio del token.
     ("GET", "/api/facturacion/prestaciones"): LECTURA_FACTURACION,
@@ -573,6 +585,7 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     ("GET", "/api/valores_nm/"): Scope.NOMENCLADOR_LEER,
     ("POST", "/api/valores_nm/"): Scope.NOMENCLADOR_EDITAR,
     ("GET", "/api/valores_nm/vigencias"): Scope.NOMENCLADOR_LEER,
+    ("GET", "/api/valores_nm/resumen_por_vigencia"): Scope.NOMENCLADOR_LEER,
     ("GET", "/api/valores_nm/historial"): Scope.NOMENCLADOR_LEER,
     ("GET", "/api/valores_nm/codigos_por_vigencia"): Scope.NOMENCLADOR_LEER,
     ("GET", "/api/valores_nm/por_vigencia"): Scope.NOMENCLADOR_LEER,

@@ -21,6 +21,11 @@ class ValorDocumentoOut(BaseModel):
     #: Ruta `/api/archivos/…`: pide token. Se abre con `abrirAdjunto()`.
     url: str
     created_at: datetime.datetime
+    #: Nombre de quien lo subió, resuelto desde `ListadoMedico`. `None` si no
+    #: se pudo resolver (usuario eliminado) o si es un documento viejo sin
+    #: `subido_por`. Se calculaba y se guardaba desde el alta, pero no había
+    #: dónde verlo — ver auditoría H-10.
+    subido_por_nombre: Optional[str] = None
 
 
 class ObraSocialActualizada(BaseModel):

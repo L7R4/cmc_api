@@ -22,6 +22,7 @@ from app.modules.facturacion.schemas import (
     CierrePreviewResponse,
     CierreResponse,
     ClinicaBuscarOut,
+    ClinicaCreate,
     CodigoHabilitadoOut,
     ComplementoCreate,
     FacturaDetalleOut,
@@ -77,6 +78,35 @@ async def buscar_clinicas(
     """Autocomplete de clínicas/organizaciones — mismo `listado_medico` que
     `/medicos`, filtrado por `es_organizacion=1`."""
     return await service.buscar_clinicas(db, q, limit)
+
+
+@router.get("/clinicas/todas", response_model=list[ClinicaBuscarOut])
+async def listar_clinicas_todas(db: AsyncSession = Depends(get_db)):
+    """Precarga completa (~100-150 filas) para el formulario de Carga de
+    Facturación — ver `/medicos/todos` y `/obras-sociales/todas`."""
+    return await service.listar_clinicas_todas(db)
+
+
+@router.post("/clinicas", response_model=ClinicaBuscarOut, status_code=status.HTTP_201_CREATED)
+async def crear_clinica(
+    payload: ClinicaCreate,
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Alta rápida de clínica — solo el nombre; el resto queda en su default y
+    `es_organizacion=1` fijo. Mismo patrón que `POST /afiliados`."""
+    return await service.crear_clinica(db, payload)
+
+
+@router.delete("/clinicas/{cod}", status_code=status.HTTP_204_NO_CONTENT)
+async def eliminar_clinica(
+    cod: int,
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Borra una clínica. 404 si no existe; 409 si tiene prestaciones no anuladas
+    que la referencian (hay que anularlas antes)."""
+    await service.eliminar_clinica(db, cod)
 
 
 @router.get("/obras-sociales")

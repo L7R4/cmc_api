@@ -1564,6 +1564,18 @@ async def obtener_factura_detalle(db: AsyncSession, factura_id: int) -> dict:
         )).scalars().all()
         medicos = {str(m.NRO_SOCIO): m for m in med_rows}
 
+    # Nombre de especialidad por prestación — igual patrón que en
+    # `_medicos_con_especialidades`: `id_especialidad` referencia
+    # `Especialidad.ID_COLEGIO_ESPE`, no `Especialidad.ID` (divergen desde el 7).
+    ids_especialidad = {r.id_especialidad for r in rows if r.id_especialidad}
+    especialidades: dict[int, str] = {}
+    if ids_especialidad:
+        esp_rows = (await db.execute(
+            select(Especialidad.ID_COLEGIO_ESPE, Especialidad.ESPECIALIDAD)
+            .where(Especialidad.ID_COLEGIO_ESPE.in_(ids_especialidad))
+        )).all()
+        especialidades = {int(eid): nombre for eid, nombre in esp_rows}
+
     # Fallback para filas legacy con `tipo` NULL (la columna se puebla recién al cargar
     # por el módulo nuevo; el histórico de CMC nunca la tuvo). Se deriva on-the-fly con
     # la misma regla que `derivar_tipo`/`resolver_prestador`, sin tocar la fila persistida.
@@ -1637,6 +1649,9 @@ async def obtener_factura_detalle(db: AsyncSession, factura_id: int) -> dict:
             "tipo": _tipo_de(r),
             "revisado": r.revisado,
             "estado": r.estado,
+            "grupo_equipo_id": r.grupo_equipo_id,
+            "id_especialidad": r.id_especialidad or None,
+            "especialidad_nombre": especialidades.get(r.id_especialidad),
         })
 
     # Orden final de grupos: por nombre del médico, fallback cod_medico.

@@ -312,27 +312,31 @@ def _fmt_fecha(d: Optional[datetime.date]) -> str:
 
 
 _DEFINICIONES: dict[str, ColumnaSpec] = {
-    "prestador": ColumnaSpec("prestador", "PRESTADOR", 34, 22, "L", False, lambda f: (f.prestador_nombre or "")[:30]),
-    "matricula": ColumnaSpec("matricula", "MATRI.", 14, 8, "C", False, lambda f: f.matricula or ""),
-    "autorizacion": ColumnaSpec("autorizacion", "AUTORIZACION", 20, 14, "C", False, lambda f: f.autorizacion or ""),
-    "fecha": ColumnaSpec("fecha", "FECHA", 18, 11, "C", False, lambda f: _fmt_fecha(f.fecha_practica)),
-    "codigo": ColumnaSpec("codigo", "CODIGO", 16, 10, "C", False, lambda f: f.codigo or ""),
-    "nro_afiliado": ColumnaSpec("nro_afiliado", "Nro. AFILIADO", 22, 14, "C", False, lambda f: f.nro_afiliado or ""),
-    "afiliado": ColumnaSpec("afiliado", "AFILIADO", 34, 22, "L", False, lambda f: (f.afiliado or "")[:30]),
-    "cantidad": ColumnaSpec("cantidad", "CANT.", 14, 8, "C", False, lambda f: f"{f.cantidad}-{f.sesion}"),
-    "porcentaje": ColumnaSpec("porcentaje", "%", 12, 6, "R", True, lambda f: f.porcentaje or 0),
-    "honorarios": ColumnaSpec("honorarios", "HONORARIOS", 22, 13, "R", True, lambda f: f.honorarios),
-    "gastos": ColumnaSpec("gastos", "GASTOS", 22, 13, "R", True, lambda f: f.gastos),
-    "coseguro": ColumnaSpec("coseguro", "COSEGURO", 22, 13, "R", True, lambda f: f.coseguro),
-    "diagnostico": ColumnaSpec("diagnostico", "DIAGNOSTICO", 40, 26, "L", False, lambda f: (f.diagnostico or "")[:40]),
-    "via": ColumnaSpec("via", "VIA", 14, 9, "C", False, lambda f: {"L": "Laparoscopica", "T": "Tradicional"}.get(f.via, f.via or "")),
-    "especialidad": ColumnaSpec("especialidad", "ESPECIALIDAD", 30, 20, "L", False, lambda f: (f.especialidad_nombre or "")[:26]),
-    "estado_validacion": ColumnaSpec("estado_validacion", "VALIDACION", 20, 13, "C", False, lambda f: f.estado_validacion or ""),
+    # Sin cortar por cantidad de caracteres: Helvetica es proporcional y un
+    # nombre en mayúsculas de 30 caracteres puede medir bastante más que la
+    # columna. El recorte real (por ancho medido, con "...") lo hace pdf.py al
+    # dibujar; acá va el valor completo — Excel lo aprovecha entero.
+    "prestador": ColumnaSpec("prestador", "PRESTADOR", 40, 26, "L", False, lambda f: f.prestador_nombre or ""),
+    "matricula": ColumnaSpec("matricula", "MATRI.", 12, 8, "C", False, lambda f: f.matricula or ""),
+    "autorizacion": ColumnaSpec("autorizacion", "AUTORIZACION", 22, 14, "C", False, lambda f: f.autorizacion or ""),
+    "fecha": ColumnaSpec("fecha", "FECHA", 16, 11, "C", False, lambda f: _fmt_fecha(f.fecha_practica)),
+    "codigo": ColumnaSpec("codigo", "CODIGO", 15, 10, "C", False, lambda f: f.codigo or ""),
+    "nro_afiliado": ColumnaSpec("nro_afiliado", "Nro. AFILIADO", 20, 14, "C", False, lambda f: f.nro_afiliado or ""),
+    "afiliado": ColumnaSpec("afiliado", "AFILIADO", 40, 26, "L", False, lambda f: f.afiliado or ""),
+    "cantidad": ColumnaSpec("cantidad", "CANT.", 12, 8, "C", False, lambda f: f"{f.cantidad}-{f.sesion}"),
+    "porcentaje": ColumnaSpec("porcentaje", "%", 9, 6, "R", True, lambda f: f.porcentaje or 0),
+    "honorarios": ColumnaSpec("honorarios", "HONORARIOS", 22, 14, "R", True, lambda f: f.honorarios),
+    "gastos": ColumnaSpec("gastos", "GASTOS", 22, 14, "R", True, lambda f: f.gastos),
+    "coseguro": ColumnaSpec("coseguro", "COSEGURO", 22, 14, "R", True, lambda f: f.coseguro),
+    "diagnostico": ColumnaSpec("diagnostico", "DIAGNOSTICO", 42, 28, "L", False, lambda f: f.diagnostico or ""),
+    "via": ColumnaSpec("via", "VIA", 16, 11, "C", False, lambda f: {"L": "Laparoscopica", "T": "Tradicional"}.get(f.via, f.via or "")),
+    "especialidad": ColumnaSpec("especialidad", "ESPECIALIDAD", 30, 22, "L", False, lambda f: f.especialidad_nombre or ""),
+    "estado_validacion": ColumnaSpec("estado_validacion", "VALIDACION", 20, 14, "C", False, lambda f: f.estado_validacion or ""),
 }
 
-_COL_SOCIO = ColumnaSpec("socio", "SOCIO", 14, 8, "C", False, lambda f: f.cod_medico)
-_COL_SUBTOTAL = ColumnaSpec("sub_total", "SUB. TOTAL", 22, 13, "R", True, lambda f: f.subtotal)
-_COL_TIPO = ColumnaSpec("tipo", "TIPO / ROL", 26, 17, "L", False, lambda f: ETIQUETA_TIPO.get(f.tipo, f.tipo or ""))
+_COL_SOCIO = ColumnaSpec("socio", "SOCIO", 12, 8, "C", False, lambda f: f.cod_medico)
+_COL_SUBTOTAL = ColumnaSpec("sub_total", "SUB. TOTAL", 22, 14, "R", True, lambda f: f.subtotal)
+_COL_TIPO = ColumnaSpec("tipo", "TIPO / ROL", 36, 20, "L", False, lambda f: ETIQUETA_TIPO.get(f.tipo, f.tipo or ""))
 
 
 def spec_columnas(columnas_habilitadas: list[str]) -> list[ColumnaSpec]:

@@ -22,6 +22,7 @@ from app.modules.facturacion.export.armado import (
     spec_columnas,
     valores_fila,
 )
+from app.modules.facturacion.export.encabezado import EncabezadoExport
 from app.modules.facturacion.export.schemas import ExportOpciones
 
 FORMATO_MONEDA = "#,##0.00"
@@ -51,11 +52,37 @@ def _celda(ws, valor, *, negrita: bool = False, numero: bool = False, alineacion
     return c
 
 
-def _configurar_hoja(ws, cols: list[ColumnaSpec]) -> None:
+def _aplicar_pagina_a4(ws) -> None:
+    # Que al imprimirse entre en A4: ancho a una página, alto sin límite de
+    # páginas (con miles de filas no tiene sentido "una sola hoja de alto").
+    # openpyxl no expone una constante para esto (a diferencia de otras libs);
+    # "9" es el código de tamaño de papel A4 del estándar OOXML (ECMA-376).
+    ws.page_setup.paperSize = "9"
+    ws.page_setup.orientation = "landscape"
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+    ws.oddFooter.center.text = "Página &P de &N"
+
+
+def _configurar_hoja(ws, cols: list[ColumnaSpec], fila_encabezado_col: int) -> None:
     for i, c in enumerate(cols, start=1):
         ws.column_dimensions[get_column_letter(i)].width = max(c.ancho_excel, 6)
-    ws.freeze_panes = "A2"
-    ws.auto_filter.ref = f"A1:{get_column_letter(len(cols))}1"
+    # Congela todo lo de arriba (membrete + fila de encabezado de columnas):
+    # a diferencia del PDF, en el Excel el membrete va una sola vez arriba de
+    # todo — pero conviene que quede visible al scrollear.
+    ws.freeze_panes = f"A{fila_encabezado_col + 1}"
+    ws.auto_filter.ref = f"A{fila_encabezado_col}:{get_column_letter(len(cols))}{fila_encabezado_col}"
+    _aplicar_pagina_a4(ws)
+
+
+def _fila_encabezado_institucional(ws, encabezado: list[str]) -> None:
+    """El membrete va una única vez, en las primeras filas de la hoja — no es
+    una fila "repetible" de impresión como la numeración de página del PDF."""
+    ws.append([_celda(ws, encabezado[0], negrita=True)])
+    for linea in encabezado[1:]:
+        ws.append([_celda(ws, linea)])
+    ws.append([])
 
 
 def _fila_encabezado(ws, cols: list[ColumnaSpec]) -> None:
@@ -112,10 +139,11 @@ def _escribir_resumen_general(ws, armado: Armado) -> None:
         ])
 
 
-def build_excel_detalle(armado: Armado, opciones: ExportOpciones) -> bytes:
+def build_excel_detalle(armado: Armado, opciones: ExportOpciones, encabezado: EncabezadoExport) -> bytes:
     from io import BytesIO
 
     cols = spec_columnas(opciones.columnas)
+    fila_encabezado_col = len(encabezado.lineas) + 2  # + fila en blanco + la propia fila
     wb = Workbook(write_only=True)
     usados: set[str] = set()
     multi_hoja = len(armado.secciones) > 1
@@ -124,7 +152,8 @@ def build_excel_detalle(armado: Armado, opciones: ExportOpciones) -> bytes:
     for seccion in armado.secciones:
         nombre = _sanitizar_nombre_hoja(seccion.titulo or "Detalle", usados) if multi_hoja else "Detalle"
         ws = wb.create_sheet(nombre)
-        _configurar_hoja(ws, cols)
+        _configurar_hoja(ws, cols, fila_encabezado_col)
+        _fila_encabezado_institucional(ws, encabezado.lineas)
         _fila_encabezado(ws, cols)
 
         hay_resumen_grupo = False
@@ -144,6 +173,8 @@ def build_excel_detalle(armado: Armado, opciones: ExportOpciones) -> bytes:
 
     if multi_hoja:
         ws_resumen = wb.create_sheet(_sanitizar_nombre_hoja("Resumen general", usados))
+        _aplicar_pagina_a4(ws_resumen)
+        _fila_encabezado_institucional(ws_resumen, encabezado.lineas)
         _escribir_resumen_general(ws_resumen, armado)
     else:
         _escribir_resumen_general(ultima_ws, armado)

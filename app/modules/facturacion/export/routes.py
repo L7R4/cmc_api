@@ -19,10 +19,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.deps import get_current_user
 from app.db.database import get_db
 from app.db.models import ExportPreset
-from app.modules.facturacion import service
 from app.modules.facturacion.export import armado as armado_mod
 from app.modules.facturacion.export import caratula as caratula_mod
 from app.modules.facturacion.export import datos as datos_mod
+from app.modules.facturacion.export import encabezado as encabezado_mod
 from app.modules.facturacion.export import excel as excel_mod
 from app.modules.facturacion.export import pdf as pdf_mod
 from app.modules.facturacion.export.schemas import (
@@ -67,15 +67,6 @@ async def _resolver_opciones(
     )
 
 
-def _meta_linea(factura, total_filas: int) -> str:
-    estado = "Abierta" if factura.estado == "A" else "Cerrada"
-    return (
-        f"Factura #{factura.id_prestaciones} · OS {factura.cod_obr} · "
-        f"Período {service.periodo_label(factura.periodo)} · {estado} · "
-        f"{total_filas} prestación{'es' if total_filas != 1 else ''}"
-    )
-
-
 @router.get("/facturas/{id}/export/detalle.pdf")
 async def export_detalle_pdf(
     id: int, opciones: ExportOpciones = Depends(_resolver_opciones), db: AsyncSession = Depends(get_db),
@@ -84,9 +75,9 @@ async def export_detalle_pdf(
     factura = await datos_mod.obtener_factura(db, id)
     filas = await datos_mod.obtener_filas_export(db, factura, opciones)
     armado = armado_mod.armar(filas, opciones)
-    titulo = "COLEGIO MEDICO DE CORRIENTES - Detalle de facturación"
+    encabezado = await encabezado_mod.construir_encabezado(db, factura)
     contenido = await run_in_threadpool(
-        pdf_mod.build_pdf_detalle, armado, opciones, titulo, _meta_linea(factura, len(filas)),
+        pdf_mod.build_pdf_detalle, armado, opciones, encabezado,
     )
     logger.info(
         "export detalle.pdf factura=%s filas=%s tiempo=%.2fs", id, len(filas), time.perf_counter() - t0,
@@ -105,7 +96,8 @@ async def export_detalle_xlsx(
     factura = await datos_mod.obtener_factura(db, id)
     filas = await datos_mod.obtener_filas_export(db, factura, opciones)
     armado = armado_mod.armar(filas, opciones)
-    contenido = await run_in_threadpool(excel_mod.build_excel_detalle, armado, opciones)
+    encabezado = await encabezado_mod.construir_encabezado(db, factura)
+    contenido = await run_in_threadpool(excel_mod.build_excel_detalle, armado, opciones, encabezado)
     logger.info(
         "export detalle.xlsx factura=%s filas=%s tiempo=%.2fs", id, len(filas), time.perf_counter() - t0,
     )

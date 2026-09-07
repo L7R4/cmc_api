@@ -555,6 +555,11 @@ class PrestacionFacturaDetalleOut(BaseModel):
     tipo: Optional[str] = None                       # badge: Consulta | Practica | Honorarios individuales | Sanatorio
     revisado: bool = False
     estado: Optional[str] = None
+    # Vínculo ayudante/gastos → fila del médico cabeza de equipo (grupo_equipo_id ==
+    # su propio id). None si la prestación no tiene equipo quirúrgico asociado.
+    grupo_equipo_id: Optional[int] = None
+    id_especialidad: Optional[int] = None
+    especialidad_nombre: Optional[str] = None
 
     # codigo/nro_afiliado son columnas enteras en filas legacy → coercionar a string.
     @field_validator("codigo", "nro_afiliado", mode="before")

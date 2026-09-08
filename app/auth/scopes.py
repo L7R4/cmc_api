@@ -102,6 +102,13 @@ class Scope(StrEnum):
     # abrirle la facturación de todos los colegas.
     FACTURACION_LEER_PROPIO = "facturacion:leer_propio"
 
+    # Panel administrativo de auditoría de facturación: quién cerró cada
+    # factura, cuántas prestaciones carga cada operador del Colegio (nunca
+    # las que cargan los médicos desde su portal) y el feed de actividad
+    # reciente. Deliberadamente separado de FACTURACION_LEER — es información
+    # de desempeño del staff, no del día a día operativo de facturación.
+    FACTURACION_REGISTRO = "facturacion:registro"
+
     # El permiso base del médico prestador.
     VALIDACION_CARGAR = "validacion:cargar"
 
@@ -467,6 +474,7 @@ DESCRIPCIONES: dict[Scope, str] = {
     Scope.FACTURACION_PERIODO: "Mover el puntero de período (afecta a todos los médicos)",
     Scope.FACTURACION_COMPLEMENTAR: "Emitir facturas y prestaciones complementarias",
     Scope.FACTURACION_LEER_PROPIO: "Ver únicamente la facturación y prestaciones propias",
+    Scope.FACTURACION_REGISTRO: "Ver el registro de cierres de facturación y la carga por operador administrativo",
     Scope.VALIDACION_CARGAR: "Validar y cargar prestaciones contra obras sociales",
     Scope.REPORTE_LEER: "Ver reportes y estadísticas de facturación de todo el Colegio",
     Scope.NOMENCLADOR_LEER: "Ver nomenclador, galenos, valores y homologador",

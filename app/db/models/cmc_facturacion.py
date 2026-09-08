@@ -191,6 +191,12 @@ class FacturacionCMC(Base):
     # complementarias. A lo sumo una versión está abierta a la vez y es la de mayor
     # número. Ver `abrir_complemento` en el servicio. Histórico → 1.
     version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+    # Quién/cuándo se creó esta cabecera (primera prestación cargada, o alta del
+    # complemento) — a diferencia de `usuario`/`fecha`, que se pisan en el cierre y
+    # de hecho ya funcionan como "cerrado por"/"fecha de cierre". NULL en filas
+    # históricas anteriores a este campo (no hay forma confiable de reconstruirlo).
+    creado_por: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    creado_en: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime, nullable=True)
 
 
 class PeriodoMedicoActual(Base):

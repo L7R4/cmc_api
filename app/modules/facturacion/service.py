@@ -2388,6 +2388,8 @@ async def _ensure_factura_abierta(
         estado_doctor=estado_doctor,
         usuario=usuario,
         version=1,
+        creado_por=usuario,
+        creado_en=datetime.datetime.utcnow(),
     )
     db.add(cabecera)
     await db.flush()
@@ -2543,6 +2545,8 @@ async def cerrar_periodo(
             cod_obr=cod_obra,
             periodo=periodo,
             version=version_actual,
+            creado_por=usuario,
+            creado_en=datetime.datetime.utcnow(),
         )
         db.add(cabecera)
         await db.flush()  # asigna id_prestaciones — se necesita para la carpeta del archivo
@@ -2624,6 +2628,8 @@ async def abrir_complemento(
         estado_doctor=DOCTOR_CERRADA,
         usuario=usuario,
         version=cabecera.version + 1,
+        creado_por=usuario,
+        creado_en=datetime.datetime.utcnow(),
     )
     db.add(nueva)
     await db.commit()
@@ -2780,3 +2786,227 @@ async def avanzar_periodo_medico(
         "periodo_nuevo": nuevo,
         "cabeceras_cerradas": len(cabeceras),
     }
+
+
+# ── Registro de facturación (auditoría administrativa) ──────────────────────
+# Mismas reglas que app/modules/reportes/service.py: se agrega en SQL, nunca se
+# traen filas a Python; `periodo` (o un rango desde/hasta) es obligatorio para
+# no hacer full-scan; hay un tope duro de filas por consulta.
+_REGISTRO_MAX_LIMIT = 200
+
+
+def _a_datetime(valor) -> datetime.datetime:
+    """Normaliza `date`/`datetime`/`None` a `datetime` comparable — hace falta
+    para intercalar cierres (columna `fecha`, sólo fecha) con cargas (columna
+    `created`, con hora) en un mismo feed ordenado."""
+    if isinstance(valor, datetime.datetime):
+        return valor
+    if isinstance(valor, datetime.date):
+        return datetime.datetime.combine(valor, datetime.time.min)
+    return datetime.datetime.min
+
+
+async def _nombres_por_usuario(db: AsyncSession, usuarios: Sequence[Optional[str]]) -> dict[str, str]:
+    """NRO_SOCIO (como string) → NOMBRE, en una sola consulta. `usuario` no numérico
+    (no debería existir, pero por las dudas) se ignora en vez de romper."""
+    numericos = {int(u) for u in usuarios if u and str(u).strip().isdigit()}
+    if not numericos:
+        return {}
+    filas = (await db.execute(
+        select(ListadoMedico.NRO_SOCIO, ListadoMedico.NOMBRE)
+        .where(ListadoMedico.NRO_SOCIO.in_(numericos))
+    )).all()
+    return {str(nro): nombre for nro, nombre in filas}
+
+
+def _requiere_periodo_o_rango(periodo: Optional[str], desde, hasta) -> None:
+    if not periodo and not (desde and hasta):
+        raise HTTPException(422, "Se requiere 'periodo' o un rango 'desde'/'hasta'")
+
+
+async def carga_por_usuario(
+    db: AsyncSession,
+    *,
+    cod_obra: Optional[str] = None,
+    periodo: Optional[str] = None,
+    desde: Optional[datetime.date] = None,
+    hasta: Optional[datetime.date] = None,
+    limit: int = 200,
+) -> list[dict]:
+    """Ranking de prestaciones cargadas por operador del Colegio. `origen_carga`
+    fijo en 'colegio' — deliberadamente NO filtrable: lo que carga un médico desde
+    su portal no cuenta acá. Rango de fechas sobre `created` (fecha de CARGA, no
+    de práctica).
+
+    Excluye filas con `usuario` NULL/vacío: son datos históricos importados en
+    bloque del sistema legacy (antes de que existiera esta API), sin operador
+    real asociado — quedarían agrupados bajo un "usuario" en blanco con un
+    conteo enorme (ej. 21290 filas en un solo período), lo que arruina el
+    ranking. No representan trabajo de ningún miembro del staff, así que no
+    corresponde que aparezcan acá."""
+    _requiere_periodo_o_rango(periodo, desde, hasta)
+    D = DetalleFacturacionCMC
+
+    cond = [
+        D.origen_carga == ORIGEN_COLEGIO,
+        D.estado != "X",
+        D.usuario.isnot(None),
+        D.usuario != "",
+    ]
+    if periodo:
+        cond.append(D.periodo == periodo)
+    if cod_obra:
+        cond.append(D.cod_obr == str(cod_obra))
+    if desde:
+        cond.append(D.created >= desde)
+    if hasta:
+        cond.append(D.created < hasta + datetime.timedelta(days=1))
+
+    limit = max(1, min(int(limit or 200), _REGISTRO_MAX_LIMIT))
+    filas = (await db.execute(
+        select(
+            D.usuario,
+            func.count(D.id_detalle_prestaciones),
+            func.coalesce(func.sum(D.importe_total), Decimal("0")),
+        )
+        .where(and_(*cond))
+        .group_by(D.usuario)
+        .order_by(func.count(D.id_detalle_prestaciones).desc())
+        .limit(limit)
+    )).all()
+
+    nombres = await _nombres_por_usuario(db, [f[0] for f in filas])
+    return [
+        {
+            "usuario": usuario or "",
+            "nombre": nombres.get(usuario or ""),
+            "cantidad_prestaciones": int(cantidad),
+            "importe_total": Decimal(str(importe or 0)),
+        }
+        for usuario, cantidad, importe in filas
+    ]
+
+
+async def cierres_por_usuario(
+    db: AsyncSession,
+    *,
+    cod_obra: Optional[str] = None,
+    periodo: Optional[str] = None,
+    desde: Optional[datetime.date] = None,
+    hasta: Optional[datetime.date] = None,
+    limit: int = 200,
+) -> list[dict]:
+    """Ranking de facturas cerradas por operador. `FacturacionCMC.usuario` ya
+    funciona como "cerrado por" (se pisa en `cerrar_periodo`). Rango de fechas
+    sobre `fecha` (fecha de cierre)."""
+    _requiere_periodo_o_rango(periodo, desde, hasta)
+    F = FacturacionCMC
+
+    cond = [F.estado.in_(FACTURA_ESTADOS_CERRADOS)]
+    if periodo:
+        cond.append(F.periodo == periodo)
+    if cod_obra:
+        cond.append(F.cod_obr == str(cod_obra))
+    if desde:
+        cond.append(F.fecha >= desde)
+    if hasta:
+        cond.append(F.fecha <= hasta)
+
+    limit = max(1, min(int(limit or 200), _REGISTRO_MAX_LIMIT))
+    filas = (await db.execute(
+        select(
+            F.usuario,
+            func.count(F.id_prestaciones),
+            func.coalesce(func.sum(F.importe), Decimal("0")),
+        )
+        .where(and_(*cond))
+        .group_by(F.usuario)
+        .order_by(func.count(F.id_prestaciones).desc())
+        .limit(limit)
+    )).all()
+
+    nombres = await _nombres_por_usuario(db, [f[0] for f in filas])
+    return [
+        {
+            "usuario": usuario or "",
+            "nombre": nombres.get(usuario or ""),
+            "cantidad_facturas": int(cantidad),
+            "importe_total": Decimal(str(importe or 0)),
+        }
+        for usuario, cantidad, importe in filas
+    ]
+
+
+async def actividad_reciente(
+    db: AsyncSession,
+    *,
+    cod_obra: Optional[str] = None,
+    periodo: Optional[str] = None,
+    limit: int = 20,
+) -> list[dict]:
+    """Feed de actividad administrativa: cierres de factura + cargas de
+    prestaciones del Colegio (nunca del portal médico), intercalados por fecha
+    descendente. Dos SELECT topeados + merge en Python — el volumen es chico
+    (a lo sumo 2×limit filas), no es una agregación."""
+    limit = max(1, min(int(limit or 20), 100))
+
+    F = FacturacionCMC
+    cond_f = [F.estado.in_(FACTURA_ESTADOS_CERRADOS)]
+    if periodo:
+        cond_f.append(F.periodo == periodo)
+    if cod_obra:
+        cond_f.append(F.cod_obr == str(cod_obra))
+    cierres = (await db.execute(
+        select(F.usuario, F.fecha, F.cod_obr, F.periodo, F.id_prestaciones, F.importe)
+        .where(and_(*cond_f))
+        .order_by(F.fecha.desc(), F.id_prestaciones.desc())
+        .limit(limit)
+    )).all()
+
+    D = DetalleFacturacionCMC
+    # Excluye `usuario` NULL/vacío: filas históricas importadas en bloque del
+    # legacy, sin operador real — ver el docstring de `carga_por_usuario`.
+    cond_d = [D.origen_carga == ORIGEN_COLEGIO, D.estado != "X", D.usuario.isnot(None), D.usuario != ""]
+    if periodo:
+        cond_d.append(D.periodo == periodo)
+    if cod_obra:
+        cond_d.append(D.cod_obr == str(cod_obra))
+    cargas = (await db.execute(
+        select(D.usuario, D.created, D.cod_obr, D.periodo, D.id_detalle_prestaciones, D.importe_total)
+        .where(and_(*cond_d))
+        .order_by(D.created.desc())
+        .limit(limit)
+    )).all()
+
+    todos_usuarios = {r[0] for r in cierres} | {r[0] for r in cargas}
+    nombres = await _nombres_por_usuario(db, list(todos_usuarios))
+
+    eventos = [
+        {
+            "tipo": "cierre",
+            "usuario": usuario or "",
+            "nombre": nombres.get(usuario or ""),
+            "fecha": _a_datetime(fecha),
+            # `cod_obr` es legacy (smallint) a nivel de driver aunque el ORM lo
+            # declare String — coercionar siempre, igual que reportes/service.py::_txt.
+            "cod_obra": str(cod_obr) if cod_obr is not None else "",
+            "periodo": periodo_ or "",
+            "referencia": f"Factura #{id_}",
+            "importe": Decimal(str(importe or 0)),
+        }
+        for usuario, fecha, cod_obr, periodo_, id_, importe in cierres
+    ] + [
+        {
+            "tipo": "carga",
+            "usuario": usuario or "",
+            "nombre": nombres.get(usuario or ""),
+            "fecha": _a_datetime(creado),
+            "cod_obra": str(cod_obr) if cod_obr is not None else "",
+            "periodo": periodo_ or "",
+            "referencia": f"Prestación #{id_}",
+            "importe": Decimal(str(importe or 0)),
+        }
+        for usuario, creado, cod_obr, periodo_, id_, importe in cargas
+    ]
+    eventos.sort(key=lambda e: e["fecha"], reverse=True)
+    return eventos[:limit]

@@ -449,13 +449,20 @@ class FacturaRead(BaseModel):
     created: Optional[datetime.datetime] = None
     documento_url: Optional[str] = None     # comprobante subido al cerrar (si lo hay)
     version: int = 1                        # 1 = original; 2+ = facturas complementarias
+    # Quién/cuándo se creó esta cabecera (primera prestación cargada, o alta del
+    # complemento) — distinto de `usuario`/`created`, que se pisan en el cierre y
+    # de hecho ya funcionan como "cerrado por"/"fecha de cierre". NULL en filas
+    # históricas anteriores a este campo.
+    creado_por: Optional[str] = None
+    creado_en: Optional[datetime.datetime] = None
+    creado_por_nombre: Optional[str] = None  # NOMBRE resuelto contra ListadoMedico (batch, no persistido)
 
     @field_validator("cod_obr", mode="before")
     @classmethod
     def _num_to_str(cls, v):
         return str(v) if v is not None else v
 
-    @field_validator("fecha", "fecha_envio", "fecha_recep", "created", mode="before")
+    @field_validator("fecha", "fecha_envio", "fecha_recep", "created", "creado_en", mode="before")
     @classmethod
     def _zero_date_to_none(cls, v):
         # MySQL puede devolver zero-dates ('0000-00-00') que no son fechas válidas.
@@ -769,3 +776,29 @@ class PrestacionFichaOut(BaseModel):
     factura: Optional[FacturaRead] = None
     equipo: list[PrestacionRead] = Field(default_factory=list)
     auditoria: list[AuditoriaEventoOut] = Field(default_factory=list)
+
+
+# ── Registro de facturación (auditoría administrativa, scope facturacion:registro) ──
+class CargaPorUsuarioOut(BaseModel):
+    usuario: str
+    nombre: Optional[str] = None
+    cantidad_prestaciones: int
+    importe_total: Decimal
+
+
+class CierresPorUsuarioOut(BaseModel):
+    usuario: str
+    nombre: Optional[str] = None
+    cantidad_facturas: int
+    importe_total: Decimal
+
+
+class ActividadEventoOut(BaseModel):
+    tipo: Literal["cierre", "carga"]
+    usuario: str
+    nombre: Optional[str] = None
+    fecha: datetime.datetime
+    cod_obra: str
+    periodo: str
+    referencia: str
+    importe: Decimal

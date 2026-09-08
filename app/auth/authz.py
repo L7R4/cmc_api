@@ -519,6 +519,13 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     # Lo dispara el cron con X-Cron-Secret, sin JWT. Ver la nota en MAQUINA.
     ("POST", "/api/facturacion/periodo-medico/cerrar-vencidos"): MAQUINA,
 
+    # Registro de facturación (auditoría administrativa): quién cerró, cuánto
+    # carga cada operador del Colegio, actividad reciente. Permiso propio,
+    # separado de FACTURACION_LEER.
+    ("GET", "/api/facturacion/registro/carga-por-usuario"): Scope.FACTURACION_REGISTRO,
+    ("GET", "/api/facturacion/registro/cierres-por-usuario"): Scope.FACTURACION_REGISTRO,
+    ("GET", "/api/facturacion/registro/actividad"): Scope.FACTURACION_REGISTRO,
+
     # ── Validaciones (el permiso base del prestador) ─────────────────────────
     ("GET", "/api/validaciones/prestador"): Scope.VALIDACION_CARGAR,
     ("GET", "/api/validaciones/codigos"): Scope.VALIDACION_CARGAR,

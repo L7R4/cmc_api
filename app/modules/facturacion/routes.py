@@ -12,11 +12,14 @@ from app.db.database import get_db
 from app.db.models import ListadoMedico, NomencladorCMC, ObrasSociales
 from app.modules.facturacion import service
 from app.modules.facturacion.schemas import (
+    ActividadEventoOut,
     AfiliadoCreate,
     AfiliadoRead,
     AvanzarPeriodoMedicoPayload,
     AvanzarPeriodoMedicoResponse,
+    CargaPorUsuarioOut,
     CerrarPeriodosVencidosResponse,
+    CierresPorUsuarioOut,
     CierreDoctorPayload,
     CierreDoctorResponse,
     CierrePreviewResponse,
@@ -276,10 +279,11 @@ async def listar_facturas(
     # mostrar quién cerró cada factura, sin N+1.
     nros: set[int] = set()
     for row in rows:
-        try:
-            nros.add(int(row.usuario))
-        except (TypeError, ValueError):
-            continue
+        for valor in (row.usuario, row.creado_por):
+            try:
+                nros.add(int(valor))
+            except (TypeError, ValueError):
+                continue
     nombres: dict[str, str] = {}
     if nros:
         med_rows = (await db.execute(
@@ -300,6 +304,8 @@ async def listar_facturas(
             factura.periodo_label = service.periodo_label(factura.periodo)
         if factura.usuario:
             factura.usuario_nombre = nombres.get(str(factura.usuario))
+        if factura.creado_por:
+            factura.creado_por_nombre = nombres.get(str(factura.creado_por))
         if factura.id_prestaciones in importes_abiertos:
             factura.importe = importes_abiertos[factura.id_prestaciones]
         out.append(factura)
@@ -313,6 +319,50 @@ async def factura_detalle(id: int, db: AsyncSession = Depends(get_db)):
     """Detalle de una factura: sus prestaciones (misma OS+período, sin anuladas)
     agrupadas por prestador, con totales por prestador y de la factura."""
     return await service.obtener_factura_detalle(db, id)
+
+
+# ── Registro de facturación (auditoría administrativa, scope facturacion:registro) ──
+@router.get("/registro/carga-por-usuario", response_model=list[CargaPorUsuarioOut])
+async def registro_carga_por_usuario(
+    cod_obra: Optional[str] = Query(None),
+    periodo: Optional[str] = Query(None, description="YYYYMM"),
+    desde: Optional[datetime.date] = Query(None),
+    hasta: Optional[datetime.date] = Query(None),
+    limit: int = Query(200, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+):
+    """Ranking de prestaciones cargadas por operador del Colegio en un
+    período/rango — nunca incluye lo que carga un médico desde su portal."""
+    return await service.carga_por_usuario(
+        db, cod_obra=cod_obra, periodo=periodo, desde=desde, hasta=hasta, limit=limit,
+    )
+
+
+@router.get("/registro/cierres-por-usuario", response_model=list[CierresPorUsuarioOut])
+async def registro_cierres_por_usuario(
+    cod_obra: Optional[str] = Query(None),
+    periodo: Optional[str] = Query(None, description="YYYYMM"),
+    desde: Optional[datetime.date] = Query(None),
+    hasta: Optional[datetime.date] = Query(None),
+    limit: int = Query(200, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+):
+    """Ranking de facturas cerradas por operador en un período/rango."""
+    return await service.cierres_por_usuario(
+        db, cod_obra=cod_obra, periodo=periodo, desde=desde, hasta=hasta, limit=limit,
+    )
+
+
+@router.get("/registro/actividad", response_model=list[ActividadEventoOut])
+async def registro_actividad(
+    cod_obra: Optional[str] = Query(None),
+    periodo: Optional[str] = Query(None, description="YYYYMM"),
+    limit: int = Query(20, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+):
+    """Feed de actividad administrativa reciente: cierres + cargas del Colegio,
+    intercalados por fecha descendente."""
+    return await service.actividad_reciente(db, cod_obra=cod_obra, periodo=periodo, limit=limit)
 
 
 # ── Grupo C — Prestaciones ───────────────────────────────────────────────────

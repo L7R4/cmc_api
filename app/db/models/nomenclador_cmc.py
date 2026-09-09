@@ -357,6 +357,13 @@ class Valor(Base):
     )
     # Máximo de ayudantes admitidos para este código+OS. NULL = no lleva ayudantes (0).
     cantidad_ayudantes: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # Lo que el afiliado paga de su bolsillo por esta práctica en esta OS — mismo
+    # concepto y misma semántica que `detalle_facturacion.coseguro` (se descuenta
+    # del total a liquidar). Es metadato de la variante, no de la ecuación de
+    # precio: cambiarlo no exige abrir una vigencia nueva.
+    coseguro: Mapped[Decimal] = mapped_column(
+        DECIMAL(14, 2), nullable=False, default=0, server_default="0"
+    )
     # True → el código se factura "por presupuesto": no hay precio pactado en el
     # sistema, la OS informa el importe por fuera. Los componentes H/G/A quedan en 0
     # y el operador carga el monto a mano al facturar (modo manual).

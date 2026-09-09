@@ -263,6 +263,7 @@ async def buscar_codigos(
                 "honorarios": precio.honorarios,
                 "gastos": precio.gastos,
                 "total": precio.honorarios + precio.gastos,
+                "coseguro": precio.coseguro,
                 "admitido": True,
                 "motivo": precio.motivo,
                 "se_envia": se_envia,

@@ -588,6 +588,9 @@ class ValorCreate(BaseModel):
     por_presupuesto: bool = False
     # Máximo de ayudantes admitidos para este código+OS. NULL = no lleva ayudantes.
     cantidad_ayudantes: Optional[int] = Field(None, ge=0)
+    # Importe que el afiliado paga de su bolsillo por esta práctica en esta OS;
+    # se descuenta del total a liquidar (ver facturacion.calcular_importe_total).
+    coseguro: Decimal = Field(Decimal("0"), ge=0)
     vigencia_desde: datetime.date
     observacion: Optional[str] = None
     componentes: List[ValorComponenteIn] = []
@@ -612,6 +615,9 @@ class ValorUpdate(BaseModel):
     categoria: Optional[str] = None
     requiere_autorizacion: Optional[bool] = None
     cantidad_ayudantes: Optional[int] = Field(None, ge=0)
+    # None = no tocar; va con los metadatos, no con la ecuación de precio, para
+    # poder corregirlo sin abrir una vigencia nueva.
+    coseguro: Optional[Decimal] = Field(None, ge=0)
     observacion: Optional[str] = None
 
 
@@ -626,6 +632,9 @@ class ValorCerrarYCrearIn(BaseModel):
     categoria: Optional[str] = None
     requiere_autorizacion: Optional[bool] = None
     cantidad_ayudantes: Optional[int] = Field(None, ge=0)
+    # None = hereda el coseguro del valor que se cierra (mismo patrón que
+    # cantidad_ayudantes/categoria/requiere_autorizacion arriba).
+    coseguro: Optional[Decimal] = Field(None, ge=0)
     observacion: Optional[str] = None
 
     @model_validator(mode="after")
@@ -652,6 +661,7 @@ class ValorOut(BaseModel):
     especialidad_id_colegio: Optional[int]
     por_presupuesto: bool = False
     cantidad_ayudantes: Optional[int] = None
+    coseguro: Decimal = Decimal("0")
     # Modalidad de la ecuación: 'galeno' | 'fijo' | 'por_presupuesto'
     modalidad: str
     vigencia_desde: datetime.date
@@ -820,6 +830,9 @@ class LookupPrecioOut(BaseModel):
     fecha_practica: datetime.date
     precio_base: Decimal            # = precio_total (ya no hay opcionales)
     precio_total: Decimal           # suma de los 3 componentes
+    # Importe que el afiliado paga de su bolsillo; sugerido desde el Valor, editable
+    # al facturar. No está incluido en precio_total.
+    coseguro: Decimal = Decimal("0")
     componentes: List[ComponenteLookupOut]
     # Vía cotizada (T=tradicional, L=laparoscópica) y, si L, el nivel efectivamente
     # usado para cotizar (galeno de 7 niveles → nivel siguiente; 10 niveles → mismo

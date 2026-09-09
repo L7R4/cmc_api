@@ -111,6 +111,10 @@ class CodigoOut(BaseModel):
     honorarios: Decimal
     gastos: Decimal
     total: Decimal
+    # Coseguro sugerido por el Valor del código — informativo acá; el que factura
+    # es el que el médico tipea en el campo "Coseguro" del formulario (si la OS lo
+    # pide, ver `validaciones.config.ts`).
+    coseguro: Decimal = Decimal("0")
     # `False` cuando el código no está habilitado para el médico o no tiene
     # precio vigente para esa obra social; `motivo` explica por qué.
     admitido: bool = True

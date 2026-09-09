@@ -977,6 +977,7 @@ async def resolver_precio(
         cantidad_ayudantes=cantidad_ayudantes,
         via=out.via,
         nivel_cotizado=out.nivel_cotizado,
+        coseguro=out.coseguro,
     )
 
 
@@ -1182,10 +1183,16 @@ def _derivar_tipo_prestador(h: Decimal, g: Decimal, a: Decimal) -> Optional[str]
 
 
 def calcular_importe_total(
-    h: Decimal, g: Decimal, a: Decimal, cantidad: int, sesion: int
+    h: Decimal, g: Decimal, a: Decimal, cantidad: int, sesion: int,
+    coseguro: Decimal = Decimal("0"),
 ) -> Decimal:
+    """`coseguro` se resta ANTES de multiplicar por cantidad/sesión: es lo que el
+    afiliado paga por cada unidad de la práctica, así que el descuento total también
+    escala con la cantidad cargada (ver decisión de negocio en el módulo de valores).
+    Con el default 0, los llamadores que no lo pasan (ej. Validaciones, que resta el
+    coseguro una única vez fuera de esta función) no cambian de comportamiento."""
     return quantize_money(
-        (_dec(h) + _dec(g) + _dec(a)) * Decimal(cantidad) * Decimal(sesion)
+        (_dec(h) + _dec(g) + _dec(a) - _dec(coseguro)) * Decimal(cantidad) * Decimal(sesion)
     )
 
 
@@ -1199,31 +1206,36 @@ async def _montos_de_item(
     cod_nomenclador: str,
     tipo_calculo: str,
     fecha: datetime.date,
-) -> tuple[Decimal, Decimal, Decimal, Optional[list[dict]]]:
-    """Resuelve los montos base (h, g, a) SIN porcentaje, y el snapshot.
+) -> tuple[Decimal, Decimal, Decimal, Optional[list[dict]], Decimal]:
+    """Resuelve los montos base (h, g, a) SIN porcentaje, el snapshot y el coseguro
+    efectivo (sin escalar por cantidad/sesión — eso lo hace calcular_importe_total).
 
     El concepto que el cliente manda en > 0 es el que se factura (médico/gastos/ayudante
     queda implícito). En modo automático el monto sale del lookup para cada concepto
-    marcado en > 0; en manual se usan los montos enviados tal cual.
+    marcado en > 0; en manual se usan los montos enviados tal cual. El coseguro es lo
+    que mandó el operador si lo mandó; si no, el sugerido por el Valor del código
+    (0 en modo manual, donde no hay lookup).
     """
     hi = item.honorarios or Decimal("0")
     gi = item.gastos or Decimal("0")
     ai = item.ayudante or Decimal("0")
+    coseguro_item = item.coseguro
     if tipo_calculo == "A":
         via = item.via or service_vias.VIA_TRADICIONAL
         precio = await resolver_precio(db, cod_obra, medico, cod_nomenclador, fecha, via=via)
         if not precio.admitido:
             raise HTTPException(422, precio.motivo)
+        coseguro = coseguro_item if coseguro_item is not None else precio.coseguro
         # Por presupuesto: el lookup admite con H/G/A en 0; el monto lo informa la OS
         # y lo carga el operador a mano (montos del item).
         if precio.por_presupuesto:
-            return hi, gi, ai, precio.snapshot
+            return hi, gi, ai, precio.snapshot, coseguro
         # Para cada concepto marcado en > 0 por el front, usar el valor autoritativo del lookup.
         h = precio.honorarios if hi > 0 else Decimal("0")
         g = precio.gastos if gi > 0 else Decimal("0")
         a = precio.ayudante if ai > 0 else Decimal("0")
-        return h, g, a, precio.snapshot
-    return hi, gi, ai, None
+        return h, g, a, precio.snapshot, coseguro
+    return hi, gi, ai, None, (coseguro_item if coseguro_item is not None else Decimal("0"))
 
 
 # ── Guardado ─────────────────────────────────────────────────────────────────
@@ -1353,7 +1365,7 @@ async def _insertar_prestaciones(
 
         # El precio sale de la especialidad del médico ejecutor (= el propio médico si el
         # payee no es una clínica).
-        h_base, g_base, a_base, snapshot = await _montos_de_item(
+        h_base, g_base, a_base, snapshot, coseguro = await _montos_de_item(
             db, item, cod_obra, medico_precio,
             item.cod_nomenclador, item.tipo_calculo, fecha_precio,
         )
@@ -1364,7 +1376,13 @@ async def _insertar_prestaciones(
         ):
             g_base = Decimal("0")
         h, g, a = _aplicar_porcentaje(h_base, g_base, a_base, item.porcentaje)
-        total = calcular_importe_total(h, g, a, item.cantidad, item.sesion)
+        # El coseguro es del acto, no de cada prestador: sólo la fila del médico
+        # (nunca la del ayudante) lo lleva. No se escala por `porcentaje`.
+        if item.ayudante and item.ayudante > 0:
+            coseguro = Decimal("0")
+        if coseguro > h + g + a:
+            raise HTTPException(422, "El coseguro no puede superar el valor de la prestación")
+        total = calcular_importe_total(h, g, a, item.cantidad, item.sesion, coseguro=coseguro)
         # Importe 0 permitido: un concepto en 0 no afecta la suma de la liquidación.
 
         tipo = await derivar_tipo(db, item.cod_nomenclador, prestador.tipo, cod_obra)
@@ -1396,6 +1414,7 @@ async def _insertar_prestaciones(
             gastos=g,
             ayudante=a,
             importe_total=total,
+            coseguro=coseguro,
             manual=item.tipo_calculo,
             dni_p=item.dni_paciente,
             nom_ape_p=nombre_paciente,
@@ -2131,6 +2150,7 @@ async def editar_prestacion(
             "honorarios": "honorarios",
             "gastos": "gastos",
             "ayudante": "ayudante",
+            "coseguro": "coseguro",
         }
         for src, dst in simples.items():
             if src in data:
@@ -2229,6 +2249,12 @@ async def editar_prestacion(
                     gb = precio.gastos if gi > 0 else Decimal("0")
                     ab = precio.ayudante if ai > 0 else Decimal("0")
                 row.calculo_snapshot = precio.snapshot
+                # El código/OS que cotiza pudo haber cambiado — el coseguro viejo era del
+                # código/OS anterior. Si el operador no lo tocó en este mismo PATCH, se
+                # refresca con el sugerido del nuevo código; si lo tocó, ya quedó aplicado
+                # arriba (mapeo `simples`) y no se pisa.
+                if "coseguro" not in data:
+                    row.coseguro = precio.coseguro
             else:  # manual
                 hb, gb, ab = hi, gi, ai
                 row.calculo_snapshot = None
@@ -2246,10 +2272,17 @@ async def editar_prestacion(
                 row.honorarios or Decimal("0"), Decimal("0"), row.ayudante or Decimal("0")
             )
 
+        h_final = row.honorarios or Decimal("0")
+        g_final = row.gastos or Decimal("0")
+        a_final = row.ayudante or Decimal("0")
+        coseguro_final = row.coseguro or Decimal("0")
+        if coseguro_final > h_final + g_final + a_final:
+            raise HTTPException(422, "El coseguro no puede superar el valor de la prestación")
+
         # importe_total siempre se recalcula con los montos y cantidad/sesión. (0 permitido.)
         row.importe_total = calcular_importe_total(
-            row.honorarios or Decimal("0"), row.gastos or Decimal("0"),
-            row.ayudante or Decimal("0"), row.cantidad or 1, row.sesion or 1,
+            h_final, g_final, a_final, row.cantidad or 1, row.sesion or 1,
+            coseguro=coseguro_final,
         )
 
         # Sin tope de ayudantes: el máximo del Valor es solo referencia, no se valida (ver

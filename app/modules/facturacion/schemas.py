@@ -153,6 +153,12 @@ class PrestacionItem(BaseModel):
     ayudante: Optional[Decimal] = None
     porcentaje: int = Field(100, ge=1, le=100)
 
+    # Importe que el afiliado paga de su bolsillo; se descuenta del total. None = usar
+    # el sugerido por el Valor del código (ver PrecioResponse.coseguro); un número,
+    # incluido 0, es lo que decidió el operador. No se escala por `porcentaje`.
+    # Sólo aplica a la fila principal — las de ayudante del equipo van en 0.
+    coseguro: Optional[Decimal] = Field(None, ge=0)
+
     # Vínculo a la fila del médico (cabeza del equipo) cuando el ayudante se carga aparte.
     grupo_equipo_id: Optional[int] = None
 
@@ -218,6 +224,7 @@ class PrestacionUpdate(BaseModel):
     gastos: Optional[Decimal] = None
     ayudante: Optional[Decimal] = None
     porcentaje: Optional[int] = Field(None, ge=1, le=100)
+    coseguro: Optional[Decimal] = Field(None, ge=0)
     grupo_equipo_id: Optional[int] = None
 
 
@@ -291,6 +298,9 @@ class PrecioResponse(BaseModel):
     # efectivamente usado (ver app/modules/nomenclador/service_vias.py).
     via: str = "T"
     nivel_cotizado: Optional[int] = None
+    # Coseguro sugerido desde el Valor del código — el operador lo puede editar al
+    # cargar la prestación (ver PrestacionItem.coseguro).
+    coseguro: Decimal = Decimal("0")
 
 
 class PrestacionRead(BaseModel):
@@ -326,6 +336,7 @@ class PrestacionRead(BaseModel):
     gastos: Optional[Decimal] = None
     ayudante: Optional[Decimal] = None
     importe_total: Optional[Decimal] = None
+    coseguro: Optional[Decimal] = None
     estado: Optional[str] = None
     origen_carga: Optional[str] = None  # 'medico' | 'colegio'
     fecha_practica: Optional[datetime.date] = None

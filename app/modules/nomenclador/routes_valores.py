@@ -212,6 +212,7 @@ async def _crear_valor_con_componentes(
     cantidad_ayudantes: Optional[int] = None,
     categoria: Optional[str] = None,
     requiere_autorizacion: Optional[bool] = None,
+    coseguro: Decimal = Decimal("0"),
 ) -> Valor:
     nom = await db.get(NomencladorCMC, nomenclador_id)
     if not nom:
@@ -232,6 +233,7 @@ async def _crear_valor_con_componentes(
         especialidad_id_colegio=especialidad_id_colegio,
         por_presupuesto=por_presupuesto,
         cantidad_ayudantes=cantidad_ayudantes,
+        coseguro=coseguro,
         vigencia_desde=vigencia_desde,
         vigencia_hasta=None,
         estado="activo",
@@ -324,6 +326,7 @@ async def _clonar_valor(
         requiere_autorizacion=origen.requiere_autorizacion,
         especialidad_id_colegio=origen.especialidad_id_colegio,
         cantidad_ayudantes=origen.cantidad_ayudantes,
+        coseguro=origen.coseguro,
         vigencia_desde=vigencia_desde,
         vigencia_hasta=None,
         estado="activo",
@@ -702,6 +705,7 @@ async def create_valor(body: ValorCreate, db: AsyncSession = Depends(get_db)):
         cantidad_ayudantes=body.cantidad_ayudantes,
         categoria=body.categoria,
         requiere_autorizacion=body.requiere_autorizacion,
+        coseguro=body.coseguro,
     )
 
     await service.regenerar_historial_por_valores(valor.id, None, db, motivo="carga_inicial")
@@ -843,6 +847,7 @@ async def actualizar_valor(
             body.requiere_autorizacion if body.requiere_autorizacion is not None
             else anterior.requiere_autorizacion
         ),
+        coseguro=body.coseguro if body.coseguro is not None else anterior.coseguro,
     )
 
     await service.regenerar_historial_por_valores(
@@ -976,6 +981,7 @@ async def replicar_estructura(body: ReplicarEstructuraIn, db: AsyncSession = Dep
                 complejidad=None,
                 especialidad_id_colegio=origen.especialidad_id_colegio,
                 cantidad_ayudantes=origen.cantidad_ayudantes,
+                coseguro=origen.coseguro,
                 vigencia_desde=body.vigencia_desde,
                 vigencia_hasta=None,
                 estado="activo",
@@ -1108,6 +1114,7 @@ async def replicar_a_obras_sociales(
                 complejidad=None,
                 especialidad_id_colegio=origen.especialidad_id_colegio,
                 cantidad_ayudantes=origen.cantidad_ayudantes,
+                coseguro=origen.coseguro,
                 vigencia_desde=body.vigencia_desde,
                 vigencia_hasta=None,
                 estado="activo",
@@ -1579,6 +1586,7 @@ async def importar_valores_csv(
                 complejidad=prev.complejidad if prev else None,
                 especialidad_id_colegio=especialidad,
                 cantidad_ayudantes=prev.cantidad_ayudantes if prev else None,
+                coseguro=prev.coseguro if prev else Decimal("0"),
                 por_presupuesto=por_presupuesto,
                 vigencia_desde=vigencia_desde,
                 vigencia_hasta=None,

@@ -1417,6 +1417,7 @@ async def lookup_precio(
         fecha_practica=fecha,
         precio_base=precio_base,
         precio_total=precio_total,
+        coseguro=valor.coseguro if valor else Decimal("0"),
         componentes=componentes_out,
         via=via,
         nivel_cotizado=nivel_cotizado,

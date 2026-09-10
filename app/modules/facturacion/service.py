@@ -2338,14 +2338,12 @@ async def marcar_revisado(
 
 
 # ── Soft-delete ──────────────────────────────────────────────────────────────
-async def anular_prestacion(db: AsyncSession, prestacion_id: int, usuario: str) -> None:
+async def anular_prestacion(db: AsyncSession, prestacion_id: int) -> None:
     row = await db.get(DetalleFacturacionCMC, prestacion_id)
     if row is None:
         raise HTTPException(404, "Prestación no encontrada")
     if row.estado != "A":
         raise HTTPException(409, "Prestación cerrada/liquidada, no se puede anular")
-    if row.usuario != usuario:
-        raise HTTPException(403, "Solo el usuario que cargó la prestación puede anularla")
     # La fase de la cabecera (según quién cargó la prestación) debe seguir abierta.
     _gate_carga(await _get_factura(db, row.cod_obr, row.periodo), row.origen_carga)
     cod_obra, periodo = row.cod_obr, row.periodo

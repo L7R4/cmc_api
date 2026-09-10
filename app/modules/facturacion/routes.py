@@ -682,4 +682,4 @@ async def anular_prestacion(
     user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    await service.anular_prestacion(db, id, _usuario(user))
+    await service.anular_prestacion(db, id)

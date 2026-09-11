@@ -170,11 +170,11 @@ async def tabla_valores(
     colapsada a una fila por código.
 
     Cada código puede tener varias variantes. Se devuelve solo la de mayor "peso" según la
-    misma prioridad que el lookup de facturación: origen (NE>NNE>NN) → match de
+    misma prioridad que el lookup de facturación: origen (NE>NN) → match de
     especialidad por orden de slots → vigencia más reciente.
     - Con `especialidades`: NE entra en juego (gana la que matchee la especialidad de
-      mayor rango del médico); si ninguna NE aplica, cae a NNE y luego NN.
-    - Sin `especialidades`: NE queda fuera; compiten solo NNE y NN (en ese orden).
+      mayor rango del médico); si ninguna NE aplica, cae a NN.
+    - Sin `especialidades`: NE queda fuera; compite solo NN.
     Si `codigo` no existe, se devuelve vacío.
 
     `via=L`: los códigos elegibles (Honorarios con galeno de cirugía adulto/infantil)
@@ -256,15 +256,15 @@ async def tabla_valores(
     _SLOT_SIN_ESP = len(especialidades) + 1
 
     def _aplicable(fila: HistorialPrecioCodigo) -> bool:
-        # NNE y NN siempre entran en juego. NE (siempre por especialidad) solo aplica si
-        # se pasó el perfil del médico y este posee esa especialidad; sin especialidades
-        # NE queda fuera y compiten únicamente NNE y NN (en ese orden).
+        # NN siempre entra en juego. NE (siempre por especialidad) solo aplica si se pasó
+        # el perfil del médico y este posee esa especialidad; sin especialidades NE queda
+        # fuera y compite únicamente NN.
         if fila.origen == Origen.NE.value:
             return bool(especialidades) and fila.especialidad_id_colegio in slot_rank
         return True
 
     def _orden_variante(fila: HistorialPrecioCodigo):
-        # Menor gana: prioridad de origen (NE>NNE>NN) → match de especialidad por orden
+        # Menor gana: prioridad de origen (NE>NN) → match de especialidad por orden
         # de slots → vigencia más reciente como desempate final.
         rank = (
             slot_rank.get(fila.especialidad_id_colegio, _SLOT_SIN_ESP)

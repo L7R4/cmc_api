@@ -20,10 +20,13 @@ class Origen(str, enum.Enum):
     La PRIORIDAD no vive acá: se deriva de la posición en
     ``service.ORIGEN_PRIORIDAD`` (índice 0 = máxima). Sumar un origen = agregar el
     miembro acá + insertarlo en esa tupla; no requiere migración de base.
+
+    NNE (Nomenclador Negociado) se eliminó: era un atajo de almacenamiento para "vale
+    para cualquier especialidad habilitada". Toda variante de convenio es ahora NE con
+    una fila explícita por especialidad (ver ``validar_reglas_origen``).
     """
-    NE = "NE"    # Nomenclador Específico (OS + ente de la especialidad)
-    NNE = "NNE"  # Nomenclador Negociado (OS)
-    NN = "NN"    # Nomenclador Nacional (siempre calculado: unidades × VU pactado)
+    NE = "NE"  # Nomenclador Específico (OS + especialidad habilitada para el código)
+    NN = "NN"  # Nomenclador Nacional (siempre calculado: unidades × VU pactado)
 
 
 def slugify_codigo(nombre: str) -> str:
@@ -525,17 +528,21 @@ def validar_reglas_origen(
 ) -> None:
     """
     Reglas transversales por origen (válidas tanto en Pydantic como server-side):
-    - especialidad_id_colegio solo lo admite NE (NNE/NN van sin perfil).
+    - NE exige especialidad_id_colegio (identifica qué especialidad habilitada cobra
+      esta variante); NN va siempre sin especialidad.
     - NN es siempre calculado: exige modalidad galeno y no puede ser por_presupuesto.
+
+    Esta función solo valida forma (presencia/ausencia de especialidad). Que la
+    especialidad esté efectivamente habilitada para el código se valida aparte, con
+    consulta a la base, en ``service.validar_especialidad_habilitada``.
 
     `es_galeno`: True si la modalidad es calculable (galeno), False si fija, None si
     no aplica/desconocida (p.ej. por_presupuesto, donde no hay ecuación que evaluar).
     """
-    if especialidad_id_colegio is not None and origen != Origen.NE.value:
-        raise ValueError(
-            "especialidad_id_colegio solo es válido para origen NE; "
-            "NNE y NN deben ir sin especialidad"
-        )
+    if origen == Origen.NE.value and especialidad_id_colegio is None:
+        raise ValueError("El origen NE exige especialidad_id_colegio")
+    if origen != Origen.NE.value and especialidad_id_colegio is not None:
+        raise ValueError("especialidad_id_colegio solo es válido para origen NE; NN debe ir sin especialidad")
     if origen == Origen.NN.value:
         if por_presupuesto:
             raise ValueError("El origen NN es siempre calculado: no admite 'por_presupuesto'")
@@ -567,10 +574,21 @@ class ValorComponenteOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+def _rechazar_nne(v):
+    """Compat de transición: NNE se eliminó, no se normaliza en silencio porque no
+    hay especialidad con la que reconstruir la variante — hay que elegirla a mano."""
+    if isinstance(v, str) and v.upper() == "NNE":
+        raise ValueError(
+            "El origen NNE fue eliminado: cargar como NE indicando la(s) especialidad(es) "
+            "habilitadas para el código (ver POST /api/valores_nm/multi)"
+        )
+    return v
+
+
 class ValorCreate(BaseModel):
     obra_social_nro: int
     nomenclador_id: int
-    # Categoría/procedencia: fija la prioridad del lookup (NE > NNE > NN)
+    # Categoría/procedencia: fija la prioridad del lookup (NE > NN)
     origen: Origen
     descripcion: Optional[str] = None
     nivel: Optional[int] = None
@@ -580,8 +598,9 @@ class ValorCreate(BaseModel):
     # Override por OS; NULL hereda nm_nomenclador.requiere_autorizacion. No es lo mismo
     # que False: False = "esta OS dice que no", NULL = "esta OS no opinó".
     requiere_autorizacion: Optional[bool] = None
-    # Perfil que cobra esta variante: NULL = sin especialidad; N = exige esa especialidad.
-    # Solo lo admite NE (NNE/NN van NULL).
+    # Especialidad que cobra esta variante. Obligatoria en NE (debe estar habilitada
+    # para el código en nm_nomenclador_especialidad, ver validar_especialidad_habilitada);
+    # NN va siempre NULL.
     especialidad_id_colegio: Optional[int] = None
     # True → código por presupuesto: se ignora la ecuación, los componentes H/G/A
     # se guardan en 0 y el monto lo informa la OS al facturar (modo manual)
@@ -595,6 +614,11 @@ class ValorCreate(BaseModel):
     observacion: Optional[str] = None
     componentes: List[ValorComponenteIn] = []
 
+    @field_validator("origen", mode="before")
+    @classmethod
+    def _origen_sin_nne(cls, v):
+        return _rechazar_nne(v)
+
     @model_validator(mode="after")
     def check_componentes(self) -> "ValorCreate":
         es_galeno = None
@@ -605,6 +629,59 @@ class ValorCreate(BaseModel):
             self.origen.value, self.especialidad_id_colegio, self.por_presupuesto, es_galeno
         )
         return self
+
+
+class ValorCreateMulti(BaseModel):
+    """Alta de una variante NE para varias especialidades a la vez: una fila NE por
+    cada especialidad_id_colegio (mismo precio, misma vigencia). Cada una se valida
+    contra el catálogo de habilitaciones del código igual que en ValorCreate."""
+    obra_social_nro: int
+    nomenclador_id: int
+    origen: Literal[Origen.NE] = Origen.NE
+    descripcion: Optional[str] = None
+    nivel: Optional[int] = None
+    complejidad: Optional[Literal["baja", "media", "alta"]] = None
+    categoria: Optional[str] = None
+    requiere_autorizacion: Optional[bool] = None
+    especialidades_id_colegio: List[int] = Field(..., min_length=1)
+    por_presupuesto: bool = False
+    cantidad_ayudantes: Optional[int] = Field(None, ge=0)
+    coseguro: Decimal = Field(Decimal("0"), ge=0)
+    vigencia_desde: datetime.date
+    observacion: Optional[str] = None
+    componentes: List[ValorComponenteIn] = []
+
+    @field_validator("especialidades_id_colegio")
+    @classmethod
+    def _sin_repetidos(cls, v: List[int]) -> List[int]:
+        if len(set(v)) != len(v):
+            raise ValueError("especialidades_id_colegio no puede tener valores repetidos")
+        return v
+
+    @model_validator(mode="after")
+    def check_componentes(self) -> "ValorCreateMulti":
+        if not self.por_presupuesto:
+            validar_lista_componentes(self.componentes)
+        return self
+
+    def a_valor_create(self, especialidad_id_colegio: int) -> "ValorCreate":
+        return ValorCreate(
+            obra_social_nro=self.obra_social_nro,
+            nomenclador_id=self.nomenclador_id,
+            origen=self.origen,
+            descripcion=self.descripcion,
+            nivel=self.nivel,
+            complejidad=self.complejidad,
+            categoria=self.categoria,
+            requiere_autorizacion=self.requiere_autorizacion,
+            especialidad_id_colegio=especialidad_id_colegio,
+            por_presupuesto=self.por_presupuesto,
+            cantidad_ayudantes=self.cantidad_ayudantes,
+            coseguro=self.coseguro,
+            vigencia_desde=self.vigencia_desde,
+            observacion=self.observacion,
+            componentes=self.componentes,
+        )
 
 
 class ValorUpdate(BaseModel):
@@ -636,6 +713,10 @@ class ValorCerrarYCrearIn(BaseModel):
     # cantidad_ayudantes/categoria/requiere_autorizacion arriba).
     coseguro: Optional[Decimal] = Field(None, ge=0)
     observacion: Optional[str] = None
+    # Si True, replica esta misma vigencia+componentes a las demás variantes NE
+    # (mismas obra_social_nro + nomenclador_id, otra especialidad) activas al momento
+    # de cerrar. No aplica a NN (no tiene hermanas por especialidad).
+    aplicar_a_variantes: bool = False
 
     @model_validator(mode="after")
     def check_componentes(self) -> "ValorCerrarYCrearIn":
@@ -691,11 +772,15 @@ class ActualizarPorCodigosItem(BaseModel):
     nomenclador_id: int
     nuevo_valor_unitario: Decimal
     nuevo_nivel: Optional[int] = None
+    # NULL = aplicar a TODAS las variantes NE activas de este código+OS (ex-NNE, mismo
+    # precio para toda especialidad habilitada); con valor, aplica solo a esa variante.
+    # No aplica a NN (siempre va sin especialidad).
+    especialidad_id_colegio: Optional[int] = None
 
 
 class ActualizarPorCodigosIn(BaseModel):
     obra_social_nro: int
-    origen: Origen                               # scope: variante (origen, sin especialidad)
+    origen: Origen
     vigencia_desde: datetime.date
     items: List[ActualizarPorCodigosItem]
 
@@ -818,7 +903,7 @@ class LookupPrecioOut(BaseModel):
     descripcion: Optional[str]
     obra_social_nro: int
     nivel: Optional[int]
-    # Origen de la variante elegida (NE|NNE|NN) — la de mayor prioridad aplicable
+    # Origen de la variante elegida (NE|NN) — la de mayor prioridad aplicable
     origen: str
     # Variante elegida: NULL = sin especialidad, N = variante por especialidad N
     variante_especialidad_id: Optional[int] = None
@@ -938,7 +1023,7 @@ class TablaValoresItem(BaseModel):
     codigo: str
     origen: str
     # Especialidad de la variante elegida (ID_COLEGIO_ESPE). NULL = variante sin
-    # perfil (NNE/NN o NE sin especialidad). Se puebla al filtrar por especialidades.
+    # perfil (NN). Se puebla al filtrar por especialidades.
     especialidad_id_colegio: Optional[int] = None
     descripcion: Optional[str]
     nivel: Optional[int]

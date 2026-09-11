@@ -273,7 +273,7 @@ async def tabla_valores(
     _=Depends(get_current_user_with_scopes_and_role),
 ):
     """Valor vigente de una práctica para una OS, resuelto desde las tablas nm_.
-    Reutiliza íntegra la lógica de selección de variante (NE > NNE > NN + especialidad)
+    Reutiliza íntegra la lógica de selección de variante (NE > NN + especialidad)
     de reportes_nm.tabla_valores; acá solo se fija el tamaño de página al uso del app."""
     return await _tabla_valores(
         obra_social_nro=obra_social_nro,

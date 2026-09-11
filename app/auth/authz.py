@@ -591,6 +591,7 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     # ── Valores del nomenclador ──────────────────────────────────────────────
     ("GET", "/api/valores_nm/"): Scope.NOMENCLADOR_LEER,
     ("POST", "/api/valores_nm/"): Scope.NOMENCLADOR_EDITAR,
+    ("POST", "/api/valores_nm/multi"): Scope.NOMENCLADOR_EDITAR,
     ("GET", "/api/valores_nm/vigencias"): Scope.NOMENCLADOR_LEER,
     ("GET", "/api/valores_nm/resumen_por_vigencia"): Scope.NOMENCLADOR_LEER,
     ("GET", "/api/valores_nm/historial"): Scope.NOMENCLADOR_LEER,

@@ -39,7 +39,7 @@ from app.modules.nomenclador.schemas import (
 #
 # Índice 0 = máxima prioridad. Para sumar un origen: agregarlo al enum
 # schemas.Origen y a esta tupla en la posición que corresponda. Sin migración.
-ORIGEN_PRIORIDAD: tuple[str, ...] = ("NE", "NNE", "NN")
+ORIGEN_PRIORIDAD: tuple[str, ...] = ("NE", "NN")
 
 # Rank para orígenes desconocidos: pierden contra cualquier origen conocido (fail-safe).
 _PRIORIDAD_DESCONOCIDA = len(ORIGEN_PRIORIDAD)
@@ -137,6 +137,37 @@ async def especialidades_habilitadas_de(
         E.obra_social_key == _nivel_pertenencia_especialidad(nomenclador_id, obra_social_nro),
     )
     return {row for row in (await db.execute(stmt)).scalars()}
+
+
+async def validar_especialidad_habilitada(
+    db: AsyncSession, nomenclador_id: int, obra_social_nro: Optional[int], especialidad_id_colegio: int
+) -> None:
+    """Toda variante NE implica que su especialidad puede facturar el código: la fila
+    NE deja de ser una restricción de precio y pasa a ser también una habilitación, así
+    que no puede existir una sin la otra. Usa el mismo set (y la misma precedencia
+    OS-reemplaza-Colegio) que el gate de `_validar_habilitacion_medico`."""
+    habilitadas = await especialidades_habilitadas_de(db, nomenclador_id, obra_social_nro)
+    if especialidad_id_colegio not in habilitadas:
+        raise ValueError(
+            f"La especialidad {especialidad_id_colegio} no está habilitada para este código "
+            "en nm_nomenclador_especialidad; cargarla ahí antes de crear la variante NE"
+        )
+
+
+async def variantes_hermanas(db: AsyncSession, valor: Valor) -> list[Valor]:
+    """NE activas del mismo (obra_social_nro, nomenclador_id) que `valor`, excluyéndolo:
+    las variantes por especialidad de un mismo código+OS, para propagar una edición a
+    todas de una vez (ver ValorCerrarYCrearIn.aplicar_a_variantes)."""
+    if valor.origen != "NE":
+        return []
+    stmt = select(Valor).where(
+        Valor.obra_social_nro == valor.obra_social_nro,
+        Valor.nomenclador_id == valor.nomenclador_id,
+        Valor.origen == "NE",
+        Valor.estado == "activo",
+        Valor.id != valor.id,
+    )
+    return list((await db.execute(stmt)).scalars())
 
 
 def descripcion_efectiva(
@@ -1351,7 +1382,9 @@ async def lookup_precio(
     _SLOT_SIN_ESP = len(especialidades) + 1
 
     def _aplicable(fila) -> bool:
-        if fila.especialidad_id_colegio is None:
+        # NN nunca lleva especialidad: siempre aplicable. NE la exige (ver
+        # validar_reglas_origen) — misma condición que routes_reportes._aplicable.
+        if fila.origen == "NN":
             return True
         return fila.especialidad_id_colegio in slot_rank
 
@@ -1364,7 +1397,7 @@ async def lookup_precio(
         )
 
     def _orden(fila):
-        # Menor gana: prioridad de origen (NE>NNE>NN) → match de especialidad por
+        # Menor gana: prioridad de origen (NE>NN) → match de especialidad por
         # orden de slots → vigencia más reciente como desempate final.
         rank = (
             slot_rank.get(fila.especialidad_id_colegio, _SLOT_SIN_ESP)

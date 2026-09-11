@@ -312,10 +312,10 @@ class Valor(Base):
     Variante de precio para un código+OS+vigencia.
     La identidad de la variante es (origen, especialidad_id_colegio):
       origen → categoría/procedencia de la regla de precio; fija la PRIORIDAD del
-               lookup (NE > NNE > NN). La prioridad NO vive en DB: es la posición en
+               lookup (NE > NN). La prioridad NO vive en DB: es la posición en
                ORIGEN_PRIORIDAD (service.py). El String permite sumar orígenes sin migrar.
-      especialidad_id_colegio → NULL = sin perfil · N = exige esa especialidad.
-               Solo lo usa NE (NNE/NN siempre van NULL).
+      especialidad_id_colegio → obligatoria en NE (debe existir como habilitación activa
+               en nm_nomenclador_especialidad para el código); NN siempre va NULL.
     El lookup elige por mayor prioridad de origen y, dentro del origen, match de
     especialidad (orden de slots del médico) > sin especialidad.
     Máximo un activo por (obra_social_nro, nomenclador_id, origen, especialidad_id_colegio) — app-level.
@@ -327,7 +327,7 @@ class Valor(Base):
     nomenclador_id: Mapped[int] = mapped_column(
         ForeignKey("nm_nomenclador.id"), nullable=False
     )
-    # Categoría/procedencia del valor: 'NE' | 'NNE' | 'NN' (validado en código contra
+    # Categoría/procedencia del valor: 'NE' | 'NN' (validado en código contra
     # schemas.Origen / service.ORIGEN_PRIORIDAD). NO es ENUM de DB para poder sumar
     # orígenes sin migración. La prioridad de lookup se deriva en código.
     origen: Mapped[str] = mapped_column(String(10), nullable=False)
@@ -513,7 +513,7 @@ class HistorialPrecioCodigo(Base):
         ForeignKey("nm_nomenclador.id"), nullable=False
     )
     obra_social_nro: Mapped[int] = mapped_column(Integer, nullable=False)
-    # Categoría/procedencia del valor (NE|NNE|NN) — parte de la identidad de la variante
+    # Categoría/procedencia del valor (NE|NN) — parte de la identidad de la variante
     origen: Mapped[str] = mapped_column(String(10), nullable=False)
     # Variante del valor al que pertenece esta fila (NULL = sin especialidad)
     especialidad_id_colegio: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)

@@ -11,7 +11,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from app.db.database import get_db
 from app.db.models import (
     Deduccion,
-    Descuentos,
+    Conceptos,
     ListadoMedico,
     Pago,
     SocioDescuento,
@@ -38,7 +38,7 @@ from app.modules.deducciones.schemas import (
     DeduccionRead,
     DeduccionUpdate,
     DeduccionesAplicadasResponse,
-    DeshacerDescuentosResponse,
+    DeshacerConceptosResponse,
     SocioDescuentoCreate,
     SocioDescuentoPagadorUpdate,
     SocioDescuentoRead,
@@ -282,7 +282,7 @@ async def crear_socio_descuento(
     """Asigna un descuento/concepto a un médico."""
     if not await db.scalar(select(ListadoMedico.ID).where(ListadoMedico.ID == payload.medico_id)):
         raise HTTPException(404, "Médico no encontrado")
-    if not await db.scalar(select(Descuentos.id).where(Descuentos.id == payload.descuento_id)):
+    if not await db.scalar(select(Conceptos.id).where(Conceptos.id == payload.descuento_id)):
         raise HTTPException(404, "Descuento no encontrado")
     if payload.pagador_medico_id is not None:
         if not await db.scalar(select(ListadoMedico.ID).where(ListadoMedico.ID == payload.pagador_medico_id)):
@@ -325,7 +325,7 @@ async def actualizar_socio_descuento(
     sent = payload.model_fields_set
 
     if "descuento_id" in sent and payload.descuento_id is not None:
-        if not await db.scalar(select(Descuentos.id).where(Descuentos.id == payload.descuento_id)):
+        if not await db.scalar(select(Conceptos.id).where(Conceptos.id == payload.descuento_id)):
             raise HTTPException(404, "Descuento no encontrado")
         socio.descuento_id = payload.descuento_id
 
@@ -395,7 +395,7 @@ async def crear_deduccion_manual(
     """Crea una deducción manual con 1 o N cuotas."""
     if not await db.scalar(select(ListadoMedico.ID).where(ListadoMedico.ID == payload.medico_id)):
         raise HTTPException(404, "Médico no encontrado")
-    if not await db.scalar(select(Descuentos.id).where(Descuentos.id == payload.descuento_id)):
+    if not await db.scalar(select(Conceptos.id).where(Conceptos.id == payload.descuento_id)):
         raise HTTPException(404, "Descuento no encontrado")
     if payload.pagador_medico_id is not None:
         if not await db.scalar(select(ListadoMedico.ID).where(ListadoMedico.ID == payload.pagador_medico_id)):
@@ -579,7 +579,7 @@ async def verificar_deducciones_pago(
     return await verificar_deducciones_por_pago(db, pago_id)
 
 
-@router.delete("/{pago_id}/colegio/deshacer", response_model=DeshacerDescuentosResponse)
+@router.delete("/{pago_id}/colegio/deshacer", response_model=DeshacerConceptosResponse)
 async def deshacer_descuentos_pago(
     pago_id: int,
     db: AsyncSession = Depends(get_db),
@@ -600,7 +600,7 @@ async def deshacer_descuentos_pago(
             raise HTTPException(409, "El pago está cerrado y no puede deshacerse")
 
 
-@router.delete("/{pago_id}/colegio/deshacer/{desc_id}", response_model=DeshacerDescuentosResponse)
+@router.delete("/{pago_id}/colegio/deshacer/{desc_id}", response_model=DeshacerConceptosResponse)
 async def deshacer_descuentos_pago_por_descuento(
     pago_id: int,
     desc_id: int,

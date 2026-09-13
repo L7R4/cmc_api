@@ -27,8 +27,9 @@ Dos orígenes, y la diferencia se lee en `ARCHIVO`:
 
 El `/` es el discriminador, no una heurística de "existe en disco": una consulta
 no tiene que depender de que el volumen esté montado para decidir a dónde
-apuntar el link. `ARCHIVO` es `varchar(50)`, así que el nombre se recorta a
-`MAX_NOMBRE` para que entre junto con el prefijo.
+apuntar el link. `ARCHIVO` es `varchar(255)` — se amplió de 50 porque ahí
+truncaba nombres reales en silencio (ver auditoría P-07) — así que el nombre se
+recorta a `MAX_NOMBRE` sólo para dejar lugar al prefijo `planillas/`.
 """
 import datetime
 import re
@@ -54,8 +55,8 @@ SECCION = "planillas"
 PLANILLAS_DIR = Path("uploads") / SECCION
 PLANILLAS_DIR.mkdir(parents=True, exist_ok=True)
 
-#: `avisos.ARCHIVO` es varchar(50) y hay que dejar lugar para `planillas/`.
-MAX_NOMBRE = 50 - len(SECCION) - 1
+#: `avisos.ARCHIVO` es varchar(255) y hay que dejar lugar para `planillas/`.
+MAX_NOMBRE = 255 - len(SECCION) - 1
 
 #: Sólo PDF: es lo único que el Colegio publica acá y lo único que el visor del
 #: front sabe abrir embebido.
@@ -182,6 +183,63 @@ async def crear_planilla(
         # sabe que quedó suelto.
         destino.unlink(missing_ok=True)
         raise
+    await db.refresh(fila)
+    return _to_out(fila)
+
+
+@router.patch("/{planilla_id}", response_model=PlanillaOut)
+async def editar_planilla(
+    planilla_id: int = PathParam(..., ge=1),
+    descripcion: Optional[str] = Form(None, max_length=500),
+    fecha: Optional[str] = Form(None, max_length=10, description="YYYY-MM-DD"),
+    archivo: Optional[UploadFile] = File(None, description="Reemplaza el PDF actual, si se manda"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Edita descripción y fecha, y opcionalmente reemplaza el PDF.
+
+    Antes la única forma de corregir un typo o de reemplazar un PDF era dar de
+    baja y volver a publicar, dejando una fila fantasma con `EXISTE='N'` y el
+    archivo viejo huérfano en disco — pasó con OSPM (ID 50 → 53) y con MEDIFE
+    (ID 24 → 32). Ver auditoría P-04.
+
+    Reemplazar el archivo de una planilla que hoy apunta al legacy (`ARCHIVO`
+    sin el prefijo `planillas/`) la migra a `uploads/planillas/` de una: es el
+    mismo movimiento que P-03 pide hacer con las 16 históricas.
+    """
+    fila = await db.get(Avisos, planilla_id)
+    if not fila or fila.AVISO_PLANILLA != "P" or fila.EXISTE != "S":
+        raise HTTPException(404, "Planilla no encontrada")
+
+    nuevo_destino: Optional[Path] = None
+    viejo_destino: Optional[Path] = None
+
+    if archivo is not None:
+        info = await validate_upload(archivo, EXTENSIONES)
+        nuevo_destino = _destino_libre(_sanear(info.original_name))
+        nuevo_destino.write_bytes(info.data)
+
+        # Si la fila ya apuntaba a un PDF nuestro, ese archivo queda huérfano:
+        # se borra recién si el commit sale bien.
+        if fila.ARCHIVO.startswith(f"{SECCION}/"):
+            viejo_destino = PLANILLAS_DIR / fila.ARCHIVO[len(SECCION) + 1:]
+
+        fila.ARCHIVO = f"{SECCION}/{nuevo_destino.name}"
+
+    if descripcion is not None:
+        fila.AVISO = descripcion.strip() or fila.ARCHIVO.rsplit("/", 1)[-1]
+    if fecha is not None and fecha.strip():
+        fila.FECHA = fecha.strip()
+
+    try:
+        await db.commit()
+    except Exception:
+        if nuevo_destino is not None:
+            nuevo_destino.unlink(missing_ok=True)
+        raise
+
+    if viejo_destino is not None:
+        viejo_destino.unlink(missing_ok=True)
+
     await db.refresh(fila)
     return _to_out(fila)
 

@@ -16,7 +16,9 @@ from app.modules.beneficios.routes import router_socio as beneficios_socio_route
 from app.modules.auditoria.routes import router as auditoria_router
 from app.modules.catalogs.routes_especialidades import router as especialidades_router
 from app.modules.catalogs.routes_obras_sociales import router as obras_social_router
-from app.modules.catalogs.routes_os_pagos import router as os_pagos_router
+# «Pagos» de obra social deshabilitado a pedido del Colegio — ver el docstring
+# de ObraSocialPago en app/db/models/catalogs.py para reactivarlo.
+# from app.modules.catalogs.routes_os_pagos import router as os_pagos_router
 from app.modules.catalogs.routes_periodos import router as periodos_router
 from app.modules.catalogs.routes_normas import router as normas_boletin_router
 from app.modules.catalogs.routes_observaciones import router as observaciones_boletin_router
@@ -25,10 +27,12 @@ from app.modules.catalogs.routes_valores_eticos import router as valores_eticos_
 from app.modules.contenido.routes_noticias import router as noticias_router
 from app.modules.contenido.routes_publicidad import router as publicidades_medico_router
 from app.modules.deducciones.routes import router as deducciones_router
-from app.modules.deducciones.routes_descuentos import router as descuentos_router
+from app.modules.deducciones.routes_conceptos import router as conceptos_router
+from app.modules.deducciones.routes_cobranzas import router as cobranzas_router
 from app.modules.exports.routes import router as exports_router
 from app.modules.reportes.routes import router as reportes_router
 from app.modules.facturacion.routes import router as facturacion_router
+from app.modules.facturacion.export.routes import router as facturacion_export_router
 from app.modules.liquidacion.routes import router as liquidacion_router
 from app.modules.lotes.routes import router as lotes_router
 from app.modules.medicos.routes import router as medicos_router
@@ -52,11 +56,8 @@ api_router = APIRouter()
 
 api_router.include_router(medicos_router, prefix="/medicos", tags=["Medicos"])
 api_router.include_router(padrones_router, prefix="/padrones", tags=["Padrones Médico"])
-# Antes que `obras_social_router` por el mismo criterio que los documentos de
-# valores: comparten prefijo y aquel tiene `/{id}`. Acá no habría colisión real
-# —`/{id}/pagos` tiene un segmento más— pero mantener el orden evita tener que
-# volver a razonarlo cada vez que se agrega una ruta.
-api_router.include_router(os_pagos_router, prefix="/obras_social", tags=["Obras Sociales"])
+# «Pagos» de obra social deshabilitado (ver el import comentado arriba).
+# api_router.include_router(os_pagos_router, prefix="/obras_social", tags=["Obras Sociales"])
 api_router.include_router(obras_social_router, prefix="/obras_social", tags=["Obras Sociales"])
 api_router.include_router(especialidades_router, prefix="/especialidades", tags=["Especialidades"])
 api_router.include_router(periodos_router, prefix="/periodos", tags=["Periodos"])
@@ -69,9 +70,11 @@ api_router.include_router(pagos_router, prefix="/pagos", tags=["Pagos"])
 api_router.include_router(lotes_router, prefix="/lotes", tags=["Lotes de Ajuste"])
 api_router.include_router(liquidacion_router, prefix="/liquidacion", tags=["Liquidacion"])
 api_router.include_router(facturacion_router, prefix="/facturacion", tags=["Facturación"])
+api_router.include_router(facturacion_export_router, prefix="/facturacion", tags=["Facturación"])
 api_router.include_router(validaciones_router, prefix="/validaciones", tags=["Validaciones O.S."])
 api_router.include_router(deducciones_router, prefix="/deducciones", tags=["Deducciones - Generar"])
-api_router.include_router(descuentos_router, prefix="/descuentos", tags=["Descuentos"])
+api_router.include_router(conceptos_router, prefix="/conceptos", tags=["Conceptos"])
+api_router.include_router(cobranzas_router, prefix="/cobranzas", tags=["Cobranzas"])
 
 api_router.include_router(solicitudes_router, prefix="/solicitudes", tags=["Solicitudes"])
 # Los routers "socio" van ANTES que el ABM correspondiente: comparten prefijo y

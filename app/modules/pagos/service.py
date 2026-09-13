@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import (
     Ajuste,
     DeduccionAplicacion,
-    Descuentos,
+    Conceptos,
     DetalleLiquidacion,
     Deduccion,
     Liquidacion,
@@ -76,7 +76,7 @@ async def recalcular_totales_pago(db: AsyncSession, pago_id: int) -> dict:
         )
     else:
         ded_res = await db.execute(
-            select(func.coalesce(func.sum(Deduccion.monto_aplicado), 0))
+            select(func.coalesce(func.sum(Deduccion.monto_aplicado_preview), 0))
             .where(Deduccion.estado == "en_pago")
         )
 
@@ -162,18 +162,21 @@ async def vista_previa_pago(db: AsyncSession, pago_id: int) -> dict:
 
     # ── 2. Deducciones agrupadas por concepto ────────────────────────────────
     estado_ded = "aplicado" if pago.estado == "C" else "en_pago"
+    # Cerrado: monto_aplicado es el ledger real (DeduccionAplicacion). Abierto:
+    # todavía no se cobró nada, se muestra la preview (monto_aplicado_preview).
+    col_monto = Deduccion.monto_aplicado if pago.estado == "C" else Deduccion.monto_aplicado_preview
 
     ded_rows = (await db.execute(
         select(
             Deduccion.descuento_id,
-            Descuentos.nombre.label("descuento_nombre"),
+            Conceptos.nombre.label("descuento_nombre"),
             func.count(Deduccion.id).label("cantidad_socios"),
-            func.coalesce(func.sum(Deduccion.monto_aplicado), 0).label("total_monto"),
+            func.coalesce(func.sum(col_monto), 0).label("total_monto"),
         )
-        .outerjoin(Descuentos, Descuentos.id == Deduccion.descuento_id)
+        .outerjoin(Conceptos, Conceptos.id == Deduccion.descuento_id)
         .where(Deduccion.generado_en_pago_id == pago_id, Deduccion.estado == estado_ded)
-        .group_by(Deduccion.descuento_id, Descuentos.nombre)
-        .order_by(Descuentos.nombre)
+        .group_by(Deduccion.descuento_id, Conceptos.nombre)
+        .order_by(Conceptos.nombre)
     )).mappings().all()
 
     ded_items = []
@@ -291,7 +294,7 @@ async def refrescar_detalle_medico(
     }
 
     # ── 1. Liquidaciones donde participó el médico ────────────────────────────
-    # DetalleLiquidacion.medico_id == NRO_SOCIO (legacy)
+    # DetalleLiquidacion.medico_id == listado_medico.ID
     liq_rows = (await db.execute(
         select(
             Liquidacion.id.label("liq_id"),
@@ -308,7 +311,7 @@ async def refrescar_detalle_medico(
         .join(ObrasSociales, ObrasSociales.NRO_OBRASOCIAL == Liquidacion.obra_social_id)
         .where(
             Liquidacion.pago_id == pago_id,
-            DetalleLiquidacion.medico_id == medico.NRO_SOCIO,
+            DetalleLiquidacion.medico_id == medico_db_id,
         )
         .group_by(
             Liquidacion.id,
@@ -365,13 +368,32 @@ async def refrescar_detalle_medico(
         }
         os_per_to_liq[(r.obra_social_id, r.mes_periodo, r.anio_periodo)] = r.liq_id
 
-    # Distribuir cada ajuste individual en su liquidación correspondiente
+    # Distribuir cada ajuste individual en su liquidación correspondiente.
+    # Un ajuste cuya OS+período no tiene Liquidacion en este pago (p. ej. un
+    # lote sin_factura o una refacturación sobre un período ya facturado en
+    # otro pago) no se descarta: cuenta igual en los totales del médico y se
+    # lista aparte en "otros_ajustes", para que el recibo cuadre con lo que
+    # ya se le restó del disponible a la hora de calcular deducciones.
+    otros_ajustes: list[dict] = []
+    otros_os_ids: set[int] = set()
     for r in ajuste_rows:
         liq_id = os_per_to_liq.get((r.obra_social_id, r.mes_periodo, r.anio_periodo))
-        if liq_id is None:
-            continue
         h = _to_dec(r.honorarios)
         g = _to_dec(r.gastos)
+        if liq_id is None:
+            otros_os_ids.add(r.obra_social_id)
+            otros_ajustes.append({
+                "ajuste_id":      r.ajuste_id,
+                "lote_id":        r.lote_id,
+                "obra_social_id": r.obra_social_id,
+                "periodo":        f"{r.mes_periodo:02d}/{r.anio_periodo}",
+                "tipo":           "debito" if r.tipo == "d" else "credito",
+                "honorarios":     float(h),
+                "gastos":         float(g),
+                "total":          float(h + g),
+                "observacion":    r.observacion,
+            })
+            continue
         item = {
             "ajuste_id":  r.ajuste_id,
             "lote_id":    r.lote_id,
@@ -384,9 +406,27 @@ async def refrescar_detalle_medico(
         liq_map[liq_id][bucket]["detalle"].append(item)
         liq_map[liq_id][bucket]["total"] += h + g
 
+    # Nombres de OS para los ajustes que cayeron fuera de las liquidaciones del pago
+    otros_os_nombres: dict[int, str] = {}
+    if otros_os_ids:
+        rows_os = (await db.execute(
+            select(ObrasSociales.NRO_OBRASOCIAL, ObrasSociales.OBRA_SOCIAL)
+            .where(ObrasSociales.NRO_OBRASOCIAL.in_(otros_os_ids))
+        )).all()
+        otros_os_nombres = {r.NRO_OBRASOCIAL: r.OBRA_SOCIAL for r in rows_os}
+    for item in otros_ajustes:
+        item["obra_social"] = otros_os_nombres.get(item["obra_social_id"], "")
+
+    total_otros_debitos = sum(
+        (Decimal(str(a["total"])) for a in otros_ajustes if a["tipo"] == "debito"), Decimal("0")
+    )
+    total_otros_creditos = sum(
+        (Decimal(str(a["total"])) for a in otros_ajustes if a["tipo"] == "credito"), Decimal("0")
+    )
+
     # Totales de ajustes y serialización del mapa
-    total_debitos = Decimal("0")
-    total_creditos = Decimal("0")
+    total_debitos = total_otros_debitos
+    total_creditos = total_otros_creditos
     liquidaciones_out: dict[str, dict] = {}
 
     for liq_id, data in liq_map.items():
@@ -409,47 +449,47 @@ async def refrescar_detalle_medico(
         # Pago cerrado: usamos lo efectivamente aplicado via DeduccionAplicacion
         ded_rows = (await db.execute(
             select(
-                Descuentos.nro_colegio.label("nro_deduccion"),
-                Descuentos.nombre.label("nombre_deduccion"),
+                Conceptos.nro_colegio.label("nro_deduccion"),
+                Conceptos.nombre.label("nombre_deduccion"),
                 Deduccion.mes_aplicar,
                 Deduccion.anio_aplicar,
                 func.coalesce(func.sum(DeduccionAplicacion.aplicado), 0).label("total"),
             )
             .select_from(DeduccionAplicacion)
             .join(Deduccion, Deduccion.id == DeduccionAplicacion.deduccion_id)
-            .outerjoin(Descuentos, Descuentos.id == Deduccion.descuento_id)
+            .outerjoin(Conceptos, Conceptos.id == Deduccion.descuento_id)
             .where(
                 DeduccionAplicacion.pago_id == pago_id,
                 Deduccion.medico_id == medico_db_id,
             )
             .group_by(
-                Descuentos.nro_colegio,
-                Descuentos.nombre,
+                Conceptos.nro_colegio,
+                Conceptos.nombre,
                 Deduccion.mes_aplicar,
                 Deduccion.anio_aplicar,
             )
             .order_by(Deduccion.anio_aplicar, Deduccion.mes_aplicar)
         )).all()
     else:
-        # Pago abierto: usamos el monto_aplicado pendiente en el pago
+        # Pago abierto: todavía no se cobró nada realmente, mostramos la preview
         ded_rows = (await db.execute(
             select(
-                Descuentos.nro_colegio.label("nro_deduccion"),
-                Descuentos.nombre.label("nombre_deduccion"),
+                Conceptos.nro_colegio.label("nro_deduccion"),
+                Conceptos.nombre.label("nombre_deduccion"),
                 Deduccion.mes_aplicar,
                 Deduccion.anio_aplicar,
-                func.coalesce(func.sum(Deduccion.monto_aplicado), 0).label("total"),
+                func.coalesce(func.sum(Deduccion.monto_aplicado_preview), 0).label("total"),
             )
             .select_from(Deduccion)
-            .outerjoin(Descuentos, Descuentos.id == Deduccion.descuento_id)
+            .outerjoin(Conceptos, Conceptos.id == Deduccion.descuento_id)
             .where(
                 Deduccion.generado_en_pago_id == pago_id,
                 Deduccion.medico_id == medico_db_id,
                 Deduccion.estado == "en_pago",
             )
             .group_by(
-                Descuentos.nro_colegio,
-                Descuentos.nombre,
+                Conceptos.nro_colegio,
+                Conceptos.nombre,
                 Deduccion.mes_aplicar,
                 Deduccion.anio_aplicar,
             )
@@ -491,12 +531,19 @@ async def refrescar_detalle_medico(
         "neto_a_pagar": float(neto_a_pagar),
     }
 
+    otros_ajustes_out = {
+        "total_debitos":  float(total_otros_debitos.quantize(Decimal("0.01"))),
+        "total_creditos": float(total_otros_creditos.quantize(Decimal("0.01"))),
+        "detalle": otros_ajustes,
+    }
+
     full_doc = {
         "info_medico": info_medico,
         "resumen":     resumen,
         "detalle": {
-            "liquidaciones": liquidaciones_out,
-            "deducciones":   deducciones_out,
+            "liquidaciones":  liquidaciones_out,
+            "deducciones":    deducciones_out,
+            "otros_ajustes":  otros_ajustes_out,
         },
     }
 
@@ -590,10 +637,9 @@ async def refrescar_todos_medicos(db: AsyncSession, pago_id: int, pago: Pago) ->
     Devuelve {medico_db_id: {info_medico, resumen, detalle}, ...}.
     """
     medico_ids_q = await db.execute(
-        select(ListadoMedico.ID.label("medico_db_id"))
+        select(DetalleLiquidacion.medico_id.label("medico_db_id"))
         .select_from(DetalleLiquidacion)
         .join(Liquidacion, Liquidacion.id == DetalleLiquidacion.liquidacion_id)
-        .join(ListadoMedico, ListadoMedico.NRO_SOCIO == DetalleLiquidacion.medico_id)
         .where(Liquidacion.pago_id == pago_id)
         .distinct()
     )

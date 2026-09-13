@@ -49,6 +49,42 @@ class EspecialidadOut(BaseModel):
         from_attributes = True
 
 
+class EspecialidadCreate(BaseModel):
+    # `ID` es AUTO_INCREMENT en `especialidad`: nunca lo manda el cliente.
+    id_colegio_espe: int = Field(..., ge=1)
+    nombre: str = Field(..., min_length=1, max_length=50)
+
+    @field_validator("nombre")
+    @classmethod
+    def normalizar_nombre(cls, v: str) -> str:
+        # El legacy guarda estos nombres en mayúsculas y el front ya hacía el
+        # `.toUpperCase()` antes de enviar; se normaliza acá tambien para que el
+        # alta por API directa no rompa la convencion.
+        #
+        # El chequeo de vacío va acá y no en `min_length`: ese corre ANTES del
+        # validador, así que `"   "` (largo 3) lo pasaba y llegaba a la base como
+        # cadena vacía.
+        v = v.strip().upper()
+        if not v:
+            raise ValueError("El nombre no puede estar vacío")
+        return v
+
+
+class EspecialidadUpdate(BaseModel):
+    id_colegio_espe: Optional[int] = Field(None, ge=1)
+    nombre: Optional[str] = Field(None, min_length=1, max_length=50)
+
+    @field_validator("nombre")
+    @classmethod
+    def normalizar_nombre(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        v = v.strip().upper()
+        if not v:
+            raise ValueError("El nombre no puede estar vacío")
+        return v
+
+
 class AsignacionesOut(BaseModel):
     conceps: List[int] = Field(default_factory=list)
     espec: List[int] = Field(default_factory=list)
@@ -101,7 +137,7 @@ class ObraSocialSimpleOut(BaseModel):
 
 class ObraSocialCreate(BaseModel):
     nro_obra_social: int = Field(..., description="Número identificador de la obra social")
-    nombre: str = Field(..., max_length=45, description="Nombre de la obra social")
+    nombre: str = Field(..., max_length=255, description="Nombre de la obra social")
     marca: str = Field("N", max_length=1)
     ver_valor: str = Field("N", max_length=1)
     cuit: Optional[str] = Field(None, max_length=20)
@@ -119,7 +155,7 @@ class ObraSocialCreate(BaseModel):
 
 class ObraSocialUpdate(BaseModel):
     nro_obra_social: Optional[int] = None
-    nombre: Optional[str] = Field(None, max_length=45)
+    nombre: Optional[str] = Field(None, max_length=255)
     marca: Optional[str] = Field(None, max_length=1)
     ver_valor: Optional[str] = Field(None, max_length=1)
     cuit: Optional[str] = Field(None, max_length=20)

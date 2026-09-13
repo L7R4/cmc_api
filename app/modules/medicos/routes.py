@@ -33,7 +33,7 @@ from app.auth.ownership import medico_objetivo
 from app.core.passwords import hash_password, hash_password_inicial, validate_new_password
 from app.db.database import get_db
 from app.db.models import (
-    Deduccion, Descuentos, DetalleLiquidacion, Documento, Especialidad, Liquidacion, ListadoMedico,
+    Deduccion, Conceptos, DetalleLiquidacion, Documento, Especialidad, Liquidacion, ListadoMedico,
     DeduccionAplicacion, Pago, SolicitudRegistro
 )
 from app.modules.medicos.schemas import (
@@ -1581,8 +1581,8 @@ async def listar_conceptos_medico(
         return []
 
     rows = (await db.execute(
-        select(Descuentos.id, Descuentos.nro_colegio, Descuentos.nombre)
-        .where(Descuentos.nro_colegio.in_(nro_list))
+        select(Conceptos.id, Conceptos.nro_colegio, Conceptos.nombre)
+        .where(Conceptos.nro_colegio.in_(nro_list))
     )).all()
 
     ids_by_nro: DefaultDict[int, List[int]] = defaultdict(list)

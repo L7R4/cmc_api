@@ -10,7 +10,7 @@ from app.db.models import (
     Ajuste,
     Deduccion,
     DeduccionAplicacion,
-    Descuentos,
+    Conceptos,
     DetalleLiquidacion,
     Liquidacion,
     ListadoMedico,
@@ -26,7 +26,7 @@ from app.modules.deducciones.schemas import (
     DeduccionPorPagoResponse,
     DeduccionRead,
     DeduccionesAplicadasResponse,
-    DeshacerDescuentosResponse,
+    DeshacerConceptosResponse,
     TopDeudorItem,
 )
 
@@ -68,10 +68,9 @@ async def auto_enrolar_pendientes(db: AsyncSession, pago: Pago) -> dict:
     """
     medicos_en_pago: set[int] = set(
         (await db.execute(
-            select(ListadoMedico.ID)
+            select(DetalleLiquidacion.medico_id)
             .select_from(DetalleLiquidacion)
             .join(Liquidacion, Liquidacion.id == DetalleLiquidacion.liquidacion_id)
-            .join(ListadoMedico, ListadoMedico.NRO_SOCIO == DetalleLiquidacion.medico_id)
             .where(Liquidacion.pago_id == pago.id)
             .distinct()
         )).scalars().all()
@@ -158,7 +157,7 @@ async def recalcular_automaticas_porcentuales(db: AsyncSession, pago_id: int) ->
 
     desc_ids = list({d.descuento_id for d in deds_auto if d.descuento_id})
     desc_rows = (await db.execute(
-        select(Descuentos).where(Descuentos.id.in_(desc_ids))
+        select(Conceptos).where(Conceptos.id.in_(desc_ids))
     )).scalars().all()
     desc_map = {d.id: d for d in desc_rows}
 
@@ -202,7 +201,7 @@ async def _auto_generar_deducciones_porcentuales(db: AsyncSession, pago: Pago) -
     recalcular_automaticas_porcentuales las actualiza con el bruto real.
     """
     desc_rows = (await db.execute(
-        select(Descuentos).where(Descuentos.porcentaje > 0, Descuentos.nro_colegio != 200)
+        select(Conceptos).where(Conceptos.porcentaje > 0, Conceptos.nro_colegio != 200)
     )).scalars().all()
 
     if not desc_rows:
@@ -269,19 +268,26 @@ async def _auto_generar_deducciones_porcentuales(db: AsyncSession, pago: Pago) -
 
 async def _recalcular_montos_aplicados_en_pago(db: AsyncSession, pago_id: int) -> None:
     """
-    Recalcula monto_aplicado de todas las deducciones en_pago del pago
-    usando la lógica menor-a-mayor por pagador, sin cambiar estado ni
-    crear registros DeduccionAplicacion. Es la función de 'preview':
-    muestra cuánto se descontaría a cada médico con el disponible actual.
-    Se resetea monto_aplicado=0 antes de recalcular para partir desde cero.
+    Recalcula monto_aplicado_preview de todas las deducciones en_pago del pago
+    usando la lógica menor-a-mayor por pagador, sin cambiar estado ni crear
+    registros DeduccionAplicacion. Es la función de 'preview': muestra cuánto
+    se descontaría a cada médico con el disponible actual si se cerrara ahora.
+
+    monto_aplicado_preview es descartable y se resetea en cada corrida.
+    monto_aplicado (sin sufijo) NUNCA se toca acá — es el ledger real de lo
+    ya cobrado (via DeduccionAplicacion), y aplicar_deducciones_al_cierre lo
+    usa como base para saber cuánto falta cobrar. Mezclarlos hacía que el
+    cierre contara la preview como si ya fuera plata cobrada (ver diagnóstico
+    C2: una deducción podía quedar 'aplicado' habiendo cobrado solo una
+    fracción de calculado_total).
     """
-    # Primero resetear monto_aplicado=0 para partir desde cero
+    # Resetear solo la preview — monto_aplicado (ledger real) queda intacto.
     await db.execute(
         update(Deduccion)
         .where(
             Deduccion.estado == "en_pago",
         )
-        .values(monto_aplicado=Decimal("0.00"))
+        .values(monto_aplicado_preview=Decimal("0.00"))
     )
     await db.flush()
 
@@ -314,21 +320,23 @@ async def _recalcular_montos_aplicados_en_pago(db: AsyncSession, pago_id: int) -
         if disponible <= Decimal("0"):
             continue
 
-        # Prioritarios primero (en orden de id), luego el resto menor-a-mayor
+        # Prioritarios primero (en orden de id), luego el resto por saldo
+        # pendiente ascendente (calculado_total - lo ya cobrado en pagos
+        # anteriores) — misma lógica que usa el cierre real.
         prioritarios = sorted(
             [d for d in pagador_deds if d.descuento_id in DESCUENTOS_PRIORITARIOS],
             key=lambda d: d.descuento_id,
         )
         resto = sorted(
             [d for d in pagador_deds if d.descuento_id not in DESCUENTOS_PRIORITARIOS],
-            key=lambda d: (d.calculado_total, d.id),
+            key=lambda d: (d.calculado_total - d.monto_aplicado, d.id),
         )
         ordered_deds = prioritarios + resto
 
         restante = disponible
 
         for ded in ordered_deds:
-            saldo = ded.calculado_total  # monto_aplicado fue reseteado a 0
+            saldo = ded.calculado_total - ded.monto_aplicado
             if saldo <= Decimal("0") or restante <= Decimal("0"):
                 continue
             tomar = min(saldo, restante)
@@ -336,7 +344,7 @@ async def _recalcular_montos_aplicados_en_pago(db: AsyncSession, pago_id: int) -
             await db.execute(
                 update(Deduccion)
                 .where(Deduccion.id == ded.id)
-                .values(monto_aplicado=tomar)
+                .values(monto_aplicado_preview=tomar)
             )
 
 
@@ -495,10 +503,10 @@ async def fetch_deducciones_item(
     stmt = (
         select(
             Deduccion,
-            Descuentos.nombre.label("desc_nombre"),
+            Conceptos.nombre.label("desc_nombre"),
             ListadoMedico.NOMBRE.label("med_nombre"),
         )
-        .outerjoin(Descuentos, Descuentos.id == Deduccion.descuento_id)
+        .outerjoin(Conceptos, Conceptos.id == Deduccion.descuento_id)
         .join(ListadoMedico, ListadoMedico.ID == Deduccion.medico_id)
         .where(Deduccion.estado != "eliminado")
     )
@@ -560,6 +568,7 @@ async def fetch_deducciones_item(
             descuento_nombre=desc_nombre,
             monto=ded.calculado_total,
             saldo_pendiente=ded.calculado_total - ded.monto_aplicado,
+            monto_aplicado_preview=ded.monto_aplicado_preview,
             mes_periodo=mes_periodo,
             anio_periodo=anio_periodo,
             estado=est,
@@ -642,9 +651,10 @@ async def get_deducciones_aplicadas(
     Devuelve las deducciones que se están aplicando en un pago.
 
     - Pago abierto ('A'): lee desde `Deduccion` donde estado='en_pago'
-      y monto_aplicado != 0, con generado_en_pago_id = pago_id.
+      y monto_aplicado_preview != 0 (preview, todavía no es plata cobrada),
+      con generado_en_pago_id = pago_id.
     - Pago cerrado ('C'): lee desde `DeduccionAplicacion` donde pago_id = pago_id,
-      tomando directamente el campo `aplicado`.
+      tomando directamente el campo `aplicado` (esto sí es el cobro real).
     """
     from app.modules.deducciones.schemas import DeduccionAplicadaItem
 
@@ -661,17 +671,17 @@ async def get_deducciones_aplicadas(
             select(
                 Deduccion.medico_id,
                 Deduccion.descuento_id,
-                Deduccion.monto_aplicado,
-                Descuentos.nombre.label("desc_nombre"),
+                Deduccion.monto_aplicado_preview,
+                Conceptos.nombre.label("desc_nombre"),
                 ListadoMedico.NOMBRE.label("med_nombre"),
                 ListadoMedico.NRO_SOCIO.label("nro_socio"),
             )
-            .outerjoin(Descuentos, Descuentos.id == Deduccion.descuento_id)
+            .outerjoin(Conceptos, Conceptos.id == Deduccion.descuento_id)
             .join(ListadoMedico, ListadoMedico.ID == Deduccion.medico_id)
             .where(
                 Deduccion.generado_en_pago_id == pago_id,
                 Deduccion.estado == "en_pago",
-                Deduccion.monto_aplicado != 0,
+                Deduccion.monto_aplicado_preview != 0,
             )
             .order_by(ListadoMedico.NOMBRE)
         )).mappings().all()
@@ -683,7 +693,7 @@ async def get_deducciones_aplicadas(
                 medico_nro_socio=int(r["nro_socio"]),
                 descuento_id=r["descuento_id"],
                 descuento_nombre=r["desc_nombre"] or "",
-                monto_aplicado=Decimal(str(r["monto_aplicado"] or "0")),
+                monto_aplicado=Decimal(str(r["monto_aplicado_preview"] or "0")),
             ))
     else:
         # Pago cerrado — fuente: tabla deduccion_aplicacion
@@ -692,12 +702,12 @@ async def get_deducciones_aplicadas(
                 DeduccionAplicacion.aplicado,
                 Deduccion.medico_id,
                 Deduccion.descuento_id,
-                Descuentos.nombre.label("desc_nombre"),
+                Conceptos.nombre.label("desc_nombre"),
                 ListadoMedico.NOMBRE.label("med_nombre"),
                 ListadoMedico.NRO_SOCIO.label("nro_socio"),
             )
             .join(Deduccion, Deduccion.id == DeduccionAplicacion.deduccion_id)
-            .outerjoin(Descuentos, Descuentos.id == Deduccion.descuento_id)
+            .outerjoin(Conceptos, Conceptos.id == Deduccion.descuento_id)
             .join(ListadoMedico, ListadoMedico.ID == Deduccion.medico_id)
             .where(DeduccionAplicacion.pago_id == pago_id)
             .order_by(ListadoMedico.NOMBRE)
@@ -1109,7 +1119,7 @@ async def deshacer_descuentos_generados(
     db: AsyncSession,
     pago_id: int,
     desc_id: Optional[int] = None,
-) -> DeshacerDescuentosResponse:
+) -> DeshacerConceptosResponse:
     """
     Deshace los efectos de bulk_generar_descuento para este pago:
 
@@ -1159,7 +1169,7 @@ async def deshacer_descuentos_generados(
     pago.deducciones_dirty = False
     await db.commit()
 
-    return DeshacerDescuentosResponse(
+    return DeshacerConceptosResponse(
         pago_id=pago_id,
         eliminadas=len(ids_eliminar),
         monto_revertido=monto_revertido.quantize(TWOPLACES),

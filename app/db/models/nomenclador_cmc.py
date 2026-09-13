@@ -312,10 +312,10 @@ class Valor(Base):
     Variante de precio para un código+OS+vigencia.
     La identidad de la variante es (origen, especialidad_id_colegio):
       origen → categoría/procedencia de la regla de precio; fija la PRIORIDAD del
-               lookup (NE > NNE > NN). La prioridad NO vive en DB: es la posición en
+               lookup (NE > NN). La prioridad NO vive en DB: es la posición en
                ORIGEN_PRIORIDAD (service.py). El String permite sumar orígenes sin migrar.
-      especialidad_id_colegio → NULL = sin perfil · N = exige esa especialidad.
-               Solo lo usa NE (NNE/NN siempre van NULL).
+      especialidad_id_colegio → obligatoria en NE (debe existir como habilitación activa
+               en nm_nomenclador_especialidad para el código); NN siempre va NULL.
     El lookup elige por mayor prioridad de origen y, dentro del origen, match de
     especialidad (orden de slots del médico) > sin especialidad.
     Máximo un activo por (obra_social_nro, nomenclador_id, origen, especialidad_id_colegio) — app-level.
@@ -327,7 +327,7 @@ class Valor(Base):
     nomenclador_id: Mapped[int] = mapped_column(
         ForeignKey("nm_nomenclador.id"), nullable=False
     )
-    # Categoría/procedencia del valor: 'NE' | 'NNE' | 'NN' (validado en código contra
+    # Categoría/procedencia del valor: 'NE' | 'NN' (validado en código contra
     # schemas.Origen / service.ORIGEN_PRIORIDAD). NO es ENUM de DB para poder sumar
     # orígenes sin migración. La prioridad de lookup se deriva en código.
     origen: Mapped[str] = mapped_column(String(10), nullable=False)
@@ -357,6 +357,13 @@ class Valor(Base):
     )
     # Máximo de ayudantes admitidos para este código+OS. NULL = no lleva ayudantes (0).
     cantidad_ayudantes: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # Lo que el afiliado paga de su bolsillo por esta práctica en esta OS — mismo
+    # concepto y misma semántica que `detalle_facturacion.coseguro` (se descuenta
+    # del total a liquidar). Es metadato de la variante, no de la ecuación de
+    # precio: cambiarlo no exige abrir una vigencia nueva.
+    coseguro: Mapped[Decimal] = mapped_column(
+        DECIMAL(14, 2), nullable=False, default=0, server_default="0"
+    )
     # True → el código se factura "por presupuesto": no hay precio pactado en el
     # sistema, la OS informa el importe por fuera. Los componentes H/G/A quedan en 0
     # y el operador carga el monto a mano al facturar (modo manual).
@@ -402,6 +409,12 @@ class Valor(Base):
         Index("ix_nm_valores_origen", "origen"),
         Index("ix_nm_valores_codigo", "codigo"),
         Index("ix_nm_valores_vigencia", "vigencia_desde", "vigencia_hasta"),
+        # Índice cubriente de GET /api/valores_nm/actualizaciones: agrupa por
+        # (vigencia_desde, obra_social_nro) sin tocar la tabla. Ya existía en
+        # la base (migración vigos1dx0001) pero faltaba declararlo acá — un
+        # autogenerate lo habría visto como índice de más y propuesto borrarlo.
+        # Ver auditoría A-02.
+        Index("ix_nm_valores_vigencia_os", "vigencia_desde", "obra_social_nro"),
         Index("ix_nm_valores_nivel", "nivel"),
         Index("ix_nm_valores_complejidad", "complejidad"),
         Index("ix_nm_valores_estado", "estado"),
@@ -423,9 +436,17 @@ class ValorComponente(Base):
     galeno_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("nm_galenos.id"), nullable=True
     )
-    # 0 = precio fijo; > 0 = unidades del galeno a multiplicar
+    # 0 = precio fijo; > 0 = unidades del galeno a multiplicar.
+    #
+    # DECIMAL(16,4) — 12 dígitos enteros, el mismo rango que `valor_unitario` y
+    # `precio_total`. Era DECIMAL(10,4) hasta el 2026-08-27 y ese techo de 999.999
+    # no alcanzaba: hay obras sociales que modelan el galeno con valor_unitario 1 y
+    # ponen el importe entero acá, así que `cantidad` tiene que poder representar
+    # lo mismo que una columna de dinero. Pasarse no fallaba en producción (el
+    # sql_mode de prod no tiene STRICT_TRANS_TABLES): MySQL clavaba el valor en el
+    # máximo y seguía. 643 componentes de la OS 81 quedaron así.
     cantidad: Mapped[Decimal] = mapped_column(
-        DECIMAL(10, 4), nullable=False, default=Decimal("0"), server_default="0"
+        DECIMAL(16, 4), nullable=False, default=Decimal("0"), server_default="0"
     )
     # Solo se usa cuando galeno_id IS NULL (precio fijo embebido)
     valor_unitario: Mapped[Optional[Decimal]] = mapped_column(DECIMAL(14, 2), nullable=True)
@@ -492,7 +513,7 @@ class HistorialPrecioCodigo(Base):
         ForeignKey("nm_nomenclador.id"), nullable=False
     )
     obra_social_nro: Mapped[int] = mapped_column(Integer, nullable=False)
-    # Categoría/procedencia del valor (NE|NNE|NN) — parte de la identidad de la variante
+    # Categoría/procedencia del valor (NE|NN) — parte de la identidad de la variante
     origen: Mapped[str] = mapped_column(String(10), nullable=False)
     # Variante del valor al que pertenece esta fila (NULL = sin especialidad)
     especialidad_id_colegio: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)

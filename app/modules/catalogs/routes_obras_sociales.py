@@ -1,5 +1,4 @@
 import os
-import shutil
 import uuid
 from typing import Optional
 
@@ -14,7 +13,7 @@ from app.common.uploads import DOCUMENTOS, validate_upload
 from app.auth.deps import usuario_opcional
 from app.auth.scopes import Scope
 from app.db.database import get_db
-from app.db.models.catalogs import ObrasSociales, ObraSocialContacto, ObraSocialDireccion, ObraSocialDocumento
+from app.db.models.catalogs import ObrasSociales, ObraSocialDocumento
 from app.modules.catalogs.schemas import (
     ContactoSimpleOut,
     DireccionOut,
@@ -63,26 +62,31 @@ def _build_out(
     principal: Optional[ObrasSociales],
     asociadas: list[ObrasSociales],
 ) -> ObraSocialOut:
+    # `contactos` / `direcciones` son columnas JSON (ver auditoría O-05): listas
+    # de dicts, no filas propias. `DireccionOut.id` no tiene de dónde salir acá
+    # —no hay PK por dirección—, así que se sintetiza con la posición: el front
+    # nunca lo usa para nada más que la key de un `.map()`.
+    contactos = obj.contactos or []
     emails = [
-        ContactoSimpleOut(valor=c.valor, etiqueta=c.etiqueta)
-        for c in obj.contactos
-        if c.tipo == "email"
+        ContactoSimpleOut(valor=c["valor"], etiqueta=c.get("etiqueta"))
+        for c in contactos
+        if c.get("tipo") == "email"
     ]
     telefonos = [
-        ContactoSimpleOut(valor=c.valor, etiqueta=c.etiqueta)
-        for c in obj.contactos
-        if c.tipo == "telefono"
+        ContactoSimpleOut(valor=c["valor"], etiqueta=c.get("etiqueta"))
+        for c in contactos
+        if c.get("tipo") == "telefono"
     ]
     direccion = [
         DireccionOut(
-            id=d.id,
-            provincia=d.provincia,
-            localidad=d.localidad,
-            direccion=d.direccion,
-            codigo_postal=d.codigo_postal,
-            horario=d.horario,
+            id=i + 1,
+            provincia=d.get("provincia"),
+            localidad=d.get("localidad"),
+            direccion=d.get("direccion"),
+            codigo_postal=d.get("codigo_postal"),
+            horario=d.get("horario"),
         )
-        for d in obj.direcciones
+        for i, d in enumerate(obj.direcciones or [])
     ]
     documentos = [
         DocumentoOut(
@@ -147,6 +151,32 @@ async def _batch_principal_and_asociadas(
     return principals_map, asociadas_map
 
 
+async def _crearia_ciclo(db: AsyncSession, propio_id: int, principal_id: int) -> bool:
+    """True si `principal_id` cuelga, directa o transitivamente, de `propio_id`.
+
+    Antes sólo se rechazaba `A → A`; `A → B` + `B → A` (o cadenas más largas)
+    pasaban igual, y el ciclo dejaba a `_load_principal_and_asociadas` girando
+    en un ida-y-vuelta sin fin la primera vez que alguien pidiera el detalle.
+    Ver auditoría O-09.
+    """
+    actual = principal_id
+    visitados: set[int] = set()
+    for _ in range(64):  # cota defensiva: ninguna cadena real llega a esa longitud
+        if actual == propio_id:
+            return True
+        if actual in visitados:
+            return False
+        visitados.add(actual)
+        res = await db.execute(
+            select(ObrasSociales.obra_social_principal_id).where(ObrasSociales.ID == actual)
+        )
+        siguiente = res.scalar_one_or_none()
+        if siguiente is None:
+            return False
+        actual = siguiente
+    return True
+
+
 async def _get_or_404(id: int, db: AsyncSession) -> ObrasSociales:
     res = await db.execute(select(ObrasSociales).where(ObrasSociales.ID == id))
     obj = res.scalar_one_or_none()
@@ -198,6 +228,17 @@ async def list_obras_sociales(
     db: AsyncSession = Depends(get_db),
     nro_obra_social: Optional[int] = Query(None, description="Filtrar por N° obra social (exacto)"),
     nombre: Optional[str] = Query(None, description="Filtrar por nombre (contiene)"),
+    solo_principales: bool = Query(
+        False,
+        description="Oculta asociadas (obra_social_principal_id IS NOT NULL). "
+                     "Para selectores de padrón, donde una empresa con varios "
+                     "planes tiene que listarse una sola vez.",
+    ),
+    incluir_inactivas: bool = Query(
+        False,
+        description="Incluye las dadas de baja (MARCA='N'). Por default quedan "
+                     "afuera, igual que cualquier baja lógica del sistema.",
+    ),
     user: dict | None = Depends(usuario_opcional),
 ):
     """Listado de obras sociales. **Público con respuesta recortada.**
@@ -207,12 +248,24 @@ async def list_obras_sociales(
     Publicar eso entero sería cambiar un 401 por una filtración: al visitante se
     le entrega solo la identificación de la obra social, y el resto requiere
     `catalogo:leer`.
+
+    `solo_principales` es aparte de ese recorte: el CRUD de obras sociales y
+    facturación necesitan ver TODAS las filas (para poder asignar la relación,
+    y porque cada plan liquida por separado); el default `False` no les cambia
+    nada. Sólo el selector de padrón pasa `true`.
+
+    Orden alfabético ascendente: es el que espera cualquier pantalla que liste
+    obras sociales, y el front ya no tiene que reordenar lo que devuelve la API.
     """
-    query = select(ObrasSociales).order_by(ObrasSociales.OBRA_SOCIAL.desc())
+    query = select(ObrasSociales).order_by(ObrasSociales.OBRA_SOCIAL.asc())
     if nro_obra_social is not None:
         query = query.where(ObrasSociales.NRO_OBRASOCIAL == nro_obra_social)
     if nombre is not None:
         query = query.where(ObrasSociales.OBRA_SOCIAL.ilike(f"%{nombre}%"))
+    if solo_principales:
+        query = query.where(ObrasSociales.obra_social_principal_id.is_(None))
+    if not incluir_inactivas:
+        query = query.where(ObrasSociales.MARCA != "N")
 
     result = await db.execute(query)
     objs = list(result.scalars().all())
@@ -271,36 +324,29 @@ async def create_obra_social(
         OBRA_SOCIAL=payload.nombre,
         MARCA=payload.marca,
         VER_VALOR=payload.ver_valor,
-        cuit=payload.cuit,
+        # `cuit` (minúscula, "extendido") y `CUIT` (legacy, varchar(11) NOT
+        # NULL DEFAULT '0') son literalmente la misma columna física: MySQL
+        # compara nombres de columna sin distinguir mayúsculas. Un `None`
+        # explícito viaja como NULL en el INSERT y choca contra el NOT NULL
+        # heredado. `'0'` es el placeholder de "sin dato" que ya usa el resto
+        # del sistema (ver `displayCuit()` en el front).
+        cuit=payload.cuit or "0",
         direccion_real=payload.direccion_real,
         condicion_iva=payload.condicion_iva,
         plazo_vencimiento=payload.plazo_vencimiento,
         fecha_alta_convenio=payload.fecha_alta_convenio,
         obra_social_principal_id=payload.obra_social_principal_id,
         dia_corte=payload.dia_corte,
+        contactos=[c.model_dump() for c in payload.contactos],
+        direcciones=[d.model_dump() for d in payload.direcciones],
     )
     db.add(obj)
     try:
-        await db.flush()
+        await db.commit()
     except IntegrityError as e:
         await db.rollback()
         raise HTTPException(status_code=409, detail="Conflicto de integridad.") from e
 
-    for c in payload.contactos:
-        db.add(ObraSocialContacto(
-            obra_social_id=obj.ID, tipo=c.tipo, valor=c.valor, etiqueta=c.etiqueta
-        ))
-    for d in payload.direcciones:
-        db.add(ObraSocialDireccion(
-            obra_social_id=obj.ID,
-            provincia=d.provincia,
-            localidad=d.localidad,
-            direccion=d.direccion,
-            codigo_postal=d.codigo_postal,
-            horario=d.horario,
-        ))
-
-    await db.commit()
     await db.refresh(obj)
 
     principal, asociadas = await _load_principal_and_asociadas(obj, db)
@@ -335,6 +381,12 @@ async def update_obra_social(
         )
         if not res_p.scalar_one_or_none():
             raise HTTPException(status_code=404, detail="obra_social_principal_id no encontrada")
+        if await _crearia_ciclo(db, id, payload.obra_social_principal_id):
+            raise HTTPException(
+                status_code=422,
+                detail="Esa relación forma un ciclo: la principal elegida ya cuelga, directa o "
+                       "indirectamente, de esta obra social.",
+            )
 
     scalar_map = {
         "nro_obra_social": "NRO_OBRASOCIAL",
@@ -350,30 +402,20 @@ async def update_obra_social(
         "dia_corte": "dia_corte",
     }
     changes = payload.model_dump(exclude_unset=True, exclude={"contactos", "direcciones"})
+    if "cuit" in changes and not changes["cuit"]:
+        # Mismo motivo que en el alta: `cuit` es la misma columna física que la
+        # legacy `CUIT NOT NULL DEFAULT '0'`.
+        changes["cuit"] = "0"
     for field, orm_attr in scalar_map.items():
         if field in changes:
             setattr(obj, orm_attr, changes[field])
 
+    # Si vienen, reemplazan la lista completa — mismo contrato que antes con las
+    # filas de las tablas satélite (ver auditoría O-05).
     if payload.contactos is not None:
-        for c in list(obj.contactos):
-            await db.delete(c)
-        for c in payload.contactos:
-            db.add(ObraSocialContacto(
-                obra_social_id=obj.ID, tipo=c.tipo, valor=c.valor, etiqueta=c.etiqueta
-            ))
-
+        obj.contactos = [c.model_dump() for c in payload.contactos]
     if payload.direcciones is not None:
-        for d in list(obj.direcciones):
-            await db.delete(d)
-        for d in payload.direcciones:
-            db.add(ObraSocialDireccion(
-                obra_social_id=obj.ID,
-                provincia=d.provincia,
-                localidad=d.localidad,
-                direccion=d.direccion,
-                codigo_postal=d.codigo_postal,
-                horario=d.horario,
-            ))
+        obj.direcciones = [d.model_dump() for d in payload.direcciones]
 
     try:
         await db.commit()
@@ -391,15 +433,24 @@ async def delete_obra_social(
     id: int = Path(..., ge=1),
     db: AsyncSession = Depends(get_db),
 ) -> Response:
+    """Baja lógica: `MARCA='N'`, igual que el resto del sistema legacy.
+
+    Antes esto era un `db.delete()` físico. Dos problemas reales, no
+    hipotéticos (ver auditoría O-03): `ajuste` y `lote_ajuste` tienen FK
+    `RESTRICT` contra esta fila y el `IntegrityError` no estaba capturado acá
+    (500 sin explicación), y otras ~30 tablas —`nm_valores`,
+    `medico_obra_social`, `liquidacion`, `facturacion`, `guardar_atencion`,
+    entre ellas— la referencian por `NRO_OBRASOCIAL`/`cod_obr` **sin FK**, así
+    que quedaban apuntando a un número inexistente sin ningún aviso.
+
+    `MARCA='N'` ya es, en el resto del sistema, "esta obra social no está
+    habilitada" — es lo que filtra `catalogo_obras_sociales` para el padrón.
+    Reusarlo acá evita inventar un segundo flag de baja y hace que "eliminar"
+    también la saque del padrón. El listado (`GET /`) la oculta por default;
+    `incluir_inactivas=true` la trae de vuelta para poder reactivarla.
+    """
     obj = await _get_or_404(id, db)
-    # Eliminar archivos físicos de documentos
-    for doc in obj.documentos:
-        try:
-            if os.path.exists(doc.url):
-                os.remove(doc.url)
-        except OSError:
-            pass
-    await db.delete(obj)
+    obj.MARCA = "N"
     await db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 

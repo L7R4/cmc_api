@@ -2,7 +2,7 @@
 Rollback de Liquidacion, DetalleLiquidacion y Recibo al eliminar un Pago.
 
 Orden de eliminación respetando FK constraints:
-  1. DetalleLiquidacion (FK → liquidacion, RESTRICT en guardar_atencion)
+  1. DetalleLiquidacion (FK → liquidacion, FK → listado_medico RESTRICT)
   2. Liquidacion (FK → pago, sin ondelete explícito)
   3. Recibo (FK → pago, RESTRICT) — bloqueado si hay recibos en estado 'pagado'
 

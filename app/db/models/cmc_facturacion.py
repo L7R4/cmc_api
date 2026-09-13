@@ -83,6 +83,19 @@ class DetalleFacturacionCMC(Base):
     urgencia: Mapped[Optional[str]] = mapped_column(String(1))
     estado: Mapped[Optional[str]] = mapped_column(String(2))
     usuario: Mapped[Optional[str]] = mapped_column(String(30))
+    # Fecha/hora de CARGA de la prestación (no de práctica: para eso está
+    # `fecha_practica`). Columna física preexistente de CMC —
+    # `timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP`, sin ON UPDATE— que el ORM
+    # venía ignorando: MySQL la llenaba sola en cada INSERT. Se mapea sólo para
+    # leerla y ordenar por ella; la API nunca la escribe.
+    #
+    # `server_default` y NADA de default en Python a propósito: SQLAlchemy omite la
+    # columna del INSERT y el valor lo fija el servidor (mismo reloj para todas las
+    # filas), igual que `FacturacionCMC.created`. Y NADA de `onupdate`: un PATCH no
+    # tiene que reflotar la prestación a la cabeza del listado.
+    created: Mapped[datetime.datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
     id_especialidad: Mapped[Optional[int]] = mapped_column(Integer)
     # Desglose del cálculo del lookup (modo automático). NULL en CMC y modo manual.
     calculo_snapshot: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
@@ -178,6 +191,12 @@ class FacturacionCMC(Base):
     # complementarias. A lo sumo una versión está abierta a la vez y es la de mayor
     # número. Ver `abrir_complemento` en el servicio. Histórico → 1.
     version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+    # Quién/cuándo se creó esta cabecera (primera prestación cargada, o alta del
+    # complemento) — a diferencia de `usuario`/`fecha`, que se pisan en el cierre y
+    # de hecho ya funcionan como "cerrado por"/"fecha de cierre". NULL en filas
+    # históricas anteriores a este campo (no hay forma confiable de reconstruirlo).
+    creado_por: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    creado_en: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime, nullable=True)
 
 
 class PeriodoMedicoActual(Base):
@@ -207,6 +226,26 @@ class Afiliado(Base):
     dni: Mapped[str] = mapped_column(String(20), nullable=False, unique=True, index=True)
     nombre: Mapped[str] = mapped_column(String(100), nullable=False)
     usuario: Mapped[str] = mapped_column(String(30), nullable=False)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+
+
+class ExportPreset(Base):
+    """Combinación de opciones del panel de pre-exportación (orden, agrupación,
+    filtros, columnas) guardada con un nombre para reusar. Personal por
+    `usuario` (NRO_SOCIO, mismo patrón sin FK que `Afiliado.usuario` /
+    `DetalleFacturacionCMC.usuario`) — presets compartidos por todo el Colegio
+    quedan afuera a propósito hasta que alguien los pida."""
+    __tablename__ = "export_preset"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    usuario: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    nombre: Mapped[str] = mapped_column(String(120), nullable=False)
+    # "detalle" | "caratula" — un preset de carátula no tiene sentido aplicarlo
+    # al detalle (agrupación/columnas no existen ahí) y viceversa.
+    tipo_documento: Mapped[str] = mapped_column(String(20), nullable=False)
+    opciones: Mapped[dict] = mapped_column(JSON, nullable=False)
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.now()
     )

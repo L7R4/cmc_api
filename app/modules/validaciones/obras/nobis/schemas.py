@@ -5,9 +5,9 @@ from app.modules.validaciones.schemas import EntradaBase
 
 class EntradaNobis(EntradaBase):
     nro_afiliado: str = Field("", max_length=30)
-    # El legacy exige el token en la pantalla pero NUNCA lo manda al WS: sólo
-    # lo guarda. Se mantiene el requisito para no cambiarle la regla al
-    # prestador (ver `obras/nobis/validador.py`).
+    # Viaja en `<Token>` dentro de la orden y Nobis lo valida ("Token
+    # incorrecto" aparece 21 veces en el log real). Son de 6 dígitos, no de 4
+    # como los de Sancor — por eso acá no hay un regex de largo fijo.
     token: str = Field("", max_length=8)
 
     @field_validator("nro_afiliado", mode="after")

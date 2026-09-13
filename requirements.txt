@@ -12,6 +12,7 @@ cryptography==46.0.2
 ecdsa==0.19.1
 et_xmlfile==2.0.0
 fastapi==0.116.1
+fpdf2==2.8.4
 greenlet==3.2.4
 h11==0.16.0
 httpcore==1.0.9

@@ -65,7 +65,7 @@ def build_excel_from_liquidacion(payload: Dict[str, Any]) -> bytes:
     ws2 = wb.create_sheet("Detalle por médico")
     _header(ws2, 1, [
         "Médico ID", "Médico", "Obra social", "Período",
-        "Bruto periodo", "Descuentos periodo", "Neto periodo",
+        "Bruto periodo", "Conceptos periodo", "Neto periodo",
     ])
 
     fila = 2
@@ -98,7 +98,7 @@ def build_excel_from_liquidacion(payload: Dict[str, Any]) -> bytes:
         "Médico ID", "Médico",
         "Obra social", "Período",
         "Atención ID", "Código prestación", "Fecha",
-        "Bruto", "Descuentos", "Neto",
+        "Bruto", "Conceptos", "Neto",
     ])
     fila = 2
 

@@ -18,14 +18,14 @@ from app.db.models.liquidacion import (
     DetalleLiquidacion, PagoMedico, Recibo,
 )
 from app.db.models.financiero import (
-    LoteAjuste, Ajuste, Descuentos, SocioDescuento,
+    LoteAjuste, Ajuste, Conceptos, SocioDescuento,
     Deduccion, DeduccionAplicacion,
 )
 from app.db.models.catalogs import (
     Especialidad, ObrasSociales, Periodos, ValorPrestacion,
     PeriodosDoctor, ValoresBoletin, ValoresBoletinHistorial, ValoresObrasocial,
     BoletinObservacion, BoletinObservacionPlantilla,
-    ObraSocialContacto, ObraSocialDireccion, ObraSocialDocumento, ObraSocialPago,
+    ObraSocialDocumento, ObraSocialPago,
     ValoresEticos,
 )
 from app.db.models.rbac import Role, Permission, UserRole, RolePermission, UserPermission
@@ -41,7 +41,7 @@ from app.db.models.dispositivos_push import DispositivoPush
 # Padrón de OSPM: es `clientes_ospm`, la tabla del legacy (padrón único).
 from app.db.models.padron_ospm import ClientesOspm
 from app.db.models.cmc_facturacion import (
-    DetalleFacturacionCMC, FacturacionCMC, Afiliado, PeriodoMedicoActual,
+    DetalleFacturacionCMC, FacturacionCMC, Afiliado, PeriodoMedicoActual, ExportPreset,
 )
 from app.db.models.nomenclador_cmc import (
     NomencladorCMC, NomencladorEspecialidad, MedicoCodigoHabilitado,
@@ -71,13 +71,13 @@ __all__ = [
     "GuardarAtencion", "Pago", "Liquidacion",
     "DetalleLiquidacion", "PagoMedico", "Recibo",
     # financiero
-    "LoteAjuste", "Ajuste", "Descuentos", "SocioDescuento",
+    "LoteAjuste", "Ajuste", "Conceptos", "SocioDescuento",
     "Deduccion", "DeduccionAplicacion",
     # catalogs
     "Especialidad", "ObrasSociales", "Periodos", "PeriodosDoctor",
     "ValoresBoletin", "ValoresBoletinHistorial", "ValoresObrasocial", "ValorPrestacion",
     "BoletinObservacion", "BoletinObservacionPlantilla",
-    "ObraSocialContacto", "ObraSocialDireccion", "ObraSocialDocumento", "ObraSocialPago",
+    "ObraSocialDocumento", "ObraSocialPago",
     "ValoresEticos",
     # rbac
     "Role", "Permission", "UserRole", "RolePermission", "UserPermission",
@@ -99,7 +99,7 @@ __all__ = [
     "DispositivoPush",
     "ClientesOspm",
     # cmc_facturacion (detalle/facturacion CMC + padrón afiliado + período médico)
-    "DetalleFacturacionCMC", "FacturacionCMC", "Afiliado", "PeriodoMedicoActual",
+    "DetalleFacturacionCMC", "FacturacionCMC", "Afiliado", "PeriodoMedicoActual", "ExportPreset",
     # nomenclador / valores (sistema nuevo)
     "NomencladorCMC", "NomencladorEspecialidad", "MedicoCodigoHabilitado",
     "Homologador", "Galeno", "GalenoPlantilla", "Valor", "ValorComponente",

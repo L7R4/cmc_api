@@ -12,16 +12,20 @@ from app.db.database import get_db
 from app.db.models import ListadoMedico, NomencladorCMC, ObrasSociales
 from app.modules.facturacion import service
 from app.modules.facturacion.schemas import (
+    ActividadEventoOut,
     AfiliadoCreate,
     AfiliadoRead,
     AvanzarPeriodoMedicoPayload,
     AvanzarPeriodoMedicoResponse,
+    CargaPorUsuarioOut,
     CerrarPeriodosVencidosResponse,
+    CierresPorUsuarioOut,
     CierreDoctorPayload,
     CierreDoctorResponse,
     CierrePreviewResponse,
     CierreResponse,
     ClinicaBuscarOut,
+    ClinicaCreate,
     CodigoHabilitadoOut,
     ComplementoCreate,
     FacturaDetalleOut,
@@ -37,6 +41,7 @@ from app.modules.facturacion.schemas import (
     SetPeriodoMedicoResponse,
     PrestacionesComplementariaCreate,
     PrestacionesCreate,
+    PrestacionFichaOut,
     PrestacionRead,
     PrestacionesRevisadoUpdate,
     PrestacionUpdate,
@@ -76,6 +81,35 @@ async def buscar_clinicas(
     """Autocomplete de clínicas/organizaciones — mismo `listado_medico` que
     `/medicos`, filtrado por `es_organizacion=1`."""
     return await service.buscar_clinicas(db, q, limit)
+
+
+@router.get("/clinicas/todas", response_model=list[ClinicaBuscarOut])
+async def listar_clinicas_todas(db: AsyncSession = Depends(get_db)):
+    """Precarga completa (~100-150 filas) para el formulario de Carga de
+    Facturación — ver `/medicos/todos` y `/obras-sociales/todas`."""
+    return await service.listar_clinicas_todas(db)
+
+
+@router.post("/clinicas", response_model=ClinicaBuscarOut, status_code=status.HTTP_201_CREATED)
+async def crear_clinica(
+    payload: ClinicaCreate,
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Alta rápida de clínica — solo el nombre; el resto queda en su default y
+    `es_organizacion=1` fijo. Mismo patrón que `POST /afiliados`."""
+    return await service.crear_clinica(db, payload)
+
+
+@router.delete("/clinicas/{cod}", status_code=status.HTTP_204_NO_CONTENT)
+async def eliminar_clinica(
+    cod: int,
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Borra una clínica. 404 si no existe; 409 si tiene prestaciones no anuladas
+    que la referencian (hay que anularlas antes)."""
+    await service.eliminar_clinica(db, cod)
 
 
 @router.get("/obras-sociales")
@@ -245,10 +279,11 @@ async def listar_facturas(
     # mostrar quién cerró cada factura, sin N+1.
     nros: set[int] = set()
     for row in rows:
-        try:
-            nros.add(int(row.usuario))
-        except (TypeError, ValueError):
-            continue
+        for valor in (row.usuario, row.creado_por):
+            try:
+                nros.add(int(valor))
+            except (TypeError, ValueError):
+                continue
     nombres: dict[str, str] = {}
     if nros:
         med_rows = (await db.execute(
@@ -269,6 +304,8 @@ async def listar_facturas(
             factura.periodo_label = service.periodo_label(factura.periodo)
         if factura.usuario:
             factura.usuario_nombre = nombres.get(str(factura.usuario))
+        if factura.creado_por:
+            factura.creado_por_nombre = nombres.get(str(factura.creado_por))
         if factura.id_prestaciones in importes_abiertos:
             factura.importe = importes_abiertos[factura.id_prestaciones]
         out.append(factura)
@@ -284,6 +321,50 @@ async def factura_detalle(id: int, db: AsyncSession = Depends(get_db)):
     return await service.obtener_factura_detalle(db, id)
 
 
+# ── Registro de facturación (auditoría administrativa, scope facturacion:registro) ──
+@router.get("/registro/carga-por-usuario", response_model=list[CargaPorUsuarioOut])
+async def registro_carga_por_usuario(
+    cod_obra: Optional[str] = Query(None),
+    periodo: Optional[str] = Query(None, description="YYYYMM"),
+    desde: Optional[datetime.date] = Query(None),
+    hasta: Optional[datetime.date] = Query(None),
+    limit: int = Query(200, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+):
+    """Ranking de prestaciones cargadas por operador del Colegio en un
+    período/rango — nunca incluye lo que carga un médico desde su portal."""
+    return await service.carga_por_usuario(
+        db, cod_obra=cod_obra, periodo=periodo, desde=desde, hasta=hasta, limit=limit,
+    )
+
+
+@router.get("/registro/cierres-por-usuario", response_model=list[CierresPorUsuarioOut])
+async def registro_cierres_por_usuario(
+    cod_obra: Optional[str] = Query(None),
+    periodo: Optional[str] = Query(None, description="YYYYMM"),
+    desde: Optional[datetime.date] = Query(None),
+    hasta: Optional[datetime.date] = Query(None),
+    limit: int = Query(200, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+):
+    """Ranking de facturas cerradas por operador en un período/rango."""
+    return await service.cierres_por_usuario(
+        db, cod_obra=cod_obra, periodo=periodo, desde=desde, hasta=hasta, limit=limit,
+    )
+
+
+@router.get("/registro/actividad", response_model=list[ActividadEventoOut])
+async def registro_actividad(
+    cod_obra: Optional[str] = Query(None),
+    periodo: Optional[str] = Query(None, description="YYYYMM"),
+    limit: int = Query(20, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+):
+    """Feed de actividad administrativa reciente: cierres + cargas del Colegio,
+    intercalados por fecha descendente."""
+    return await service.actividad_reciente(db, cod_obra=cod_obra, periodo=periodo, limit=limit)
+
+
 # ── Grupo C — Prestaciones ───────────────────────────────────────────────────
 @router.get("/prestaciones/recientes", response_model=list[PrestacionRead], response_model_by_alias=False)
 async def prestaciones_recientes(
@@ -297,6 +378,7 @@ async def prestaciones_recientes(
 @router.get("/prestaciones", response_model=list[PrestacionRead], response_model_by_alias=False)
 async def listar_prestaciones(
     response: Response,
+    id: Optional[int] = Query(None, description="ID exacto de la prestación (PK)"),
     cod_obra: Optional[str] = Query(None),
     periodo: Optional[str] = Query(None),
     cod_medico: Optional[str] = Query(None),
@@ -310,6 +392,12 @@ async def listar_prestaciones(
     fecha_hasta: Optional[datetime.date] = Query(None),
     revisado: Optional[bool] = Query(None, description="Filtro por checkbox de auditoría"),
     q: Optional[str] = Query(None, description="Búsqueda libre: médico, código, paciente, nro_orden"),
+    orden_o_autorizacion: Optional[str] = Query(
+        None,
+        description="Busca el texto en `nro_orden` O en `autorizacion`. Segundo campo "
+                    "del buscador de la pantalla de consulta; se combina con AND con "
+                    "el resto de los filtros (incluido `q`).",
+    ),
     solo_facturas_abiertas: bool = Query(
         False,
         description="Devuelve sólo prestaciones cuya cabecera de facturación sigue "
@@ -329,11 +417,13 @@ async def listar_prestaciones(
 
     rows, total = await service.listar_prestaciones(
         db,
+        prestacion_id=id,
         cod_obra=cod_obra, periodo=periodo, cod_medico=cod_medico,
         cod_nomenclador=cod_nomenclador, estado=estado,
         tipo=tipo, grupo_equipo_id=grupo_equipo_id,
         dni_paciente=dni_paciente, nombre_paciente=nombre_paciente,
         fecha_desde=fecha_desde, fecha_hasta=fecha_hasta, revisado=revisado, q=q,
+        orden_o_autorizacion=orden_o_autorizacion,
         solo_facturas_abiertas=solo_facturas_abiertas,
         limit=limit, offset=offset,
     )
@@ -558,6 +648,24 @@ async def obtener_prestacion(id: int, db: AsyncSession = Depends(get_db)):
     return await service.obtener_prestacion(db, id)
 
 
+@router.get(
+    "/prestaciones/{id}/ficha", response_model=PrestacionFichaOut,
+    response_model_by_alias=False,
+)
+async def obtener_prestacion_ficha(id: int, db: AsyncSession = Depends(get_db)):
+    """Ficha completa de una prestación: la fila cruda de `detalle_facturacion` (sin
+    los recortes de `PrestacionRead`) más los bloques resueltos — médico, clínica,
+    obra social, nomenclador, paciente, cabecera de factura, quién la cargó, el
+    equipo quirúrgico y el historial de auditoría.
+
+    Pantalla de consulta/soporte, **solo lectura** — no toca nada. Es una vista
+    distinta de `GET /prestaciones/{id}` (que existe para precargar el formulario de
+    edición): engordar aquel endpoint con estos bloques le sumaría varias queries a
+    cada apertura del formulario, que se llama mucho más seguido que esta ficha.
+    """
+    return await service.obtener_prestacion_ficha(db, id)
+
+
 @router.patch("/prestaciones/{id}", response_model=PrestacionRead, response_model_by_alias=False)
 async def editar_prestacion(
     id: int,
@@ -574,4 +682,4 @@ async def anular_prestacion(
     user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    await service.anular_prestacion(db, id, _usuario(user))
+    await service.anular_prestacion(db, id)

@@ -2,7 +2,7 @@ from typing import List, Optional
 
 import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import and_, exists, or_, select, update
+from sqlalchemy import and_, exists, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.deps import get_current_user_with_scopes_and_role
@@ -447,6 +447,30 @@ async def add_especialidad(
     return ne
 
 
+async def _contar_ne_activas_de_especialidad(
+    db: AsyncSession, nomenclador_id: int, especialidad_id_colegio: int,
+    obra_social_nro: Optional[int],
+) -> int:
+    """Cuántos Valor NE activos referencian esta especialidad para este código: una fila
+    NE implica la habilitación, así que no se puede desactivar/borrar la habilitación
+    mientras exista una NE activa que dependa de ella (quedaría huérfana).
+
+    obra_social_nro=None (habilitación del Colegio) cuenta NE de cualquier OS que no
+    tenga su propia regla propia para esta especialidad — borrar la regla compartida
+    las dejaría sin sustento. obra_social_nro=N (regla propia de esa OS) solo cuenta
+    NE de esa OS."""
+    condiciones = [
+        Valor.nomenclador_id == nomenclador_id,
+        Valor.origen == "NE",
+        Valor.especialidad_id_colegio == especialidad_id_colegio,
+        Valor.estado == "activo",
+    ]
+    if obra_social_nro is not None:
+        condiciones.append(Valor.obra_social_nro == obra_social_nro)
+    stmt = select(func.count()).select_from(Valor).where(*condiciones)
+    return (await db.execute(stmt)).scalar_one()
+
+
 @router.patch("/{id}/especialidades/{esp_id}/activar", response_model=NomencladorEspecialidadOut)
 async def toggle_especialidad(
     id: int,
@@ -465,6 +489,14 @@ async def toggle_especialidad(
     obj = (await db.execute(stmt)).scalar_one_or_none()
     if not obj:
         raise HTTPException(404, "Habilitación no encontrada")
+    if not activo:
+        cantidad = await _contar_ne_activas_de_especialidad(db, id, esp_id, obra_social_nro)
+        if cantidad:
+            raise HTTPException(
+                409,
+                f"No se puede desactivar: hay {cantidad} valor(es) NE activo(s) que "
+                "dependen de esta habilitación. Cerrarlos primero.",
+            )
     obj.activo = activo
     await db.commit()
     await db.refresh(obj)
@@ -488,6 +520,13 @@ async def delete_especialidad(
     obj = (await db.execute(stmt)).scalar_one_or_none()
     if not obj:
         raise HTTPException(404, "Habilitación no encontrada")
+    cantidad = await _contar_ne_activas_de_especialidad(db, id, esp_id, obra_social_nro)
+    if cantidad:
+        raise HTTPException(
+            409,
+            f"No se puede borrar: hay {cantidad} valor(es) NE activo(s) que dependen "
+            "de esta habilitación. Cerrarlos primero.",
+        )
     await db.delete(obj)
     await db.commit()
 

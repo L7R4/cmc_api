@@ -187,18 +187,22 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     ("DELETE", "/api/obras_social/{id}"): Scope.CATALOGO_EDITAR,
     ("POST", "/api/obras_social/{id}/documentos"): Scope.CATALOGO_EDITAR,
 
-    # Pagos y deuda de la obra social (pestaña «Pagos» del perfil). Mismos
-    # scopes que el resto del perfil: es información del convenio.
-    ("GET", "/api/obras_social/{obra_id}/pagos"): Scope.CATALOGO_LEER,
-    ("POST", "/api/obras_social/{obra_id}/pagos"): Scope.CATALOGO_EDITAR,
-    ("PUT", "/api/obras_social/{obra_id}/pagos/{pago_id}"): Scope.CATALOGO_EDITAR,
-    ("DELETE", "/api/obras_social/{obra_id}/pagos/{pago_id}"): Scope.CATALOGO_EDITAR,
-    ("POST", "/api/obras_social/{obra_id}/pagos/{pago_id}/factura"): Scope.CATALOGO_EDITAR,
-    ("DELETE", "/api/obras_social/{obra_id}/pagos/{pago_id}/factura"): Scope.CATALOGO_EDITAR,
+    # Pagos y deuda de la obra social (pestaña «Pagos» del perfil): router
+    # deshabilitado (ver app/api/routes.py), así que estas rutas no existen hoy.
+    # Reactivar el router exige descomentar estas seis entradas también, o
+    # test_no_hay_rutas_declaradas_de_mas() falla por entradas huérfanas.
+    # ("GET", "/api/obras_social/{obra_id}/pagos"): Scope.CATALOGO_LEER,
+    # ("POST", "/api/obras_social/{obra_id}/pagos"): Scope.CATALOGO_EDITAR,
+    # ("PUT", "/api/obras_social/{obra_id}/pagos/{pago_id}"): Scope.CATALOGO_EDITAR,
+    # ("DELETE", "/api/obras_social/{obra_id}/pagos/{pago_id}"): Scope.CATALOGO_EDITAR,
+    # ("POST", "/api/obras_social/{obra_id}/pagos/{pago_id}/factura"): Scope.CATALOGO_EDITAR,
+    # ("DELETE", "/api/obras_social/{obra_id}/pagos/{pago_id}/factura"): Scope.CATALOGO_EDITAR,
     ("DELETE", "/api/obras_social/{id}/documentos/{doc_id}"): Scope.CATALOGO_EDITAR,
 
     # ── Catálogos: especialidades y períodos ─────────────────────────────────
     ("GET", "/api/especialidades/"): Scope.CATALOGO_LEER,
+    ("POST", "/api/especialidades/"): Scope.CATALOGO_EDITAR,
+    ("PATCH", "/api/especialidades/{id}"): Scope.CATALOGO_EDITAR,
     ("GET", "/api/periodos/disponibles"): Scope.CATALOGO_LEER,
     ("GET", "/api/periodos/disponibles_lotes_ajustes"): Scope.CATALOGO_LEER,
 
@@ -230,6 +234,7 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     # quien administra contenido, igual que las noticias.
     ("GET", "/api/planillas/"): Scope.CONTENIDO_LEER,
     ("POST", "/api/planillas/"): Scope.CONTENIDO_EDITAR,
+    ("PATCH", "/api/planillas/{planilla_id}"): Scope.CONTENIDO_EDITAR,
     ("DELETE", "/api/planillas/{planilla_id}"): Scope.CONTENIDO_EDITAR,
 
     # ── Datos del propio Colegio ─────────────────────────────────────────────
@@ -358,6 +363,7 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     # ── Padrones ─────────────────────────────────────────────────────────────
     ("GET", "/api/padrones/catalogo"): Scope.CATALOGO_LEER,
     ("GET", "/api/padrones/obras-sociales/{nro_os}/medicos"): Scope.PADRON_LEER,
+    ("GET", "/api/padrones/obras-sociales/{nro_os}/medicos/export"): Scope.PADRON_LEER,
     ("GET", "/api/padrones/{nro_socio}"): LECTURA_PADRON,
     ("GET", "/api/padrones/{medico_id}/asignaciones"): LECTURA_PADRON,
     ("POST", "/api/padrones/{medico_id}/asignaciones/concepto"): Scope.PADRON_EDITAR,
@@ -427,21 +433,32 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     ("POST", "/api/deducciones/{pago_id}/deducciones/refrescar"): Scope.DEDUCCION_APLICAR,
     ("DELETE", "/api/deducciones/{pago_id}/colegio/deshacer"): Scope.DEDUCCION_ELIMINAR,
     ("DELETE", "/api/deducciones/{pago_id}/colegio/deshacer/{desc_id}"): Scope.DEDUCCION_ELIMINAR,
-    # Asignación de socios a descuentos: es catálogo de descuentos, no deducción.
-    ("GET", "/api/deducciones/socios"): Scope.DESCUENTO_LEER,
-    ("POST", "/api/deducciones/socios"): Scope.DESCUENTO_CREAR,
-    ("GET", "/api/deducciones/socios/{socio_descuento_id}"): Scope.DESCUENTO_LEER,
-    ("PATCH", "/api/deducciones/socios/{socio_descuento_id}"): Scope.DESCUENTO_EDITAR,
-    ("PATCH", "/api/deducciones/socios/{socio_descuento_id}/pagador"): Scope.DESCUENTO_EDITAR,
-    ("DELETE", "/api/deducciones/socios/{socio_descuento_id}"): Scope.DESCUENTO_ELIMINAR,
+    # Asignación de socios a conceptos: es catálogo de conceptos, no deducción.
+    ("GET", "/api/deducciones/socios"): Scope.CONCEPTO_LEER,
+    ("POST", "/api/deducciones/socios"): Scope.CONCEPTO_CREAR,
+    ("GET", "/api/deducciones/socios/{socio_descuento_id}"): Scope.CONCEPTO_LEER,
+    ("PATCH", "/api/deducciones/socios/{socio_descuento_id}"): Scope.CONCEPTO_EDITAR,
+    ("PATCH", "/api/deducciones/socios/{socio_descuento_id}/pagador"): Scope.CONCEPTO_EDITAR,
+    ("DELETE", "/api/deducciones/socios/{socio_descuento_id}"): Scope.CONCEPTO_ELIMINAR,
 
-    # ── Descuentos ───────────────────────────────────────────────────────────
-    ("GET", "/api/descuentos"): Scope.DESCUENTO_LEER,
-    ("POST", "/api/descuentos"): Scope.DESCUENTO_CREAR,
-    ("GET", "/api/descuentos/by_nro/{nro_colegio}"): Scope.DESCUENTO_LEER,
-    ("GET", "/api/descuentos/{desc_id}"): Scope.DESCUENTO_LEER,
-    ("PATCH", "/api/descuentos/{desc_id}"): Scope.DESCUENTO_EDITAR,
-    ("DELETE", "/api/descuentos/{desc_id}"): Scope.DESCUENTO_ELIMINAR,
+    # ── Conceptos ────────────────────────────────────────────────────────────
+    ("GET", "/api/conceptos"): Scope.CONCEPTO_LEER,
+    ("POST", "/api/conceptos"): Scope.CONCEPTO_CREAR,
+    ("GET", "/api/conceptos/by_nro/{nro_colegio}"): Scope.CONCEPTO_LEER,
+    ("GET", "/api/conceptos/{concepto_id}"): Scope.CONCEPTO_LEER,
+    ("PATCH", "/api/conceptos/{concepto_id}"): Scope.CONCEPTO_EDITAR,
+    ("DELETE", "/api/conceptos/{concepto_id}"): Scope.CONCEPTO_ELIMINAR,
+
+    # ── Cobranzas (panel de deuda por concepto, solo lectura) ────────────────
+    # Rutas estáticas antes que las dinámicas por la misma razón que en
+    # Deducciones: /export y /por_concepto tienen que matchear antes que
+    # cualquier ruta con {id}.
+    ("GET", "/api/cobranzas/resumen"): Scope.COBRANZA_LEER,
+    ("GET", "/api/cobranzas/por_concepto"): Scope.COBRANZA_LEER,
+    ("GET", "/api/cobranzas/por_socio"): Scope.COBRANZA_LEER,
+    ("GET", "/api/cobranzas/export"): TODOS(Scope.COBRANZA_LEER, Scope.EXPORT_GENERAR),
+    ("GET", "/api/cobranzas/por_concepto/{descuento_id}/medicos"): Scope.COBRANZA_LEER,
+    ("GET", "/api/cobranzas/medicos/{medico_id}"): Scope.COBRANZA_LEER,
 
     # ── Facturación ──────────────────────────────────────────────────────────
     ("GET", "/api/facturacion/afiliados"): Scope.FACTURACION_LEER,
@@ -449,6 +466,9 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     ("GET", "/api/facturacion/afiliados/{dni:path}"): Scope.FACTURACION_LEER,
     ("DELETE", "/api/facturacion/afiliados/{dni:path}"): Scope.FACTURACION_CARGAR,
     ("GET", "/api/facturacion/clinicas"): Scope.FACTURACION_LEER,
+    ("GET", "/api/facturacion/clinicas/todas"): Scope.FACTURACION_LEER,
+    ("POST", "/api/facturacion/clinicas"): Scope.FACTURACION_CARGAR,
+    ("DELETE", "/api/facturacion/clinicas/{cod}"): Scope.FACTURACION_CARGAR,
     ("GET", "/api/facturacion/medicos"): Scope.FACTURACION_LEER,
     ("GET", "/api/facturacion/medicos/todos"): Scope.FACTURACION_LEER,
     ("GET", "/api/facturacion/obras-sociales"): Scope.CATALOGO_LEER,
@@ -465,6 +485,15 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     ("GET", "/api/facturacion/facturas"): Scope.FACTURACION_LEER,
     ("GET", "/api/facturacion/facturas/{id}/detalle"): Scope.FACTURACION_LEER,
     ("POST", "/api/facturacion/facturas/complemento"): Scope.FACTURACION_COMPLEMENTAR,
+    # Exportables (detalle + carátula) de una factura — mismos scopes que el
+    # export ya existente de deducciones/cobranzas (`TODOS(..., EXPORT_GENERAR)`).
+    ("GET", "/api/facturacion/facturas/{id}/export/detalle.pdf"): TODOS(Scope.FACTURACION_LEER, Scope.EXPORT_GENERAR),
+    ("GET", "/api/facturacion/facturas/{id}/export/detalle.xlsx"): TODOS(Scope.FACTURACION_LEER, Scope.EXPORT_GENERAR),
+    ("GET", "/api/facturacion/facturas/{id}/export/caratula.pdf"): TODOS(Scope.FACTURACION_LEER, Scope.EXPORT_GENERAR),
+    ("GET", "/api/facturacion/facturas/{id}/export/caratula.xlsx"): TODOS(Scope.FACTURACION_LEER, Scope.EXPORT_GENERAR),
+    ("GET", "/api/facturacion/export-presets"): Scope.FACTURACION_LEER,
+    ("POST", "/api/facturacion/export-presets"): Scope.FACTURACION_LEER,
+    ("DELETE", "/api/facturacion/export-presets/{preset_id}"): Scope.FACTURACION_LEER,
     ("POST", "/api/facturacion/prestaciones-complementaria"): Scope.FACTURACION_COMPLEMENTAR,
     # `filtro_socio()`: sin `medico:leer` el filtro se fuerza al socio del token.
     ("GET", "/api/facturacion/prestaciones"): LECTURA_FACTURACION,
@@ -472,6 +501,11 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     ("GET", "/api/facturacion/prestaciones/recientes"): Scope.FACTURACION_LEER,
     ("PATCH", "/api/facturacion/prestaciones/revisado"): Scope.FACTURACION_CARGAR,
     ("GET", "/api/facturacion/prestaciones/{id}"): Scope.FACTURACION_LEER,
+    # Ficha completa de una prestación (pantalla de consulta, solo lectura).
+    # `facturacion:leer` a secas y NO `LECTURA_FACTURACION`: la ficha es MÁS sensible
+    # que `/prestaciones/{id}` — expone `usuario`, `calculo_snapshot` y el audit_log
+    # con IPs y bodies. Mismo criterio de acceso administrativo que ese endpoint.
+    ("GET", "/api/facturacion/prestaciones/{id}/ficha"): Scope.FACTURACION_LEER,
     ("PATCH", "/api/facturacion/prestaciones/{id}"): Scope.FACTURACION_CARGAR,
     ("DELETE", "/api/facturacion/prestaciones/{id}"): Scope.FACTURACION_CARGAR,
     ("POST", "/api/facturacion/cierre"): Scope.FACTURACION_CERRAR,
@@ -487,6 +521,13 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     # Lo dispara el cron con X-Cron-Secret, sin JWT. Ver la nota en MAQUINA.
     ("POST", "/api/facturacion/periodo-medico/cerrar-vencidos"): MAQUINA,
 
+    # Registro de facturación (auditoría administrativa): quién cerró, cuánto
+    # carga cada operador del Colegio, actividad reciente. Permiso propio,
+    # separado de FACTURACION_LEER.
+    ("GET", "/api/facturacion/registro/carga-por-usuario"): Scope.FACTURACION_REGISTRO,
+    ("GET", "/api/facturacion/registro/cierres-por-usuario"): Scope.FACTURACION_REGISTRO,
+    ("GET", "/api/facturacion/registro/actividad"): Scope.FACTURACION_REGISTRO,
+
     # ── Validaciones (el permiso base del prestador) ─────────────────────────
     ("GET", "/api/validaciones/prestador"): Scope.VALIDACION_CARGAR,
     ("GET", "/api/validaciones/codigos"): Scope.VALIDACION_CARGAR,
@@ -497,6 +538,7 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     ("DELETE", "/api/validaciones/prestaciones/{prestacion_id}"): Scope.VALIDACION_CARGAR,
     ("POST", "/api/validaciones/prestaciones/{prestacion_id}/orden"): Scope.VALIDACION_CARGAR,
     ("GET", "/api/validaciones/sancor/estado"): Scope.VALIDACION_CARGAR,
+    ("GET", "/api/validaciones/nobis/afiliado"): Scope.VALIDACION_CARGAR,
     # Importar el padrón de OSPM: operación del Colegio, no del prestador —
     # mismo scope que el resto de las mutaciones de padrón.
     ("POST", "/api/validaciones/ospm/padron"): Scope.PADRON_EDITAR,
@@ -551,7 +593,9 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     # ── Valores del nomenclador ──────────────────────────────────────────────
     ("GET", "/api/valores_nm/"): Scope.NOMENCLADOR_LEER,
     ("POST", "/api/valores_nm/"): Scope.NOMENCLADOR_EDITAR,
+    ("POST", "/api/valores_nm/multi"): Scope.NOMENCLADOR_EDITAR,
     ("GET", "/api/valores_nm/vigencias"): Scope.NOMENCLADOR_LEER,
+    ("GET", "/api/valores_nm/resumen_por_vigencia"): Scope.NOMENCLADOR_LEER,
     ("GET", "/api/valores_nm/historial"): Scope.NOMENCLADOR_LEER,
     ("GET", "/api/valores_nm/codigos_por_vigencia"): Scope.NOMENCLADOR_LEER,
     ("GET", "/api/valores_nm/por_vigencia"): Scope.NOMENCLADOR_LEER,

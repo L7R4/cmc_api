@@ -56,18 +56,24 @@ def _pct(honorarios: int, pct: Decimal) -> Decimal:
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Data a cargar — editar acá. Ejemplo: cirugía adulto con 7 niveles.
+#
+# ⚠ `nombre` no es sólo una etiqueta: el front arma el alta a partir de él y
+# la API deriva el slug con slugify_codigo(nombre) — `codigo` no viaja en el
+# request. Un nombre que no slugifique al codigo de acá crea un galeno con
+# OTRO slug, que es como nacieron las familias paralelas (cirugia_adulto vs
+# galeno_cirugia_adultos). _seed_plantilla lo valida y aborta.
 # ─────────────────────────────────────────────────────────────────────────────
 PLANTILLAS: list[Plantilla] = [
     Plantilla(
         grupo="cirugia_adulto_de_7_niveles",
-        codigo="cirugia_adulto",
-        nombre="Cirugía Adulto",
+        codigo="galeno_cirugia_adultos",
+        nombre="Galeno Cirugia Adultos",
         niveles=[NivelPlantilla(nivel=n) for n in range(1, 8)],
     ),
     Plantilla(
         grupo="cirugia_adulto_de_10_niveles",
-        codigo="cirugia_adulto",
-        nombre="Cirugía Adulto",
+        codigo="galeno_cirugia_adultos",
+        nombre="Galeno Cirugia Adultos",
         niveles=[
             NivelPlantilla(nivel=1, unidades_honorarios=Decimal("3")),
             NivelPlantilla(nivel=2, unidades_honorarios=Decimal("10"), unidades_ayudante=_pct(10, Decimal("0.25"))),

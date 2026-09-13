@@ -9,7 +9,19 @@ from app.auth.deps import get_current_user
 from app.auth.ownership import medico_objetivo
 from app.db.database import get_db
 from app.db.models import Especialidad, MedicoObraSocial, ListadoMedico, ObrasSociales
-from app.modules.padrones.schemas import AsignacionesOut, ObraSocialOut, PadronOut, PadronUpdate, PageMedicoOS
+from app.modules.catalogs.familia_padron import codigos_de_familia
+from app.modules.padrones.schemas import (
+    AsignacionesOut,
+    MedicoOSItemOut,
+    ObraSocialOut,
+    PadronOut,
+    PadronUpdate,
+    PageMedicoOS,
+)
+
+import logging
+
+log = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -50,6 +62,11 @@ async def _listado_defaults(db: AsyncSession, nro_socio: int):
 
 
 # 1) Catálogo: listar obras sociales con MARCA = "S"
+#
+# Sólo cabezas de familia (`obra_social_principal_id IS NULL`): una empresa
+# con varios planes (Swiss Medical, Medife, Sancor...) tiene que aparecer
+# UNA sola vez acá. Las asociadas siguen existiendo en `obras_sociales` para
+# facturación/valores, sólo se ocultan de este selector de padrón.
 @router.get("/catalogo", response_model=List[ObraSocialOut])
 async def catalogo_obras_sociales(
     marca: str = Query("S", description='Filtrar por MARCA; por defecto "S"'),
@@ -60,7 +77,11 @@ async def catalogo_obras_sociales(
     if nombre_col is None:
         raise HTTPException(status_code=500, detail="No encuentro columna de nombre en ObrasSociales")
 
-    stmt = select(nro_col.label("nro"), nombre_col.label("nombre")).where(ObrasSociales.MARCA == marca).order_by(nombre_col.asc())
+    stmt = (
+        select(nro_col.label("nro"), nombre_col.label("nombre"))
+        .where(ObrasSociales.MARCA == marca, ObrasSociales.obra_social_principal_id.is_(None))
+        .order_by(nombre_col.asc())
+    )
     rows = (await db.execute(stmt)).all()
 
     out: list[ObraSocialOut] = []
@@ -100,34 +121,27 @@ async def list_padrones_de_medico(
     return list(result.scalars())
 
 
-@router.post("/{medico_id}/obras-sociales/{nro_os}", response_model=PadronOut)
-async def create_padron_checkbox(
-    response: Response,
-    medico_id: int = Path(..., ge=1),
-    nro_os: int = Path(..., ge=1),
-    body: Optional[PadronUpdate] = Body(default=None),
-    db: AsyncSession = Depends(get_db),
-):
-    medico = (
-        await db.execute(select(ListadoMedico).where(ListadoMedico.ID == medico_id))
-    ).scalar_one_or_none()
-    if not medico:
-        raise HTTPException(status_code=404, detail="Médico no encontrado")
+async def _upsert_una_fila(
+    db: AsyncSession,
+    nro_socio: int,
+    nro_os: int,
+    body: Optional[PadronUpdate],
+    defaults: dict,
+) -> tuple[Optional[MedicoObraSocial], bool]:
+    """Upsert de una sola fila `(nro_socio, nro_os)`.
 
-    nro_socio = getattr(medico, "NRO_SOCIO", None)
-    if not nro_socio:
-        raise HTTPException(status_code=400, detail="Médico sin NRO_SOCIO")
-
+    Devuelve `(fila, creada)`. `fila=None` si `nro_os` no tiene catálogo
+    `MARCA='S'` activo — el llamador decide si eso es un error (código
+    pedido explícitamente) o se omite (otro miembro de la familia).
+    """
     nro_col = _os_number_col()
     os_row = (
         await db.execute(
-            select(ObrasSociales).where(
-                and_(nro_col == nro_os, ObrasSociales.MARCA == "S")
-            )
+            select(ObrasSociales).where(and_(nro_col == nro_os, ObrasSociales.MARCA == "S"))
         )
     ).scalar_one_or_none()
     if not os_row:
-        raise HTTPException(status_code=404, detail="Obra social no encontrada o inactiva")
+        return None, False
 
     padron_os_attr = _padron_number_attr()
     existing = (
@@ -138,8 +152,6 @@ async def create_padron_checkbox(
         )
     ).scalar_one_or_none()
 
-    defaults = await _listado_defaults(db, nro_socio)
-
     if existing:
         if body:
             for k, v in body.model_dump(exclude_unset=True).items():
@@ -148,11 +160,7 @@ async def create_padron_checkbox(
         for k, v in defaults.items():
             if getattr(existing, k, None) in (None, "", 0):
                 setattr(existing, k, v)
-
-        await db.commit()
-        await db.refresh(existing)
-        response.status_code = status.HTTP_200_OK
-        return existing
+        return existing, False
 
     nuevo = MedicoObraSocial(
         NRO_SOCIO=nro_socio,
@@ -161,10 +169,63 @@ async def create_padron_checkbox(
         **(body.model_dump(exclude_unset=True) if body else {}),
     )
     db.add(nuevo)
+    return nuevo, True
+
+
+@router.post("/{medico_id}/obras-sociales/{nro_os}", response_model=PadronOut)
+async def create_padron_checkbox(
+    response: Response,
+    medico_id: int = Path(..., ge=1),
+    nro_os: int = Path(..., ge=1),
+    body: Optional[PadronUpdate] = Body(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Tilda el padrón de `nro_os` para el médico — y el de TODA su familia.
+
+    Una empresa con varios planes (Swiss Medical, Medife, Sancor...) es un
+    único padrón: tildar "Swiss Medical" tiene que dar de alta al médico en
+    los 4 códigos, no sólo en el que aparece en el selector. Ver
+    `app/modules/catalogs/familia_padron.py`.
+    """
+    medico = (
+        await db.execute(select(ListadoMedico).where(ListadoMedico.ID == medico_id))
+    ).scalar_one_or_none()
+    if not medico:
+        raise HTTPException(status_code=404, detail="Médico no encontrado")
+
+    nro_socio = getattr(medico, "NRO_SOCIO", None)
+    if not nro_socio:
+        raise HTTPException(status_code=400, detail="Médico sin NRO_SOCIO")
+
+    familia = await codigos_de_familia(db, nro_os)
+    defaults = await _listado_defaults(db, nro_socio)
+
+    filas_por_codigo: dict[int, MedicoObraSocial] = {}
+    creada_solicitada = False
+    omitidos: list[int] = []
+    for miembro in familia:
+        fila, creada = await _upsert_una_fila(db, nro_socio, miembro, body, defaults)
+        if fila is None:
+            omitidos.append(miembro)
+            continue
+        filas_por_codigo[miembro] = fila
+        if miembro == nro_os:
+            creada_solicitada = creada
+
+    fila_solicitada = filas_por_codigo.get(nro_os)
+    if fila_solicitada is None:
+        raise HTTPException(status_code=404, detail="Obra social no encontrada o inactiva")
+
+    if omitidos:
+        log.warning(
+            "padron: familia de %s tiene miembros sin catálogo activo, se omiten: %s",
+            nro_os, omitidos,
+        )
+
     await db.commit()
-    await db.refresh(nuevo)
-    response.status_code = status.HTTP_201_CREATED
-    return nuevo
+    await db.refresh(fila_solicitada)
+    response.status_code = status.HTTP_201_CREATED if creada_solicitada else status.HTTP_200_OK
+    return fila_solicitada
 
 
 @router.delete("/{medico_id}/obras-sociales/{nro_os}", status_code=status.HTTP_200_OK)
@@ -173,6 +234,8 @@ async def delete_padron_checkbox(
     nro_os: int = Path(..., ge=1),
     db: AsyncSession = Depends(get_db),
 ):
+    """Destilda el padrón de `nro_os` para el médico — y el de toda su
+    familia (ver `create_padron_checkbox`)."""
     medico = (
         await db.execute(select(ListadoMedico).where(ListadoMedico.ID == medico_id))
     ).scalar_one_or_none()
@@ -183,44 +246,66 @@ async def delete_padron_checkbox(
     if not nro_socio:
         return {"deleted": 0}
 
+    familia = await codigos_de_familia(db, nro_os)
     padron_os_attr = _padron_number_attr()
-    row = (
+    filas = (
         await db.execute(
             select(MedicoObraSocial).where(
-                and_(MedicoObraSocial.NRO_SOCIO == nro_socio, padron_os_attr == nro_os)
+                and_(MedicoObraSocial.NRO_SOCIO == nro_socio, padron_os_attr.in_(familia))
             )
         )
-    ).scalar_one_or_none()
+    ).scalars().all()
 
-    if not row:
-        return {"deleted": 0}
-
-    await db.delete(row)
+    for fila in filas:
+        await db.delete(fila)
     await db.commit()
-    return {"deleted": 1}
+    return {"deleted": len(filas)}
 
 
-@router.get("/obras-sociales/{nro_os}/medicos", response_model=PageMedicoOS)
-async def list_medicos_por_obra_social(
-    nro_os: int = Path(..., ge=1),
-    search: str | None = Query(None, description="Filtra por NOMBRE contiene o NRO_SOCIO exacto"),
-    page: int = Query(1, ge=1),
-    size: int = Query(50, ge=1, le=200),
-    db: AsyncSession = Depends(get_db),
-):
+async def _armar_query_medicos_por_os(db: AsyncSession, nro_os: int, search: str | None):
+    """Arma el SELECT del padrón de una obra social — expandido a toda su
+    familia — sin `ORDER BY`/`OFFSET`/`LIMIT`. Compartido por el endpoint
+    paginado y por el de exportación: ambos tienen que devolver exactamente
+    el mismo universo de filas, sólo cambia cuánto de ese universo se manda.
+
+    Una empresa con varios planes (Swiss Medical, Medife, Sancor...) manda
+    UN padrón; pedir cualquiera de sus códigos devuelve el mismo resultado.
+    Sin la dedup por `NRO_SOCIO` el `IN(...)` de la familia multiplicaría
+    filas (un prestador empadronado en 3 planes saldría 3 veces), y encima
+    la tabla legacy tiene pares `(NRO_SOCIO, NRO_OBRASOCIAL)` duplicados —
+    de ahí el `MIN(ID)` como desempate determinístico.
+    """
     padron_os_attr = _padron_number_attr()
+    familia = await codigos_de_familia(db, nro_os)
 
     LM = aliased(ListadoMedico)
-    OS = aliased(ObrasSociales)
 
-    filters = [padron_os_attr == nro_os]
-
+    search_filters = []
     if search:
         s = search.strip()
         if s.isdigit():
-            filters.append(LM.NRO_SOCIO == int(s))
+            search_filters.append(LM.NRO_SOCIO == int(s))
         else:
-            filters.append(LM.NOMBRE.like(f"%{s}%"))
+            search_filters.append(LM.NOMBRE.like(f"%{s}%"))
+
+    # Una fila elegida por NRO_SOCIO entre todos los códigos de la familia
+    # (y sus duplicados internos): el MIN(ID) es determinístico e idempotente.
+    chosen_id_subq = (
+        select(func.min(MedicoObraSocial.ID))
+        .where(padron_os_attr.in_(familia))
+        .group_by(MedicoObraSocial.NRO_SOCIO)
+        .scalar_subquery()
+    )
+
+    # `listado_medico` también tiene NRO_SOCIO repetidos (datos legacy, no hay
+    # unique constraint) — sin este segundo dedup, esos socios saldrían
+    # duplicados en el listado aunque `chosen_id_subq` ya haya elegido una
+    # única fila de `medico_obra_social` para ellos.
+    lm_min_id_subq = (
+        select(ListadoMedico.NRO_SOCIO, func.min(ListadoMedico.ID).label("min_id"))
+        .group_by(ListadoMedico.NRO_SOCIO)
+        .subquery()
+    )
 
     esp_keys = ["ESP1", "ESP2", "ESP3", "ESP4", "ESP5", "ESP6"]
 
@@ -238,7 +323,6 @@ async def list_medicos_por_obra_social(
             LM.CUIT.label("CUIT"),
             LM.CODIGO_POSTAL.label("CODIGO_POSTAL"),
             MedicoObraSocial.MARCA.label("MARCA"),
-            OS.OBRA_SOCIAL.label("OBRA_SOCIAL"),
             LM.NRO_ESPECIALIDAD.label("ESP1"),
             LM.NRO_ESPECIALIDAD2.label("ESP2"),
             LM.NRO_ESPECIALIDAD3.label("ESP3"),
@@ -246,27 +330,49 @@ async def list_medicos_por_obra_social(
             LM.NRO_ESPECIALIDAD5.label("ESP5"),
             LM.NRO_ESPECIALIDAD6.label("ESP6"),
         )
-        .join(LM, LM.NRO_SOCIO == MedicoObraSocial.NRO_SOCIO)
-        .outerjoin(OS, OS.NRO_OBRASOCIAL == padron_os_attr)
-        .where(and_(*filters))
+        .join(lm_min_id_subq, lm_min_id_subq.c.NRO_SOCIO == MedicoObraSocial.NRO_SOCIO)
+        .join(LM, LM.ID == lm_min_id_subq.c.min_id)
+        .where(and_(MedicoObraSocial.ID.in_(chosen_id_subq), *search_filters))
     )
 
     total_stmt = (
-        select(func.count())
+        select(func.count(func.distinct(MedicoObraSocial.NRO_SOCIO)))
         .select_from(MedicoObraSocial)
         .join(LM, LM.NRO_SOCIO == MedicoObraSocial.NRO_SOCIO)
-        .where(and_(*filters))
+        .where(and_(padron_os_attr.in_(familia), *search_filters))
     )
     total = (await db.execute(total_stmt)).scalar_one()
 
-    offset = (page - 1) * size
-    result = await db.execute(
-        stmt.order_by(LM.NOMBRE.asc())
-            .offset(offset)
-            .limit(size)
-    )
-    rows = result.mappings().all()
+    # Nombre único de la familia (el de la cabeza), no el de la fila que
+    # matcheó — antes variaba según qué código específico traía cada socio.
+    obra_social_nombre = (
+        await db.execute(
+            select(ObrasSociales.OBRA_SOCIAL).where(
+                ObrasSociales.NRO_OBRASOCIAL.in_(familia),
+                ObrasSociales.obra_social_principal_id.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if obra_social_nombre is None:
+        obra_social_nombre = (
+            await db.execute(
+                select(ObrasSociales.OBRA_SOCIAL).where(ObrasSociales.NRO_OBRASOCIAL == nro_os)
+            )
+        ).scalar_one_or_none()
 
+    return stmt, LM, esp_keys, total, obra_social_nombre
+
+
+async def _filas_a_items(
+    db: AsyncSession,
+    rows,
+    esp_keys: list[str],
+    obra_social_nombre: str | None,
+) -> list[dict]:
+    """Enriquece cada fila con nombres de especialidad y arma el dict que
+    espera `MedicoOSItemOut`. Compartido por el listado paginado y el
+    export: ambos parten del mismo `stmt` de `_armar_query_medicos_por_os`.
+    """
     all_codes: set[int] = set()
     codes_per_row: list[list[int]] = []
 
@@ -314,11 +420,60 @@ async def list_medicos_por_obra_social(
             "CUIT": _clean_str(r["CUIT"]),
             "CODIGO_POSTAL": _clean_str(r["CODIGO_POSTAL"]),
             "MARCA": r["MARCA"],
-            "OBRA_SOCIAL": (r["OBRA_SOCIAL"] or "").strip() if r["OBRA_SOCIAL"] is not None else None,
+            "OBRA_SOCIAL": (obra_social_nombre or "").strip() if obra_social_nombre is not None else None,
             "ESPECIALIDADES": especialidades,
         })
 
+    return items
+
+
+@router.get("/obras-sociales/{nro_os}/medicos", response_model=PageMedicoOS)
+async def list_medicos_por_obra_social(
+    nro_os: int = Path(..., ge=1),
+    search: str | None = Query(None, description="Filtra por NOMBRE contiene o NRO_SOCIO exacto"),
+    page: int = Query(1, ge=1),
+    size: int = Query(50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+):
+    """Padrón de una obra social — expandido a toda su familia, paginado.
+
+    Pensado para la grilla en pantalla. Para exportar el padrón completo
+    (Excel/PDF) usar `GET .../medicos/export`, que devuelve el mismo
+    universo de filas sin paginar.
+    """
+    stmt, LM, esp_keys, total, obra_social_nombre = await _armar_query_medicos_por_os(db, nro_os, search)
+
+    offset = (page - 1) * size
+    result = await db.execute(
+        stmt.order_by(LM.NOMBRE.asc())
+            .offset(offset)
+            .limit(size)
+    )
+    rows = result.mappings().all()
+
+    items = await _filas_a_items(db, rows, esp_keys, obra_social_nombre)
+
     return {"items": items, "total": total, "page": page, "size": size}
+
+
+@router.get("/obras-sociales/{nro_os}/medicos/export", response_model=List[MedicoOSItemOut])
+async def list_medicos_por_obra_social_export(
+    nro_os: int = Path(..., ge=1),
+    search: str | None = Query(None, description="Mismo filtro que el listado paginado"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Igual que `GET .../medicos`, pero sin paginar: pensado para que el
+    front arme la exportación (Excel/PDF) con una sola consulta en vez de
+    recorrer 5-6 páginas de `size=200`. Mismos filtros, misma familia,
+    mismo dedup — sólo cambia que acá no hay `page`/`size`/`total`, es la
+    lista completa directamente.
+    """
+    stmt, LM, esp_keys, _total, obra_social_nombre = await _armar_query_medicos_por_os(db, nro_os, search)
+
+    result = await db.execute(stmt.order_by(LM.NOMBRE.asc()))
+    rows = result.mappings().all()
+
+    return await _filas_a_items(db, rows, esp_keys, obra_social_nombre)
 
 
 # region Asignaciones

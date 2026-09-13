@@ -16,7 +16,9 @@ class Avisos(Base):
     )
 
     ID: Mapped[int] = mapped_column(INTEGER(11), primary_key=True)
-    ARCHIVO: Mapped[str] = mapped_column(String(50, 'utf8_spanish2_ci'), nullable=False, server_default=text("'#'"))
+    # Ampliado de 50 a 255: con 50 el nombre de un PDF subido se truncaba en
+    # silencio contra el prefijo `planillas/` (ver auditoría P-07).
+    ARCHIVO: Mapped[str] = mapped_column(String(255, 'utf8_spanish2_ci'), nullable=False, server_default=text("'#'"))
     FECHA: Mapped[str] = mapped_column(String(10, 'utf8_spanish2_ci'), nullable=False, server_default=text("'--'"))
     EXISTE: Mapped[str] = mapped_column(String(1, 'utf8_spanish2_ci'), nullable=False, server_default=text("'S'"))
     # A = aviso del portal legacy · P = planilla de consulta. La columna ya

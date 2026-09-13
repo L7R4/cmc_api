@@ -3,7 +3,7 @@ from typing import List, Literal, Optional
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
-from sqlalchemy import desc, select
+from sqlalchemy import delete, desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -13,6 +13,8 @@ from app.common.uploads import IMAGENES, validate_upload
 from app.db.database import get_db
 from app.db.models import DocumentoNoticias as DocNoticiaModel
 from app.db.models import Noticia as NoticiaModel
+from app.db.models import NoticiaObraSocial as NoticiaObraSocialModel
+from app.db.models import ObrasSociales as ObrasSocialesModel
 from app.modules.contenido.schemas import DocumentoNoticiasOut, NoticiaDetailOut, NoticiaOut
 
 router = APIRouter()
@@ -53,7 +55,11 @@ def _to_doc_out(row: DocNoticiaModel) -> DocumentoNoticiasOut:
     )
 
 
-def _to_out(row: NoticiaModel, docs: Optional[List[DocNoticiaModel]] = None) -> NoticiaDetailOut:
+def _to_out(
+    row: NoticiaModel,
+    docs: Optional[List[DocNoticiaModel]] = None,
+    obras: Optional[List[int]] = None,
+) -> NoticiaDetailOut:
     return NoticiaDetailOut(
         id=str(row.id),
         titulo=row.titulo,
@@ -66,7 +72,66 @@ def _to_out(row: NoticiaModel, docs: Optional[List[DocNoticiaModel]] = None) -> 
         portada=row.portada,
         badge=row.badge,
         documentos=[_to_doc_out(d) for d in (docs or row.documentos or [])],
+        obras_sociales=obras or [],
     )
+
+
+# Tope de obras sociales por noticia. No hay norma que alcance a cientos de
+# obras sociales; el límite existe para que un POST no inserte miles de filas.
+MAX_OBRAS_POR_NOTICIA = 80
+
+
+async def _obras_de(db: AsyncSession, noticia_id: int) -> List[int]:
+    res = await db.execute(
+        select(NoticiaObraSocialModel.nro_obrasocial)
+        .where(NoticiaObraSocialModel.noticia_id == noticia_id)
+        .order_by(NoticiaObraSocialModel.nro_obrasocial)
+    )
+    return list(res.scalars().all())
+
+
+async def _sync_obras(db: AsyncSession, noticia_id: int, raw: str) -> None:
+    """Reemplaza las obras sociales de la noticia por las de `raw` (CSV de NRO).
+
+    Viene como texto porque el alta de noticias es `multipart/form-data` (lleva
+    portada y adjuntos), no JSON. Cadena vacía = desasociar todas.
+
+    Los números se validan contra `obras_sociales`: sin foreign key posible
+    (`NRO_OBRASOCIAL` no es única), un número inventado quedaría guardado para
+    siempre apuntando a nada.
+    """
+    nros = {int(x) for x in raw.split(",") if x.strip().lstrip("-").isdigit()}
+
+    if len(nros) > MAX_OBRAS_POR_NOTICIA:
+        raise HTTPException(
+            status_code=422,
+            detail=f"No se pueden asociar más de {MAX_OBRAS_POR_NOTICIA} obras sociales",
+        )
+
+    if nros:
+        existentes = set(
+            (
+                await db.execute(
+                    select(ObrasSocialesModel.NRO_OBRASOCIAL).where(
+                        ObrasSocialesModel.NRO_OBRASOCIAL.in_(nros)
+                    )
+                )
+            ).scalars().all()
+        )
+        invalidos = sorted(nros - existentes)
+        if invalidos:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Obras sociales inexistentes: {invalidos}",
+            )
+
+    await db.execute(
+        delete(NoticiaObraSocialModel).where(
+            NoticiaObraSocialModel.noticia_id == noticia_id
+        )
+    )
+    for nro in sorted(nros):
+        db.add(NoticiaObraSocialModel(noticia_id=noticia_id, nro_obrasocial=nro))
 
 
 def _abs_from_doc_path(p: str) -> Path:
@@ -145,7 +210,7 @@ async def obtener_noticia(
             raise HTTPException(status_code=404, detail="Noticia no encontrada")
 
     await db.refresh(n, attribute_names=["documentos"])
-    return _to_out(n)
+    return _to_out(n, obras=await _obras_de(db, n.id))
 
 
 @router.post("/", response_model=NoticiaDetailOut)
@@ -157,6 +222,7 @@ async def crear_noticia(
     publicada: bool = Form(True),
     autor: Optional[str] = Form(None),
     badge: Optional[str] = Form(None),
+    obras_sociales: Optional[str] = Form(None),
     portada: Optional[UploadFile] = File(None),
     adjuntos: Optional[List[UploadFile]] = File(None),
     user=Depends(get_current_user),
@@ -179,6 +245,9 @@ async def crear_noticia(
     db.add(n)
     await db.flush()
 
+    if obras_sociales is not None:
+        await _sync_obras(db, n.id, obras_sociales)
+
     if adjuntos:
         for f in adjuntos:
             if not f:
@@ -198,7 +267,7 @@ async def crear_noticia(
     await db.commit()
     await db.refresh(n)
     await db.refresh(n, attribute_names=["documentos"])
-    return _to_out(n)
+    return _to_out(n, obras=await _obras_de(db, n.id))
 
 
 @router.put("/{id}", response_model=NoticiaDetailOut)
@@ -212,6 +281,7 @@ async def actualizar_noticia(
     autor: Optional[str] = Form(None),
     portada: Optional[UploadFile] = File(None),
     badge: Optional[str] = Form(None),
+    obras_sociales: Optional[str] = Form(None),
     limpiar_portada: Optional[bool] = Form(False),
     adjuntos: Optional[List[UploadFile]] = File(None),
     eliminar_documento_ids: Optional[str] = Form(None),
@@ -256,6 +326,11 @@ async def actualizar_noticia(
                 path=meta["path"],
             ))
 
+    # `None` = el form no mandó el campo, así que no se toca lo asociado.
+    # Cadena vacía = el editor sacó todas las obras sociales.
+    if obras_sociales is not None:
+        await _sync_obras(db, n.id, obras_sociales)
+
     if eliminar_documento_ids:
         ids = [int(x) for x in eliminar_documento_ids.split(",") if x.strip().isdigit()]
         if ids:
@@ -271,7 +346,7 @@ async def actualizar_noticia(
     await db.commit()
     await db.refresh(n)
     await db.refresh(n, attribute_names=["documentos"])
-    return _to_out(n)
+    return _to_out(n, obras=await _obras_de(db, n.id))
 
 
 @router.delete("/{id}")

@@ -309,3 +309,18 @@ class ValoresEticosOut(BaseModel):
     def _url_pdf(self, v: Optional[str]) -> Optional[str]:
         from app.common.files import url_archivo
         return url_archivo(v)
+
+
+# ── Normas operativas del boletín ────────────────────────────────
+class NormaOperativaOut(BaseModel):
+    """Noticia asociada a obras sociales, tal como la lista el boletín.
+
+    Sin `contenido` a propósito: el boletín muestra título y fecha, y el cuerpo
+    lo sirve `/api/noticias/{id}` recién cuando el usuario entra.
+    """
+
+    id: int
+    titulo: str
+    badge: Optional[str] = None
+    fecha: datetime
+    obras_sociales: List[int]

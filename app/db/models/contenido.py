@@ -77,3 +77,32 @@ class PublicidadMedico(Base):
 
     created_at: Mapped["DateTime"] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped["DateTime"] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class NoticiaObraSocial(Base):
+    """Obras sociales alcanzadas por una noticia (hoy, las normas operativas).
+
+    Es lo que consulta el boletín de consulta común, y a propósito **no** es el
+    campo `badge` de la noticia: ese es texto libre de 80 caracteres, así que un
+    "Normas Operativas" con otra escritura dejaría de matchear y el link
+    desaparecería sin que nadie se entere. El badge decide cómo se muestra; esta
+    tabla decide a qué obra social pertenece.
+
+    `nro_obrasocial` va sin foreign key, igual que `boletin_observacion`:
+    `obras_sociales.NRO_OBRASOCIAL` está indexada pero no es única, y MySQL no
+    admite FK contra una columna no única. El número se valida en el handler.
+    """
+
+    __tablename__ = "noticias_obras_sociales"
+
+    noticia_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("noticias.id", ondelete="CASCADE"), primary_key=True
+    )
+    nro_obrasocial: Mapped[int] = mapped_column(Integer, primary_key=True)
+
+    __table_args__ = (
+        # El boletín entra siempre por obra social ("¿qué normas tiene la 256?"),
+        # nunca por noticia; la PK compuesta arranca con noticia_id y no sirve
+        # para ese acceso.
+        Index("ix_noticias_os_nro", "nro_obrasocial"),
+    )

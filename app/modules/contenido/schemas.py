@@ -56,6 +56,9 @@ class DocumentoNoticiasOut(BaseModel):
 
 class NoticiaDetailOut(NoticiaOut):
     documentos: List[DocumentoNoticiasOut] = []
+    # NRO_OBRASOCIAL de las obras sociales alcanzadas por la noticia. Sólo se
+    # usa hoy para las normas operativas; vacío en el resto.
+    obras_sociales: List[int] = []
 
 
 class PublicidadMedicoOut(BaseModel):

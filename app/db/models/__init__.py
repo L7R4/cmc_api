@@ -31,7 +31,7 @@ from app.db.models.catalogs import (
 from app.db.models.rbac import Role, Permission, UserRole, RolePermission, UserPermission
 from app.db.models.sesiones import RefreshToken
 from app.db.models.auditoria import AuditLog
-from app.db.models.contenido import Noticia, DocumentoNoticias, PublicidadMedico
+from app.db.models.contenido import Noticia, DocumentoNoticias, NoticiaObraSocial, PublicidadMedico
 from app.db.models.solicitud import SolicitudRegistro
 from app.db.models.solicitud_cambio import SolicitudCambioMedico
 from app.db.models.beneficios import Beneficio
@@ -86,7 +86,7 @@ __all__ = [
     # auditoria
     "AuditLog",
     # contenido
-    "Noticia", "DocumentoNoticias", "PublicidadMedico",
+    "Noticia", "DocumentoNoticias", "NoticiaObraSocial", "PublicidadMedico",
     # solicitud
     "SolicitudRegistro",
     # solicitudes de cambio de datos (app móvil)

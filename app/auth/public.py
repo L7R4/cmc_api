@@ -58,6 +58,14 @@ PUBLIC_ROUTES: set[tuple[str, str]] = {
     ("GET", "/api/noticias/{id}/documentos"),
     ("GET", "/api/publicidad-medicos/"),
     ("GET", "/api/obras_social/"),
+
+    # Agregada el 2026-08-28 para la sección "Beneficios para Socios" del sitio
+    # público. A diferencia de las cinco de arriba **no recorta nada**, porque
+    # no hay nada que recortar: `/vigentes` ya filtra a activos y no vencidos y
+    # devuelve lo mismo a un anónimo que a un socio. El ABM completo —los dados
+    # de baja, los vencidos, los filtros— sigue detrás de `beneficio:gestionar`
+    # en `GET /api/beneficios/`.
+    ("GET", "/api/beneficios/vigentes"),
 }
 
 

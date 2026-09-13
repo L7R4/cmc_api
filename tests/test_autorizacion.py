@@ -79,13 +79,18 @@ def test_no_hay_rutas_declaradas_de_mas(app):
 def test_la_allowlist_publica_no_crecio():
     """Lo público solo crece con una justificación explícita en el diff.
 
-    Trece rutas:
+    Catorce rutas:
 
       * **8 de autenticación y alta** — login/refresh/logout web, SSO legacy,
         login/refresh del app, y el alta pública de registro con su adjunto.
       * **5 del portal**, agregadas el 2026-08-05 — noticias (listado, detalle y
         adjuntos), publicidad y obras sociales. El default cerrado de B1 las
         había dejado en 401 y eso rompió el sitio para los visitantes anónimos.
+      * **1 de beneficios**, agregada el 2026-08-28 — la vitrina de convenios
+        que el sitio público muestra en /beneficios. Es la única que no recorta
+        nada, porque no hay nada que recortar: `/vigentes` ya devuelve sólo los
+        activos y no vencidos, igual para todos. El ABM completo sigue pidiendo
+        `beneficio:gestionar`.
 
     Las cinco del portal **recortan la respuesta** para quien no manda token:
     noticias oculta borradores, publicidad oculta avisos inactivos, y obras
@@ -93,7 +98,7 @@ def test_la_allowlist_publica_no_crecio():
     significa "no exige token", no "devuelve todo" — lo verifica
     `test_los_endpoints_publicos_del_portal_recortan_la_respuesta`.
     """
-    assert len(PUBLIC_ROUTES) <= 13, sorted(PUBLIC_ROUTES)
+    assert len(PUBLIC_ROUTES) <= 14, sorted(PUBLIC_ROUTES)
 
 
 def test_los_endpoints_publicos_del_portal_recortan_la_respuesta():

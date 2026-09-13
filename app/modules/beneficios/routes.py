@@ -1,17 +1,17 @@
 """ABM de beneficios / convenios para socios (web admin).
 
 El ABM entero exige el scope `beneficios:gestionar`. Aparte va `router_socio`,
-de sólo lectura, que es lo que consume el portal del socio (Inicio médico): un
-médico no tiene ese scope y no debe verse obligado a pedirlo para mirar la
-vidriera de convenios. La app móvil tiene su propia lectura en el BFF
-(GET /api/mobile/beneficios).
+de sólo lectura, que es la **vitrina**: la consume el portal del socio (Inicio
+médico) y, desde el 2026-08-28, también la sección "Beneficios para Socios" del
+sitio público, así que es pública (ver `app/auth/public.py`). Devuelve lo mismo
+a todos y sólo los convenios vigentes. La app móvil tiene su propia lectura en
+el BFF (GET /api/mobile/beneficios).
 """
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, Path, Query, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth.deps import get_current_user, require_scope
 from app.db.database import get_db
 from app.db.models.beneficios import CATEGORIAS_BENEFICIO, Beneficio
 from app.modules.beneficios import service
@@ -23,7 +23,7 @@ from app.modules.beneficios.schemas import (
 
 router = APIRouter()  # El scope lo declara app/auth/authz.py::SCOPES_POR_RUTA (fuente unica de autorizacion).
 
-# Sólo autenticación: cualquier socio logueado puede leer los convenios vigentes.
+# Vitrina pública: los convenios vigentes los lee cualquiera, sin token.
 router_socio = APIRouter()
 
 MAX_PAGE_SIZE = 200
@@ -37,12 +37,14 @@ MAX_VIGENTES = 24
 async def listar_vigentes(
     limit: int = Query(MAX_VIGENTES, ge=1, le=MAX_VIGENTES),
     db: AsyncSession = Depends(get_db),
-    _=Depends(get_current_user),
 ):
-    """Convenios activos y no vencidos, para el portal del socio.
+    """Convenios activos y no vencidos: la vitrina.
 
-    Sin scope de administración a propósito (ver docstring del módulo). No
-    pagina: el tope es `MAX_VIGENTES` y la vidriera muestra menos todavía.
+    Pública (está en `PUBLIC_ROUTES`) desde el 2026-08-28, porque la sección
+    "Beneficios para Socios" del sitio la ve un visitante anónimo. No hay
+    recorte por usuario: la respuesta es la misma para todos y ya excluye los
+    dados de baja y los vencidos. Todo lo demás del módulo sigue exigiendo
+    `beneficios:gestionar`. No pagina: el tope es `MAX_VIGENTES`.
     """
     return await service.listar_vigentes(db, limit=limit)
 

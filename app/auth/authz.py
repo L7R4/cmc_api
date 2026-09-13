@@ -164,10 +164,9 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     ("GET", "/api/beneficios/{beneficio_id}"): Scope.BENEFICIO_GESTIONAR,
     ("PATCH", "/api/beneficios/{beneficio_id}"): Scope.BENEFICIO_GESTIONAR,
     ("DELETE", "/api/beneficios/{beneficio_id}"): Scope.BENEFICIO_GESTIONAR,
-    # La vitrina del socio, no la administración: devuelve sólo los convenios
-    # vigentes y no acepta filtros. `beneficio:gestionar` es del editor web y el
-    # rol `medico` no lo tiene — exigirlo acá dejaba la pantalla en 403.
-    ("GET", "/api/beneficios/vigentes"): SOLO_AUTENTICADO,
+    # `GET /api/beneficios/vigentes` NO va acá: es la vitrina —sólo activos y no
+    # vencidos, sin filtros— y desde el 2026-08-28 es pública, así que vive en
+    # app/auth/public.py. La administración (esta lista) no se tocó.
 
     # ── Catálogos: boletín / observaciones ───────────────────────────────────
     ("GET", "/api/boletin/observaciones"): Scope.CATALOGO_LEER,
@@ -176,6 +175,9 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     ("GET", "/api/boletin/observaciones/plantillas"): Scope.CATALOGO_LEER,
     ("POST", "/api/boletin/observaciones/plantillas"): Scope.CATALOGO_EDITAR,
     ("DELETE", "/api/boletin/observaciones/plantillas/{id}"): Scope.CATALOGO_EDITAR,
+    # Normas operativas por obra social. Sólo lectura: el alta y la asociación
+    # se hacen desde el alta de noticias, con `contenido:editar`.
+    ("GET", "/api/boletin/normas"): Scope.CATALOGO_LEER,
 
     # ── Catálogos: obras sociales ────────────────────────────────────────────
     ("GET", "/api/obras_social/"): Scope.CATALOGO_LEER,

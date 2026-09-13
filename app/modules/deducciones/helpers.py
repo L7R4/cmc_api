@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import (
     Ajuste,
     Deduccion,
-    Descuentos,
+    Conceptos,
     DetalleLiquidacion,
     Liquidacion,
     ListadoMedico,
@@ -46,14 +46,13 @@ async def _base_bruto_por_medico_en_pago(
 
     q = await db.execute(
         select(
-            ListadoMedico.ID.label("medico_db_id"),
+            DetalleLiquidacion.medico_id.label("medico_db_id"),
             func.coalesce(func.sum(DetalleLiquidacion.importe_total), 0),
         )
         .select_from(DetalleLiquidacion)
         .join(Liquidacion, Liquidacion.id == DetalleLiquidacion.liquidacion_id)
-        .join(ListadoMedico, ListadoMedico.NRO_SOCIO == DetalleLiquidacion.medico_id)
         .where(Liquidacion.pago_id == pago_id)
-        .group_by(ListadoMedico.ID)
+        .group_by(DetalleLiquidacion.medico_id)
     )
     return {int(med_id): Decimal(suma or 0) for med_id, suma in q}
 
@@ -68,14 +67,13 @@ async def _honorarios_por_medico_en_pago(
 
     q = await db.execute(
         select(
-            ListadoMedico.ID.label("medico_db_id"),
+            DetalleLiquidacion.medico_id.label("medico_db_id"),
             func.coalesce(func.sum(DetalleLiquidacion.honorarios), 0),
         )
         .select_from(DetalleLiquidacion)
         .join(Liquidacion, Liquidacion.id == DetalleLiquidacion.liquidacion_id)
-        .join(ListadoMedico, ListadoMedico.NRO_SOCIO == DetalleLiquidacion.medico_id)
         .where(Liquidacion.pago_id == pago_id)
-        .group_by(ListadoMedico.ID)
+        .group_by(DetalleLiquidacion.medico_id)
     )
     return {int(med_id): Decimal(suma or 0) for med_id, suma in q}
 
@@ -89,14 +87,13 @@ async def _gastos_por_medico_en_pago(
     """
     q = await db.execute(
         select(
-            ListadoMedico.ID.label("medico_db_id"),
+            DetalleLiquidacion.medico_id.label("medico_db_id"),
             func.coalesce(func.sum(DetalleLiquidacion.gastos), 0),
         )
         .select_from(DetalleLiquidacion)
         .join(Liquidacion, Liquidacion.id == DetalleLiquidacion.liquidacion_id)
-        .join(ListadoMedico, ListadoMedico.NRO_SOCIO == DetalleLiquidacion.medico_id)
         .where(Liquidacion.pago_id == pago_id)
-        .group_by(ListadoMedico.ID)
+        .group_by(DetalleLiquidacion.medico_id)
     )
     return {int(med_id): Decimal(suma or 0) for med_id, suma in q}
 
@@ -156,13 +153,13 @@ async def _disponible_por_medico_en_pago(
 
 #region Helpers de descuentos
 
-async def _get_descuento(db: AsyncSession, desc_id: int) -> Descuentos:
+async def _get_descuento(db: AsyncSession, desc_id: int) -> Conceptos:
     """
     
     Devuelve el Descuento o lanza ValueError si no existe.
     
     """
-    obj = await db.scalar(select(Descuentos).where(Descuentos.id == desc_id))
+    obj = await db.scalar(select(Conceptos).where(Conceptos.id == desc_id))
     if not obj:
         raise ValueError("Descuento inexistente")
     return obj
@@ -213,7 +210,7 @@ async def _enrich_socio(db: AsyncSession, socio: SocioDescuento) -> SocioDescuen
     
     """
     medico = await db.get(ListadoMedico, socio.medico_id)
-    desc = await db.get(Descuentos, socio.descuento_id)
+    desc = await db.get(Conceptos, socio.descuento_id)
     pagador = await db.get(ListadoMedico, socio.pagador_medico_id) if socio.pagador_medico_id else None
 
     return SocioDescuentoRead(
@@ -242,7 +239,7 @@ async def _enrich_deduccion(db: AsyncSession, ded: Deduccion) -> DeduccionRead:
     Para listas usar enrich_many (una sola query batch).
     
     """
-    desc = await db.scalar(select(Descuentos).where(Descuentos.id == ded.descuento_id)) if ded.descuento_id else None
+    desc = await db.scalar(select(Conceptos).where(Conceptos.id == ded.descuento_id)) if ded.descuento_id else None
     return DeduccionRead(
         id=ded.id,
         medico_id=ded.medico_id,
@@ -255,6 +252,7 @@ async def _enrich_deduccion(db: AsyncSession, ded: Deduccion) -> DeduccionRead:
         monto_cuota=ded.monto_cuota,
         calculado_total=ded.calculado_total,
         monto_aplicado=ded.monto_aplicado,
+        monto_aplicado_preview=ded.monto_aplicado_preview,
         cuotas_total=ded.cuotas_total,
         cuota_nro=ded.cuota_nro,
         cuotificado=ded.cuotificado,
@@ -274,7 +272,7 @@ async def enrich_many(db: AsyncSession, deds: list[Deduccion]) -> list[Deduccion
     
     """
     desc_ids = list({d.descuento_id for d in deds if d.descuento_id})
-    rows = (await db.execute(select(Descuentos).where(Descuentos.id.in_(desc_ids)))).scalars().all() if desc_ids else []
+    rows = (await db.execute(select(Conceptos).where(Conceptos.id.in_(desc_ids)))).scalars().all() if desc_ids else []
     nombre_map = {d.id: d.nombre for d in rows}
     result = []
     for ded in deds:
@@ -290,6 +288,7 @@ async def enrich_many(db: AsyncSession, deds: list[Deduccion]) -> list[Deduccion
             monto_cuota=ded.monto_cuota,
             calculado_total=ded.calculado_total,
             monto_aplicado=ded.monto_aplicado,
+            monto_aplicado_preview=ded.monto_aplicado_preview,
             cuotas_total=ded.cuotas_total,
             cuota_nro=ded.cuota_nro,
             cuotificado=ded.cuotificado,
@@ -316,11 +315,11 @@ async def _ded_to_historial(db: AsyncSession, ded: Deduccion) -> DeduccionHistor
     """
     row = (await db.execute(
         select(
-            Descuentos.nombre.label("desc_nombre"),
+            Conceptos.nombre.label("desc_nombre"),
             ListadoMedico.NOMBRE.label("med_nombre"),
         )
         .select_from(ListadoMedico)
-        .outerjoin(Descuentos, Descuentos.id == ded.descuento_id)
+        .outerjoin(Conceptos, Conceptos.id == ded.descuento_id)
         .where(ListadoMedico.ID == ded.medico_id)
         .limit(1)
     )).first()
@@ -348,6 +347,7 @@ async def _ded_to_historial(db: AsyncSession, ded: Deduccion) -> DeduccionHistor
         descuento_nombre=desc_nombre,
         monto=ded.calculado_total,
         saldo_pendiente=ded.calculado_total - ded.monto_aplicado,
+        monto_aplicado_preview=ded.monto_aplicado_preview,
         mes_periodo=ded.mes_aplicar,
         anio_periodo=ded.anio_aplicar,
         estado=est,

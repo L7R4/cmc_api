@@ -431,21 +431,21 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     ("POST", "/api/deducciones/{pago_id}/deducciones/refrescar"): Scope.DEDUCCION_APLICAR,
     ("DELETE", "/api/deducciones/{pago_id}/colegio/deshacer"): Scope.DEDUCCION_ELIMINAR,
     ("DELETE", "/api/deducciones/{pago_id}/colegio/deshacer/{desc_id}"): Scope.DEDUCCION_ELIMINAR,
-    # Asignación de socios a descuentos: es catálogo de descuentos, no deducción.
-    ("GET", "/api/deducciones/socios"): Scope.DESCUENTO_LEER,
-    ("POST", "/api/deducciones/socios"): Scope.DESCUENTO_CREAR,
-    ("GET", "/api/deducciones/socios/{socio_descuento_id}"): Scope.DESCUENTO_LEER,
-    ("PATCH", "/api/deducciones/socios/{socio_descuento_id}"): Scope.DESCUENTO_EDITAR,
-    ("PATCH", "/api/deducciones/socios/{socio_descuento_id}/pagador"): Scope.DESCUENTO_EDITAR,
-    ("DELETE", "/api/deducciones/socios/{socio_descuento_id}"): Scope.DESCUENTO_ELIMINAR,
+    # Asignación de socios a conceptos: es catálogo de conceptos, no deducción.
+    ("GET", "/api/deducciones/socios"): Scope.CONCEPTO_LEER,
+    ("POST", "/api/deducciones/socios"): Scope.CONCEPTO_CREAR,
+    ("GET", "/api/deducciones/socios/{socio_descuento_id}"): Scope.CONCEPTO_LEER,
+    ("PATCH", "/api/deducciones/socios/{socio_descuento_id}"): Scope.CONCEPTO_EDITAR,
+    ("PATCH", "/api/deducciones/socios/{socio_descuento_id}/pagador"): Scope.CONCEPTO_EDITAR,
+    ("DELETE", "/api/deducciones/socios/{socio_descuento_id}"): Scope.CONCEPTO_ELIMINAR,
 
-    # ── Descuentos ───────────────────────────────────────────────────────────
-    ("GET", "/api/descuentos"): Scope.DESCUENTO_LEER,
-    ("POST", "/api/descuentos"): Scope.DESCUENTO_CREAR,
-    ("GET", "/api/descuentos/by_nro/{nro_colegio}"): Scope.DESCUENTO_LEER,
-    ("GET", "/api/descuentos/{desc_id}"): Scope.DESCUENTO_LEER,
-    ("PATCH", "/api/descuentos/{desc_id}"): Scope.DESCUENTO_EDITAR,
-    ("DELETE", "/api/descuentos/{desc_id}"): Scope.DESCUENTO_ELIMINAR,
+    # ── Conceptos ────────────────────────────────────────────────────────────
+    ("GET", "/api/conceptos"): Scope.CONCEPTO_LEER,
+    ("POST", "/api/conceptos"): Scope.CONCEPTO_CREAR,
+    ("GET", "/api/conceptos/by_nro/{nro_colegio}"): Scope.CONCEPTO_LEER,
+    ("GET", "/api/conceptos/{concepto_id}"): Scope.CONCEPTO_LEER,
+    ("PATCH", "/api/conceptos/{concepto_id}"): Scope.CONCEPTO_EDITAR,
+    ("DELETE", "/api/conceptos/{concepto_id}"): Scope.CONCEPTO_ELIMINAR,
 
     # ── Cobranzas (panel de deuda por concepto, solo lectura) ────────────────
     # Rutas estáticas antes que las dinámicas por la misma razón que en

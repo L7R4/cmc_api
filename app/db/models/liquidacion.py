@@ -163,7 +163,8 @@ class DetalleLiquidacion(AuditMixin, Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     liquidacion_id: Mapped[int] = mapped_column(ForeignKey("liquidacion.id"), index=True)
 
-    medico_id: Mapped[int] = mapped_column(Integer, index=True)
+    # listado_medico.ID (nunca NRO_SOCIO). Ver alembic b6c1d3e9a072.
+    medico_id: Mapped[int] = mapped_column(ForeignKey("listado_medico.ID"), index=True)
     obra_social_id: Mapped[int] = mapped_column(Integer, index=True)
 
     # FK a guardar_atencion solo para registros con fuente='ga'. NULL para fuente='cmc'.

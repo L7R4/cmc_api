@@ -145,8 +145,8 @@ class Ajuste(AuditMixin, Base):
     )
 
 
-class Descuentos(AuditMixin, Base):
-    __tablename__ = "descuentos"
+class Conceptos(AuditMixin, Base):
+    __tablename__ = "conceptos"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     nro_colegio: Mapped[int] = mapped_column(Integer, nullable=False)
     nombre: Mapped[str] = mapped_column(String(200), nullable=False)
@@ -160,7 +160,7 @@ class SocioDescuento(AuditMixin, Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
 
     medico_id: Mapped[int] = mapped_column(ForeignKey("listado_medico.ID"), index=True, nullable=False)
-    descuento_id: Mapped[int] = mapped_column(ForeignKey("descuentos.id"), index=True, nullable=False)
+    descuento_id: Mapped[int] = mapped_column(ForeignKey("conceptos.id"), index=True, nullable=False)
 
     fecha_alta: Mapped[datetime.date] = mapped_column(Date, default=datetime.date.today, nullable=True)
     fecha_baja: Mapped[Optional[datetime.date]] = mapped_column(Date, nullable=True)
@@ -189,7 +189,7 @@ class Deduccion(AuditMixin, Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
 
     medico_id: Mapped[int] = mapped_column(ForeignKey("listado_medico.ID"), nullable=False, index=True)
-    descuento_id: Mapped[Optional[int]] = mapped_column(ForeignKey("descuentos.id"), nullable=True, index=True)
+    descuento_id: Mapped[Optional[int]] = mapped_column(ForeignKey("conceptos.id"), nullable=True, index=True)
 
     # Pago en el que fue generada esta deducción (bulk_generar_descuento) o
     # en el que fue enrolada automáticamente (auto_enrolar_pendientes).
@@ -204,8 +204,14 @@ class Deduccion(AuditMixin, Base):
     # Amounts — auto rows use calculado_total; manual rows set calculado_total = monto_cuota for display
     calculado_total: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), nullable=False, default=Decimal("0.00"), server_default="0.00")
     porcentaje_aplicado: Mapped[Decimal] = mapped_column(DECIMAL(10, 2), nullable=False, default=Decimal("0.00"), server_default="0.00")
-    # Acumulado de pagos parciales ya cobrados
+    # Ledger real: acumulado de lo efectivamente cobrado (DeduccionAplicacion).
+    # Solo lo tocan _persistir_aplicaciones (cierre), pagar_deduccion y
+    # cambiar_estado_item (cobro en caja) — nunca la preview.
     monto_aplicado: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), nullable=False, default=Decimal("0.00"), server_default="0.00")
+    # Preview descartable: "cuánto se cobraría si el pago abierto cerrara
+    # ahora". La recalcula _recalcular_montos_aplicados_en_pago en cada
+    # refresco del pago y no representa cobro real hasta el cierre.
+    monto_aplicado_preview: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), nullable=False, default=Decimal("0.00"), server_default="0.00")
 
     origen: Mapped[Literal["manual", "automatico"]] = mapped_column(
         Enum("manual", "automatico", name="ded_origen"),

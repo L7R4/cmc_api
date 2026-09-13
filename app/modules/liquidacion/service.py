@@ -17,7 +17,7 @@ from app.db.models import (
     Ajuste,
     DeduccionAplicacion,
     Deduccion,
-    Descuentos,
+    Conceptos,
     DetalleLiquidacion,
     DetalleFacturacionCMC,
     Especialidad,
@@ -88,13 +88,15 @@ async def build_detalles_from_cmc(db: AsyncSession, liquidacion_id: int) -> None
     for nro_socio, lm_id in lm_rows:
         medico_map[str(nro_socio)] = lm_id
 
-    # Set de (cmc_detalle_id,) para detectar duplicados
+    # Prestaciones ya liquidadas en CUALQUIER Liquidacion (no solo esta), para
+    # no volver a pagarlas si se crea una segunda liquidación del mismo
+    # OS+período en otro pago, y para que una complementaria solo traiga las
+    # filas nuevas de detalle_facturacion (las de la versión anterior ya
+    # están acá y quedan excluidas). Ver diagnóstico C3.
+    candidate_ids = [df.id_detalle_prestaciones for df in cmc_rows]
     existing_cmc = set((await db.execute(
         select(DetalleLiquidacion.cmc_detalle_id)
-        .where(
-            DetalleLiquidacion.liquidacion_id == liquidacion_id,
-            DetalleLiquidacion.cmc_detalle_id.isnot(None),
-        )
+        .where(DetalleLiquidacion.cmc_detalle_id.in_(candidate_ids))
     )).scalars().all())
 
     observados: list[dict] = []
@@ -284,7 +286,7 @@ async def vista_detalles_liquidacion(
             DL.obra_social_id.label("obra_social_id"),
         )
         .select_from(DL)
-        .outerjoin(LM, LM.NRO_SOCIO == DL.medico_id)
+        .outerjoin(LM, LM.ID == DL.medico_id)
         .where(and_(*filters))
         .order_by(DL.id)
     )
@@ -437,7 +439,7 @@ async def detalle_recibo_medico(
         detalles = (await db.execute(
             select(DetalleLiquidacion).where(
                 DetalleLiquidacion.liquidacion_id == liq.id,
-                DetalleLiquidacion.medico_id == nro_socio,
+                DetalleLiquidacion.medico_id == medico_id,
             )
         )).scalars().all()
 
@@ -531,7 +533,7 @@ async def detalle_recibo_medico(
     desc_nombres: dict[int, str] = {}
     if desc_ids:
         for r in (await db.execute(
-            select(Descuentos.id, Descuentos.nombre).where(Descuentos.id.in_(desc_ids))
+            select(Conceptos.id, Conceptos.nombre).where(Conceptos.id.in_(desc_ids))
         )).all():
             desc_nombres[r.id] = r.nombre
 

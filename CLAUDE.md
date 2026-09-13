@@ -37,7 +37,8 @@ app/
 ├── modules/                 # Dominios de negocio — organización principal del código
 │   ├── medicos/             # routes.py · schemas.py · helpers.py
 │   ├── liquidacion/         # routes.py · schemas.py
-│   ├── debitos/             # routes.py · schemas.py
+│   ├── pagos/               # routes.py · service.py — ciclo de Pago (cierre, reapertura, recibos)
+│   ├── lotes/                # routes.py — LoteAjuste + Ajuste (normal/refacturación/sin_factura)
 │   ├── deducciones/         # routes.py · routes_descuentos.py · schemas.py
 │   ├── padrones/            # routes.py · schemas.py  (incluye asignaciones)
 │   ├── contenido/           # routes_noticias.py · routes_publicidad.py · schemas.py
@@ -70,14 +71,11 @@ app/
 - **Registro**: El flujo público crea una `SolicitudRegistro` en estado `pendiente`; el flujo admin crea directamente el médico y la aprueba.
 - **Helpers**: `parse_conceps_espec()`, `SPECIALTY_SLOTS`, `_find_free_slot()` en `modules/medicos/helpers.py`. La lógica de registro vive en `services/medicos_register_service.py`.
 
-#### Debitos
+#### Débitos y créditos (Lotes/Ajustes)
 
-- **Un DC por detalle**: cada `DetalleLiquidacion` puede tener cero o un `Debito_Credito` vinculado por `debito_credito_id`.
-- **Tipo**: `"d"` = débito (resta al neto), `"c"` = crédito (suma al neto), `"n"` = quitar DC.
-- **Upsert**: `POST /by_detalle/{detalle_id}` crea o actualiza el DC del detalle; `tipo="n"` o `monto<=0` lo elimina.
-- **Recálculo automático**: cada operación llama `recalcular_totales_de_liquidacion()` y devuelve en la respuesta el `DebCreResumenOut` con los totales actualizados de la liquidación.
-- **Solo liquidaciones abiertas**: valida `liquidacion.estado == "A"`; rechaza con 409 si está cerrada.
-- **`prestacion_id` como string**: la FK a `GuardarAtencion` se extrae con `_parse_atencion_id()` (toma dígitos iniciales del string).
+- El viejo módulo `debitos` (un `Debito_Credito` por `DetalleLiquidacion`, ligado a `GuardarAtencion`) está eliminado — no existe `app/modules/debitos` ni `app/db/cruds/debitos.py`.
+- El mecanismo actual es `LoteAjuste` + `Ajuste` (`app/modules/lotes/`, modelos en `app/db/models/financiero.py`): un `LoteAjuste` agrupa `Ajuste` (`tipo="d"|"c"`, `honorarios`+`gastos`, `medico_id` → `listado_medico.ID`) por OS+período, con `tipo` normal/refacturacion/sin_factura y una máquina de estados A⇄C⇄L/AP.
+- `GuardarAtencion` (tabla legacy del sistema viejo) sigue existiendo y en uso por `app/modules/validaciones/legacy/*` (elegibilidad de obra social) — no relacionado con liquidación.
 
 #### Deducciones
 

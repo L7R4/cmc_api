@@ -59,17 +59,17 @@ class Scope(StrEnum):
     # handler acota con ownership, no la matriz.
     LIQUIDACION_LEER_PROPIO = "liquidacion:leer_propio"
 
-    # ── Financiero: deducciones y descuentos ──────────────────────────────────
+    # ── Financiero: deducciones y conceptos ───────────────────────────────────
     DEDUCCION_LEER = "deduccion:leer"
     DEDUCCION_CREAR = "deduccion:crear"
     DEDUCCION_EDITAR = "deduccion:editar"
     DEDUCCION_ELIMINAR = "deduccion:eliminar"
     DEDUCCION_APLICAR = "deduccion:aplicar"
 
-    DESCUENTO_LEER = "descuento:leer"
-    DESCUENTO_CREAR = "descuento:crear"
-    DESCUENTO_EDITAR = "descuento:editar"
-    DESCUENTO_ELIMINAR = "descuento:eliminar"
+    CONCEPTO_LEER = "concepto:leer"
+    CONCEPTO_CREAR = "concepto:crear"
+    CONCEPTO_EDITAR = "concepto:editar"
+    CONCEPTO_ELIMINAR = "concepto:eliminar"
 
     # Panel de cobranzas: deuda agregada por concepto, solo lectura. Separado
     # de DEDUCCION_LEER a propósito — un perfil de cobranzas no necesita el
@@ -313,10 +313,10 @@ ROLES: dict[str, set[Scope]] = {
         Scope.DEDUCCION_EDITAR,
         Scope.DEDUCCION_ELIMINAR,
         Scope.DEDUCCION_APLICAR,
-        Scope.DESCUENTO_LEER,
-        Scope.DESCUENTO_CREAR,
-        Scope.DESCUENTO_EDITAR,
-        Scope.DESCUENTO_ELIMINAR,
+        Scope.CONCEPTO_LEER,
+        Scope.CONCEPTO_CREAR,
+        Scope.CONCEPTO_EDITAR,
+        Scope.CONCEPTO_ELIMINAR,
         Scope.COBRANZA_LEER,
         Scope.PAGO_LEER,
         Scope.PAGO_CREAR,
@@ -458,10 +458,10 @@ DESCRIPCIONES: dict[Scope, str] = {
     Scope.DEDUCCION_EDITAR: "Editar deducciones",
     Scope.DEDUCCION_ELIMINAR: "Eliminar deducciones y deshacer generaciones",
     Scope.DEDUCCION_APLICAR: "Generar en masa, aplicar y refrescar deducciones",
-    Scope.DESCUENTO_LEER: "Ver el catálogo de descuentos y sus socios",
-    Scope.DESCUENTO_CREAR: "Crear descuentos y asignar socios",
-    Scope.DESCUENTO_EDITAR: "Editar descuentos y sus asignaciones",
-    Scope.DESCUENTO_ELIMINAR: "Eliminar descuentos y desasignar socios",
+    Scope.CONCEPTO_LEER: "Ver el catálogo de conceptos y sus socios",
+    Scope.CONCEPTO_CREAR: "Crear conceptos y asignar socios",
+    Scope.CONCEPTO_EDITAR: "Editar conceptos y sus asignaciones",
+    Scope.CONCEPTO_ELIMINAR: "Eliminar conceptos y desasignar socios",
     Scope.COBRANZA_LEER: "Ver el panel de cobranzas y la deuda por concepto",
     Scope.LOTE_LEER: "Ver lotes de ajuste",
     Scope.LOTE_CREAR: "Crear lotes de ajuste e ítems",

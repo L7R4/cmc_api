@@ -10,33 +10,33 @@ class OverrideValores(BaseModel):
     porcentaje: Optional[Decimal] = None
 
 
-# ---- Descuentos ----
-class DescuentoBase(BaseModel):
+# ---- Conceptos ----
+class ConceptoBase(BaseModel):
     nombre: str = Field(..., max_length=200)
     nro_colegio: int
     precio: float = 0.0
     porcentaje: float = 0.0
 
 
-class DescuentoIn(DescuentoBase):
+class ConceptoIn(ConceptoBase):
     pass
 
 
-class DescuentoUpdate(BaseModel):
+class ConceptoUpdate(BaseModel):
     nombre: Optional[str] = Field(None, max_length=200)
     nro_colegio: Optional[int] = None
     precio: Optional[float] = None
     porcentaje: Optional[float] = None
 
 
-class DescuentoOut(DescuentoBase):
+class ConceptoOut(ConceptoBase):
     id: int
 
     class Config:
         from_attributes = True
 
 
-class DescuentoInPatch(BaseModel):
+class ConceptoInPatch(BaseModel):
     precio: Optional[float] = None
     porcentaje: Optional[float] = None
 
@@ -89,6 +89,7 @@ class DeduccionRead(BaseModel):
     monto_cuota: Optional[Decimal] = None
     calculado_total: Decimal
     monto_aplicado: Decimal = Decimal("0.00")
+    monto_aplicado_preview: Decimal = Decimal("0.00")
     cuotas_total: Optional[int] = None
     cuota_nro: int
     cuotificado: Optional[bool] = None
@@ -189,6 +190,7 @@ class DeduccionHistorialItem(BaseModel):
     descuento_nombre: str
     monto: Decimal
     saldo_pendiente: Decimal = Decimal("0.00")
+    monto_aplicado_preview: Decimal = Decimal("0.00")
     mes_periodo: Optional[int] = None
     anio_periodo: Optional[int] = None
     # estados: pendiente | en_pago | aplicado | cancelado | vencida | eliminado
@@ -229,9 +231,9 @@ class DeduccionPorPagoResponse(BaseModel):
     items: List[DeduccionRead]
 
 
-# ---- Deshacer descuentos generados ----
+# ---- Deshacer conceptos generados ----
 
-class DeshacerDescuentosResponse(BaseModel):
+class DeshacerConceptosResponse(BaseModel):
     pago_id: int
     eliminadas: int
     monto_revertido: Decimal

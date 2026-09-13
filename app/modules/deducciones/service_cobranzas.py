@@ -26,7 +26,7 @@ import sqlalchemy as sa
 from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Deduccion, Descuentos, ListadoMedico
+from app.db.models import Deduccion, Conceptos, ListadoMedico
 from app.modules.deducciones.helpers import TWOPLACES
 from app.modules.deducciones.schemas import (
     CobranzaCuotaItem,
@@ -137,14 +137,14 @@ async def get_resumen(db: AsyncSession, filtros: CobranzasFiltros) -> CobranzasR
     ).select_from(Deduccion)
 
     if filtros.q:
-        q = q.join(Descuentos, Descuentos.id == Deduccion.descuento_id).join(
+        q = q.join(Conceptos, Conceptos.id == Deduccion.descuento_id).join(
             ListadoMedico, ListadoMedico.ID == Deduccion.medico_id
         )
         like = f"%{filtros.q}%"
         conds.append(
             or_(
-                Descuentos.nombre.ilike(like),
-                func.cast(Descuentos.nro_colegio, sa.String(20)).like(like),
+                Conceptos.nombre.ilike(like),
+                func.cast(Conceptos.nro_colegio, sa.String(20)).like(like),
                 ListadoMedico.NOMBRE.ilike(like),
                 func.cast(ListadoMedico.NRO_SOCIO, sa.String(20)).like(like),
             )
@@ -170,9 +170,9 @@ async def get_por_concepto(
 
     q = (
         select(
-            Descuentos.id.label("descuento_id"),
-            Descuentos.nro_colegio,
-            Descuentos.nombre,
+            Conceptos.id.label("descuento_id"),
+            Conceptos.nro_colegio,
+            Conceptos.nombre,
             func.count(func.distinct(Deduccion.medico_id)).label("medicos_con_deuda"),
             func.count(Deduccion.id).label("cuotas_impagas"),
             func.sum(SALDO_EXPR).label("saldo"),
@@ -182,18 +182,18 @@ async def get_por_concepto(
             func.min(_periodo_expr()).label("periodo_mas_antiguo"),
         )
         .select_from(Deduccion)
-        .join(Descuentos, Descuentos.id == Deduccion.descuento_id)
+        .join(Conceptos, Conceptos.id == Deduccion.descuento_id)
         .where(*conds)
     )
     if filtros.q:
         like = f"%{filtros.q}%"
         q = q.where(
             or_(
-                Descuentos.nombre.ilike(like),
-                func.cast(Descuentos.nro_colegio, sa.String(20)).like(like),
+                Conceptos.nombre.ilike(like),
+                func.cast(Conceptos.nro_colegio, sa.String(20)).like(like),
             )
         )
-    q = q.group_by(Descuentos.id, Descuentos.nro_colegio, Descuentos.nombre)
+    q = q.group_by(Conceptos.id, Conceptos.nro_colegio, Conceptos.nombre)
     q = q.order_by(func.sum(SALDO_EXPR).desc())
 
     rows = (await db.execute(q)).all()
@@ -221,7 +221,7 @@ async def get_medicos_por_concepto(
     page: int,
     size: int,
 ) -> tuple[Optional[str], int, list[CobranzaMedicoDeudorItem]]:
-    descuento_nombre = await db.scalar(select(Descuentos.nombre).where(Descuentos.id == descuento_id))
+    descuento_nombre = await db.scalar(select(Conceptos.nombre).where(Conceptos.id == descuento_id))
     if descuento_nombre is None:
         return None, 0, []
 
@@ -375,8 +375,8 @@ async def get_detalle_medico(
         select(
             Deduccion.id.label("deduccion_id"),
             Deduccion.descuento_id,
-            Descuentos.nombre.label("descuento_nombre"),
-            Descuentos.nro_colegio,
+            Conceptos.nombre.label("descuento_nombre"),
+            Conceptos.nro_colegio,
             Deduccion.mes_aplicar,
             Deduccion.anio_aplicar,
             Deduccion.calculado_total,
@@ -385,9 +385,9 @@ async def get_detalle_medico(
             Deduccion.estado,
         )
         .select_from(Deduccion)
-        .join(Descuentos, Descuentos.id == Deduccion.descuento_id)
+        .join(Conceptos, Conceptos.id == Deduccion.descuento_id)
         .where(*conds)
-        .order_by(Deduccion.anio_aplicar.asc(), Deduccion.mes_aplicar.asc(), Descuentos.nro_colegio.asc())
+        .order_by(Deduccion.anio_aplicar.asc(), Deduccion.mes_aplicar.asc(), Conceptos.nro_colegio.asc())
     )
     rows = (await db.execute(q)).all()
 
@@ -428,8 +428,8 @@ async def get_export_rows(db: AsyncSession, filtros: CobranzasFiltros) -> list[C
             ListadoMedico.NRO_SOCIO.label("nro_socio"),
             ListadoMedico.NOMBRE.label("medico_nombre"),
             Deduccion.descuento_id,
-            Descuentos.nro_colegio,
-            Descuentos.nombre.label("descuento_nombre"),
+            Conceptos.nro_colegio,
+            Conceptos.nombre.label("descuento_nombre"),
             Deduccion.mes_aplicar,
             Deduccion.anio_aplicar,
             Deduccion.calculado_total,
@@ -438,7 +438,7 @@ async def get_export_rows(db: AsyncSession, filtros: CobranzasFiltros) -> list[C
             Deduccion.estado,
         )
         .select_from(Deduccion)
-        .join(Descuentos, Descuentos.id == Deduccion.descuento_id)
+        .join(Conceptos, Conceptos.id == Deduccion.descuento_id)
         .join(ListadoMedico, ListadoMedico.ID == Deduccion.medico_id)
         .where(*conds)
     )
@@ -446,13 +446,13 @@ async def get_export_rows(db: AsyncSession, filtros: CobranzasFiltros) -> list[C
         like = f"%{filtros.q}%"
         q = q.where(
             or_(
-                Descuentos.nombre.ilike(like),
-                func.cast(Descuentos.nro_colegio, sa.String(20)).like(like),
+                Conceptos.nombre.ilike(like),
+                func.cast(Conceptos.nro_colegio, sa.String(20)).like(like),
                 ListadoMedico.NOMBRE.ilike(like),
                 func.cast(ListadoMedico.NRO_SOCIO, sa.String(20)).like(like),
             )
         )
-    q = q.order_by(Descuentos.nro_colegio.asc(), ListadoMedico.NOMBRE.asc())
+    q = q.order_by(Conceptos.nro_colegio.asc(), ListadoMedico.NOMBRE.asc())
 
     rows = (await db.execute(q)).all()
     return [

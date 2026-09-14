@@ -3,6 +3,7 @@ from typing import List, Optional
 import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import and_, exists, func, or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.deps import get_current_user_with_scopes_and_role
@@ -217,9 +218,49 @@ async def list_codigos_por_especialidad(
 
 @router.post("/", response_model=NomencladorOut, status_code=201)
 async def create_nomenclador(body: NomencladorCreate, db: AsyncSession = Depends(get_db)):
+    """Alta de un código del catálogo.
+
+    El par (codigo, obra_social_nro) es único: `uq_nm_nomenclador_codigo_os`. Sin
+    este chequeo previo, repetir un número ya existente sube como IntegrityError y
+    el handler global lo convierte en un 500 "Error al acceder a la base de datos",
+    que no le dice al operador lo único que necesita saber: que ese número ya está
+    tomado y por qué práctica.
+    """
+    ya_existe = (
+        await db.execute(
+            select(NomencladorCMC).where(
+                NomencladorCMC.codigo == body.codigo,
+                NomencladorCMC.obra_social_nro.is_(None)
+                if body.obra_social_nro is None
+                else NomencladorCMC.obra_social_nro == body.obra_social_nro,
+            )
+        )
+    ).scalar_one_or_none()
+    if ya_existe:
+        ambito = (
+            "en el catálogo compartido"
+            if body.obra_social_nro is None
+            else f"en la OS {body.obra_social_nro}"
+        )
+        raise HTTPException(
+            409,
+            f"El código {body.codigo} ya existe {ambito} (id {ya_existe.id}): "
+            f"{ya_existe.descripcion}. Usá otro número, editá el existente, o "
+            "desacoplalo si necesitás una versión propia de una obra social.",
+        )
+
     obj = NomencladorCMC(**body.model_dump())
     db.add(obj)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        # Carrera: entre el SELECT de arriba y este commit, otra petición tomó el
+        # mismo número. El chequeo previo da el mensaje bueno en el caso normal;
+        # esto evita que la ventana angosta siga saliendo como 500.
+        await db.rollback()
+        raise HTTPException(
+            409, f"El código {body.codigo} ya existe. Actualizá la lista y reintentá."
+        )
     await db.refresh(obj)
     return obj
 

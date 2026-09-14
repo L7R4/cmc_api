@@ -41,8 +41,19 @@ async def rollback_lotes_pago(db: AsyncSession, pago_id: int) -> dict:
         .values(pago_id=None, estado="C")
     )
 
+    res_sf = await db.execute(
+        update(LoteAjuste)
+        .where(
+            LoteAjuste.pago_id == pago_id,
+            LoteAjuste.tipo == "sin_factura",
+            LoteAjuste.estado.in_(["L", "AP"]),
+        )
+        .values(pago_id=None, estado="C")
+    )
+
     await db.flush()
     return {
         "lotes_normal_revertidos": res_normal.rowcount,
         "lotes_refacturacion_revertidos": res_refact.rowcount,
+        "lotes_sin_factura_revertidos": res_sf.rowcount,
     }

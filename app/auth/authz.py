@@ -381,6 +381,7 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     ("DELETE", "/api/pagos/{pago_id}"): Scope.PAGO_ELIMINAR,
     ("POST", "/api/pagos/{pago_id}/cerrar"): Scope.PAGO_CERRAR,
     ("POST", "/api/pagos/{pago_id}/reabrir"): Scope.PAGO_REABRIR,
+    ("POST", "/api/pagos/{pago_id}/marcar_pagado"): Scope.PAGO_MARCAR_PAGADO,
     ("GET", "/api/pagos/{pago_id}/informe/{tipo}"): Scope.PAGO_LEER,
     ("GET", "/api/pagos/{pago_id}/pago_medico_actualizado"): Scope.PAGO_LEER,
     ("GET", "/api/pagos/{pago_id}/vista_previa"): Scope.PAGO_LEER,

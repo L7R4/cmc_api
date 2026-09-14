@@ -40,10 +40,16 @@ async def marcar_lotes_aplicados(db: AsyncSession, pago_id: int) -> dict:
         .where(LoteAjuste.pago_id == pago_id, LoteAjuste.tipo == "refacturacion", LoteAjuste.estado == "L")
         .values(estado="AP")
     )
+    res_sf = await db.execute(
+        update(LoteAjuste)
+        .where(LoteAjuste.pago_id == pago_id, LoteAjuste.tipo == "sin_factura", LoteAjuste.estado == "L")
+        .values(estado="AP")
+    )
     await db.flush()
     return {
         "lotes_normal_aplicados": res_normal.rowcount,
         "lotes_refacturacion_aplicados": res_refact.rowcount,
+        "lotes_sin_factura_aplicados": res_sf.rowcount,
     }
 
 
@@ -63,10 +69,16 @@ async def revertir_lotes_al_reabrir(db: AsyncSession, pago_id: int) -> dict:
         .where(LoteAjuste.pago_id == pago_id, LoteAjuste.tipo == "refacturacion", LoteAjuste.estado == "AP")
         .values(estado="L")
     )
+    res_sf = await db.execute(
+        update(LoteAjuste)
+        .where(LoteAjuste.pago_id == pago_id, LoteAjuste.tipo == "sin_factura", LoteAjuste.estado == "AP")
+        .values(estado="L")
+    )
     await db.flush()
     return {
         "lotes_normal_revertidos": res_normal.rowcount,
         "lotes_refacturacion_revertidos": res_refact.rowcount,
+        "lotes_sin_factura_revertidos": res_sf.rowcount,
     }
 
 
@@ -84,4 +96,5 @@ async def resumen_lotes_del_pago(db: AsyncSession, pago_id: int) -> dict:
     return {
         "lotes_normal": next((r.cantidad for r in rows if r.tipo == "normal"), 0),
         "lotes_refacturacion": next((r.cantidad for r in rows if r.tipo == "refacturacion"), 0),
+        "lotes_sin_factura": next((r.cantidad for r in rows if r.tipo == "sin_factura"), 0),
     }

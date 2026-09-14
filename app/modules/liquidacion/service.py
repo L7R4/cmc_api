@@ -20,7 +20,6 @@ from app.db.models import (
     Conceptos,
     DetalleLiquidacion,
     DetalleFacturacionCMC,
-    Especialidad,
     ListadoMedico,
     Liquidacion,
     LoteAjuste,
@@ -210,7 +209,8 @@ async def recalcular_totales_de_liquidacion(db: AsyncSession, liquidacion_id: in
             LoteAjuste.obra_social_id == liq.obra_social_id,
             LoteAjuste.mes_periodo == liq.mes_periodo,
             LoteAjuste.anio_periodo == liq.anio_periodo,
-            LoteAjuste.estado == "L",
+            # AP = mismo lote, ya con el pago cerrado — sigue siendo "de este pago".
+            LoteAjuste.estado.in_(["L", "AP"]),
         )
     )
     dc_row = dc_res.first()
@@ -470,7 +470,8 @@ async def detalle_recibo_medico(
                 LoteAjuste.obra_social_id == liq.obra_social_id,
                 LoteAjuste.mes_periodo == liq.mes_periodo,
                 LoteAjuste.anio_periodo == liq.anio_periodo,
-                LoteAjuste.estado == "L",
+                # AP = mismo lote, ya con el pago cerrado — sigue siendo "de este pago".
+                LoteAjuste.estado.in_(["L", "AP"]),
                 Ajuste.medico_id == medico_id,
             )
             .order_by(Ajuste.tipo, Ajuste.id)
@@ -515,48 +516,35 @@ async def detalle_recibo_medico(
             "reconocido": float(bruto + total_c - total_d),
         })
 
-    # Deducciones aplicadas
+    # Deducciones aplicadas.
+    # DeduccionAplicacion ya no tiene concepto_tipo/concepto_id/medico_id
+    # (esquema anterior) — el nombre del concepto y el médico se resuelven
+    # vía Deduccion, mismo join que ya usa pagos/service.py para el recibo
+    # normal (ver diagnóstico A6).
     apl_rows = (await db.execute(
         select(
-            DeduccionAplicacion.concepto_tipo,
-            DeduccionAplicacion.concepto_id,
             DeduccionAplicacion.aplicado,
-        ).where(
-            DeduccionAplicacion.pago_id == pago_id,
-            DeduccionAplicacion.medico_id == medico_id,
+            Deduccion.descuento_id,
+            Conceptos.nombre.label("concepto_nombre"),
         )
-    )).mappings().all()
-
-    desc_ids = [r["concepto_id"] for r in apl_rows if r["concepto_tipo"] == "desc"]
-    esp_ids  = [r["concepto_id"] for r in apl_rows if r["concepto_tipo"] == "esp"]
-
-    desc_nombres: dict[int, str] = {}
-    if desc_ids:
-        for r in (await db.execute(
-            select(Conceptos.id, Conceptos.nombre).where(Conceptos.id.in_(desc_ids))
-        )).all():
-            desc_nombres[r.id] = r.nombre
-
-    esp_nombres: dict[int, str] = {}
-    if esp_ids:
-        for r in (await db.execute(
-            select(Especialidad.ID, Especialidad.ESPECIALIDAD).where(Especialidad.ID.in_(esp_ids))
-        )).all():
-            esp_nombres[r.ID] = r.ESPECIALIDAD
+        .select_from(DeduccionAplicacion)
+        .join(Deduccion, Deduccion.id == DeduccionAplicacion.deduccion_id)
+        .outerjoin(Conceptos, Conceptos.id == Deduccion.descuento_id)
+        .where(
+            DeduccionAplicacion.pago_id == pago_id,
+            Deduccion.medico_id == medico_id,
+        )
+    )).all()
 
     deducciones: list[dict] = []
     total_deducciones = Decimal("0")
     for apl in apl_rows:
-        aplicado = to_dec(apl["aplicado"])
-        nombre = (
-            desc_nombres.get(apl["concepto_id"], f"Descuento #{apl['concepto_id']}")
-            if apl["concepto_tipo"] == "desc"
-            else esp_nombres.get(apl["concepto_id"], f"Especialidad #{apl['concepto_id']}")
-        )
+        aplicado = to_dec(apl.aplicado)
         deducciones.append({
-            "concepto_tipo": apl["concepto_tipo"],
-            "concepto_id": apl["concepto_id"],
-            "nombre": nombre,
+            "descuento_id": apl.descuento_id,
+            "nombre": apl.concepto_nombre or (
+                f"Concepto #{apl.descuento_id}" if apl.descuento_id else "Deducción manual"
+            ),
             "aplicado": float(aplicado),
         })
         total_deducciones += aplicado

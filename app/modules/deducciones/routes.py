@@ -84,7 +84,7 @@ async def bulk_generar_descuento(
     pago = await db.get(Pago, pago_id)
     if not pago:
         raise HTTPException(404, "Pago no encontrado")
-    if pago.estado == "C":
+    if pago.estado != "A":
         raise HTTPException(409, "El pago está cerrado")
 
     try:
@@ -224,7 +224,7 @@ async def refrescar_deducciones_endpoint(pago_id: int, db: AsyncSession = Depend
     pago = await db.get(Pago, pago_id)
     if not pago:
         raise HTTPException(404, "Pago no encontrado")
-    if pago.estado == "C":
+    if pago.estado != "A":
         raise HTTPException(409, "El pago está cerrado")
 
     result = await refrescar_deducciones_pago(db, pago)

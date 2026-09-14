@@ -44,6 +44,10 @@ from app.services.lote_ajuste_update import (
     marcar_lotes_aplicados,
     revertir_lotes_al_reabrir,
 )
+from app.services.detalle_facturacion_update import (
+    marcar_prestaciones_liquidadas,
+    revertir_prestaciones_liquidadas,
+)
 from app.services.deducciones_rollback import rollback_deducciones_pago
 from app.services.lote_ajuste_rollback import rollback_lotes_pago
 from app.services.liquidaciones_rollback import rollback_liquidaciones_pago, rollback_recibos_pago
@@ -146,7 +150,7 @@ async def editar_pago(pago_id: int, payload: PagoUpdate, db: AsyncSession = Depe
     pago = await db.get(Pago, pago_id)
     if not pago:
         raise HTTPException(404, "Pago no encontrado")
-    if pago.estado == "C":
+    if pago.estado != "A":
         raise HTTPException(409, "No se puede editar un pago cerrado")
 
     if payload.descripcion is not None:
@@ -166,6 +170,10 @@ async def eliminar_pago(pago_id: int, db: AsyncSession = Depends(get_db)):
     pago = await db.get(Pago, pago_id)
     if not pago:
         raise HTTPException(404, "Pago no encontrado")
+
+    # Un pago marcado P (Pagado) es un registro cerrado del todo: no se borra.
+    if pago.estado == "P":
+        raise HTTPException(409, "No se puede eliminar un pago marcado como pagado")
 
     # Bloquear si hay recibos ya cobrados (representan pagos reales efectuados)
     rec_pagados = (await db.execute(
@@ -191,13 +199,17 @@ async def eliminar_pago(pago_id: int, db: AsyncSession = Depends(get_db)):
     # 2. Lotes: desvincula LoteAjuste (L → C, pago_id → NULL)
     await rollback_lotes_pago(db, pago_id)
 
-    # 3. Recibos (emitidos/pendientes): eliminar antes que Liquidacion por FK RESTRICT
+    # 3. Prestaciones CMC liquidadas (L → C) — tiene que ir ANTES de borrar las
+    #    liquidaciones/detalles, porque lee detalle_liquidacion para saber cuáles.
+    await revertir_prestaciones_liquidadas(db, pago_id)
+
+    # 4. Recibos (emitidos/pendientes): eliminar antes que Liquidacion por FK RESTRICT
     await rollback_recibos_pago(db, pago_id)
 
-    # 4. Liquidaciones y sus detalles
+    # 5. Liquidaciones y sus detalles
     await rollback_liquidaciones_pago(db, pago_id)
 
-    # 5. Eliminar Pago (PagoMedico se elimina por CASCADE automáticamente)
+    # 6. Eliminar Pago (PagoMedico se elimina por CASCADE automáticamente)
     await db.delete(pago)
     await db.commit()
     return None
@@ -211,7 +223,7 @@ async def cerrar_pago(pago_id: int, db: AsyncSession = Depends(get_db)):
     pago = await db.get(Pago, pago_id)
     if not pago:
         raise HTTPException(404, "Pago no encontrado")
-    if pago.estado == "C":
+    if pago.estado != "A":
         raise HTTPException(409, "El pago ya está cerrado")
 
     # 1. Aplicar deducciones (greedy: mayor primero por médico) — marca aplicado/pendiente
@@ -222,6 +234,10 @@ async def cerrar_pago(pago_id: int, db: AsyncSession = Depends(get_db)):
 
     # 3. Marcar lotes: L → AP (Aplicado — inmutables desde ahora)
     lotes_info = await marcar_lotes_aplicados(db, pago_id)
+
+    # 4. Marcar como liquidadas (C → L) las prestaciones CMC que este pago
+    #    efectivamente liquidó — ver diagnóstico C3/A7.
+    prestaciones_liquidadas = await marcar_prestaciones_liquidadas(db, pago_id)
 
     pago.estado = "C"
     pago.cierre_timestamp = datetime.datetime.now()
@@ -234,6 +250,7 @@ async def cerrar_pago(pago_id: int, db: AsyncSession = Depends(get_db)):
         "cierre_info": {
             **lotes_info,
             "deducciones_aplicadas_extra": ded_extra,
+            "prestaciones_liquidadas": prestaciones_liquidadas,
         },
     }
 
@@ -248,6 +265,8 @@ async def reabrir_pago(pago_id: int, db: AsyncSession = Depends(get_db)):
         raise HTTPException(404, "Pago no encontrado")
     if pago.estado == "A":
         raise HTTPException(409, "El pago ya está abierto")
+    if pago.estado == "P":
+        raise HTTPException(409, "No se puede reabrir un pago marcado como pagado")
 
     # 409 si hay recibos emitidos o pagados
     rec_activos = (await db.execute(
@@ -272,8 +291,38 @@ async def reabrir_pago(pago_id: int, db: AsyncSession = Depends(get_db)):
     # Revertir lotes: AP → L (vuelven a "En liquidaciones")
     await revertir_lotes_al_reabrir(db, pago_id)
 
+    # Revertir prestaciones CMC liquidadas: L → C (ver diagnóstico C3/A7)
+    await revertir_prestaciones_liquidadas(db, pago_id)
+
     pago.estado = "A"
     pago.cierre_timestamp = None
+    await db.commit()
+    await db.refresh(pago)
+    totales = await recalcular_totales_pago(db, pago_id)
+    return _enrich_pago(pago, totales)
+
+
+# ================================================
+# POST /pagos/{pago_id}/marcar_pagado — Marcar como pagado
+# ================================================
+@router.post("/{pago_id}/marcar_pagado", response_model=PagoRead)
+async def marcar_pagado(pago_id: int, db: AsyncSession = Depends(get_db)):
+    """
+    Marca el pago como P (Pagado) — el operador confirma que el pago bancario
+    ya se efectuó. Terminal: desde acá no se puede reabrir (ver reabrir_pago).
+
+    No exige que los recibos estén emitidos: el pago real y la emisión de
+    recibos son procesos independientes, el primero puede ocurrir antes.
+    """
+    pago = await db.get(Pago, pago_id)
+    if not pago:
+        raise HTTPException(404, "Pago no encontrado")
+    if pago.estado == "P":
+        raise HTTPException(409, "El pago ya está marcado como pagado")
+    if pago.estado != "C":
+        raise HTTPException(409, "Solo se puede marcar como pagado un pago cerrado")
+
+    pago.estado = "P"
     await db.commit()
     await db.refresh(pago)
     totales = await recalcular_totales_pago(db, pago_id)

@@ -41,6 +41,9 @@ class Scope(StrEnum):
     # Separado de PAGO_CERRAR a propósito: reabrir un pago cerrado es el
     # movimiento que permite alterar cifras ya conciliadas.
     PAGO_REABRIR = "pago:reabrir"
+    # Marca el pago como P (Pagado) — terminal, ya no se puede reabrir desde
+    # ahí. No depende de que los recibos estén emitidos (ver pagos:reabrir).
+    PAGO_MARCAR_PAGADO = "pago:marcar_pagado"
 
     # ── Financiero: recibos ───────────────────────────────────────────────────
     RECIBO_LEER = "recibo:leer"
@@ -323,6 +326,7 @@ ROLES: dict[str, set[Scope]] = {
         Scope.PAGO_EDITAR,
         Scope.PAGO_CERRAR,
         Scope.PAGO_REABRIR,
+        Scope.PAGO_MARCAR_PAGADO,
         Scope.RECIBO_LEER,
         Scope.RECIBO_EMITIR,
         Scope.RECIBO_ANULAR,
@@ -446,6 +450,7 @@ DESCRIPCIONES: dict[Scope, str] = {
     Scope.PAGO_ELIMINAR: "Eliminar un pago",
     Scope.PAGO_CERRAR: "Cerrar un pago",
     Scope.PAGO_REABRIR: "Reabrir un pago cerrado (altera cifras conciliadas)",
+    Scope.PAGO_MARCAR_PAGADO: "Marcar un pago como pagado (terminal, ya no se puede reabrir)",
     Scope.RECIBO_LEER: "Ver recibos",
     Scope.RECIBO_EMITIR: "Emitir y regenerar recibos",
     Scope.RECIBO_ANULAR: "Anular o borrar recibos emitidos",

@@ -61,15 +61,16 @@ async def recalcular_totales_pago(db: AsyncSession, pago_id: int) -> dict:
         )
         .select_from(Ajuste)
         .join(LoteAjuste, LoteAjuste.id == Ajuste.lote_id)
-        .where(LoteAjuste.pago_id == pago_id, LoteAjuste.estado == "L")
+        # AP = mismo lote, ya con el pago cerrado — sigue siendo "de este pago".
+        .where(LoteAjuste.pago_id == pago_id, LoteAjuste.estado.in_(["L", "AP"]))
     )
     dc_row = dc_res.first()
     total_debitos = _to_dec(dc_row.debitos if dc_row else 0)
     total_creditos = _to_dec(dc_row.creditos if dc_row else 0)
 
-    # Deducciones: pago cerrado → suma lo efectivamente aplicado; abierto → suma lo en_pago
+    # Deducciones: pago cerrado (C o P) → suma lo efectivamente aplicado; abierto → suma lo en_pago
     pago = await db.get(Pago, pago_id)
-    if pago and pago.estado == "C":
+    if pago and pago.estado in ("C", "P"):
         ded_res = await db.execute(
             select(func.coalesce(func.sum(DeduccionAplicacion.aplicado), 0))
             .where(DeduccionAplicacion.pago_id == pago_id)
@@ -161,10 +162,11 @@ async def vista_previa_pago(db: AsyncSession, pago_id: int) -> dict:
     liq_tot_reconocido = (liq_tot_bruto - liq_tot_deb + liq_tot_cred).quantize(Decimal("0.01"))
 
     # ── 2. Deducciones agrupadas por concepto ────────────────────────────────
-    estado_ded = "aplicado" if pago.estado == "C" else "en_pago"
-    # Cerrado: monto_aplicado es el ledger real (DeduccionAplicacion). Abierto:
-    # todavía no se cobró nada, se muestra la preview (monto_aplicado_preview).
-    col_monto = Deduccion.monto_aplicado if pago.estado == "C" else Deduccion.monto_aplicado_preview
+    pago_cerrado = pago.estado in ("C", "P")
+    estado_ded = "aplicado" if pago_cerrado else "en_pago"
+    # Cerrado (C o P): monto_aplicado es el ledger real (DeduccionAplicacion).
+    # Abierto: todavía no se cobró nada, se muestra la preview (monto_aplicado_preview).
+    col_monto = Deduccion.monto_aplicado if pago_cerrado else Deduccion.monto_aplicado_preview
 
     ded_rows = (await db.execute(
         select(
@@ -445,8 +447,8 @@ async def refrescar_detalle_medico(
         }
 
     # ── 4. Deducciones agrupadas por (nro_colegio + periodo_a_aplicar) ────────
-    if pago.estado == "C":
-        # Pago cerrado: usamos lo efectivamente aplicado via DeduccionAplicacion
+    if pago.estado in ("C", "P"):
+        # Pago cerrado (C o P): usamos lo efectivamente aplicado via DeduccionAplicacion
         ded_rows = (await db.execute(
             select(
                 Conceptos.nro_colegio.label("nro_deduccion"),
@@ -601,7 +603,7 @@ async def generar_recibo_medico(
     if not pm:
         raise HTTPException(404, f"PagoMedico no encontrado para médico {medico_db_id} en pago {pago_id}")
 
-    estado_recibo = "liquidado" if pago.estado == "C" else "en_revision"
+    estado_recibo = "liquidado" if pago.estado in ("C", "P") else "en_revision"
     now = datetime.datetime.now()
 
     existing = (await db.execute(

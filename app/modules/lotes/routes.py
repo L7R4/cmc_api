@@ -437,7 +437,7 @@ async def cambiar_estado_lote(
     elif transicion == ("L", "C"):
         pago_id_afectado = lote.pago_id
         pago = await db.get(Pago, pago_id_afectado)
-        if pago and pago.estado == "C":
+        if pago and pago.estado != "A":
             raise HTTPException(409, "No se puede quitar un lote de un pago cerrado")
         lote.pago_id = None
         lote.estado = "C"

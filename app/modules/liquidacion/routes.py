@@ -138,7 +138,7 @@ async def eliminar_liquidacion(liquidacion_id: int, db: AsyncSession = Depends(g
 
     # 409 si pago cerrado
     pago = await db.get(Pago, obj.pago_id)
-    if pago and pago.estado == "C":
+    if pago and pago.estado != "A":
         raise HTTPException(409, "No se puede eliminar una liquidación de un pago cerrado")
 
     # 409 si hay lotes en estado 'L' para esta OS+período en el mismo pago

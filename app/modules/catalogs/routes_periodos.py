@@ -5,7 +5,7 @@ from sqlalchemy import not_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.database import get_db
-from app.db.models import FacturacionCMC, Liquidacion, LoteAjuste
+from app.db.models import DetalleFacturacionCMC, FacturacionCMC, LoteAjuste
 
 router = APIRouter()
 
@@ -64,13 +64,22 @@ async def periodos_disponibles(
     anio: Optional[int] = Query(None),
     db: AsyncSession = Depends(get_db),
 ):
-    """Períodos con facturación CMC cerrada que aún no tienen liquidación creada."""
-    subq = (
-        select(Liquidacion.id)
+    """Períodos con facturación CMC cerrada que todavía tienen prestaciones sin liquidar.
+
+    Antes excluía cualquier período que ya tuviera una Liquidacion (en
+    cualquier pago), así que una factura complementaria sobre un período ya
+    liquidado no podía volver a ofrecerse aunque llegaran prestaciones nuevas
+    (ver diagnóstico C3/A7 — build_detalles_from_cmc solo copia estado='C', y
+    desde que el cierre de pago marca 'L' lo ya liquidado, "hay algo pendiente"
+    se puede preguntar directamente en detalle_facturacion en vez de inferirlo
+    de si existe o no una Liquidacion.
+    """
+    pendientes_subq = (
+        select(DetalleFacturacionCMC.id_detalle_prestaciones)
         .where(
-            Liquidacion.obra_social_id == obra_social_id,
-            Liquidacion.anio_periodo == FacturacionCMC.periodo.op("DIV")(100),
-            Liquidacion.mes_periodo == FacturacionCMC.periodo.op("%")(100),
+            DetalleFacturacionCMC.cod_obr == str(obra_social_id),
+            DetalleFacturacionCMC.periodo == FacturacionCMC.periodo,
+            DetalleFacturacionCMC.estado == "C",
         )
         .limit(1)
     )
@@ -84,7 +93,7 @@ async def periodos_disponibles(
         .where(
             FacturacionCMC.cod_obr == str(obra_social_id),
             FacturacionCMC.estado.in_(["C", "L", "LC"]),
-            not_(subq.exists()),
+            pendientes_subq.exists(),
         )
         .distinct()
         .order_by(FacturacionCMC.periodo.desc())

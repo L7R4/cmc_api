@@ -360,7 +360,7 @@ async def generar_y_recalcular_porcentuales(db: AsyncSession, pago_id: int) -> d
     No se llama al crear el pago (en ese momento no hay bruto aún).
     """
     pago = await db.get(Pago, pago_id)
-    if not pago or pago.estado == "C":
+    if not pago or pago.estado != "A":
         return {"generadas": 0, "recalculadas": 0}
 
     # Flush explícito para que los DetalleLiquidacion recién escritos
@@ -665,7 +665,7 @@ async def get_deducciones_aplicadas(
 
     items: list[DeduccionAplicadaItem] = []
 
-    if pago.estado != "C":
+    if pago.estado not in ("C", "P"):
         # Pago abierto — fuente: tabla deducciones
         rows = (await db.execute(
             select(
@@ -696,7 +696,7 @@ async def get_deducciones_aplicadas(
                 monto_aplicado=Decimal(str(r["monto_aplicado_preview"] or "0")),
             ))
     else:
-        # Pago cerrado — fuente: tabla deduccion_aplicacion
+        # Pago cerrado (C o P) — fuente: tabla deduccion_aplicacion
         rows = (await db.execute(
             select(
                 DeduccionAplicacion.aplicado,
@@ -854,8 +854,15 @@ async def cambiar_estado_item(db: AsyncSession, id: int, nuevo_estado: str) -> D
 async def pagar_deduccion(db: AsyncSession, id: int) -> DeduccionHistorialItem:
     """
     Endpoint 'Pagar': marca la deducción como pagada en caja independientemente
-    del pago abierto. Fuerza paga_por_caja=True y origen='manual', crea
-    DeduccionAplicacion(pago_id=None).
+    del pago abierto. Fuerza paga_por_caja=True, crea DeduccionAplicacion(pago_id=None).
+
+    No fuerza origen='manual' (antes sí lo hacía): el origen es un dato
+    estructural de cómo se generó la deducción (automática por porcentaje o
+    "Generar", vs. manual/cuotas), y forzarlo a manual acá hacía que el
+    alcance de rollback_deducciones_pago creciera con cada pago en caja (ver
+    diagnóstico A4) — una automática pagada en caja terminaba tratada como
+    manual "de cualquier pago" en cualquier eliminación futura. paga_por_caja
+    ya es la señal correcta de "esto se cobró en caja, no por liquidación".
     """
     ded = await db.get(Deduccion, id)
     if not ded:
@@ -871,7 +878,6 @@ async def pagar_deduccion(db: AsyncSession, id: int) -> DeduccionHistorialItem:
             await marcar_deducciones_dirty(db, pago.id)
 
     ded.paga_por_caja = True
-    ded.origen = "manual"
     ded.estado = "aplicado"
     ded.monto_aplicado = ded.calculado_total
 
@@ -1134,7 +1140,7 @@ async def deshacer_descuentos_generados(
     pago = await db.get(Pago, pago_id)
     if not pago:
         raise ValueError("pago_no_encontrado")
-    if pago.estado == "C":
+    if pago.estado != "A":
         raise ValueError("pago_cerrado")
 
     # ── 1. Eliminar las generadas por este pago ──────────────────────────────

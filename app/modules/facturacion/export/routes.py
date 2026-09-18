@@ -17,6 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.deps import get_current_user
+from app.auth.ownership import socio_objetivo
 from app.db.database import get_db
 from app.db.models import ExportPreset
 from app.modules.facturacion.export import armado as armado_mod
@@ -141,6 +142,67 @@ async def export_caratula_xlsx(id: int, db: AsyncSession = Depends(get_db)):
         content=contenido,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f'attachment; filename="caratula_factura_{id}.xlsx"'},
+    )
+
+
+# ── Detalle por médico (cruza obras sociales) ───────────────────────────────
+
+def _validar_periodo(periodo: str) -> str:
+    periodo = periodo.strip()
+    if not (len(periodo) == 6 and periodo.isdigit()):
+        raise HTTPException(422, "El período va en formato AAAAMM (ej. 202607).")
+    return periodo
+
+
+async def _export_detalle_medico(
+    nro_socio: int, periodo: str, opciones: ExportOpciones,
+    user: dict, db: AsyncSession, builder, media_type: str, ext: str,
+):
+    periodo = _validar_periodo(periodo)
+    # Mismo control de propiedad que la pantalla: sin `medico:leer`, un prestador
+    # sólo puede exportar lo suyo; pedir otro socio da 403.
+    socio = str(socio_objetivo(user, nro_socio))
+    t0 = time.perf_counter()
+    filas = await datos_mod.obtener_filas_export_por_medico(db, socio, periodo, opciones)
+    armado = armado_mod.armar(filas, opciones)
+    encabezado = await encabezado_mod.construir_encabezado_por_medico(db, socio, periodo)
+    contenido = await run_in_threadpool(builder, armado, opciones, encabezado)
+    logger.info(
+        "export detalle_medico.%s socio=%s periodo=%s filas=%s tiempo=%.2fs",
+        ext, socio, periodo, len(filas), time.perf_counter() - t0,
+    )
+    return Response(
+        content=contenido, media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="detalle_medico_{socio}_{periodo}.{ext}"'},
+    )
+
+
+@router.get("/medico/{nro_socio}/export/detalle.pdf")
+async def export_detalle_medico_pdf(
+    nro_socio: int,
+    periodo: str = Query(..., description="Período AAAAMM"),
+    opciones: ExportOpciones = Depends(_resolver_opciones),
+    db: AsyncSession = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    return await _export_detalle_medico(
+        nro_socio, periodo, opciones, user, db,
+        pdf_mod.build_pdf_detalle, "application/pdf", "pdf",
+    )
+
+
+@router.get("/medico/{nro_socio}/export/detalle.xlsx")
+async def export_detalle_medico_xlsx(
+    nro_socio: int,
+    periodo: str = Query(..., description="Período AAAAMM"),
+    opciones: ExportOpciones = Depends(_resolver_opciones),
+    db: AsyncSession = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    return await _export_detalle_medico(
+        nro_socio, periodo, opciones, user, db,
+        excel_mod.build_excel_detalle,
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "xlsx",
     )
 
 

@@ -24,7 +24,7 @@ from typing import Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import FacturacionCMC, Institucion, ObrasSociales
+from app.db.models import FacturacionCMC, Institucion, ListadoMedico, ObrasSociales
 from app.modules.facturacion import service
 
 RAZON_SOCIAL_FALLBACK = "COLEGIO MEDICO DE CORRIENTES"
@@ -84,4 +84,40 @@ async def construir_encabezado(db: AsyncSession, factura: FacturacionCMC) -> Enc
         _linea_facturas(factura),
         f"Facturación correspondiente a: {periodo}",
         f"Obra social ({factura.cod_obr}) {obra_social_nombre}",
+    ])
+
+
+async def construir_encabezado_por_medico(
+    db: AsyncSession, cod_medico: str, periodo: str,
+) -> EncabezadoExport:
+    """Mismo membrete institucional que `construir_encabezado`, adaptado al
+    "Detalle por médico": donde el export de factura pone el Nº de factura y una
+    única obra social, acá van la identidad del médico y la leyenda de que cruza
+    todas las obras sociales (el detalle es por socio, no por factura)."""
+    razon_social, linea_domicilio = await _linea_institucion(db)
+    periodo_label = service.periodo_label(periodo) if periodo else "-"
+
+    medico = None
+    try:
+        cod_int = int(cod_medico)
+    except (TypeError, ValueError):
+        cod_int = None
+    if cod_int is not None:
+        medico = (await db.execute(
+            select(ListadoMedico).where(ListadoMedico.NRO_SOCIO == cod_int)
+        )).scalars().first()
+
+    if medico is not None:
+        linea_medico = f"Médico: {medico.NOMBRE or '-'} - Socio {cod_medico}"
+        if medico.MATRICULA_PROV is not None:
+            linea_medico += f" - Matrícula {medico.MATRICULA_PROV}"
+    else:
+        linea_medico = f"Médico: Socio {cod_medico}"
+
+    return EncabezadoExport(lineas=[
+        razon_social,
+        linea_domicilio,
+        linea_medico,
+        f"Facturación correspondiente a: {periodo_label}",
+        "Detalle por médico - todas las obras sociales",
     ])

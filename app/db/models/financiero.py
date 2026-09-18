@@ -71,7 +71,8 @@ class LoteAjuste(AuditMixin, Base):
     )
 
     __table_args__ = (
-        UniqueConstraint("snap_origen_id", name="uq_lote_origen"),
+        # uq_lote_origen (UniqueConstraint sobre snap_origen_id) se sacó — limitaba
+        # a una sola refacturación por lote origen (ver diagnóstico M6).
         Index("idx_lote_os_per", "obra_social_id", "mes_periodo", "anio_periodo"),
         Index("idx_lote_pago", "pago_id"),
     )

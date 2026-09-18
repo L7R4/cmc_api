@@ -162,6 +162,14 @@ class PrestacionItem(BaseModel):
     # Vínculo a la fila del médico (cabeza del equipo) cuando el ayudante se carga aparte.
     grupo_equipo_id: Optional[int] = None
 
+    # Rol del integrante dentro del equipo. None = comportamiento histórico (el rol se
+    # infiere del concepto en >0: honorarios→médico, ayudante→ayudante). "pediatra" es
+    # el único valor que hoy cambia algo: fuerza tpo_funcion='P', coseguro 0 y lo saca
+    # de la elección de cabeza (el cirujano manda, aunque el pediatra también cobre
+    # honorarios — pero de su PROPIO código, distinto al del cirujano). Ver
+    # `service.CODIGOS_CON_PEDIATRA` y `service._insertar_prestaciones`.
+    rol: Optional[Literal["pediatra"]] = None
+
 
 class PrestacionesCreate(BaseModel):
     """Payload del POST /facturacion/prestaciones.
@@ -226,6 +234,9 @@ class PrestacionUpdate(BaseModel):
     porcentaje: Optional[int] = Field(None, ge=1, le=100)
     coseguro: Optional[Decimal] = Field(None, ge=0)
     grupo_equipo_id: Optional[int] = None
+    # Mismo campo que en PrestacionItem — None = no lo toca (se preserva el rol actual
+    # de la fila). Ver la nota ahí y `service.editar_prestacion`.
+    rol: Optional[Literal["pediatra"]] = None
 
 
 class PrestacionesRevisadoUpdate(BaseModel):
@@ -294,6 +305,10 @@ class PrecioResponse(BaseModel):
     # Máximo de ayudantes admitidos para este código+OS (informativo, para que el front
     # limite el armado del equipo). NULL/0 = no lleva ayudantes.
     cantidad_ayudantes: Optional[int] = None
+    # True → este código admite sumar un pediatra al equipo (parto/cesárea). El front lo
+    # usa para mostrar "Agregar pediatra"; la lista de códigos vive en el backend
+    # (`service.CODIGOS_CON_PEDIATRA`) para no duplicar la regla de negocio en el cliente.
+    admite_pediatra: bool = False
     # Vía cotizada (T=tradicional, L=laparoscópica) y, si L, el nivel de galeno
     # efectivamente usado (ver app/modules/nomenclador/service_vias.py).
     via: str = "T"
@@ -323,11 +338,12 @@ class PrestacionRead(BaseModel):
     cod_nomenclador: Optional[str] = Field(None, alias="cod_nom")
     via: Optional[str] = None
     tipo: Optional[str] = None
-    # Badge "Medico" | "Ayudante" | "Gastos" según qué monto está en >0 (misma derivación
-    # que en `GET /facturas/{id}/detalle`, ver `_derivar_tipo_prestador`). NO viene del
-    # ORM: se calcula en `obtener_prestacion` — en el resto de las respuestas que usan
-    # `PrestacionRead` queda None. Identifica cuál integrante de `grupo` es la cabecera
-    # ("Medico") sin tener que interpretar el código legacy `tpo_funcion` (H/HG/G/A).
+    # Badge "Medico" | "Ayudante" | "Gastos" | "Pediatra" según `tpo_funcion` y, en su
+    # ausencia, qué monto está en >0 (ver `_derivar_tipo_prestador`). Lo puebla
+    # `_to_prestacion_read_list` (así que sí viene en `listar_prestaciones` y en el
+    # `grupo` de cada prestación) y `obtener_prestacion`. Identifica cuál integrante del
+    # equipo es la cabecera ("Medico") sin tener que interpretar el código legacy
+    # `tpo_funcion` (H/HG/G/A/P).
     tipo_prestador: Optional[str] = None
     grupo_equipo_id: Optional[int] = None
     sesion: Optional[int] = None
@@ -584,6 +600,14 @@ class PrestacionFacturaDetalleOut(BaseModel):
     @classmethod
     def _num_to_str(cls, v):
         return str(v) if v is not None else v
+
+    @field_validator("fecha_practica", mode="before")
+    @classmethod
+    def _zero_date_to_none(cls, v):
+        # MySQL puede devolver zero-dates ('0000-00-00') que no son fechas válidas.
+        if isinstance(v, str) and v.startswith("0000-00-00"):
+            return None
+        return v
 
 
 class PrestadorFacturaGrupoOut(BaseModel):

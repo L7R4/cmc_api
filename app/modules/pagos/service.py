@@ -352,12 +352,14 @@ async def refrescar_detalle_medico(
     os_per_to_liq: dict[tuple, int] = {}
     total_liq_honorarios = Decimal("0")
     total_liq_gastos = Decimal("0")
+    total_liq_bruto = Decimal("0")
 
     for r in liq_rows:
         h = _to_dec(r.total_honorarios)
         g = _to_dec(r.total_gastos)
         total_liq_honorarios += h
         total_liq_gastos += g
+        total_liq_bruto += _to_dec(r.total_bruto)
         liq_map[r.liq_id] = {
             "obra_social_id":   r.obra_social_id,
             "obra_social":      r.obra_social_nombre,
@@ -518,7 +520,11 @@ async def refrescar_detalle_medico(
     }
 
     # ── 5. Resumen ────────────────────────────────────────────────────────────
-    total_bruto  = total_liq_honorarios + total_liq_gastos
+    # bruto = suma de importe_total (mismo campo que usa el header del pago vía
+    # Liquidacion.total_bruto/recalcular_totales_de_liquidacion) — no
+    # honorarios+gastos, que puede diferir por coseguro u otros ajustes al
+    # desglose que no tocan el importe ya facturado por CMC (ver diagnóstico M4).
+    total_bruto  = total_liq_bruto
     reconocido   = (total_bruto + total_creditos - total_debitos).quantize(Decimal("0.01"))
     neto_a_pagar = max(reconocido - total_deducciones, Decimal("0")).quantize(Decimal("0.01"))
 

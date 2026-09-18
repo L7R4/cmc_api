@@ -58,6 +58,17 @@ from app.modules.facturacion.schemas import (
 FUENTE_PRECIO = "nm_historial_precio_codigo"
 CODIGOS_NO_PERMITIDOS = {"5000", "6000"}
 
+# Códigos cuya carga habilita sumar un pediatra al equipo (parto / cesárea). El
+# pediatra factura su PROPIO código con su propia especialidad — esto sólo gatilla
+# la opción en el formulario y la validación del payload (decisión usuario 2026-09-17).
+CODIGOS_CON_PEDIATRA: frozenset[str] = frozenset({"110401", "110403"})
+ROL_PEDIATRA = "pediatra"
+# Letra en la columna legacy `tpo_funcion` (misma que 'H'/'HG'/'G'/'A'). Verificado en
+# producción que 'P' no la usa ninguna fila existente (ver docs/api/ auditoría 2026-09-17).
+TPO_FUNCION_PEDIATRA = "P"
+TIPO_PRESTADOR_PEDIATRA = "Pediatra"
+MAX_PEDIATRAS = 1
+
 # Estados de la cabecera `facturacion`:
 #   "A" = abierta (período en carga; se crea al cargar la primera prestación).
 #   "C" = cerrada (período liquidable). Los históricos importados de CMC usaban
@@ -931,6 +942,10 @@ async def resolver_precio(
     """
     obra_social_nro = _cod_obra_to_int(cod_obra)
     nomenclador = await _get_nomenclador_by_codigo(db, codigo, obra_social_nro)
+    # Se calcula acá (no adentro de cada `return`) para que la bandera siga siendo
+    # válida incluso en las ramas "no admitido" — el front la necesita para mostrar
+    # "Agregar pediatra" apenas se elige el código, antes de que el precio resuelva.
+    admite_pediatra = codigo in CODIGOS_CON_PEDIATRA
 
     try:
         out = await service_nm.lookup_precio(
@@ -946,11 +961,13 @@ async def resolver_precio(
                 admitido=True, motivo=e.message,
                 honorarios=Decimal("0"), gastos=Decimal("0"), ayudante=Decimal("0"),
                 descripcion="", fuente=FUENTE_PRECIO, via=via,
+                admite_pediatra=admite_pediatra,
             )
         return PrecioResponse(
             admitido=False, motivo=e.message,
             honorarios=Decimal("0"), gastos=Decimal("0"), ayudante=Decimal("0"),
             descripcion="", fuente=FUENTE_PRECIO, via=via,
+            admite_pediatra=admite_pediatra,
         )
 
     def _suma(concepto: str) -> Decimal:
@@ -978,6 +995,7 @@ async def resolver_precio(
         via=out.via,
         nivel_cotizado=out.nivel_cotizado,
         coseguro=out.coseguro,
+        admite_pediatra=admite_pediatra,
     )
 
 
@@ -1170,9 +1188,26 @@ def tpo_funcion_derivado(h: Decimal, g: Decimal, a: Decimal) -> str:
     return "H"
 
 
-def _derivar_tipo_prestador(h: Decimal, g: Decimal, a: Decimal) -> Optional[str]:
-    """Badge "Tipo de prestador" de una fila, según qué monto está en >0. Misma
-    prioridad que `tpo_funcion_derivado` (ayudante gana sobre honorarios/gastos)."""
+def tpo_funcion_de(h: Decimal, g: Decimal, a: Decimal, rol: Optional[str] = None) -> str:
+    """`tpo_funcion` con el ROL explícito ganando sobre la derivación por montos. El
+    pediatra cobra honorarios de su PROPIO código — por montos derivaría 'H', igual que
+    el cirujano — así que sin esta rama perdería el rol al guardarse y, peor, al
+    editarse (ver `editar_prestacion`, que si no fuera por esto re-derivaría 'H' en
+    cualquier PATCH)."""
+    if rol == ROL_PEDIATRA:
+        return TPO_FUNCION_PEDIATRA
+    return tpo_funcion_derivado(h, g, a)
+
+
+def _derivar_tipo_prestador(
+    h: Decimal, g: Decimal, a: Decimal, tpo_funcion: Optional[str] = None,
+) -> Optional[str]:
+    """Badge "Tipo de prestador" de una fila. El pediatra se identifica por
+    `tpo_funcion == 'P'` (no hay forma de distinguirlo de un cirujano por montos: ambos
+    cobran honorarios). Para el resto, misma derivación de siempre según qué monto está
+    en >0 (ayudante gana sobre honorarios/gastos)."""
+    if (tpo_funcion or "").upper() == TPO_FUNCION_PEDIATRA:
+        return TIPO_PRESTADOR_PEDIATRA
     if a > 0:
         return "Ayudante"
     if h > 0:
@@ -1325,12 +1360,51 @@ async def _insertar_prestaciones(
     if len(items) > 1:
         cods = [(i.cod_medico, i.cod_medico_ejecutor) for i in items]
         if len(set(cods)) != len(cods):
-            raise HTTPException(422, "No se permite repetir el mismo prestador en el equipo")
+            raise HTTPException(
+                422,
+                "No se permite repetir el mismo prestador en el equipo "
+                "(cirujano, ayudantes y pediatra deben ser socios distintos)",
+            )
 
     # NOTA: la cantidad de ayudantes NO se valida como tope. El máximo de
     # `nm_valores.cantidad_ayudantes` es solo una REFERENCIA que se muestra al operador
     # (viene en la respuesta del precio); el operador puede cargar los ayudantes que
     # necesite sin bloqueo (decisión usuario 2026-07-19).
+
+    # Pediatra: máximo uno, sólo sobre parto/cesárea, y nunca como ítem 0 — el ítem 0
+    # es siempre el cirujano y es quien tiene que quedar de cabeza del grupo (ver la
+    # elección de `cabeza_id` más abajo). Dos formas de llegar acá:
+    #   (a) alta nueva del equipo completo: varios ítems, el 0 es el cirujano;
+    #   (b) agregar un pediatra a un equipo YA guardado (editar): un único ítem que ya
+    #       trae `grupo_equipo_id` apuntando a la cabeza existente — ahí el ítem 0 SÍ es
+    #       el pediatra, y el código a validar es el de la cabeza, no el del payload.
+    pediatras = [i for i in items if i.rol == ROL_PEDIATRA]
+    if pediatras:
+        if len(pediatras) > MAX_PEDIATRAS:
+            raise HTTPException(422, "Sólo se admite un pediatra por prestación")
+        if len(items) == 1 and items[0].grupo_equipo_id is not None:
+            cabeza = await db.get(DetalleFacturacionCMC, items[0].grupo_equipo_id)
+            if cabeza is None or cabeza.cod_nom not in CODIGOS_CON_PEDIATRA:
+                raise HTTPException(
+                    422, "Sólo se puede agregar un pediatra a un parto o cesárea"
+                )
+            ya_tiene = (await db.execute(
+                select(DetalleFacturacionCMC.id_detalle_prestaciones).where(
+                    DetalleFacturacionCMC.grupo_equipo_id == cabeza.id_detalle_prestaciones,
+                    DetalleFacturacionCMC.tpo_funcion == TPO_FUNCION_PEDIATRA,
+                    DetalleFacturacionCMC.estado != "X",
+                )
+            )).first()
+            if ya_tiene is not None:
+                raise HTTPException(422, "Este equipo ya tiene un pediatra cargado")
+        else:
+            if items[0].rol == ROL_PEDIATRA:
+                raise HTTPException(422, "El primer ítem del equipo debe ser el cirujano")
+            if items[0].cod_nomenclador not in CODIGOS_CON_PEDIATRA:
+                raise HTTPException(
+                    422,
+                    "Sólo se puede agregar un pediatra a una prestación de parto o cesárea",
+                )
 
     # Autorización previa: se valida TODO el payload ANTES de insertar nada —
     # `detalle_facturacion` es MyISAM y no revierte, así que cortar en el item 3 dejaría
@@ -1348,6 +1422,7 @@ async def _insertar_prestaciones(
     cabeza_id: Optional[int] = None  # fila del médico (honorarios > 0) = cabeza del equipo
 
     for i, item in enumerate(items):
+        es_pediatra = item.rol == ROL_PEDIATRA
         # Traduce la selección del front a columnas: el médico siempre termina en
         # `cod_med` (cobra y cotiza) y la clínica, si la hubo, en `cod_clinica`.
         prestador = await resolver_prestador(
@@ -1376,9 +1451,10 @@ async def _insertar_prestaciones(
         ):
             g_base = Decimal("0")
         h, g, a = _aplicar_porcentaje(h_base, g_base, a_base, item.porcentaje)
-        # El coseguro es del acto, no de cada prestador: sólo la fila del médico
-        # (nunca la del ayudante) lo lleva. No se escala por `porcentaje`.
-        if item.ayudante and item.ayudante > 0:
+        # El coseguro es del acto, no de cada prestador: sólo la fila del cirujano lo
+        # lleva. El pediatra cotiza su propio código, que puede traer coseguro propio:
+        # se descarta igual que en la fila de ayudante. No se escala por `porcentaje`.
+        if (item.ayudante and item.ayudante > 0) or es_pediatra:
             coseguro = Decimal("0")
         if coseguro > h + g + a:
             raise HTTPException(422, "El coseguro no puede superar el valor de la prestación")
@@ -1406,8 +1482,9 @@ async def _insertar_prestaciones(
             via=item.via,
             tipo=tipo,
             grupo_equipo_id=item.grupo_equipo_id,
-            # tpo_funcion derivado SOLO para coexistencia (liquidación/lotes lo leen).
-            tpo_funcion=tpo_funcion_derivado(h, g, a),
+            # tpo_funcion derivado SOLO para coexistencia (liquidación/lotes lo leen) —
+            # salvo 'P' explícito del pediatra, que por montos sería indistinguible de 'H'.
+            tpo_funcion=tpo_funcion_de(h, g, a, item.rol),
             sesion=item.sesion,
             cantidad=item.cantidad,
             honorarios=h,
@@ -1440,7 +1517,11 @@ async def _insertar_prestaciones(
         ids.append(row.id_detalle_prestaciones)
         total_acum += total
         filas.append(row)
-        if cabeza_id is None and h > 0:
+        # El pediatra también factura honorarios (de su propio código) pero NO puede
+        # quedar de cabeza: la cabeza es siempre el cirujano. La validación de arriba ya
+        # garantiza que el ítem 0 no es el pediatra; este `not es_pediatra` es la segunda
+        # barrera, a prueba de que el payload llegue reordenado.
+        if cabeza_id is None and h > 0 and not es_pediatra:
             cabeza_id = row.id_detalle_prestaciones
 
     # Vínculo de equipo: en POST multi-ítem, las filas sin grupo explícito apuntan a la
@@ -1663,7 +1744,7 @@ async def obtener_factura_detalle(db: AsyncSession, factura_id: int) -> dict:
             "porcentaje": r.porc,
             "honorarios": r.honorarios,
             "gastos": r.gastos,
-            "tipo_prestador": _derivar_tipo_prestador(h, ga, a),
+            "tipo_prestador": _derivar_tipo_prestador(h, ga, a, r.tpo_funcion),
             "subtotal": r.importe_total,
             "tipo": _tipo_de(r),
             "revisado": r.revisado,
@@ -1824,7 +1905,7 @@ async def prestaciones_recientes(
 # ── Detalle de una prestación (precarga de formulario de edición) ────────────
 def _tipo_prestador_de(row: DetalleFacturacionCMC) -> Optional[str]:
     return _derivar_tipo_prestador(
-        _dec(row.honorarios), _dec(row.gastos), _dec(row.ayudante)
+        _dec(row.honorarios), _dec(row.gastos), _dec(row.ayudante), row.tpo_funcion
     )
 
 
@@ -2134,6 +2215,18 @@ async def editar_prestacion(
             row.dni_p = data["dni_paciente"]
             row.nom_ape_p = await _nombre_desde_afiliado(db, data["dni_paciente"])
 
+        # El rol NO se re-deriva de los montos: un pediatra cobra honorarios igual que
+        # el cirujano, así que por montos sería indistinguible. Se toma del PATCH si vino
+        # (`data["rol"]`), y si no, de lo que ya tiene la fila guardada — sin esto,
+        # cualquier PATCH que recotizara (ver `pricing_keys` más abajo) degradaba la fila
+        # de 'P' a 'H' en silencio y perdía el rol para siempre.
+        rol_efectivo = data.get("rol") or (
+            ROL_PEDIATRA if (row.tpo_funcion or "").upper() == TPO_FUNCION_PEDIATRA else None
+        )
+        es_pediatra = rol_efectivo == ROL_PEDIATRA
+        if es_pediatra and data.get("grupo_equipo_id") == prestacion_id:
+            raise HTTPException(422, "El pediatra no puede ser la cabeza del equipo")
+
         # Mapeo de campos simples. `cod_medico`/`cod_medico_ejecutor` NO van acá: no se
         # copian tal cual a la fila, se resuelven más abajo (el médico puede terminar en
         # `cod_med` y la clínica en `cod_clinica`).
@@ -2252,15 +2345,16 @@ async def editar_prestacion(
                 # El código/OS que cotiza pudo haber cambiado — el coseguro viejo era del
                 # código/OS anterior. Si el operador no lo tocó en este mismo PATCH, se
                 # refresca con el sugerido del nuevo código; si lo tocó, ya quedó aplicado
-                # arriba (mapeo `simples`) y no se pisa.
-                if "coseguro" not in data:
+                # arriba (mapeo `simples`) y no se pisa. El pediatra nunca lo recibe: su
+                # código puede traer coseguro propio, pero lo cubre el cirujano.
+                if "coseguro" not in data and not es_pediatra:
                     row.coseguro = precio.coseguro
             else:  # manual
                 hb, gb, ab = hi, gi, ai
                 row.calculo_snapshot = None
             h, g, a = _aplicar_porcentaje(hb, gb, ab, row.porc or 100)
             row.honorarios, row.gastos, row.ayudante = h, g, a
-            row.tpo_funcion = tpo_funcion_derivado(h, g, a)
+            row.tpo_funcion = tpo_funcion_de(h, g, a, rol_efectivo)
 
         # Misma regla que en la carga: bajo sanatorio los gastos los factura la clínica.
         # Va FUERA del bloque de recotización — si no, un PATCH que no toca ningún campo de
@@ -2268,9 +2362,15 @@ async def editar_prestacion(
         # Forzar a 0 es idempotente y no depende del porcentaje (0 escalado sigue siendo 0).
         if await _gasto_forzado_a_cero(db, row.cod_nom, es_sanatorio, tipo_calculo, row.cod_obr):
             row.gastos = Decimal("0")
-            row.tpo_funcion = tpo_funcion_derivado(
-                row.honorarios or Decimal("0"), Decimal("0"), row.ayudante or Decimal("0")
+            row.tpo_funcion = tpo_funcion_de(
+                row.honorarios or Decimal("0"), Decimal("0"), row.ayudante or Decimal("0"),
+                rol_efectivo,
             )
+
+        # Invariante del rol: la fila del pediatra nunca lleva coseguro (el acto es uno
+        # solo y lo cobra el cirujano) — independiente de qué disparó este PATCH.
+        if es_pediatra:
+            row.coseguro = Decimal("0")
 
         h_final = row.honorarios or Decimal("0")
         g_final = row.gastos or Decimal("0")
@@ -2299,6 +2399,12 @@ async def editar_prestacion(
 
         await db.commit()
         await db.refresh(row)
+        # No es columna del ORM: se completa acá para que la respuesta del PATCH ya
+        # traiga el badge actualizado (mismo helper que usan obtener_prestacion y
+        # listar_prestaciones) — antes quedaba None en TODA respuesta de PATCH, no sólo
+        # en la del pediatra, y un consumidor que confiara en este response para
+        # refrescar el badge sin recargar se quedaba con el valor viejo o vacío.
+        row.tipo_prestador = _tipo_prestador_de(row)
         return row
     except Exception:
         await db.rollback()

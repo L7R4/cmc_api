@@ -49,6 +49,21 @@ def to_dec(x) -> Decimal:
         return Decimal("0")
 
 
+# De qué columna de `detalle_facturacion` sale honorarios/gastos para la liquidación,
+# según el ROL que cumplió el socio en esa fila (`tpo_funcion` legacy). Antes era una
+# cadena if/elif cuyo `else` se comportaba igual que 'H' — cualquier letra no
+# contemplada (o basura en la columna) se liquidaba en silencio como si fuera el
+# médico principal. Reemplazada por esta tabla explícita + `observados` (ver más abajo)
+# para que agregar un rol sea una línea y una letra desconocida sea RUIDOSA, no muda.
+_REPARTO_POR_FUNCION: dict[str, tuple[Optional[str], Optional[str]]] = {
+    "H":  ("honorarios", None),      # médico / cirujano
+    "HG": ("honorarios", "gastos"),  # médico + gastos en la misma fila
+    "G":  (None,         "gastos"),  # sólo gastos
+    "A":  ("ayudante",   None),      # ayudante
+    "P":  ("honorarios", None),      # pediatra — honorarios de SU propio código
+}
+
+
 # ================================================
 # Poblar detalles de liquidación desde detalle_facturacion (CMC)
 # ================================================
@@ -114,21 +129,24 @@ async def build_detalles_from_cmc(db: AsyncSession, liquidacion_id: int) -> None
             continue
 
         funcion = (df.tpo_funcion or "H").upper()
-        if funcion == "H":
-            honorarios = to_dec(df.honorarios)
-            gastos = Decimal("0")
-        elif funcion == "HG":
-            honorarios = to_dec(df.honorarios)
-            gastos = to_dec(df.gastos)
-        elif funcion == "G":
-            honorarios = Decimal("0")
-            gastos = to_dec(df.gastos)
-        elif funcion == "A":
-            honorarios = to_dec(df.ayudante)
-            gastos = Decimal("0")
-        else:
-            honorarios = to_dec(df.honorarios)
-            gastos = Decimal("0")
+        reparto = _REPARTO_POR_FUNCION.get(funcion)
+        if reparto is None:
+            # Antes esto caía al `else` de arriba y se liquidaba como 'H' sin que
+            # quedara ningún rastro. Ahora se observa y SE LIQUIDA IGUAL como 'H' (no
+            # se descarta la fila: preferible pagarla al monto por defecto, visible en
+            # el reporte, a dejar de pagarla en silencio). Ver auditoría 2026-09-17:
+            # así se descubrió 'A2' (27 filas, $19,3M) cayendo acá — ver migración de
+            # datos que lo normalizó a 'A' antes de este cambio.
+            observados.append({
+                "cmc_detalle_id": df.id_detalle_prestaciones,
+                "cod_med": df.cod_med,
+                "razon": "tpo_funcion_desconocido",
+                "tpo_funcion": df.tpo_funcion,
+            })
+            reparto = _REPARTO_POR_FUNCION["H"]
+        col_hon, col_gas = reparto
+        honorarios = to_dec(getattr(df, col_hon)) if col_hon else Decimal("0")
+        gastos = to_dec(getattr(df, col_gas)) if col_gas else Decimal("0")
 
         importe_total = to_dec(df.importe_total)
         if importe_total <= 0:
@@ -350,6 +368,12 @@ async def vista_detalles_liquidacion(
             ajuste_map[det_id] = med_ajuste_map.get(med_id, [])
 
     out: List[Dict[str, Any]] = []
+    # Los ajustes (débitos/créditos) son por médico, no por prestación — sumarlos
+    # en cada fila los contaría una vez por cada prestación del médico (ver
+    # diagnóstico M1). Se imputan al total una sola vez, en la primera fila
+    # del médico; debitos_creditos_list se sigue mostrando en todas las filas
+    # como contexto informativo.
+    medicos_con_ajuste_contado: set[int] = set()
     for r in base_rows:
         importe_total = Decimal(str(r["importe_total"] or "0"))
         pagado = Decimal(str(r["pagado"] or "0"))
@@ -365,10 +389,15 @@ async def vista_detalles_liquidacion(
 
         xCant = f"{cantidad}-{cant_trat}"
         det_id = int(r["det_id"])
+        med_id = int(r["socio"])
         aj_list = ajuste_map.get(det_id, [])
 
-        sum_c = sum(Decimal(str(aj["total"] or 0)) for aj in aj_list if aj["tipo"] == "C")
-        sum_d = sum(Decimal(str(aj["total"] or 0)) for aj in aj_list if aj["tipo"] == "D")
+        if aj_list and med_id not in medicos_con_ajuste_contado:
+            medicos_con_ajuste_contado.add(med_id)
+            sum_c = sum(Decimal(str(aj["total"] or 0)) for aj in aj_list if aj["tipo"] == "C")
+            sum_d = sum(Decimal(str(aj["total"] or 0)) for aj in aj_list if aj["tipo"] == "D")
+        else:
+            sum_c = sum_d = Decimal("0")
 
         total = importe_total + sum_c - sum_d
 

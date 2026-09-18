@@ -47,12 +47,25 @@ from typing import Callable, Optional
 from app.common.money import quantize_money
 from app.modules.facturacion.export.datos import FilaExport
 from app.modules.facturacion.export.schemas import ExportOpciones
+from app.modules.facturacion.service import TIPO_PRESTADOR_PEDIATRA
 
 ORDEN_TIPO_LEGACY = {"Consulta": 0, "Practica": 1, "Honorarios individuales": 2, "Sanatorio": 3}
 ETIQUETA_TIPO = {
     "Consulta": "CONSULTA", "Practica": "PRACTICA",
     "Honorarios individuales": "HONORARIO", "Sanatorio": "SANATORIO",
 }
+# Código de una letra para la columna TIPO del detalle (no para los resúmenes,
+# que siguen con la etiqueta larga de ETIQUETA_TIPO). Mismas iniciales que el
+# FIELD(tipo,'C','P','H','S') del legacy. Las filas de equipo (ayudante/gastos)
+# se muestran como "A".
+LETRA_TIPO = {
+    "Consulta": "C", "Practica": "P",
+    "Honorarios individuales": "H", "Sanatorio": "S",
+}
+LETRA_EQUIPO = "A"
+# "PE", no "P": 'P' ya es Práctica en LETRA_TIPO — quedarían indistinguibles en la
+# misma columna. Identifica al pediatra dentro de un equipo (hijo con tpo_funcion='P').
+LETRA_PEDIATRA = "PE"
 # Orden fijo de exhibición del resumen — igual que `$totales_globales_tipo` del legacy.
 TIPOS_EN_ORDEN = ["Consulta", "Practica", "Honorarios individuales", "Sanatorio"]
 
@@ -334,28 +347,31 @@ _DEFINICIONES: dict[str, ColumnaSpec] = {
     "estado_validacion": ColumnaSpec("estado_validacion", "VALIDACION", 20, 14, "C", False, lambda f: f.estado_validacion or ""),
 }
 
+# Nº de registro = id_detalle_prestaciones. Va primera, es la que pidió el
+# usuario para poder ubicar la fila exacta en la tabla. No es un monto: se
+# muestra tal cual (es_numero=False, sin formato de moneda).
+_COL_ID = ColumnaSpec("id", "Nro. REG.", 16, 11, "C", False, lambda f: f.id)
 _COL_SOCIO = ColumnaSpec("socio", "SOCIO", 12, 8, "C", False, lambda f: f.cod_medico)
 _COL_SUBTOTAL = ColumnaSpec("sub_total", "SUB. TOTAL", 22, 14, "R", True, lambda f: f.subtotal)
-_COL_TIPO = ColumnaSpec("tipo", "TIPO / ROL", 36, 20, "L", False, lambda f: ETIQUETA_TIPO.get(f.tipo, f.tipo or ""))
+# El valor real de esta columna lo resuelve `etiqueta_tipo_rol` (via
+# `valores_fila`), no este lambda — acá queda por consistencia del spec.
+_COL_TIPO = ColumnaSpec("tipo", "TIPO", 10, 7, "C", False, lambda f: LETRA_TIPO.get(f.tipo, f.tipo or ""))
 
 
 def spec_columnas(columnas_habilitadas: list[str]) -> list[ColumnaSpec]:
     seleccion = [_DEFINICIONES[k] for k in _DEFINICIONES if k in columnas_habilitadas]
-    return [_COL_SOCIO, *seleccion, _COL_SUBTOTAL, _COL_TIPO]
+    return [_COL_ID, _COL_SOCIO, *seleccion, _COL_SUBTOTAL, _COL_TIPO]
 
 
 def etiqueta_tipo_rol(fila: FilaExport, es_hijo: bool) -> str:
-    """Texto de la columna TIPO/ROL. Para un hijo de equipo (ayudante/gastos)
-    es el rol dentro del equipo (`tipo_prestador`), igual que el legacy mostraba
-    "AYUDANTE"/"AYUDANTE 2" en vez del tipo C/P/H/S. Para la cabeza, el legacy
-    sufija "- CIRUJANO" en TODA fila de Honorarios individuales/Sanatorio, tenga
-    o no equipo asociado (`$es_hono_sana ? "... - CIRUJANO" : "..."`)."""
+    """Texto de la columna TIPO — código de una sola letra. La cabeza es
+    C/P/H/S según el tipo; las filas de equipo son "A" (ayudante/gastos) o "PE"
+    (pediatra — distinguido por su `tipo_prestador`, ya que por tipo/monto es
+    indistinguible de un ayudante). Se dejó de mostrar la etiqueta larga y el sufijo
+    "- CIRUJANO" a pedido del usuario, para achicar la columna."""
     if es_hijo:
-        return (fila.tipo_prestador or "AYUDANTE").upper()
-    base = ETIQUETA_TIPO.get(fila.tipo, fila.tipo or "")
-    if fila.tipo in ("Honorarios individuales", "Sanatorio"):
-        return f"{base} - CIRUJANO"
-    return base
+        return LETRA_PEDIATRA if fila.tipo_prestador == TIPO_PRESTADOR_PEDIATRA else LETRA_EQUIPO
+    return LETRA_TIPO.get(fila.tipo, fila.tipo or "")
 
 
 def valores_fila(cols: list[ColumnaSpec], fila: FilaExport, es_hijo: bool = False) -> list:

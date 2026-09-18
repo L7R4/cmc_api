@@ -3,7 +3,6 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import String, case, cast, func, or_, select
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -169,7 +168,13 @@ async def crear_lote_refacturacion(
     payload: LoteRefacturacionCreate,
     db: AsyncSession = Depends(get_db),
 ):
-    """Crea un lote tipo='refacturacion'. Sin restricción de cantidad por OS+período."""
+    """
+    Crea un lote tipo='refacturacion'. Sin restricción de cantidad por OS+período
+    ni por lote origen — antes existía uq_lote_origen (un solo lote de
+    refacturación por snap_origen_id), que este mismo docstring ya decía que
+    no existía; se sacó la constraint para que el código y el comentario
+    dejen de contradecirse (ver diagnóstico M6).
+    """
     lote = LoteAjuste(
         obra_social_id=payload.obra_social_id,
         mes_periodo=payload.mes_periodo,
@@ -181,12 +186,7 @@ async def crear_lote_refacturacion(
         total_creditos=Decimal("0"),
     )
     db.add(lote)
-    try:
-        await db.flush()
-    except IntegrityError:
-        await db.rollback()
-        raise HTTPException(409, "Ya existe un lote de refacturación para ese lote origen (uq_lote_origen)")
-
+    await db.flush()
     await db.commit()
     await db.refresh(lote)
     return _lote_with_ajustes(lote)

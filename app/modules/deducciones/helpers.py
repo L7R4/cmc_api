@@ -30,8 +30,64 @@ TWOPLACES = Decimal("0.01")
 # nro_colegio de descuentos con base de cálculo especial
 NRO_COLEGIO_CONTRIB_HONORARIOS = 100  # base = suma de honorarios del médico
 NRO_COLEGIO_CONTRIB_GASTOS = 101      # base = suma de gastos del médico
+NRO_COLEGIO_IMPUESTO_LEY = 102        # Imp. Ley 25413
+
+# nro_colegio (no descuento_id/PK) con prioridad fija de cobro cuando el
+# disponible no alcanza. nro_colegio es el número que asigna el Colegio y es
+# estable entre entornos; descuento_id es un autoincrement de la base sin
+# garantía de coincidir entre local y producción (ver diagnóstico M7).
+NRO_COLEGIO_PRIORITARIOS: frozenset[int] = frozenset({
+    NRO_COLEGIO_CONTRIB_HONORARIOS, NRO_COLEGIO_CONTRIB_GASTOS, NRO_COLEGIO_IMPUESTO_LEY,
+})
 
 #endregion
+
+
+def ordenar_deducciones_por_prioridad(
+    deds: list["Deduccion"], nro_colegio_map: dict[int, int]
+) -> list["Deduccion"]:
+    """
+    Orden de cobro cuando el disponible del pagador no alcanza para todo:
+    los descuentos prioritarios (NRO_COLEGIO_PRIORITARIOS) primero, en orden
+    de nro_colegio; el resto por saldo pendiente ascendente (calculado_total −
+    monto_aplicado), empate por id. Usado tanto por la vista previa como por
+    el cierre real (ver diagnóstico M2) — antes cada uno tenía su propio
+    criterio y divergían. Cuál de los dos criterios es el correcto sigue
+    siendo una decisión de negocio pendiente ("Decisiones del Colegio" #2);
+    mientras tanto usan el mismo acá para que preview y cierre no diverjan.
+
+    nro_colegio_map: {Conceptos.id (== Deduccion.descuento_id): Conceptos.nro_colegio},
+    a cargo del llamador (una sola query por corrida, no por pagador).
+    """
+    def nro_colegio(d: "Deduccion") -> Optional[int]:
+        return nro_colegio_map.get(d.descuento_id) if d.descuento_id else None
+
+    prioritarios = sorted(
+        (d for d in deds if nro_colegio(d) in NRO_COLEGIO_PRIORITARIOS),
+        key=nro_colegio,
+    )
+    resto = sorted(
+        (d for d in deds if nro_colegio(d) not in NRO_COLEGIO_PRIORITARIOS),
+        key=lambda d: (d.calculado_total - d.monto_aplicado, d.id),
+    )
+    return prioritarios + resto
+
+
+async def _nro_colegio_map_de_deducciones(
+    db: AsyncSession, deds: list["Deduccion"]
+) -> dict[int, int]:
+    """
+    {Conceptos.id: Conceptos.nro_colegio} para los descuento_id presentes en
+    `deds`. Una sola query por corrida — a cargo del llamador antes de agrupar
+    por pagador, no repetirla por cada grupo.
+    """
+    desc_ids = list({d.descuento_id for d in deds if d.descuento_id})
+    if not desc_ids:
+        return {}
+    rows = (await db.execute(
+        select(Conceptos.id, Conceptos.nro_colegio).where(Conceptos.id.in_(desc_ids))
+    )).all()
+    return {r.id: r.nro_colegio for r in rows if r.nro_colegio is not None}
 
 
 #region Helper base de calculo de socios

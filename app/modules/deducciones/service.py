@@ -43,10 +43,12 @@ from app.modules.deducciones.helpers import (
     _get_open_pago,
     _honorarios_por_medico_en_pago,
     _medicos_para_descuento,
+    _nro_colegio_map_de_deducciones,
     enrich_many,
     marcar_deducciones_dirty,
     NRO_COLEGIO_CONTRIB_GASTOS,
     NRO_COLEGIO_CONTRIB_HONORARIOS,
+    ordenar_deducciones_por_prioridad,
 )
 
 
@@ -306,32 +308,20 @@ async def _recalcular_montos_aplicados_en_pago(db: AsyncSession, pago_id: int) -
         return
 
     disponible_map = await _disponible_por_medico_en_pago(db, pago_id)
+    nro_colegio_map = await _nro_colegio_map_de_deducciones(db, deds)
 
     by_pagador: dict[int, list[Deduccion]] = defaultdict(list)
     for ded in deds:
         pagador = ded.pagador_medico_id if ded.pagador_medico_id is not None else ded.medico_id
         by_pagador[pagador].append(ded)
 
-    # IDs de descuentos con prioridad fija (siempre se descuentan primero)
-    DESCUENTOS_PRIORITARIOS: set[int] = {1, 2, 3}
-
     for pagador_id, pagador_deds in by_pagador.items():
         disponible = disponible_map.get(pagador_id, Decimal("0"))
         if disponible <= Decimal("0"):
             continue
 
-        # Prioritarios primero (en orden de id), luego el resto por saldo
-        # pendiente ascendente (calculado_total - lo ya cobrado en pagos
-        # anteriores) — misma lógica que usa el cierre real.
-        prioritarios = sorted(
-            [d for d in pagador_deds if d.descuento_id in DESCUENTOS_PRIORITARIOS],
-            key=lambda d: d.descuento_id,
-        )
-        resto = sorted(
-            [d for d in pagador_deds if d.descuento_id not in DESCUENTOS_PRIORITARIOS],
-            key=lambda d: (d.calculado_total - d.monto_aplicado, d.id),
-        )
-        ordered_deds = prioritarios + resto
+        # Mismo criterio que usa el cierre real — ver ordenar_deducciones_por_prioridad (M2, M7).
+        ordered_deds = ordenar_deducciones_por_prioridad(pagador_deds, nro_colegio_map)
 
         restante = disponible
 
@@ -877,28 +867,36 @@ async def pagar_deduccion(db: AsyncSession, id: int) -> DeduccionHistorialItem:
         if pago:
             await marcar_deducciones_dirty(db, pago.id)
 
+    # Lo que falta cobrar, no el total: si ya se cobró una parte por liquidación
+    # (monto_aplicado > 0, ej. una cuota parcialmente aplicada en un pago
+    # anterior), "Pagar" en caja solo debe registrar el saldo restante — de lo
+    # contrario el ledger (suma de DeduccionAplicacion) termina contando la
+    # misma plata dos veces (ver diagnóstico M8).
+    saldo = max(ded.calculado_total - ded.monto_aplicado, Decimal("0"))
+
     ded.paga_por_caja = True
     ded.estado = "aplicado"
     ded.monto_aplicado = ded.calculado_total
 
-    existing_apl = await db.scalar(
-        select(DeduccionAplicacion.id).where(
-            DeduccionAplicacion.deduccion_id == ded.id,
-            DeduccionAplicacion.pago_id.is_(None),
+    if saldo > Decimal("0"):
+        existing_apl = await db.scalar(
+            select(DeduccionAplicacion.id).where(
+                DeduccionAplicacion.deduccion_id == ded.id,
+                DeduccionAplicacion.pago_id.is_(None),
+            )
         )
-    )
-    if existing_apl:
-        await db.execute(
-            update(DeduccionAplicacion)
-            .where(DeduccionAplicacion.id == existing_apl)
-            .values(aplicado=ded.calculado_total)
-        )
-    else:
-        db.add(DeduccionAplicacion(
-            pago_id=None,
-            deduccion_id=ded.id,
-            aplicado=ded.calculado_total,
-        ))
+        if existing_apl:
+            await db.execute(
+                update(DeduccionAplicacion)
+                .where(DeduccionAplicacion.id == existing_apl)
+                .values(aplicado=DeduccionAplicacion.aplicado + saldo)
+            )
+        else:
+            db.add(DeduccionAplicacion(
+                pago_id=None,
+                deduccion_id=ded.id,
+                aplicado=saldo,
+            ))
 
     await db.commit()
     await db.refresh(ded)
@@ -1002,7 +1000,12 @@ async def _persistir_aplicaciones(
             .values(estado="pendiente")
         )
 
-    await db.commit()
+    # Sin commit acá — único llamador es aplicar_deducciones_al_cierre, que a su
+    # vez solo lo llama cerrar_pago (pagos/routes.py). Comitear acá partía el
+    # cierre en dos transacciones: si marcar_lotes_aplicados o el commit final
+    # fallaban después, quedaban deducciones ya "aplicado" con DeduccionAplicacion
+    # reales en un pago que seguía en estado "A" (ver diagnóstico M3).
+    await db.flush()
 
     pendientes_set = set(ids_pendientes)
     return len([ded_id for ded_id, _ in monto_aplicado_delta if ded_id in pendientes_set])
@@ -1029,6 +1032,7 @@ async def aplicar_deducciones_al_cierre(db: AsyncSession, pago_id: int) -> dict:
         return {"pago_id": pago_id, "aplicadas": 0, "pendientes": 0, "parciales": 0, "total_aplicado": "0.00"}
 
     disponible_map = await _disponible_por_medico_en_pago(db, pago_id)
+    nro_colegio_map = await _nro_colegio_map_de_deducciones(db, deds)
 
     # Agrupar por pagador efectivo
     by_pagador: dict[int, list[Deduccion]] = defaultdict(list)
@@ -1048,11 +1052,8 @@ async def aplicar_deducciones_al_cierre(db: AsyncSession, pago_id: int) -> dict:
             ids_pendientes.extend(d.id for d in pagador_deds)
             continue
 
-        # Ordenar por saldo pendiente ASC (menor a mayor), empate por id ASC
-        sorted_deds = sorted(
-            pagador_deds,
-            key=lambda d: (d.calculado_total - d.monto_aplicado, d.id),
-        )
+        # Mismo criterio que usa la vista previa — ver ordenar_deducciones_por_prioridad (M2, M7).
+        sorted_deds = ordenar_deducciones_por_prioridad(pagador_deds, nro_colegio_map)
 
         restante = disponible
         for ded in sorted_deds:

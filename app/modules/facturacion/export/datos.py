@@ -38,7 +38,7 @@ _COLUMNAS = (
     M.importe_total, M.coseguro, M.porc, M.dni_p, M.nom_ape_p,
     M.cod_clinica, M.fecha_practica, M.autorizacion, M.tipo, M.diag,
     M.grupo_equipo_id, M.id_especialidad, M.revisado, M.estado,
-    M.validacion_estado,
+    M.validacion_estado, M.tpo_funcion,
 )
 
 
@@ -159,7 +159,49 @@ async def obtener_filas_export(
 
     if not filas_raw:
         return []
+    return await _materializar_filas(db, filas_raw, opciones)
 
+
+async def obtener_filas_export_por_medico(
+    db: AsyncSession, cod_medico: str, periodo: str, opciones: ExportOpciones,
+) -> list[FilaExport]:
+    """Filas de UN médico en un período, cruzando todas las obras sociales y
+    versiones — la fuente del export de "Detalle por médico". A diferencia de
+    `obtener_filas_export` (atada a una factura: cod_obr + periodo + version),
+    filtra por `cod_med` + `periodo` y NO completa equipos: el detalle es de
+    este socio, no arrastra las filas de ayudantes/gastos que son de OTROS
+    socios (mismo criterio que la pantalla `listar_prestaciones` por médico)."""
+    condiciones = [
+        M.cod_med == cod_medico,
+        M.periodo == periodo,
+        M.estado != "X",
+    ]
+    if opciones.fecha_desde is not None:
+        condiciones.append(M.fecha_practica >= opciones.fecha_desde)
+    if opciones.fecha_hasta is not None:
+        condiciones.append(M.fecha_practica <= opciones.fecha_hasta)
+    if opciones.id_especialidad is not None:
+        condiciones.append(M.id_especialidad == opciones.id_especialidad)
+    if opciones.revisado is not None:
+        condiciones.append(M.revisado == opciones.revisado)
+
+    stmt = select(*_COLUMNAS).where(*condiciones)
+    filas_raw = []
+    result = await db.stream(stmt.execution_options(yield_per=1000))
+    async for row in result:
+        filas_raw.append(row)
+
+    if not filas_raw:
+        return []
+    return await _materializar_filas(db, filas_raw, opciones)
+
+
+async def _materializar_filas(
+    db: AsyncSession, filas_raw: list, opciones: ExportOpciones,
+) -> list[FilaExport]:
+    """Convierte las filas crudas (Core) en `FilaExport`: resuelve el prestador
+    (socio/matrícula/nombre), la especialidad y el tipo, y aplica el filtro de
+    tipos de `opciones`. Compartido por el export por factura y el por médico."""
     # Batch de médicos (mismo patrón que obtener_factura_detalle, service.py:1560)
     nros: set[int] = set()
     for r in filas_raw:
@@ -205,7 +247,7 @@ async def obtener_filas_export(
             coseguro=service._dec(r.coseguro),
             subtotal=service._dec(r.importe_total),
             tipo=tipo,
-            tipo_prestador=service._derivar_tipo_prestador(h, g, a),
+            tipo_prestador=service._derivar_tipo_prestador(h, g, a, r.tpo_funcion),
             diagnostico=r.diag,
             via=r.via,
             especialidad_nombre=especialidades.get(r.id_especialidad),

@@ -31,6 +31,7 @@ from app.modules.liquidacion.service import (
     vista_detalles_liquidacion,
 )
 from app.modules.deducciones.service import generar_y_recalcular_porcentuales
+from app.modules.pagos.service import refrescar_detalle_medico
 
 router = APIRouter()
 
@@ -158,10 +159,25 @@ async def eliminar_liquidacion(liquidacion_id: int, db: AsyncSession = Depends(g
     #         "Quitá el lote del pago antes de eliminar la liquidación."
     #     )
 
+    # Médicos con detalle en esta liquidación: sin esto su PagoMedico/Recibo
+    # queda con montos viejos hasta que alguien vuelva a abrir su vista a mano
+    # (ver diagnóstico M9). Se lee antes de borrar — después de eliminar la
+    # liquidación estos médicos pueden no tener ya ningún DetalleLiquidacion
+    # en el pago, y refrescar_todos_medicos (que arma la lista a partir de
+    # DetalleLiquidacion existente) ya no los encontraría.
+    medico_ids_afectados = list((await db.execute(
+        select(DetalleLiquidacion.medico_id)
+        .where(DetalleLiquidacion.liquidacion_id == liquidacion_id)
+        .distinct()
+    )).scalars().all())
+
     pago_id_del = obj.pago_id
     await db.delete(obj)
     await db.flush()
     await generar_y_recalcular_porcentuales(db, pago_id_del)
+    if pago is not None:
+        for medico_id in medico_ids_afectados:
+            await refrescar_detalle_medico(db, pago_id_del, medico_id, pago=pago)
     await db.commit()
     return None
 

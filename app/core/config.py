@@ -215,7 +215,9 @@ class Settings(BaseSettings):
     # Mismo criterio que Sancor y Nobis: sin default.
     #   simulado   → no sale ningún request; se devuelve una respuesta armada
     #   test       → api-test.ospjn.gov.ar
-    #   produccion → api.ospjn.gov.ar  (⚠️ SIN CONFIRMAR — ver InfoValidaciones/ospjn.md)
+    #   produccion → api.ospjn.gov.ar — confirmado contra el legacy PHP, que
+    #                sigue funcionando en producción real con esta URL. Ver
+    #                docs/api/validaciones/ospjn.md.
     OSPJN_MODO: str
     OSPJN_URL_TEST: str = ""
     OSPJN_URL_PROD: str = ""

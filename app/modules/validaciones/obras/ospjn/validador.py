@@ -3,17 +3,24 @@ una práctica: se le manda una *categoría* de prestación ('CON' consultas /
 'OTR' el resto) y contesta si está en condiciones, con un `NroConsulta` que
 acredita la validación. Por eso no hay nada que anular después: eliminar la
 prestación es una baja local (`anular()` queda con el default no-op).
+
+Hoy se manda siempre `CATEGORIA_CONSULTA` ("CON"), igual que el legacy —
+ver el comentario en `validar()`.
 """
 from fastapi import HTTPException
 
 from app.modules.validaciones.obras.ospjn import cliente as ospjn
 from app.modules.validaciones.core.contrato import CERO, Contexto, ResultadoValidacion, ValidadorOS
+from app.modules.validaciones.obras.ospjn.routes import router as _router
 from app.modules.validaciones.obras.ospjn.schemas import EntradaOspjn
 
 
 class ValidadorOspjn(ValidadorOS):
     def __init__(self):
-        super().__init__(nro=151, nombre="OSPJN · Poder Judicial", entrada=EntradaOspjn)
+        super().__init__(
+            nro=151, nombre="OSPJN · Poder Judicial", entrada=EntradaOspjn,
+            router=_router, prefijo="/ospjn",
+        )
 
     async def validar(self, ctx: Contexto, entrada: EntradaOspjn) -> ResultadoValidacion:
         """
@@ -27,9 +34,14 @@ class ValidadorOspjn(ValidadorOS):
         """
         precio = await ctx.precio(entrada.codigo)
 
-        # Se deriva del propio código (42* + 430202 = consulta; el resto 'OTR'), no de
-        # una columna: la regla es una función del número.
-        categoria = ospjn.categoria_de_codigo(entrada.codigo)
+        # El legacy (judicial/grabar_judiciales.php) manda SIEMPRE "CON" a OSPJN,
+        # sin importar el código real de la prestación — es el único valor que se
+        # probó en meses de uso real en producción. `ospjn.categoria_de_codigo()`
+        # sabe derivar 'OTR' para el resto de los códigos, pero eso nunca se validó
+        # contra el servicio real de OSPJN, así que por ahora no se usa acá. Si en
+        # algún momento se confirma con OSPJN que 'OTR' funciona, este es el único
+        # lugar que hay que tocar para reactivarlo.
+        categoria = ospjn.CATEGORIA_CONSULTA
 
         try:
             res = await ospjn.validar_afiliado(

@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.deps import get_current_user
 from app.auth.ownership import filtro_socio, socio_objetivo
+from app.common.files import url_archivo
 from app.core.config import settings
 from app.db.database import get_db
 from app.db.models import ListadoMedico, NomencladorCMC, ObrasSociales
@@ -300,6 +301,7 @@ async def listar_facturas(
     out: list[FacturaRead] = []
     for row in rows:
         factura = FacturaRead.model_validate(row)
+        factura.documento_url = url_archivo(factura.documento_url)
         if factura.periodo:
             factura.periodo_label = service.periodo_label(factura.periodo)
         if factura.usuario:

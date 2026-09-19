@@ -24,6 +24,10 @@ Diferencias con el legacy, a propósito
   "X",}`), que es JSON inválido. Acá se serializa con `json.dumps`.
 * El PHP pide un token nuevo en cada carga de pantalla y lo pasea por el
   formulario en un `<input hidden>`. Acá el token no sale nunca del backend.
+* El PHP deshabilita la verificación del certificado TLS (`CURLOPT_SSL_VERIFYHOST
+  = 0`, `CURLOPT_SSL_VERIFYPEER = 0`). Acá se verifica (comportamiento por
+  defecto de `httpx`) — si algún día esto rompe contra un certificado real de
+  OSPJN, el fix es documentar el motivo, no volver a desactivarla en silencio.
 """
 import datetime
 import json
@@ -237,7 +241,7 @@ async def validar_afiliado(
         "OSPJN [%s] → ValidarAfiliado afiliado=%s/%s categoría=%s",
         modo, numero_afiliado, barra_afiliado, categoria_prestacion,
     )
-    async with httpx.AsyncClient(timeout=settings.OSPJN_TIMEOUT, verify=False) as cli:
+    async with httpx.AsyncClient(timeout=settings.OSPJN_TIMEOUT) as cli:
         token = await _ingresar(cli)
         datos = await _postear(cli, "ValidarAfiliado", cuerpo, token=token)
 

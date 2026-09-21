@@ -105,6 +105,11 @@ class DetalleFacturacionCMC(Base):
     tipo: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
     # Vínculo ayudante/gastos → fila del médico (cabeza del equipo). NULL si factura solo.
     grupo_equipo_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # `guardar_atencion.ID` de origen — columna física legacy, la puebla el importador
+    # CMC (`scripts/import_facturacion_cmc.py` la conoce, pero nunca estuvo declarada en
+    # este modelo). NULL en toda fila cargada por la API. Clave de idempotencia de
+    # `scripts/migrar_guardar_atencion.py`.
+    ga_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
     # Quién cargó la prestación: 'medico' (portal del médico) o 'colegio'. Gatea qué
     # fase de la cabecera controla su edición. Histórico → 'colegio'.
     origen_carga: Mapped[str] = mapped_column(

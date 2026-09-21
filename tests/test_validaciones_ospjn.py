@@ -113,14 +113,18 @@ def test_categoria_de_codigo(codigo, esperado):
 class _CtxFake:
     """Doble mínimo de `core.contrato.Contexto`: sólo lo que `validar()` toca."""
 
-    def __init__(self):
+    def __init__(self, especialidad=None):
         self.fecha = None
+        self._especialidad = especialidad
 
     async def precio(self, codigo, *, exigir_admitido=True):
         return PrecioResponse(
             honorarios=Decimal("1000"), gastos=Decimal("0"), ayudante=Decimal("0"),
             descripcion="test", fuente="test", admitido=True,
         )
+
+    def especialidad_principal(self):
+        return self._especialidad
 
 
 @pytest.mark.asyncio
@@ -178,6 +182,47 @@ async def test_validar_error_transporte_da_502(monkeypatch):
     with pytest.raises(HTTPException) as exc:
         await validador.validar(_CtxFake(), entrada)
     assert exc.value.status_code == 502
+
+
+# ── Homologación (`obras/ospjn/homologador.py`) ────────────────────────────────
+
+def test_homologador_320101_a_420351():
+    from app.modules.validaciones.obras.ospjn import homologador
+    assert homologador.homologar("320101", None) == ("420351", "320101")
+    assert homologador.homologar("320101", 41) == ("420351", "320101")  # sin especialidad = aplica a todas
+
+
+def test_homologador_codigo_sin_entrada_no_homologa():
+    from app.modules.validaciones.obras.ospjn import homologador
+    assert homologador.homologar("420101", None) == ("420101", None)
+
+
+@pytest.mark.asyncio
+async def test_validar_320101_envia_categoria_con_por_homologacion(monkeypatch):
+    """320101 ("Atención prematuro") es 'OTR' por número — sin la homologación
+    se enviaría así, y OSPJN nunca validó 'OTR'. Con la homologación a 420351
+    ("Consulta especializada") lo que se le informa a OSPJN es 'CON'. El
+    precio y lo que se graba siguen siendo los de 320101."""
+    capturado = {}
+
+    async def _validar_afiliado(**kwargs):
+        capturado.update(kwargs)
+        return ospjn.RespuestaOspjn(
+            validado=True, estado_detalle="ACTIVO", estado="ACTIVO",
+            nro_consulta="123", nombre_afiliado="TEST", modo="test", enviado="{}",
+        )
+
+    monkeypatch.setattr(ospjn, "validar_afiliado", _validar_afiliado)
+
+    validador = ValidadorOspjn()
+    entrada = EntradaOspjn(codigo="320101", nro_afiliado="12345", barra_afiliado="01")
+    resultado = await validador.validar(_CtxFake(), entrada)
+
+    assert capturado["categoria_prestacion"] == "CON"
+    assert resultado.codigo == "320101"  # se cotiza y graba el código del Colegio
+    assert resultado.traza["codigo_colegio"] == "320101"
+    assert resultado.traza["codigo_enviado"] == "420351"
+    assert resultado.traza["categoria_enviada"] == "CON"
 
 
 # ── `anular()` — confirmar que sigue siendo el no-op heredado ─────────────────

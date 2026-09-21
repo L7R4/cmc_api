@@ -113,6 +113,11 @@ class DetalleFacturacionCMC(Base):
     # Checkbox de auditoría del colegio sobre la prestación cargada. No participa
     # del cálculo ni de los gates de edición/cierre — es solo un marcador manual.
     revisado: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
+    # Visibilidad para el médico ("recepción"): true = el período (cod_obr+periodo,
+    # sin distinguir versión) tiene al menos una fila publicada. Se escribe SOLO
+    # desde `service.publicar_periodo()` (botón "Publicado/No publicado" en "Ver
+    # períodos") — no forma parte de ningún form de edición de prestación.
+    publicado: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
     # Número de autorización de la obra social para la prestación. Nullable — no todas
     # las OS/prestaciones lo requieren; se carga/edita como cualquier otro campo simple.
     autorizacion: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)

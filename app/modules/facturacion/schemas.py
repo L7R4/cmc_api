@@ -336,6 +336,10 @@ class PrestacionRead(BaseModel):
     # Resuelto en batch contra `obras_sociales` (NRO_OBRASOCIAL) — no viene del ORM.
     nombre_obra_social: Optional[str] = None
     cod_nomenclador: Optional[str] = Field(None, alias="cod_nom")
+    # Descripción del nomenclador, resuelta en batch contra `nm_nomenclador` por
+    # `nomenclador_id` — no viene del ORM. `None` en filas legacy sin `nomenclador_id`
+    # (código que ya no existe en el catálogo).
+    descripcion: Optional[str] = None
     via: Optional[str] = None
     tipo: Optional[str] = None
     # Badge "Medico" | "Ayudante" | "Gastos" | "Pediatra" según `tpo_funcion` y, en su
@@ -483,6 +487,11 @@ class FacturaRead(BaseModel):
     creado_por: Optional[str] = None
     creado_en: Optional[datetime.datetime] = None
     creado_por_nombre: Optional[str] = None  # NOMBRE resuelto contra ListadoMedico (batch, no persistido)
+    # Visibilidad para el médico: true si hay al menos una fila de
+    # detalle_facturacion publicada para este cod_obr+periodo (cualquier
+    # versión). No es una columna de `facturacion` — se estampa después de
+    # `model_validate()`, igual que `usuario_nombre`/`creado_por_nombre`.
+    publicado: bool = False
 
     @field_validator("cod_obr", mode="before")
     @classmethod
@@ -499,6 +508,27 @@ class FacturaRead(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class PublicarPeriodoPayload(BaseModel):
+    """PATCH /facturas/publicado — publica o despublica en bloque una OS+período."""
+    cod_obra: str
+    periodo: str = Field(..., min_length=6, max_length=6)
+    publicado: bool
+
+
+class PublicarPeriodoResponse(BaseModel):
+    cod_obra: str
+    periodo: str
+    publicado: bool
+    filas_actualizadas: int
+
+
+class PeriodoPropioOut(BaseModel):
+    """GET /periodos-propios — selector de "Mi recepción": períodos donde el
+    médico logueado tiene al menos una prestación publicada."""
+    periodo: str
+    periodo_label: str
 
 
 # ── Períodos médico / colegio ────────────────────────────────────────────────

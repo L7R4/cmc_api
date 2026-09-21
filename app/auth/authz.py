@@ -519,6 +519,14 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     ("POST", "/api/facturacion/periodo-medico/avanzar"): Scope.FACTURACION_PERIODO,
     ("POST", "/api/facturacion/periodo-medico/set"): Scope.FACTURACION_PERIODO,
     ("POST", "/api/facturacion/prestaciones/mover-periodo"): Scope.FACTURACION_PERIODO,
+    # Publica/despublica TODAS las filas de una OS+período: afecta a todos los
+    # médicos con carga en ese período a la vez, mismo criterio que el resto de
+    # las operaciones con FACTURACION_PERIODO.
+    ("PATCH", "/api/facturacion/facturas/publicado"): Scope.FACTURACION_PERIODO,
+    # Selector de "Mi recepción": sólo `facturacion:leer_propio` (no la tupla
+    # LECTURA_FACTURACION) — el rol admin no tiene ese scope, así que queda
+    # exclusiva del médico; el Colegio ya tipea el período a mano en detalle-medico.
+    ("GET", "/api/facturacion/periodos-propios"): Scope.FACTURACION_LEER_PROPIO,
     # Lo dispara el cron con X-Cron-Secret, sin JWT. Ver la nota en MAQUINA.
     ("POST", "/api/facturacion/periodo-medico/cerrar-vencidos"): MAQUINA,
 

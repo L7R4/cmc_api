@@ -7,7 +7,7 @@ from typing import NamedTuple, Optional, Sequence
 
 from fastapi import HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
-from sqlalchemy import and_, func, or_, select, tuple_
+from sqlalchemy import and_, func, or_, select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -1623,6 +1623,29 @@ async def calcular_importes_abiertos(
     }
 
 
+async def calcular_publicado(
+    db: AsyncSession, rows: list[FacturacionCMC],
+) -> dict[int, bool]:
+    """Estado de publicación EN VIVO por (cod_obr, periodo): True si existe al
+    menos una fila de `detalle_facturacion` con publicado=1 para esa OS+período
+    — sin importar versión ni estado de la prestación. No se persiste en
+    `facturacion`, se recalcula en cada lectura (igual que `importe` abierto)."""
+    M = DetalleFacturacionCMC
+    claves = {(r.cod_obr, r.periodo) for r in rows}
+    if not claves:
+        return {}
+    stmt = (
+        select(M.cod_obr, M.periodo, func.max(M.publicado))
+        .where(tuple_(M.cod_obr, M.periodo).in_(claves))
+        .group_by(M.cod_obr, M.periodo)
+    )
+    publicados = {
+        (cod_obr, periodo): bool(pub)
+        for cod_obr, periodo, pub in (await db.execute(stmt)).all()
+    }
+    return {r.id_prestaciones: publicados.get((r.cod_obr, r.periodo), False) for r in rows}
+
+
 # ── Detalle de factura agrupado por prestador ────────────────────────────────
 async def obtener_factura_detalle(db: AsyncSession, factura_id: int) -> dict:
     """Detalle de una factura (cabecera `facturacion`): sus prestaciones
@@ -1793,6 +1816,7 @@ async def listar_prestaciones(
     q: Optional[str] = None,
     orden_o_autorizacion: Optional[str] = None,
     solo_facturas_abiertas: bool = False,
+    publicado: Optional[bool] = None,
     limit: int = 50,
     offset: int = 0,
 ) -> tuple[list[PrestacionRead], int]:
@@ -1804,6 +1828,11 @@ async def listar_prestaciones(
         filtros.append(M.id_detalle_prestaciones == prestacion_id)
     if revisado is not None:
         filtros.append(M.revisado == revisado)
+    # "Mi recepción" del médico: sólo lo que el Colegio publicó (ver
+    # `service.publicar_periodo`). Sin este filtro (None) se ve todo, publicado o no
+    # — el comportamiento de siempre para el listado administrativo.
+    if publicado is not None:
+        filtros.append(M.publicado == publicado)
     if cod_obra is not None:
         filtros.append(M.cod_obr == cod_obra)
     if periodo is not None:
@@ -1913,11 +1942,13 @@ async def _to_prestacion_read_list(
     db: AsyncSession, rows: Sequence[DetalleFacturacionCMC],
 ) -> list[PrestacionRead]:
     """Convierte filas ORM a `PrestacionRead` completando `tipo_prestador` (no viene del
-    ORM), `nombre_obra_social` (batch contra `obras_sociales`) y `nombre_clinica` (batch
-    contra `listado_medico`), sin N+1. Mismo criterio que `obtener_prestacion` — reusado
-    acá para que el listado también lo traiga."""
+    ORM), `nombre_obra_social` (batch contra `obras_sociales`), `nombre_clinica` (batch
+    contra `listado_medico`) y `descripcion` (batch contra `nm_nomenclador`), sin N+1.
+    Mismo criterio que `obtener_prestacion` — reusado acá para que el listado también lo
+    traiga."""
     nros_os: set[int] = set()
     nros_clinica: set[int] = set()
+    nomenclador_ids: set[int] = set()
     for row in rows:
         try:
             nros_os.add(int(row.cod_obr))
@@ -1925,6 +1956,8 @@ async def _to_prestacion_read_list(
             pass
         if row.cod_clinica:  # 0 = sentinel legacy "sin clínica"
             nros_clinica.add(int(row.cod_clinica))
+        if row.nomenclador_id is not None:
+            nomenclador_ids.add(row.nomenclador_id)
     nombres_os: dict[int, str] = {}
     if nros_os:
         os_rows = (await db.execute(
@@ -1939,6 +1972,13 @@ async def _to_prestacion_read_list(
             .where(ListadoMedico.NRO_SOCIO.in_(nros_clinica))
         )).all()
         nombres_clinica = {nro: nombre for nro, nombre in cl_rows}
+    descripciones: dict[int, str] = {}
+    if nomenclador_ids:
+        nm_rows = (await db.execute(
+            select(NomencladorCMC.id, NomencladorCMC.descripcion)
+            .where(NomencladorCMC.id.in_(nomenclador_ids))
+        )).all()
+        descripciones = {nid: descripcion for nid, descripcion in nm_rows}
 
     out = []
     for row in rows:
@@ -1950,6 +1990,8 @@ async def _to_prestacion_read_list(
             pass
         if row.cod_clinica:
             item.nombre_clinica = nombres_clinica.get(int(row.cod_clinica))
+        if row.nomenclador_id is not None:
+            item.descripcion = descripciones.get(row.nomenclador_id)
         out.append(item)
     return out
 
@@ -2441,6 +2483,32 @@ async def marcar_revisado(
     for row in rows:
         await db.refresh(row)
     return [rows_por_id[prestacion_id] for prestacion_id in ids]
+
+
+# ── Publicación hacia el médico ("recepción") ────────────────────────────────
+async def publicar_periodo(
+    db: AsyncSession, *, cod_obra: str, periodo: str, publicado: bool,
+) -> int:
+    """Publica o despublica TODAS las filas de `detalle_facturacion` de una
+    OS+período (todas las versiones, cualquier estado). Único punto de
+    escritura de `publicado` — ver comentario en el modelo."""
+    M = DetalleFacturacionCMC
+    result = await db.execute(
+        update(M).where(M.cod_obr == cod_obra, M.periodo == periodo).values(publicado=publicado)
+    )
+    await db.commit()
+    return result.rowcount or 0
+
+
+async def listar_periodos_propios(db: AsyncSession, cod_medico: str) -> list[dict]:
+    """Períodos donde el médico tiene al menos una prestación publicada — selector
+    de "Mi recepción". Más reciente primero."""
+    M = DetalleFacturacionCMC
+    periodos = (await db.execute(
+        select(M.periodo).where(M.cod_med == cod_medico, M.publicado.is_(True))
+        .distinct().order_by(M.periodo.desc())
+    )).scalars().all()
+    return [{"periodo": p, "periodo_label": periodo_label(p)} for p in periodos]
 
 
 # ── Soft-delete ──────────────────────────────────────────────────────────────

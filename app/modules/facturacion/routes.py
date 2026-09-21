@@ -46,6 +46,9 @@ from app.modules.facturacion.schemas import (
     PrestacionRead,
     PrestacionesRevisadoUpdate,
     PrestacionUpdate,
+    PublicarPeriodoPayload,
+    PublicarPeriodoResponse,
+    PeriodoPropioOut,
 )
 
 router = APIRouter()
@@ -297,6 +300,9 @@ async def listar_facturas(
     # Importe en vivo para las cabeceras abiertas (normales o complementos): el
     # `importe` persistido solo se escribe al cerrar, mientras está abierto vale 0.
     importes_abiertos = await service.calcular_importes_abiertos(db, rows)
+    # Estado de publicación en vivo (cod_obr+periodo, cualquier versión) — ver
+    # `service.calcular_publicado`.
+    publicado_por_id = await service.calcular_publicado(db, rows)
 
     out: list[FacturaRead] = []
     for row in rows:
@@ -310,6 +316,7 @@ async def listar_facturas(
             factura.creado_por_nombre = nombres.get(str(factura.creado_por))
         if factura.id_prestaciones in importes_abiertos:
             factura.importe = importes_abiertos[factura.id_prestaciones]
+        factura.publicado = publicado_por_id.get(factura.id_prestaciones, False)
         out.append(factura)
     response.headers["X-Total-Count"] = str(total)
     response.headers["Content-Range"] = f"facturas {offset}-{offset + len(rows)}/{total}"
@@ -406,6 +413,11 @@ async def listar_prestaciones(
                     "abierta, mirando `facturacion.estado` en vez del `estado` copiado "
                     "en la prestación. Usar en la tabla del formulario de carga.",
     ),
+    publicado: Optional[bool] = Query(
+        None,
+        description="Filtro por visibilidad hacia el médico. true = sólo lo que el "
+                    "Colegio publicó ('Mi recepción'); omitido = todo, publicado o no.",
+    ),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
@@ -427,6 +439,7 @@ async def listar_prestaciones(
         fecha_desde=fecha_desde, fecha_hasta=fecha_hasta, revisado=revisado, q=q,
         orden_o_autorizacion=orden_o_autorizacion,
         solo_facturas_abiertas=solo_facturas_abiertas,
+        publicado=publicado,
         limit=limit, offset=offset,
     )
     response.headers["X-Total-Count"] = str(total)
@@ -641,6 +654,36 @@ async def marcar_revisado(
     si alguno no existe, no se modifica ninguna prestación.
     """
     return await service.marcar_revisado(db, payload.marcados, payload.desmarcados)
+
+
+@router.patch("/facturas/publicado", response_model=PublicarPeriodoResponse)
+async def publicar_periodo(
+    payload: PublicarPeriodoPayload,
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Publica o despublica de una sola vez todas las prestaciones de una
+    OS+período — único camino de la app para tocar `detalle_facturacion.publicado`.
+    """
+    filas = await service.publicar_periodo(
+        db, cod_obra=payload.cod_obra, periodo=payload.periodo, publicado=payload.publicado,
+    )
+    if filas == 0:
+        raise HTTPException(404, "No hay prestaciones cargadas para esa obra social y período.")
+    return PublicarPeriodoResponse(
+        cod_obra=payload.cod_obra, periodo=payload.periodo,
+        publicado=payload.publicado, filas_actualizadas=filas,
+    )
+
+
+@router.get("/periodos-propios", response_model=list[PeriodoPropioOut])
+async def periodos_propios(
+    user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_db),
+):
+    """Períodos publicados del médico logueado — alimenta el selector de "Mi
+    recepción". Fuerza el socio del token, sin parámetro: no es para consultar a
+    otro médico."""
+    return await service.listar_periodos_propios(db, str(user["nro_socio"]))
 
 
 @router.get("/prestaciones/{id}", response_model=PrestacionRead, response_model_by_alias=False)

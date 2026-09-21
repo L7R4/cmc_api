@@ -4,8 +4,14 @@ servicio externo.
 Es la MISMA tabla que usa el legacy: el padrón es uno solo, así que el PHP
 viejo y la API validan siempre contra el mismo dato. `obras/ospm/padron.py`
 reemplaza el padrón entero, igual que `importar_padron_ospm.php`.
+
+Activo → autoriza y factura de verdad (ver `ValidadorOspm.validar()`); es la
+primera obra social "contra padrón" que efectivamente autoriza — hasta el
+2026-09-20 cualquier resultado se grababa `rechazada`, así que nunca facturaba
+ni abría una factura para OSPM.
 """
 import datetime
+from typing import Optional
 
 from fastapi import HTTPException
 from sqlalchemy import func, select
@@ -34,32 +40,31 @@ class ValidadorOspm(ValidadorOS):
         )
 
     async def validar(self, ctx: Contexto, entrada: EntradaOspm) -> ResultadoValidacion:
-        """OSPM no tiene servicio de autorización: se resuelve con un solo dato
-        local, **el afiliado**, buscado en el padrón por DNI. Si no está, no se
-        graba nada.
-
-        De ahí salen dos desenlaces:
+        """OSPM no tiene servicio de autorización en línea: se resuelve con un
+        solo dato local, **el afiliado**, buscado en el padrón (`clientes_ospm`)
+        por DNI.
 
         | Afiliado | Resultado |
         |---|---|
-        | activo | `rechazada` — el afiliado gestiona la autorización en la O.S. |
-        | inactivo | `rechazada` — no figura en el padrón |
+        | activo | `autorizada` — factura |
+        | existe, inactivo | `rechazada` — "Rechazado. Afiliado suspendido" |
+        | no está en el padrón | `rechazada` — "Rechazado. Afiliado inexistente" |
 
-        Los dos desenlaces graban `rechazada` y se distinguen por el motivo. El
-        afiliado activo era `pendiente` hasta que se unificó el criterio: acá no
-        se autoriza nada, así que la prestación no se factura, y un estado
-        propio hacía leer como "en trámite" algo que el Colegio no está
-        tramitando.
-
-        Que un código pueda saltearse la autorización es criterio por convenio y
-        todavía no está resuelto acá, así que se toma siempre el caso restrictivo:
-        mejor mandar a gestionar de más que dar por autorizado algo que la obra
-        social después rechaza.
+        Los dos rechazos quedan igual de grabados que el autorizado (fila en
+        `detalle_facturacion` con `estado='X'`, sin facturar) — a diferencia de
+        un DNI vacío o un padrón sin importar, que siguen siendo errores duros
+        (422) porque no son un hecho sobre un afiliado real, sino un problema
+        de la carga o del sistema.
         """
-        afiliado = await self._afiliado(ctx.db, entrada.documento)
-        doc = afiliado.documento
+        doc = (entrada.documento or "").strip()
+        if not doc:
+            raise HTTPException(422, "Falta el DNI del afiliado.")
 
-        if await self._duplicado(ctx.db, codigo=entrada.codigo, nro_afiliado=doc, fecha=ctx.fecha):
+        afiliado = await self._buscar_afiliado(ctx.db, doc)
+
+        if afiliado is not None and await self._duplicado(
+            ctx.db, codigo=entrada.codigo, nro_afiliado=doc, fecha=ctx.fecha,
+        ):
             raise HTTPException(
                 422,
                 f"Por convenio, el afiliado {doc} y la prestación {entrada.codigo} no pueden "
@@ -68,14 +73,24 @@ class ValidadorOspm(ValidadorOS):
 
         precio = await ctx.precio(entrada.codigo)
 
-        if not afiliado.activo:
-            estado, detalle = "rechazada", "El afiliado no figura activo en el padrón de OSPM."
+        if afiliado is None:
+            estado, detalle = "rechazada", "Rechazado. Afiliado inexistente"
+            nombre_afiliado = ""
+            traza_padron = {"documento": doc, "encontrado": False}
+        elif not afiliado.activo:
+            estado, detalle = "rechazada", "Rechazado. Afiliado suspendido"
+            nombre_afiliado = afiliado.nombre
+            traza_padron = {
+                "documento": doc, "cuit": afiliado.CUIT,
+                "nombre": afiliado.nombre, "activo": afiliado.activo,
+            }
         else:
-            estado, detalle = (
-                "rechazada",
-                "Pendiente de autorización de la obra social. El afiliado tiene que "
-                "gestionarla en OSPM.",
-            )
+            estado, detalle = "autorizada", "Autorizado. Afiliado activo en el padrón de OSPM."
+            nombre_afiliado = afiliado.nombre
+            traza_padron = {
+                "documento": doc, "cuit": afiliado.CUIT,
+                "nombre": afiliado.nombre, "activo": afiliado.activo,
+            }
 
         return ResultadoValidacion(
             estado=estado,
@@ -83,34 +98,23 @@ class ValidadorOspm(ValidadorOS):
             codigo=entrada.codigo,
             precio=precio,
             nro_afiliado=doc,
-            nombre_afiliado=afiliado.nombre,
-            # Sin nº de autorización: la da la obra social cuando el afiliado la
-            # gestiona, no el Colegio.
+            nombre_afiliado=nombre_afiliado,
+            # Sin nº de autorización: OSPM no es un servicio en línea, no hay
+            # ningún número que la obra social le dé al Colegio (a diferencia
+            # de Sancor/Nobis/OSPJN).
             nro_autorizacion=None,
             coseguro=CERO,  # OSPM no cobra coseguro (el legacy lo fija en 0)
-            traza={
-                # `clientes_ospm` es la tabla del legacy: DU, CUIT, AFILIADO,
-                # ACTIVO y nada más. No guarda cuándo se importó el padrón, así
-                # que la traza deja lo que sí se sabe — con qué fila se resolvió
-                # el afiliado y en qué estado figuraba al momento de validar.
-                #
-                # Acá había un `afiliado.importado_at.isoformat()` sobre un
-                # atributo que el modelo nunca tuvo: **toda** carga de OSPM
-                # moría con AttributeError → 500. Ver el docstring del módulo.
-                "padron": {
-                    "documento": doc,
-                    "cuit": afiliado.CUIT,
-                    "nombre": afiliado.nombre,
-                    "activo": afiliado.activo,
-                },
-            },
+            traza={"padron": traza_padron},
         )
 
-    async def _afiliado(self, db: AsyncSession, documento: str) -> ClientesOspm:
-        doc = (documento or "").strip()
-        if not doc:
-            raise HTTPException(422, "Falta el DNI del afiliado.")
+    async def _buscar_afiliado(self, db: AsyncSession, doc: str) -> Optional[ClientesOspm]:
+        """Busca el afiliado por DNI. `None` si no está en el padrón — ya no es
+        un error, es uno de los tres desenlaces posibles de `validar()`.
 
+        El padrón vacío sigue siendo un error duro (422): con el padrón sin
+        importar NADIE valida, y el prestador no tiene forma de saber que el
+        problema no es su DNI.
+        """
         fila = (
             await db.execute(select(ClientesOspm).where(ClientesOspm.DU == doc))
         ).scalar_one_or_none()
@@ -118,15 +122,11 @@ class ValidadorOspm(ValidadorOS):
         if fila is None:
             total = int((await db.execute(select(func.count(ClientesOspm.ID)))).scalar_one() or 0)
             if total == 0:
-                # Distinguirlo importa: con el padrón vacío NADIE valida, y el
-                # prestador no tiene forma de saber que el problema no es su DNI.
                 raise HTTPException(
                     422,
                     "El padrón de OSPM todavía no fue importado. Avisá al Colegio "
                     "para que cargue el padrón vigente.",
                 )
-            raise HTTPException(422, f"El DNI {doc} no figura en el padrón de OSPM.")
-
         return fila
 
     async def _duplicado(

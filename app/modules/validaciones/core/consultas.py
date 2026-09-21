@@ -204,14 +204,6 @@ async def buscar_codigos(
     medico = await get_medico(db, nro_socio)
     hoy = datetime.date.today()
 
-    # Con qué código se le habla a esta obra social. Import perezoso: `obras`
-    # arma los seis validadores al importarse y `pipeline` es el que lo hace en
-    # el arranque — traerlo acá arriba invertiría ese orden sin necesidad.
-    from app.modules.validaciones import obras
-
-    obra = obras.POR_NRO.get(obra_social_id)
-    especialidad = int(medico.NRO_ESPECIALIDAD) if medico.NRO_ESPECIALIDAD else None
-
     stmt = select(NomencladorCMC.codigo, NomencladorCMC.descripcion).where(
         # Códigos compartidos del Colegio + los propios de esta obra social.
         service_nm.filtro_pertenencia(obra_social_id)
@@ -248,13 +240,6 @@ async def buscar_codigos(
             continue
         if not precio.admitido or factura_en_cero(precio):
             continue
-        # Informativo: si la O.S. exige otro código, el prestador tiene que
-        # saber que lo que se autoriza allá se llama distinto. El precio y lo
-        # que se factura siguen siendo los de `codigo`.
-        se_envia = None
-        if obra is not None:
-            homologado, _ = obra.homologar(codigo, especialidad)
-            se_envia = homologado if homologado != codigo else None
 
         salida.append(
             {
@@ -266,7 +251,6 @@ async def buscar_codigos(
                 "coseguro": precio.coseguro,
                 "admitido": True,
                 "motivo": precio.motivo,
-                "se_envia": se_envia,
             }
         )
     return salida

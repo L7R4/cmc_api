@@ -119,10 +119,6 @@ class CodigoOut(BaseModel):
     # precio vigente para esa obra social; `motivo` explica por qué.
     admitido: bool = True
     motivo: Optional[str] = None
-    # Código con el que la obra social conoce esta práctica, cuando exige uno
-    # distinto (ver `obras/<os>/homologador.py`). `None` = se manda tal cual.
-    # Es informativo: el precio y lo que se factura son los de `codigo`.
-    se_envia: Optional[str] = None
 
 
 class PrestadorOut(BaseModel):

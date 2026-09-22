@@ -11,14 +11,15 @@ factura. La homologación afecta **sólo la categoría** que se le informa a
 OSPJN (`CodigoPrestacion`, que para esta obra social no es un código sino
 'CON'/'OTR' — ver `obras/ospjn/cliente.py::categoria_de_codigo`).
 
-## Caso 320101 → 420351
+## Casos homologados
 
-`320101` ("Atención prematuro hasta 1500 grs.") es categoría 'OTR' por
-número (no empieza con '42'). OSPJN no reconoce esa práctica como una
-consulta y no hay forma de validarla en línea con su categoría real. El
-Colegio resolvió homologarla contra `420351` ("Consulta especializada"),
-que sí es 'CON' — el médico sigue facturando y cobrando 320101, pero la
-validación de elegibilidad contra OSPJN se hace como si fuera una consulta.
+- `320101` ("Atención prematuro hasta 1500 grs.") es categoría 'OTR' por
+  número (no empieza con '42'). OSPJN no reconoce esa práctica como una
+  consulta y no hay forma de validarla en línea con su categoría real. El
+  Colegio resolvió homologarla contra `420351` ("Consulta especializada"),
+  que sí es 'CON' — el médico sigue facturando y cobrando 320101, pero la
+  validación de elegibilidad contra OSPJN se hace como si fuera una consulta.
+- `320002` — mismo criterio, homologado contra `420232`.
 
 Un código que **no** figure acá no tiene homologación: usa la categoría por
 defecto de `validador.py` (hoy, siempre 'CON' — ver el comentario ahí sobre
@@ -30,6 +31,7 @@ por qué 'OTR' no está activado todavía).
 # cualquier especialidad).
 HOMOLOGACIONES: dict[str, list[dict]] = {
     "320101": [{"codigo_homologado": "420351", "especialidad": None}],
+    "320002": [{"codigo_homologado": "420232", "especialidad": None}],
 }
 
 

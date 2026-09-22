@@ -339,6 +339,14 @@ async def crear_clinica(db: AsyncSession, payload: ClinicaCreate) -> dict:
     clinica = ListadoMedico(
         NOMBRE=payload.nombre,
         NRO_SOCIO=nuevo_cod,
+        # La clínica no tiene matrícula propia — se le asigna el mismo número que
+        # su NRO_SOCIO, así queda identificable donde el resto del panel busca por
+        # MATRICULA_PROV (ver `buscar_medicos`, más arriba).
+        MATRICULA_PROV=nuevo_cod,
+        # `ListadoMedico.EXISTE` tiene server_default 'N' (pensado para médicos que
+        # se dan de alta por el flujo de solicitud/aprobación); acá se fuerza a 'S'
+        # porque el alta rápida de clínica queda operativa de inmediato.
+        EXISTE="S",
         es_organizacion=True,
         # Única columna de la tabla sin server_default — sin esto el INSERT falla.
         hashed_password=hash_password_inicial(),

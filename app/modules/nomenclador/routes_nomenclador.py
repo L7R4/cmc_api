@@ -58,7 +58,15 @@ async def list_nomenclador(
             "las obras sociales (uso administrativo)."
         ),
     ),
-    activo: Optional[bool] = Query(True),
+    activo: Optional[bool] = Query(
+        None,
+        description=(
+            "Omitido = catálogo completo (activos e inactivos). El front de Gestión de "
+            "Códigos manda `true`/`false` para sus filtros 'Activos'/'Inactivos' y omite "
+            "el parámetro para 'Todos' — con un default distinto de `None` acá, 'Todos' "
+            "terminaba mostrando sólo los activos igual."
+        ),
+    ),
     page: int = Query(1, ge=1),
     size: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),

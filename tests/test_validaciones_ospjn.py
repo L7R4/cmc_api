@@ -192,6 +192,12 @@ def test_homologador_320101_a_420351():
     assert homologador.homologar("320101", 41) == ("420351", "320101")  # sin especialidad = aplica a todas
 
 
+def test_homologador_320002_a_420232():
+    from app.modules.validaciones.obras.ospjn import homologador
+    assert homologador.homologar("320002", None) == ("420232", "320002")
+    assert homologador.homologar("320002", 41) == ("420232", "320002")  # sin especialidad = aplica a todas
+
+
 def test_homologador_codigo_sin_entrada_no_homologa():
     from app.modules.validaciones.obras.ospjn import homologador
     assert homologador.homologar("420101", None) == ("420101", None)

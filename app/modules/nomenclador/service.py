@@ -1365,8 +1365,28 @@ async def lookup_precio(
     )
     filas = (await db.execute(stmt_hist)).scalars().all()
     if not filas:
+        # Dos casos bien distintos para el mismo "sin precio", y el prestador
+        # necesita saber cuál es: si la obra social cargó el código alguna vez
+        # (en otra fecha, otra variante) el problema es de vigencia — falta
+        # actualizar el valor para este período; si nunca cargó nada, el código
+        # directamente no está en su nomenclador. Sin esta distinción el mensaje
+        # ("no tiene un valor vigente a esa fecha") sonaba a lo primero incluso
+        # cuando era lo segundo.
+        existe_algun_precio = (await db.execute(
+            select(HistorialPrecioCodigo.id)
+            .where(
+                HistorialPrecioCodigo.nomenclador_id == nomenclador_id,
+                HistorialPrecioCodigo.obra_social_nro == obra_social_nro,
+            )
+            .limit(1)
+        )).scalar_one_or_none() is not None
+        if existe_algun_precio:
+            raise LookupError(
+                "No existe vigencia correspondiente para este código",
+                sin_precio=True,
+            )
         raise LookupError(
-            "La obra social no tiene un valor vigente para este código a esa fecha",
+            "No existe ningún precio para este código",
             sin_precio=True,
         )
 

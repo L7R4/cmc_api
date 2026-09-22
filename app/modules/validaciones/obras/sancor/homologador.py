@@ -52,6 +52,11 @@ HOMOLOGACIONES: dict[str, list[dict]] = {
     # Encontrada al revisar `grabar_prestacion_Sancor.php`: viva desde marzo de
     # 2026 y sólo en el camino del médico. No estaba implementada.
     "420305": [{"codigo_homologado": "420101", "especialidad": 15}],
+    # Mismo criterio que 320101→420351 de OSPJN (`obras/ospjn/homologador.py`):
+    # Sancor tampoco reconoce estas prácticas tal cual. Sin especialidad
+    # específica, aplican a cualquier médico.
+    "320101": [{"codigo_homologado": "420132", "especialidad": None}],
+    "320002": [{"codigo_homologado": "420132", "especialidad": None}],
 }
 
 

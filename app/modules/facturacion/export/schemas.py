@@ -19,7 +19,7 @@ AgrupacionExport = Literal["todo_junto", "por_tipo", "por_socio", "plana"]
 # obligatorias (identifican la fila y cierran el resumen) — no forman parte del
 # selector, así que no están acá.
 ColumnaExport = Literal[
-    "prestador", "matricula", "autorizacion", "fecha", "codigo",
+    "prestador", "obra_social", "matricula", "autorizacion", "fecha", "codigo",
     "nro_afiliado", "afiliado", "cantidad", "porcentaje",
     "honorarios", "gastos", "coseguro", "diagnostico", "via", "especialidad",
     "estado_validacion",
@@ -29,6 +29,17 @@ COLUMNAS_DEFAULT: list[ColumnaExport] = [
     "prestador", "matricula", "autorizacion", "fecha", "codigo",
     "nro_afiliado", "afiliado", "cantidad", "porcentaje",
     "honorarios", "gastos",
+]
+
+# "Detalle por médico" cruza todas las obras sociales de un mismo socio (ver
+# `datos.obtener_filas_export_por_medico`): el encabezado ya identifica al
+# médico (`construir_encabezado_por_medico`), así que repetir "prestador" en
+# cada fila es ruido — lo que hace falta por fila es de qué obra social es, y
+# el coseguro, que no venía en el default genérico.
+COLUMNAS_DEFAULT_POR_MEDICO: list[ColumnaExport] = [
+    "obra_social", "matricula", "autorizacion", "fecha", "codigo",
+    "nro_afiliado", "afiliado", "cantidad", "porcentaje",
+    "honorarios", "gastos", "coseguro",
 ]
 
 TipoPrestacion = Literal["Consulta", "Practica", "Honorarios individuales", "Sanatorio"]

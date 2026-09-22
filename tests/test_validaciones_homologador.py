@@ -15,7 +15,7 @@ from app.modules.validaciones.obras.sancor import homologador
 from app.modules.validaciones.obras.sancor.homologador import _validar, homologar
 
 
-# ── Las tres homologaciones vigentes ──────────────────────────────────────────
+# ── Las homologaciones por especialidad específica ─────────────────────────────
 
 @pytest.mark.parametrize(
     "codigo, especialidad, se_envia",
@@ -37,6 +37,16 @@ def test_otra_especialidad_no_homologa(codigo):
     """La homologación es por especialidad: sin ella el código va tal cual."""
     assert homologar(codigo, 99) == (codigo, None)
     assert homologar(codigo, None) == (codigo, None)
+
+
+# ── 320101/320002 → 420132: sin especialidad, aplica a cualquier médico ────────
+
+@pytest.mark.parametrize("codigo", ["320101", "320002"])
+@pytest.mark.parametrize("especialidad", [None, 41, 99])
+def test_homologa_a_420132_para_cualquier_especialidad(codigo, especialidad):
+    """Igual que 320101→420351 de OSPJN: sin especialidad puntual en la tabla, la
+    entrada `especialidad: None` es el default y aplica a cualquier médico."""
+    assert homologar(codigo, especialidad) == ("420132", codigo)
 
 
 def test_codigo_que_no_esta_en_la_tabla_va_tal_cual():

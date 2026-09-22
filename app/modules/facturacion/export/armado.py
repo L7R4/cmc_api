@@ -330,6 +330,7 @@ _DEFINICIONES: dict[str, ColumnaSpec] = {
     # columna. El recorte real (por ancho medido, con "...") lo hace pdf.py al
     # dibujar; acá va el valor completo — Excel lo aprovecha entero.
     "prestador": ColumnaSpec("prestador", "PRESTADOR", 40, 26, "L", False, lambda f: f.prestador_nombre or ""),
+    "obra_social": ColumnaSpec("obra_social", "OBRA SOCIAL", 40, 26, "L", False, lambda f: f.obra_social_nombre or f.cod_obr or ""),
     "matricula": ColumnaSpec("matricula", "MATRI.", 12, 8, "C", False, lambda f: f.matricula or ""),
     "autorizacion": ColumnaSpec("autorizacion", "AUTORIZACION", 22, 14, "C", False, lambda f: f.autorizacion or ""),
     "fecha": ColumnaSpec("fecha", "FECHA", 16, 11, "C", False, lambda f: _fmt_fecha(f.fecha_practica)),

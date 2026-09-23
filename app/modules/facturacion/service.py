@@ -7,7 +7,7 @@ from typing import NamedTuple, Optional, Sequence
 
 from fastapi import HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
-from sqlalchemy import and_, func, or_, select, tuple_, update
+from sqlalchemy import String, and_, case, cast, func, or_, select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -164,8 +164,30 @@ async def buscar_medicos(db: AsyncSession, q: str, limit: int) -> list[dict]:
     # filas legacy con NOMBRE NULL (dato incompleto, no un médico usable en un
     # selector) que igual pueden calzar por NRO_SOCIO/MATRICULA — sin este
     # filtro, buscar exactamente ese número tira un 500 de validación.
+    # Orden de prioridad de coincidencia — mismo criterio que el filtro en memoria
+    # del front (`filtrarYOrdenar`, components/localSearch.ts): Nº de socio >
+    # Matrícula > Nombre y, dentro de cada campo, "empieza con" antes que
+    # "contiene". Sin este ORDER BY, el buscador remoto (el que usan las pantallas
+    # sin precarga, p.ej. /panel/facturacion/detalle-medico) devolvía las filas en
+    # el orden arbitrario de la tabla.
+    nro_socio_txt = cast(M.NRO_SOCIO, String)
+    matricula_txt = cast(M.MATRICULA_PROV, String)
+    orden = case(
+        (nro_socio_txt.like(f"{q}%"), 0),
+        (nro_socio_txt.like(f"%{q}%"), 1),
+        (matricula_txt.like(f"{q}%"), 2),
+        (matricula_txt.like(f"%{q}%"), 3),
+        (M.NOMBRE.ilike(f"{q}%"), 4),
+        else_=5,
+    )
+
     rows = list(
-        (await db.execute(select(M).where(cond, M.NOMBRE.isnot(None)).limit(limit)))
+        (await db.execute(
+            select(M)
+            .where(cond, M.NOMBRE.isnot(None))
+            .order_by(orden, M.NOMBRE)
+            .limit(limit)
+        ))
         .scalars()
         .all()
     )
@@ -671,8 +693,20 @@ async def resolver_periodo_colegio_carga(
     Validación: el override debe ser >= el automático. Un período **anterior** se rechaza
     acá (si ya está cerrado, la reapertura se hace con un complemento). El caso de un
     período ya cerrado igual queda cubierto aguas abajo por `_gate_carga` (409).
+
+    Obra social sin ningún período cerrado todavía (primera carga): `get_periodo_activo`
+    no tiene de qué partir y rechaza con 422 — no es un piso que validar, es la ausencia
+    total de uno. Sin override eso sigue siendo un error (no hay forma de resolver un
+    período solo); pero con override el operador ya eligió uno a mano (botón "editar
+    período" del front, habilitado justamente para este caso), así que se usa tal cual,
+    sin comparar contra un automático que no existe.
     """
-    automatico = await get_periodo_activo(db, cod_obra)
+    try:
+        automatico = await get_periodo_activo(db, cod_obra)
+    except HTTPException:
+        if periodo_override:
+            return periodo_override
+        raise
     if not periodo_override:
         return automatico
     if _periodo_to_date(periodo_override) < _periodo_to_date(automatico):

@@ -1783,7 +1783,7 @@ async def obtener_factura_detalle(db: AsyncSession, factura_id: int) -> dict:
         h, ga, a = _dec(r.honorarios), _dec(r.gastos), _dec(r.ayudante)
         subtotal = _dec(r.importe_total)
         g["cantidad_prestaciones"] += 1
-        g["total_cantidad"] += r.cantidad or 0
+        g["total_cantidad"] += (r.cantidad or 1) * (r.sesion or 1)
         g["total_honorarios"] += h
         g["total_gastos"] += ga
         g["total_subtotal"] += subtotal
@@ -1832,7 +1832,9 @@ async def obtener_factura_detalle(db: AsyncSession, factura_id: int) -> dict:
         "estado_doctor": factura.estado_doctor,
         "version": factura.version,
         "es_complemento": factura.version > 1,
-        "total_prestaciones": len(rows),
+        # Unidades facturadas, no filas: una prestación con cantidad=2 y sesion=3 cuenta 6
+        # (mismo criterio que el importe: cantidad * sesion).
+        "total_prestaciones": sum((r.cantidad or 1) * (r.sesion or 1) for r in rows),
         "total_importe": sum((g["total_subtotal"] for g in prestadores), Decimal("0")),
         "prestadores": prestadores,
     }

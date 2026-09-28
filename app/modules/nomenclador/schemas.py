@@ -948,6 +948,42 @@ class HistorialPrecioOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class ValorSinHistorialOut(BaseModel):
+    """Un `Valor` activo que no tiene ninguna fila en `nm_historial_precio_codigo`."""
+    valor_id: int
+    obra_social_nro: int
+    nomenclador_id: int
+    codigo: str
+    origen: str
+    especialidad_id_colegio: Optional[int] = None
+    vigencia_desde: datetime.date
+
+
+class SinHistorialPorObraSocialOut(BaseModel):
+    obra_social_nro: int
+    #: Valores activos huérfanos de esa obra social.
+    valores: int
+    #: Códigos distintos afectados (un código aporta un valor por especialidad).
+    codigos: int
+    vigencia_min: datetime.date
+    vigencia_max: datetime.date
+
+
+class DiagnosticoSinHistorialOut(BaseModel):
+    """Resultado del chequeo de integridad valores ↔ historial.
+
+    `total` tiene que ser **0**. Si no lo es, esos valores se ven en el panel
+    pero son invisibles para `lookup_precio`, que cotiza sólo contra el
+    historial: o la prestación se factura con otra variante (típicamente la NN,
+    que gana por descarte) o queda sin precio. Ver
+    `service.valores_activos_sin_historial`.
+    """
+    total: int
+    por_obra_social: List[SinHistorialPorObraSocialOut]
+    #: Muestra acotada por `limite_detalle`; `total` es el número real.
+    detalle: List[ValorSinHistorialOut]
+
+
 class ResumenVigenciaOut(BaseModel):
     """Una vigencia de una obra social, ya agregada: cuántos códigos entraron y
     cuánto varió el precio promedio contra la vigencia anterior de cada código.

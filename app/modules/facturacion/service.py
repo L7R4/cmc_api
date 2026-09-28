@@ -18,6 +18,7 @@ from app.common.uploads import DOCUMENTOS, validate_upload
 from app.db.models import (
     Afiliado,
     AuditLog,
+    Clinicas,
     DetalleFacturacionCMC,
     Documento,
     Especialidad,
@@ -1729,6 +1730,10 @@ async def obtener_factura_detalle(db: AsyncSession, factura_id: int) -> dict:
         )).scalars().all()
         medicos = {str(m.NRO_SOCIO): m for m in med_rows}
 
+    nombres_clinica = await _nombres_clinica(
+        db, {int(r.cod_clinica) for r in rows if r.cod_clinica},
+    )
+
     # Nombre de especialidad por prestación — igual patrón que en
     # `_medicos_con_especialidades`: `id_especialidad` referencia
     # `Especialidad.ID_COLEGIO_ESPE`, no `Especialidad.ID` (divergen desde el 7).
@@ -1788,7 +1793,6 @@ async def obtener_factura_detalle(db: AsyncSession, factura_id: int) -> dict:
         g["total_gastos"] += ga
         g["total_subtotal"] += subtotal
         ejecutor = medicos.get(str(r.cod_med_ejecutor)) if r.cod_med_ejecutor else None
-        clinica = medicos.get(str(r.cod_clinica)) if r.cod_clinica else None
         g["prestaciones"].append({
             "id": r.id_detalle_prestaciones,
             "periodo": r.periodo,
@@ -1802,13 +1806,14 @@ async def obtener_factura_detalle(db: AsyncSession, factura_id: int) -> dict:
             "nombre_ejecutor": ejecutor.NOMBRE if ejecutor else None,
             # Clínica bajo la que se ejecutó (tipo_orden='S'); None si el médico factura solo.
             "cod_clinica": r.cod_clinica or None,
-            "nombre_clinica": clinica.NOMBRE if clinica else None,
+            "nombre_clinica": nombres_clinica.get(int(r.cod_clinica)) if r.cod_clinica else None,
             "tipo_orden": r.tipo_orden,
             "cantidad": r.cantidad,
             "sesion": r.sesion,
             "porcentaje": r.porc,
             "honorarios": r.honorarios,
             "gastos": r.gastos,
+            "coseguro": r.coseguro,
             "tipo_prestador": _derivar_tipo_prestador(h, ga, a, r.tpo_funcion),
             "subtotal": r.importe_total,
             "tipo": _tipo_de(r),
@@ -1982,6 +1987,28 @@ def _tipo_prestador_de(row: DetalleFacturacionCMC) -> Optional[str]:
     )
 
 
+async def _nombres_clinica(db: AsyncSession, cods: set[int]) -> dict[int, str]:
+    """Nombre de cada `cod_clinica`. Hay dos espacios de códigos que no se pisan: las
+    organizaciones cargadas por el módulo nuevo (`listado_medico` con es_organizacion=1,
+    NRO_SOCIO >= 9000) y las clínicas del sistema viejo (tabla `clinicas`, ID <= 99).
+    Resolver todo contra `listado_medico` devolvía el nombre de un MÉDICO cualquiera que
+    casualmente tuviera ese NRO_SOCIO (ej. cod_clinica=2 → un prestador)."""
+    if not cods:
+        return {}
+    orgs = (await db.execute(
+        select(ListadoMedico.NRO_SOCIO, ListadoMedico.NOMBRE)
+        .where(ListadoMedico.NRO_SOCIO.in_(cods), ListadoMedico.es_organizacion == True)  # noqa: E712
+    )).all()
+    nombres = {int(nro): nombre for nro, nombre in orgs}
+    faltan = cods - nombres.keys()
+    if faltan:
+        legacy = (await db.execute(
+            select(Clinicas.ID, Clinicas.CLINICA).where(Clinicas.ID.in_(faltan))
+        )).all()
+        nombres.update({int(cid): nombre for cid, nombre in legacy})
+    return nombres
+
+
 async def _to_prestacion_read_list(
     db: AsyncSession, rows: Sequence[DetalleFacturacionCMC],
 ) -> list[PrestacionRead]:
@@ -2009,13 +2036,7 @@ async def _to_prestacion_read_list(
             .where(ObrasSociales.NRO_OBRASOCIAL.in_(nros_os))
         )).all()
         nombres_os = {nro: nombre for nro, nombre in os_rows}
-    nombres_clinica: dict[int, str] = {}
-    if nros_clinica:
-        cl_rows = (await db.execute(
-            select(ListadoMedico.NRO_SOCIO, ListadoMedico.NOMBRE)
-            .where(ListadoMedico.NRO_SOCIO.in_(nros_clinica))
-        )).all()
-        nombres_clinica = {nro: nombre for nro, nombre in cl_rows}
+    nombres_clinica = await _nombres_clinica(db, nros_clinica)
     descripciones: dict[int, str] = {}
     if nomenclador_ids:
         nm_rows = (await db.execute(

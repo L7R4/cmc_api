@@ -24,6 +24,7 @@ from app.modules.nomenclador.schemas import (
     ActualizacionMasivaResult,
     ActualizarPorcentajeIn,
     ActualizarPorCodigosIn,
+    DiagnosticoSinHistorialOut,
     GenerarValoresNNIn,
     GenerarValoresNNResult,
     HistorialPrecioOut,
@@ -214,6 +215,9 @@ async def _crear_valor_con_componentes(
     categoria: Optional[str] = None,
     requiere_autorizacion: Optional[bool] = None,
     coseguro: Decimal = Decimal("0"),
+    *,
+    motivo: str = "carga_inicial",
+    fecha_corte: Optional[datetime.date] = None,
 ) -> Valor:
     nom = await db.get(NomencladorCMC, nomenclador_id)
     if not nom:
@@ -248,6 +252,9 @@ async def _crear_valor_con_componentes(
         for datos in _componentes_presupuesto_cero():
             db.add(ValorComponente(valor_id=valor.id, **datos))
         await db.flush()
+        await service.regenerar_historial_por_valores(
+            valor.id, fecha_corte, db, motivo=motivo
+        )
         return valor
 
     presentes: set[str] = set()
@@ -295,6 +302,7 @@ async def _crear_valor_con_componentes(
             valor_unitario=None if galeno_relleno is not None else Decimal("0"),            orden=90 + orden,
         ))
     await db.flush()
+    await service.regenerar_historial_por_valores(valor.id, fecha_corte, db, motivo=motivo)
     return valor
 
 
@@ -304,6 +312,9 @@ async def _clonar_valor(
     vigencia_desde: datetime.date,
     nivel: Optional[int] = None,
     transform_componente=None,
+    *,
+    motivo: str,
+    fecha_corte: Optional[datetime.date] = None,
 ) -> Valor:
     """
     Crea un nuevo Valor copiando metadatos (incluida la variante) y componentes
@@ -348,6 +359,7 @@ async def _clonar_valor(
             datos = transform_componente(c) or datos
         db.add(ValorComponente(valor_id=nuevo.id, **datos))
     await db.flush()
+    await service.regenerar_historial_por_valores(nuevo.id, fecha_corte, db, motivo=motivo)
     return nuevo
 
 
@@ -522,6 +534,26 @@ async def codigos_por_vigencia(
         "vigencia_desde": vigencia_desde,
         "codigos": list(codigos),
     }
+
+
+@router.get("/diagnostico/sin_historial", response_model=DiagnosticoSinHistorialOut)
+async def diagnostico_valores_sin_historial(
+    obra_social_nro: Optional[int] = Query(None),
+    limite_detalle: int = Query(200, ge=1, le=2000),
+    db: AsyncSession = Depends(get_db),
+):
+    """Valores activos que no tienen fila en el historial de precios.
+
+    `total` tiene que dar **0**: mientras no lo dé, esos precios se ven en el
+    panel pero no existen para el motor de cotización, que lee sólo el
+    historial. El front muestra el aviso en la pantalla de nomenclador.
+
+    Dos segmentos en la ruta (`/diagnostico/...`) a propósito: `/{id}` es un
+    único segmento, así que no hay riesgo de que capture esta ruta.
+    """
+    return await service.valores_activos_sin_historial(
+        db, obra_social_nro=obra_social_nro, limite_detalle=limite_detalle
+    )
 
 
 @router.get("/vigencias")
@@ -717,8 +749,6 @@ async def create_valor(body: ValorCreate, db: AsyncSession = Depends(get_db)):
         coseguro=body.coseguro,
     )
 
-    await service.regenerar_historial_por_valores(valor.id, None, db, motivo="carga_inicial")
-
     await db.commit()
     await db.refresh(valor)
     return await _valor_out(db, valor)
@@ -767,7 +797,6 @@ async def create_valor_multi(body: ValorCreateMulti, db: AsyncSession = Depends(
             requiere_autorizacion=individual.requiere_autorizacion,
             coseguro=individual.coseguro,
         )
-        await service.regenerar_historial_por_valores(valor.id, None, db, motivo="carga_inicial")
         creados.append(valor)
 
     await db.commit()
@@ -916,10 +945,8 @@ async def actualizar_valor(
             else anterior.requiere_autorizacion
         ),
         coseguro=body.coseguro if body.coseguro is not None else anterior.coseguro,
-    )
-
-    await service.regenerar_historial_por_valores(
-        nuevo.id, fecha_corte, db, motivo="valores_estructura"
+        motivo="valores_estructura",
+        fecha_corte=fecha_corte,
     )
 
     # Propaga la misma vigencia+componentes a las demás variantes NE del par (OS,
@@ -952,9 +979,8 @@ async def actualizar_valor(
                 else hermana.requiere_autorizacion
             ),
             coseguro=body.coseguro if body.coseguro is not None else hermana.coseguro,
-        )
-        await service.regenerar_historial_por_valores(
-            nuevo_hermano.id, fecha_corte, db, motivo="valores_estructura"
+            motivo="valores_estructura",
+            fecha_corte=fecha_corte,
         )
 
     await db.commit()
@@ -1086,29 +1112,26 @@ async def replicar_estructura(body: ReplicarEstructuraIn, db: AsyncSession = Dep
                 _cerrar_valor(previo, fecha_corte)
                 await db.flush()
 
-            nuevo = Valor(
-                obra_social_nro=origen.obra_social_nro,
-                nomenclador_id=destino.nomenclador_id,
-                origen=origen.origen,
-                codigo=nom_dest.codigo,
-                descripcion=nom_dest.descripcion,
-                nivel=nivel_destino,
-                complejidad=None,
-                especialidad_id_colegio=origen.especialidad_id_colegio,
-                cantidad_ayudantes=origen.cantidad_ayudantes,
-                coseguro=origen.coseguro,
-                vigencia_desde=body.vigencia_desde,
-                vigencia_hasta=None,
-                estado="activo",
-            )
-            db.add(nuevo)
-            await db.flush()
-            for datos in componentes_destino:
-                db.add(ValorComponente(valor_id=nuevo.id, **datos))
-            await db.flush()
-
-            await service.regenerar_historial_por_valores(
-                nuevo.id, fecha_corte if previo else None, db, motivo="replicacion"
+            await service.persistir_valor(
+                db,
+                Valor(
+                    obra_social_nro=origen.obra_social_nro,
+                    nomenclador_id=destino.nomenclador_id,
+                    origen=origen.origen,
+                    codigo=nom_dest.codigo,
+                    descripcion=nom_dest.descripcion,
+                    nivel=nivel_destino,
+                    complejidad=None,
+                    especialidad_id_colegio=origen.especialidad_id_colegio,
+                    cantidad_ayudantes=origen.cantidad_ayudantes,
+                    coseguro=origen.coseguro,
+                    vigencia_desde=body.vigencia_desde,
+                    vigencia_hasta=None,
+                    estado="activo",
+                ),
+                componentes_destino,
+                motivo="replicacion",
+                fecha_corte=fecha_corte if previo else None,
             )
             actualizados += 1
         except Exception as e:
@@ -1230,29 +1253,26 @@ async def replicar_a_obras_sociales(
                 _cerrar_valor(previo, fecha_corte)
                 await db.flush()
 
-            nuevo = Valor(
-                obra_social_nro=os_dest,
-                nomenclador_id=origen.nomenclador_id,
-                origen=origen.origen,
-                codigo=origen.codigo,
-                descripcion=origen.descripcion,
-                nivel=origen.nivel,
-                complejidad=None,
-                especialidad_id_colegio=origen.especialidad_id_colegio,
-                cantidad_ayudantes=origen.cantidad_ayudantes,
-                coseguro=origen.coseguro,
-                vigencia_desde=body.vigencia_desde,
-                vigencia_hasta=None,
-                estado="activo",
-            )
-            db.add(nuevo)
-            await db.flush()
-            for datos in componentes_destino:
-                db.add(ValorComponente(valor_id=nuevo.id, **datos))
-            await db.flush()
-
-            await service.regenerar_historial_por_valores(
-                nuevo.id, fecha_corte if previo else None, db, motivo="replicacion"
+            await service.persistir_valor(
+                db,
+                Valor(
+                    obra_social_nro=os_dest,
+                    nomenclador_id=origen.nomenclador_id,
+                    origen=origen.origen,
+                    codigo=origen.codigo,
+                    descripcion=origen.descripcion,
+                    nivel=origen.nivel,
+                    complejidad=None,
+                    especialidad_id_colegio=origen.especialidad_id_colegio,
+                    cantidad_ayudantes=origen.cantidad_ayudantes,
+                    coseguro=origen.coseguro,
+                    vigencia_desde=body.vigencia_desde,
+                    vigencia_hasta=None,
+                    estado="activo",
+                ),
+                componentes_destino,
+                motivo="replicacion",
+                fecha_corte=fecha_corte if previo else None,
             )
             actualizados += 1
         except Exception as e:
@@ -1314,10 +1334,8 @@ async def actualizar_porcentaje(body: ActualizarPorcentajeIn, db: AsyncSession =
             _cerrar_valor(v, fecha_corte)
             await db.flush()
             nuevo = await _clonar_valor(
-                db, v, body.vigencia_desde, transform_componente=_ajustar_fijo
-            )
-            await service.regenerar_historial_por_valores(
-                nuevo.id, fecha_corte, db, motivo="valor_fijo_actualizado"
+                db, v, body.vigencia_desde, transform_componente=_ajustar_fijo,
+                motivo="valor_fijo_actualizado", fecha_corte=fecha_corte,
             )
             actualizados += 1
         except Exception as e:
@@ -1368,9 +1386,7 @@ async def actualizar_por_codigos(body: ActualizarPorCodigosIn, db: AsyncSession 
             db, anterior, body.vigencia_desde,
             nivel=item.nuevo_nivel,
             transform_componente=_set_precio_fijo(item.nuevo_valor_unitario),
-        )
-        await service.regenerar_historial_por_valores(
-            nuevo.id, fecha_corte, db, motivo="valor_fijo_actualizado"
+            motivo="valor_fijo_actualizado", fecha_corte=fecha_corte,
         )
         nonlocal actualizados
         actualizados += 1
@@ -1768,31 +1784,28 @@ async def importar_valores_csv(
                     _cerrar_valor(prev, fecha_corte)
                     await db.flush()
 
-                nuevo = Valor(
-                    obra_social_nro=obra_social_nro,
-                    nomenclador_id=nom.id,
-                    origen=origen,
-                    codigo=nom.codigo,
-                    descripcion=data["descripcion"] or None,  # NULL = hereda del catálogo
-                    nivel=nivel_valor,
-                    complejidad=prev.complejidad if prev else None,
-                    especialidad_id_colegio=esp_destino,
-                    cantidad_ayudantes=prev.cantidad_ayudantes if prev else None,
-                    coseguro=prev.coseguro if prev else Decimal("0"),
-                    por_presupuesto=por_presupuesto,
-                    vigencia_desde=vigencia_desde,
-                    vigencia_hasta=None,
-                    estado="activo",
-                )
-                db.add(nuevo)
-                await db.flush()
-                for datos in componentes_resueltos:
-                    db.add(ValorComponente(valor_id=nuevo.id, **datos))
-                await db.flush()
-
-                motivo = "valor_fijo_actualizado" if prev else "carga_inicial"
-                await service.regenerar_historial_por_valores(
-                    nuevo.id, fecha_corte if prev else None, db, motivo=motivo
+                await service.persistir_valor(
+                    db,
+                    Valor(
+                        obra_social_nro=obra_social_nro,
+                        nomenclador_id=nom.id,
+                        origen=origen,
+                        codigo=nom.codigo,
+                        # NULL = hereda del catálogo
+                        descripcion=data["descripcion"] or None,
+                        nivel=nivel_valor,
+                        complejidad=prev.complejidad if prev else None,
+                        especialidad_id_colegio=esp_destino,
+                        cantidad_ayudantes=prev.cantidad_ayudantes if prev else None,
+                        coseguro=prev.coseguro if prev else Decimal("0"),
+                        por_presupuesto=por_presupuesto,
+                        vigencia_desde=vigencia_desde,
+                        vigencia_hasta=None,
+                        estado="activo",
+                    ),
+                    componentes_resueltos,
+                    motivo="valor_fijo_actualizado" if prev else "carga_inicial",
+                    fecha_corte=fecha_corte if prev else None,
                 )
                 procesados += 1
         except Exception as e:

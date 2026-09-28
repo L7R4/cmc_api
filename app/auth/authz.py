@@ -607,6 +607,9 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     ("GET", "/api/valores_nm/resumen_por_vigencia"): Scope.NOMENCLADOR_LEER,
     ("GET", "/api/valores_nm/historial"): Scope.NOMENCLADOR_LEER,
     ("GET", "/api/valores_nm/codigos_por_vigencia"): Scope.NOMENCLADOR_LEER,
+    # Chequeo de integridad valores ↔ historial. Sólo lectura y sin datos
+    # sensibles (ids y códigos), así que alcanza con NOMENCLADOR_LEER.
+    ("GET", "/api/valores_nm/diagnostico/sin_historial"): Scope.NOMENCLADOR_LEER,
     ("GET", "/api/valores_nm/por_vigencia"): Scope.NOMENCLADOR_LEER,
     ("POST", "/api/valores_nm/lookup"): Scope.NOMENCLADOR_LEER,
     # Respaldo documental de cada vigencia de valores. Mismos scopes que los

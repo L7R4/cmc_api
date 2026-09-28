@@ -151,7 +151,7 @@ class PrestacionItem(BaseModel):
     honorarios: Optional[Decimal] = None
     gastos: Optional[Decimal] = None
     ayudante: Optional[Decimal] = None
-    porcentaje: int = Field(100, ge=1, le=100)
+    porcentaje: int = Field(100, ge=1)
 
     # Importe que el afiliado paga de su bolsillo; se descuenta del total. None = usar
     # el sugerido por el Valor del código (ver PrecioResponse.coseguro); un número,
@@ -231,7 +231,7 @@ class PrestacionUpdate(BaseModel):
     honorarios: Optional[Decimal] = None
     gastos: Optional[Decimal] = None
     ayudante: Optional[Decimal] = None
-    porcentaje: Optional[int] = Field(None, ge=1, le=100)
+    porcentaje: Optional[int] = Field(None, ge=1)
     coseguro: Optional[Decimal] = Field(None, ge=0)
     grupo_equipo_id: Optional[int] = None
     # Mismo campo que en PrestacionItem — None = no lo toca (se preserva el rol actual
@@ -614,6 +614,7 @@ class PrestacionFacturaDetalleOut(BaseModel):
     porcentaje: Optional[int] = None                 # porc
     honorarios: Optional[Decimal] = None
     gastos: Optional[Decimal] = None
+    coseguro: Optional[Decimal] = None
     tipo_prestador: Optional[str] = None             # badge: Medico | Ayudante | Gastos
     subtotal: Optional[Decimal] = None               # importe_total
     tipo: Optional[str] = None                       # badge: Consulta | Practica | Honorarios individuales | Sanatorio

@@ -10,7 +10,7 @@ import datetime
 from decimal import Decimal
 from typing import List, Optional
 
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import and_, exists, func, or_, select, update
 from sqlalchemy.orm import aliased
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -370,6 +370,48 @@ async def regenerar_historial_por_valores(
     await db.flush()
 
 
+async def persistir_valor(
+    db: AsyncSession,
+    valor: Valor,
+    componentes: list[dict],
+    *,
+    motivo: str,
+    fecha_corte: Optional[datetime.date],
+) -> Valor:
+    """Punto único de alta de un `Valor`: lo persiste junto con sus componentes
+    **y su fila de historial**, en la misma transacción.
+
+    El precio vive en dos tablas — `nm_valores` (lo que se edita y se ve en el
+    panel) y `nm_historial_precio_codigo` (lo único contra lo que cotiza
+    `lookup_precio`) — y el esquema no las ata: la FK va en la dirección
+    contraria a la que haría falta, así que un valor activo sin historial es un
+    estado perfectamente legal para la base, y silencioso. Cuando hay una fila
+    NN vigente para el mismo código, ésta gana por descarte y la prestación se
+    factura al precio nacional sin que nadie se entere.
+
+    Antes el alta y su historial eran dos pasos que cada endpoint encadenaba por
+    su cuenta, en una decena de lugares: alcanzaba con que un camino nuevo se
+    olvidara del segundo. Pasó de verdad — los 520 valores NE de Prevención
+    Salud (OS 103) quedaron sin historial desde junio de 2026 y se detectó tres
+    meses después, mirando un honorario a ojo. Por eso las dos escrituras se
+    hacen acá adentro y no se delegan al llamador; `tests/test_valor_historial_
+    atomico.py` falla el build si alguien vuelve a construir un `Valor` fuera de
+    este camino, y `valores_activos_sin_historial` vigila el dato.
+
+    `componentes` son dicts listos para `ValorComponente(valor_id=..., **datos)`.
+    Para el alta desde el panel, con validación de galenos y relleno de los tres
+    conceptos, ver `routes_valores._crear_valor_con_componentes`, que termina
+    llamando igual al motor de historial.
+    """
+    db.add(valor)
+    await db.flush()
+    for datos in componentes:
+        db.add(ValorComponente(valor_id=valor.id, **datos))
+    await db.flush()
+    await regenerar_historial_por_valores(valor.id, fecha_corte, db, motivo=motivo)
+    return valor
+
+
 async def cerrar_historial_de_valor(
     valor_id: int,
     fecha_corte: datetime.date,
@@ -384,6 +426,100 @@ async def cerrar_historial_de_valor(
         )
         .values(vigencia_hasta=fecha_corte)
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Chequeo de integridad valores ↔ historial
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def valores_activos_sin_historial(
+    db: AsyncSession,
+    obra_social_nro: Optional[int] = None,
+    limite_detalle: int = 200,
+) -> dict:
+    """
+    Invariante del módulo: **todo `Valor` activo tiene al menos una fila en
+    `nm_historial_precio_codigo`**. Devuelve los que lo violan.
+
+    Por qué hace falta un chequeo explícito: el precio vive en dos tablas y nada
+    en el esquema las ata. La FK va en la dirección contraria a la que haría falta
+    (obliga a que todo historial apunte a un valor, no a que todo valor tenga
+    historial), así que "valor activo sin historial" es un estado perfectamente
+    legal para la base — y silencioso: el panel lee `nm_valores` y ve el precio,
+    pero `lookup_precio` sólo mira el historial y cotiza como si no existiera.
+    Cuando hay una fila NN vigente para el mismo código, ésta gana por descarte y
+    la prestación se factura al precio nacional sin que nadie se entere.
+
+    Pasó de verdad (2026-09): los 520 valores NE de Prevención Salud (OS 103)
+    quedaron sin historial desde junio; 70 códigos cotizaron mal en silencio y
+    115 quedaron sin precio. Se detectó a ojo, mirando un honorario.
+
+    El total tiene que dar **0**. Cualquier otro número es un bug de datos.
+    """
+    cond_huerfano = ~exists(
+        select(HistorialPrecioCodigo.id)
+        .where(HistorialPrecioCodigo.valores_id == Valor.id)
+        .correlate(Valor)
+    )
+    filtros = [Valor.estado == "activo", cond_huerfano]
+    if obra_social_nro is not None:
+        filtros.append(Valor.obra_social_nro == obra_social_nro)
+
+    total = (await db.execute(
+        select(func.count()).select_from(Valor).where(*filtros)
+    )).scalar_one()
+
+    if not total:
+        return {"total": 0, "por_obra_social": [], "detalle": []}
+
+    filas_os = (await db.execute(
+        select(
+            Valor.obra_social_nro,
+            func.count().label("valores"),
+            func.count(func.distinct(Valor.nomenclador_id)).label("codigos"),
+            func.min(Valor.vigencia_desde).label("vigencia_min"),
+            func.max(Valor.vigencia_desde).label("vigencia_max"),
+        )
+        .where(*filtros)
+        .group_by(Valor.obra_social_nro)
+        .order_by(func.count().desc())
+    )).all()
+
+    detalle = (await db.execute(
+        select(
+            Valor.id, Valor.obra_social_nro, Valor.nomenclador_id, Valor.codigo,
+            Valor.origen, Valor.especialidad_id_colegio, Valor.vigencia_desde,
+        )
+        .where(*filtros)
+        .order_by(Valor.obra_social_nro, Valor.codigo)
+        .limit(limite_detalle)
+    )).all()
+
+    return {
+        "total": total,
+        "por_obra_social": [
+            {
+                "obra_social_nro": r.obra_social_nro,
+                "valores": r.valores,
+                "codigos": r.codigos,
+                "vigencia_min": r.vigencia_min,
+                "vigencia_max": r.vigencia_max,
+            }
+            for r in filas_os
+        ],
+        "detalle": [
+            {
+                "valor_id": r.id,
+                "obra_social_nro": r.obra_social_nro,
+                "nomenclador_id": r.nomenclador_id,
+                "codigo": r.codigo,
+                "origen": r.origen,
+                "especialidad_id_colegio": r.especialidad_id_colegio,
+                "vigencia_desde": r.vigencia_desde,
+            }
+            for r in detalle
+        ],
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -980,36 +1116,34 @@ async def generar_valores_nn_por_rangos(
                 or Decimal("0")
             )
 
-        valor = Valor(
-            obra_social_nro=obra_social_nro,
-            nomenclador_id=nom.id,
-            origen="NN",
-            codigo=nom.codigo,
-            descripcion=None,  # hereda del catálogo (descripcion_efectiva)
-            nivel=None,
-            complejidad=None,
-            especialidad_id_colegio=None,
-            por_presupuesto=False,
-            vigencia_desde=vigencia_desde,
-            vigencia_hasta=None,
-            estado="activo",
-        )
-        db.add(valor)
-        await db.flush()
-
-        db.add_all([
-            ValorComponente(valor_id=valor.id, concepto="Honorarios",
-                            galeno_id=g_hon.id, cantidad=_cant("unidades_honorarios", g_hon), orden=0),
-            ValorComponente(valor_id=valor.id, concepto="Gastos",
-                            galeno_id=g_gas.id, cantidad=_cant("unidades_gastos", g_gas), orden=1),
-            ValorComponente(valor_id=valor.id, concepto="Ayudante",
-                            galeno_id=g_hon.id, cantidad=_cant("unidades_ayudante", g_hon), orden=2),
-        ])
-        await db.flush()
-
-        await regenerar_historial_por_valores(
-            valor.id, fecha_corte, db, motivo="carga_inicial",
-            nueva_vigencia_desde=vigencia_desde,
+        await persistir_valor(
+            db,
+            Valor(
+                obra_social_nro=obra_social_nro,
+                nomenclador_id=nom.id,
+                origen="NN",
+                codigo=nom.codigo,
+                descripcion=None,  # hereda del catálogo (descripcion_efectiva)
+                nivel=None,
+                complejidad=None,
+                especialidad_id_colegio=None,
+                por_presupuesto=False,
+                vigencia_desde=vigencia_desde,
+                vigencia_hasta=None,
+                estado="activo",
+            ),
+            [
+                {"concepto": "Honorarios", "galeno_id": g_hon.id,
+                 "cantidad": _cant("unidades_honorarios", g_hon), "orden": 0},
+                {"concepto": "Gastos", "galeno_id": g_gas.id,
+                 "cantidad": _cant("unidades_gastos", g_gas), "orden": 1},
+                {"concepto": "Ayudante", "galeno_id": g_hon.id,
+                 "cantidad": _cant("unidades_ayudante", g_hon), "orden": 2},
+            ],
+            motivo="carga_inicial",
+            # Redundante pasar la vigencia aparte: `regenerar_historial_por_valores`
+            # toma la del propio valor cuando no se le fuerza otra.
+            fecha_corte=fecha_corte,
         )
 
     return {

@@ -1323,10 +1323,13 @@ async def listar_codigos_habilitados(
     código o descripción.
 
     `obra_social_nro` aplica las reglas de especialidad de esa OS (las propias
-    reemplazan a las del Colegio). **Sin obra social el listado es la UNIÓN**: aparece
-    todo código que alguna regla habilite, aunque para una OS puntual no aplique. Es
-    deliberado — este listado es "mis códigos" del médico, que no se mira parado en una
-    obra social; el rechazo fino ocurre al cotizar, que es donde sí hay OS.
+    reemplazan a las del Colegio) y también la descripción: si esa OS nombra el código
+    distinto en su propio `nm_valores` (misma precedencia que `descripcion_efectiva`),
+    esa es la que se devuelve en vez de la del catálogo. **Sin obra social el listado
+    es la UNIÓN**: aparece todo código que alguna regla habilite, aunque para una OS
+    puntual no aplique, y la descripción es siempre la del catálogo. Es deliberado —
+    este listado es "mis códigos" del médico, que no se mira parado en una obra
+    social; el rechazo fino ocurre al cotizar, que es donde sí hay OS.
 
     Cada código trae además las especialidades DEL MÉDICO que lo habilitan (puede ser
     más de una si el código está vinculado a varias especialidades que el médico
@@ -1420,10 +1423,30 @@ async def listar_codigos_habilitados(
         )).all()
         nombre_map = {int(eid): nombre for eid, nombre in esp_rows}
 
+    # Descripción pactada con esta OS (misma precedencia que `descripcion_efectiva` y
+    # que el autocomplete de `buscar_nomenclador`): sin esto, este listado mostraba
+    # siempre el texto del catálogo del Colegio aunque la OS elegida nombre el código
+    # distinto en su propio `nm_valores` (p. ej. un código que el Colegio cataloga con
+    # una descripción y que una OS puntual pactó para nombrar otra práctica).
+    desc_por_codigo: dict[int, str] = {}
+    if obra_social_nro is not None:
+        desc_rows = (await db.execute(
+            select(Valor.nomenclador_id, func.max(Valor.descripcion))
+            .where(
+                Valor.obra_social_nro == obra_social_nro,
+                Valor.nomenclador_id.in_(ids_finales),
+                Valor.estado == "activo",
+                Valor.descripcion.is_not(None),
+                Valor.descripcion != "",
+            )
+            .group_by(Valor.nomenclador_id)
+        )).all()
+        desc_por_codigo = {nid: desc for nid, desc in desc_rows}
+
     return [
         {
             "codigo": c.codigo,
-            "descripcion": c.descripcion,
+            "descripcion": desc_por_codigo.get(c.id) or c.descripcion,
             "categoria": c.categoria,
             "complejidad": c.complejidad,
             "especialidades": [

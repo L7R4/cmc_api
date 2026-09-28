@@ -1043,13 +1043,18 @@ async def resolver_precio(
 
 
 async def codigos_habilitados_medico(
-    db: AsyncSession, cod_medico: str, q: Optional[str] = None,
+    db: AsyncSession, cod_medico: str, q: Optional[str] = None, cod_obra: Optional[str] = None,
 ) -> list[dict]:
     """Códigos que un médico puede facturar. Delega el alcance completo (especialidad +
     excepciones individuales + sin restricción) en el módulo nomenclador — mismo
-    patrón de delegación que `resolver_precio` hacia `lookup_precio`."""
+    patrón de delegación que `resolver_precio` hacia `lookup_precio`.
+
+    `cod_obra`, si se manda, hace que la descripción de cada código sea la que esa OS
+    pactó (en vez de la del catálogo) — mismo criterio que `buscar_nomenclador` y que
+    lo que después muestra el cotizador."""
     medico = await check_medico_activo(db, cod_medico)
-    return await service_nm.listar_codigos_habilitados(db, medico, q)
+    obra_social_nro = _cod_obra_to_int(cod_obra) if cod_obra else None
+    return await service_nm.listar_codigos_habilitados(db, medico, q, obra_social_nro)
 
 
 # ── Tope de ayudantes por (código, OS) ───────────────────────────────────────
@@ -2275,8 +2280,9 @@ async def editar_prestacion(
         raise HTTPException(404, "Prestación no encontrada")
     if row.estado != "A":
         raise HTTPException(409, "Prestación cerrada/liquidada, no se puede editar")
-    # La fase de la cabecera (según quién cargó la prestación) debe seguir abierta.
-    _gate_carga(await _get_factura(db, row.cod_obr, row.periodo), row.origen_carga)
+    # Editar no depende de la fase médico, solo de que el Colegio no haya cerrado
+    # el período — ver `_gate_edicion`.
+    _gate_edicion(await _get_factura(db, row.cod_obr, row.periodo))
 
     # Todo lo que sigue muta `row` (y a veces otras filas/cabeceras) antes de
     # llegar a `db.commit()`. Sin este try/except, una excepcion a mitad de
@@ -2303,8 +2309,9 @@ async def editar_prestacion(
             nuevo_cod_obra = data.get("cod_obra_social", row.cod_obr)
             nuevo_periodo = data.get("periodo", row.periodo)
             cabecera_destino = await _get_factura(db, nuevo_cod_obra, nuevo_periodo)
-            # Mismo gate que al cargar: no se puede aterrizar en un período/fase cerrada.
-            _gate_carga(cabecera_destino, row.origen_carga)
+            # Mismo criterio que arriba: el destino solo tiene que tener abierta la
+            # fase Colegio, la fase médico no aplica a una edición.
+            _gate_edicion(cabecera_destino)
             cod_obra_anterior, periodo_anterior = row.cod_obr, row.periodo
             row.cod_obr = nuevo_cod_obra
             row.periodo = nuevo_periodo
@@ -2583,8 +2590,9 @@ async def anular_prestacion(db: AsyncSession, prestacion_id: int) -> None:
         raise HTTPException(404, "Prestación no encontrada")
     if row.estado != "A":
         raise HTTPException(409, "Prestación cerrada/liquidada, no se puede anular")
-    # La fase de la cabecera (según quién cargó la prestación) debe seguir abierta.
-    _gate_carga(await _get_factura(db, row.cod_obr, row.periodo), row.origen_carga)
+    # Mismo criterio que editar_prestacion: anular no depende de la fase médico,
+    # solo de que el Colegio no haya cerrado el período — ver `_gate_edicion`.
+    _gate_edicion(await _get_factura(db, row.cod_obr, row.periodo))
     cod_obra, periodo = row.cod_obr, row.periodo
     row.estado = "X"
     await db.flush()
@@ -2667,7 +2675,7 @@ async def _ensure_factura_abierta(
 
 
 def _gate_carga(cabecera: Optional[FacturacionCMC], actor: str) -> None:
-    """Valida que la fase correspondiente al actor esté abierta antes de cargar/editar.
+    """Valida que la fase correspondiente al actor esté abierta antes de cargar.
     `cabecera=None` (aún no existe) se permite: se creará abierta."""
     if cabecera is None:
         return
@@ -2675,6 +2683,21 @@ def _gate_carga(cabecera: Optional[FacturacionCMC], actor: str) -> None:
         raise HTTPException(409, "El período está cerrado por el colegio")
     if actor == ORIGEN_MEDICO and cabecera.estado_doctor == DOCTOR_CERRADA:
         raise HTTPException(409, "El período está cerrado para carga de médicos")
+
+
+def _gate_edicion(cabecera: Optional[FacturacionCMC]) -> None:
+    """Valida que se pueda editar una prestación YA cargada en esta cabecera.
+
+    A propósito NO mira `estado_doctor`: la fase médico gatea si el MÉDICO puede
+    seguir mandando prestaciones nuevas (`_gate_carga`), no si una fila ya
+    cargada se puede corregir. Que el médico haya cerrado su ventana de carga no
+    puede dejar una prestación (suya o del Colegio) fuera de edición — el Colegio
+    tiene que poder seguir ajustándola mientras SU fase siga abierta. Lo único
+    que cierra la edición de verdad es que el Colegio cierre el período."""
+    if cabecera is None:
+        return
+    if cabecera.estado in FACTURA_ESTADOS_CERRADOS:
+        raise HTTPException(409, "El período está cerrado por el colegio")
 
 
 async def _cleanup_factura_si_vacia(

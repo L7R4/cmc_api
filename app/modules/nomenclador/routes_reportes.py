@@ -105,21 +105,10 @@ async def boletin(
         stmt = stmt.where(HistorialPrecioCodigo.obra_social_nro == obra_social_nro)
 
     if codigo:
-        if obra_social_nro:
-            # Con OS en contexto el código resuelve a una sola fila (propia > compartida).
-            nom = await service.resolver_nomenclador(db, codigo, obra_social_nro)
-            if not nom:
-                raise HTTPException(404, f"Código '{codigo}' no encontrado")
-            stmt = stmt.where(HistorialPrecioCodigo.nomenclador_id == nom.id)
-        else:
-            # Sin OS el mismo código puede existir compartido y propio de varias obras
-            # sociales; el boletín las muestra todas en vez de elegir una arbitraria.
-            ids = (await db.execute(
-                select(NomencladorCMC.id).where(NomencladorCMC.codigo == codigo)
-            )).scalars().all()
-            if not ids:
-                raise HTTPException(404, f"Código '{codigo}' no encontrado")
-            stmt = stmt.where(HistorialPrecioCodigo.nomenclador_id.in_(ids))
+        nom = await service.resolver_nomenclador(db, codigo)
+        if not nom:
+            raise HTTPException(404, f"Código '{codigo}' no encontrado")
+        stmt = stmt.where(HistorialPrecioCodigo.nomenclador_id == nom.id)
 
     stmt = stmt.order_by(HistorialPrecioCodigo.obra_social_nro, HistorialPrecioCodigo.nomenclador_id)
     result = await db.execute(stmt)
@@ -129,10 +118,14 @@ async def boletin(
     for h in historiales:
         nom = await db.get(NomencladorCMC, h.nomenclador_id)
         valor = await db.get(Valor, h.valores_id)
+        legacy = None
+        if nom is not None and not (valor and valor.descripcion and valor.descripcion.strip()):
+            mapa = await service.descripciones_legacy(db, {(nom.codigo, h.obra_social_nro)})
+            legacy = mapa.get((nom.codigo, h.obra_social_nro))
         items.append(BoletinItemOut(
             codigo=nom.codigo if nom else str(h.nomenclador_id),
             origen=h.origen,
-            descripcion=service.descripcion_efectiva(valor, nom),
+            descripcion=service.descripcion_efectiva(valor, legacy),
             nivel=valor.nivel if valor else None,
             por_presupuesto=bool(valor and valor.por_presupuesto),
             precio_total=h.precio_total,
@@ -212,12 +205,17 @@ async def tabla_valores(
         except service_vias.ViaNoAplicableError:
             pass  # código no elegible para laparoscopía → queda con el precio tradicional
 
+        legacy = None
+        if nom is not None and not (valor and valor.descripcion and valor.descripcion.strip()):
+            mapa = await service.descripciones_legacy(db, {(nom.codigo, h.obra_social_nro)})
+            legacy = mapa.get((nom.codigo, h.obra_social_nro))
+
         return TablaValoresItem(
             nomenclador_id=h.nomenclador_id,
             codigo=nom.codigo if nom else str(h.nomenclador_id),
             origen=h.origen,
             especialidad_id_colegio=h.especialidad_id_colegio,
-            descripcion=service.descripcion_efectiva(valor, nom),
+            descripcion=service.descripcion_efectiva(valor, legacy),
             nivel=valor.nivel if valor else None,
             por_presupuesto=bool(valor and valor.por_presupuesto),
             sin_restriccion_especialidad=bool(valor and valor.sin_restriccion_especialidad),

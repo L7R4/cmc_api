@@ -20,58 +20,30 @@ from app.db.base import Base
 
 
 class NomencladorCMC(Base):
-    """Catálogo operativo del Colegio. Un código por práctica; la vía/técnica
-    (tradicional/laparoscópica) es un atributo de la prestación, no del código
-    (ver detalle_facturacion.via y app/modules/nomenclador/service_vias.py).
+    """Catálogo operativo del Colegio: código + clasificación, nada más. La
+    vía/técnica (tradicional/laparoscópica) es un atributo de la prestación, no
+    del código (ver detalle_facturacion.via y
+    app/modules/nomenclador/service_vias.py).
 
-    El código NO es identidad global: el mismo número puede nombrar prácticas
-    distintas según la obra social. `obra_social_nro` es el eje de pertenencia —
-    NULL = código del Colegio/Nacional, compartido por todas; N = código propio
-    de esa OS, con su propia descripción, categoría y grilla de especialidades.
-    Se resuelve con precedencia (fila propia > compartida) en
-    `app/modules/nomenclador/service.py::resolver_nomenclador`."""
+    `codigo` es identidad única — reestructura del nomenclador completa (fases
+    1-3): descripción, especialidades habilitadas, "sin restricción" y
+    "requiere autorización" pasaron a vivir por obra social, en `Valor` /
+    `ValorEspecialidad` (ver service.py::descripcion_efectiva,
+    especialidades_habilitadas_de, requiere_autorizacion_efectiva). El
+    Nomenclador Nacional es un catálogo aparte (`NomencladorNacional`), vinculado
+    opcionalmente vía `nomenclador_nacional_id`.
+    """
     __tablename__ = "nm_nomenclador"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    codigo: Mapped[str] = mapped_column(String(20), nullable=False)
-    # FK lógica a obras_sociales.NRO_OBRASOCIAL. NULL = compartido (ver docstring).
-    obra_social_nro: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    # Columna generada para poder declarar la unique con la OS en NULL (-1 = compartido).
-    # Sin NOT NULL a propósito: MariaDB (lo que corre en producción) no lo admite en
-    # columnas generadas, y COALESCE nunca devuelve NULL — la restricción sería redundante.
-    obra_social_key: Mapped[int] = mapped_column(
-        Integer, Computed("coalesce(obra_social_nro, -1)", persisted=True), nullable=True
-    )
-    # Código del Nomenclador Nacional al que corresponde este código del Colegio.
-    # NULL = no identificado como nacional (código propio del Colegio o sin match).
-    # Se cargó por comparación contra el extracto del PDF (ver scripts/compare_nomenclador.py).
-    codigo_nacional: Mapped[Optional[str]] = mapped_column(String(20), nullable=True, index=True)
-    # Legacy — fase 2 de la reestructura del nomenclador: la descripción pasó a
-    # vivir en Valor.descripcion (por obra social). Esta columna queda sin usar
-    # (se relajó a NULL para que el alta nueva no tenga que mandarla) hasta que la
-    # fase 3 la elimine del todo; ver nm_nomenclador_descripcion_legacy.
-    descripcion: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    codigo: Mapped[str] = mapped_column(String(20), nullable=False, unique=True)
     categoria: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     complejidad: Mapped[Optional[str]] = mapped_column(
         Enum("baja", "media", "alta", name="nm_complejidad_enum"), nullable=True
     )
-    # True → exime de la validación nomenclador_especialidad
-    sin_restriccion_especialidad: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=False, server_default="0"
-    )
-    # Default del Colegio: ¿esta práctica necesita autorización previa de la obra social?
-    # Cada OS lo pisa con `Valor.requiere_autorizacion` (ver service.requiere_autorizacion_efectiva).
-    requiere_autorizacion: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=False, server_default="0"
-    )
-    # Unidades por defecto al crear ValorComponente calculable sin cantidad explícita
-    unidades_honorarios: Mapped[Optional[Decimal]] = mapped_column(DECIMAL(10, 2), nullable=True)
-    unidades_ayudante: Mapped[Optional[Decimal]] = mapped_column(DECIMAL(10, 2), nullable=True)
-    unidades_gastos: Mapped[Optional[Decimal]] = mapped_column(DECIMAL(10, 2), nullable=True)
-    # Código NN al que corresponde este código del Colegio (fase 1 de la reestructura
-    # del nomenclador: reemplaza a `codigo_nacional`, que era un string sin catálogo
-    # propio). Opcional: no todo código del Colegio tiene equivalente nacional. Varios
-    # códigos del Colegio pueden apuntar al mismo NN (ver NomencladorNacional).
+    # Código NN al que corresponde este código del Colegio. Opcional: no todo
+    # código del Colegio tiene equivalente nacional. Varios códigos del Colegio
+    # pueden apuntar al mismo NN (ver NomencladorNacional).
     nomenclador_nacional_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("nm_nomenclador_nacional.id"), nullable=True
     )
@@ -84,9 +56,6 @@ class NomencladorCMC(Base):
         DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
     )
 
-    especialidades: Mapped[List["NomencladorEspecialidad"]] = relationship(
-        back_populates="nomenclador", cascade="all, delete-orphan", lazy="selectin"
-    )
     habilitaciones_medico: Mapped[List["MedicoCodigoHabilitado"]] = relationship(
         back_populates="nomenclador", cascade="all, delete-orphan"
     )
@@ -96,10 +65,7 @@ class NomencladorCMC(Base):
     )
 
     __table_args__ = (
-        UniqueConstraint("codigo", "obra_social_key", name="uq_nm_nomenclador_codigo_os"),
-        Index("ix_nm_nomenclador_codigo", "codigo"),
         Index("ix_nm_nomenclador_complejidad", "complejidad"),
-        Index("ix_nm_nomenclador_os", "obra_social_nro"),
         Index("ix_nm_nomenclador_nn", "nomenclador_nacional_id"),
     )
 
@@ -144,56 +110,6 @@ class NomencladorNacional(Base):
     __table_args__ = (
         Index("ix_nm_nomenclador_nacional_codigo", "codigo"),
         Index("ix_nm_nomenclador_nacional_activo", "activo"),
-    )
-
-
-class NomencladorEspecialidad(Base):
-    """Qué especialidades pueden facturar un código — la capa de HABILITACIÓN.
-
-    No confundir con `Valor.especialidad_id_colegio`, que responde otra pregunta: esta
-    tabla dice *quién puede hacer la práctica*; aquella dice *qué precio le toca* a un
-    médico según su especialidad (variantes NE).
-
-    `obra_social_nro` permite que la misma práctica esté clasificada en distinta
-    especialidad según la OS (el 080801 es patología para una y oftalmología para otra)
-    sin duplicar la fila del catálogo: NULL = regla del Colegio, vale para todas; N =
-    regla propia de esa obra social. Si una OS tiene reglas propias para un código,
-    esas reemplazan a las compartidas (no se suman) — ver
-    `service.especialidades_habilitadas_de`.
-    """
-    __tablename__ = "nm_nomenclador_especialidad"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    nomenclador_id: Mapped[int] = mapped_column(
-        ForeignKey("nm_nomenclador.id"), nullable=False
-    )
-    # FK lógica — no FK real porque ID_COLEGIO_ESPE no es PK
-    especialidad_id_colegio: Mapped[int] = mapped_column(Integer, nullable=False)
-    # NULL = regla compartida del Colegio; N = regla propia de esa obra social
-    obra_social_nro: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    # Generada para la unique con la OS en NULL. Sin NOT NULL: MariaDB no lo admite en
-    # columnas generadas y COALESCE nunca devuelve NULL.
-    obra_social_key: Mapped[int] = mapped_column(
-        Integer, Computed("coalesce(obra_social_nro, -1)", persisted=True), nullable=True
-    )
-    activo: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="1")
-    observacion: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime.datetime] = mapped_column(
-        DateTime, nullable=False, server_default=func.now()
-    )
-    updated_at: Mapped[datetime.datetime] = mapped_column(
-        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
-    )
-
-    nomenclador: Mapped["NomencladorCMC"] = relationship(back_populates="especialidades")
-
-    __table_args__ = (
-        UniqueConstraint(
-            "nomenclador_id", "especialidad_id_colegio", "obra_social_key",
-            name="uq_nm_nom_esp_os",
-        ),
-        Index("ix_nm_nom_esp_os", "obra_social_nro"),
-        Index("ix_nm_nom_esp_especialidad", "especialidad_id_colegio"),
     )
 
 
@@ -391,9 +307,9 @@ class Valor(Base):
     origen: Mapped[str] = mapped_column(String(10), nullable=False)
     # Snapshot denormalizado del codigo para consultas rápidas
     codigo: Mapped[str] = mapped_column(String(20), nullable=False)
-    # Cómo nombra esta OS al código. Es la descripción que se muestra al operar sobre
-    # esta obra social; NULL → cae a NomencladorCMC.descripcion (ver
-    # service.descripcion_efectiva).
+    # Cómo nombra esta OS al código. NULL solo puede pasar en filas viejas (ver
+    # service.descripcion_efectiva: cae al fallback legacy) — el alta manual la
+    # exige desde la fase 2 de la reestructura del nomenclador.
     descripcion: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     # Nivel numérico que asigna esta OS al código (independiente de complejidad del nomenclador)
     nivel: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
@@ -405,15 +321,12 @@ class Valor(Base):
     # Decide el `tipo` de la prestación y si los gastos se fuerzan a 0 bajo sanatorio
     # (ver facturacion/service.py::derivar_tipo y _gasto_forzado_a_cero).
     categoria: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
-    # Override por OS de si la práctica necesita autorización previa.
-    # NULL = hereda NomencladorCMC.requiere_autorizacion (no es lo mismo que False:
-    # False es "esta OS dice que no", NULL es "esta OS no opinó").
+    # ¿La práctica necesita autorización previa de esta obra social? `None` = nadie
+    # cargó nada, se interpreta como False (ver service.requiere_autorizacion_efectiva).
     requiere_autorizacion: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
     # True → exime de la validación de especialidad habilitada (ver
     # nm_valor_especialidad / service.especialidades_habilitadas_de) para este
-    # código EN esta OS. Reemplaza a NomencladorCMC.sin_restriccion_especialidad
-    # (fase 1 de la reestructura del nomenclador: dejó de ser un dato del catálogo
-    # del Colegio para pasar a ser un dato por OS, igual que la descripción).
+    # código EN esta OS.
     sin_restriccion_especialidad: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="0"
     )

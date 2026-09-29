@@ -911,10 +911,10 @@ async def buscar_nomenclador(
 ) -> list[dict]:
     """Autocomplete de códigos para una obra social.
 
-    Muestra los códigos compartidos del Colegio más los propios de esa OS, y devuelve
-    la descripción con la que esa obra social nombra el código (la de su `nm_valores`
-    si la hay). Sin el contexto de la OS el autocomplete mostraba un texto y el
-    cotizador otro para el mismo código.
+    Devuelve la descripción con la que esa obra social nombra el código (la de su
+    `nm_valores` si la hay; si no, el fallback legacy). El código es identidad
+    única desde la fase 3 de la reestructura del nomenclador, así que ya no hace
+    falta elegir entre una fila "propia de la OS" y una compartida.
     """
     obra_social_nro = _cod_obra_to_int(cod_obra)
     N = NomencladorCMC
@@ -942,31 +942,23 @@ async def buscar_nomenclador(
         .outerjoin(desc_os, desc_os.c.nomenclador_id == N.id)
         .where(
             N.activo.is_(True),
-            service_nm.filtro_pertenencia(obra_social_nro),
-            or_(
-                N.codigo.ilike(f"{q}%"),
-                N.descripcion.ilike(f"%{q}%"),
-                desc_os.c.descripcion.ilike(f"%{q}%"),
-            ),
+            or_(N.codigo.ilike(f"{q}%"), desc_os.c.descripcion.ilike(f"%{q}%")),
         )
-        # La fila propia de la OS antes que la compartida, para el dedupe de abajo.
-        .order_by(N.obra_social_key.desc(), N.codigo)
-        .limit(limit * 2)
+        .order_by(N.codigo)
+        .limit(limit)
     )
+    filas = (await db.execute(stmt)).all()
 
-    vistos: set[str] = set()
-    salida: list[dict] = []
-    for nom, descripcion_os in (await db.execute(stmt)).all():
-        if nom.codigo in vistos:
-            continue  # ya salió la fila propia de la OS para este código
-        vistos.add(nom.codigo)
-        salida.append({
+    faltan = {(nom.codigo, obra_social_nro) for nom, desc in filas if not desc}
+    legacy = await service_nm.descripciones_legacy(db, faltan) if faltan else {}
+
+    return [
+        {
             "codigo": nom.codigo,
-            "descripcion": descripcion_os or nom.descripcion,
-        })
-        if len(salida) >= limit:
-            break
-    return salida
+            "descripcion": desc or legacy.get((nom.codigo, obra_social_nro)) or "",
+        }
+        for nom, desc in filas
+    ]
 
 
 # ── Resolución de precio — wrapper sobre lookup_precio ───────────────────────
@@ -2019,21 +2011,26 @@ async def _to_prestacion_read_list(
 ) -> list[PrestacionRead]:
     """Convierte filas ORM a `PrestacionRead` completando `tipo_prestador` (no viene del
     ORM), `nombre_obra_social` (batch contra `obras_sociales`), `nombre_clinica` (batch
-    contra `listado_medico`) y `descripcion` (batch contra `nm_nomenclador`), sin N+1.
-    Mismo criterio que `obtener_prestacion` — reusado acá para que el listado también lo
-    traiga."""
+    contra `listado_medico`) y `descripcion` (batch contra `nm_valores`, por (obra
+    social, código) — ya no contra `nm_nomenclador`, ver plan de reestructura del
+    nomenclador), sin N+1. Mismo criterio que `obtener_prestacion` — reusado acá para
+    que el listado también lo traiga."""
     nros_os: set[int] = set()
     nros_clinica: set[int] = set()
     nomenclador_ids: set[int] = set()
+    pares_os_nom: set[tuple[int, int]] = set()
     for row in rows:
         try:
-            nros_os.add(int(row.cod_obr))
+            os_int = int(row.cod_obr)
+            nros_os.add(os_int)
         except (TypeError, ValueError):
-            pass
+            os_int = None
         if row.cod_clinica:  # 0 = sentinel legacy "sin clínica"
             nros_clinica.add(int(row.cod_clinica))
         if row.nomenclador_id is not None:
             nomenclador_ids.add(row.nomenclador_id)
+            if os_int is not None:
+                pares_os_nom.add((os_int, row.nomenclador_id))
     nombres_os: dict[int, str] = {}
     if nros_os:
         os_rows = (await db.execute(
@@ -2042,26 +2039,52 @@ async def _to_prestacion_read_list(
         )).all()
         nombres_os = {nro: nombre for nro, nombre in os_rows}
     nombres_clinica = await _nombres_clinica(db, nros_clinica)
-    descripciones: dict[int, str] = {}
-    if nomenclador_ids:
-        nm_rows = (await db.execute(
-            select(NomencladorCMC.id, NomencladorCMC.descripcion)
-            .where(NomencladorCMC.id.in_(nomenclador_ids))
+
+    descripciones: dict[tuple[int, int], str] = {}
+    if pares_os_nom:
+        valor_rows = (await db.execute(
+            select(Valor.obra_social_nro, Valor.nomenclador_id, func.max(Valor.descripcion))
+            .where(
+                tuple_(Valor.obra_social_nro, Valor.nomenclador_id).in_(pares_os_nom),
+                Valor.estado == "activo",
+                Valor.descripcion.is_not(None),
+                Valor.descripcion != "",
+            )
+            .group_by(Valor.obra_social_nro, Valor.nomenclador_id)
         )).all()
-        descripciones = {nid: descripcion for nid, descripcion in nm_rows}
+        descripciones = {(os, nid): d for os, nid, d in valor_rows}
+
+        codigo_por_id = {
+            nid: cod for nid, cod in (await db.execute(
+                select(NomencladorCMC.id, NomencladorCMC.codigo).where(NomencladorCMC.id.in_(nomenclador_ids))
+            )).all()
+        }
+        faltan = {
+            (codigo_por_id[nid], os)
+            for os, nid in pares_os_nom
+            if (os, nid) not in descripciones and nid in codigo_por_id
+        }
+        legacy = await service_nm.descripciones_legacy(db, faltan) if faltan else {}
+        for os, nid in pares_os_nom:
+            if (os, nid) in descripciones or nid not in codigo_por_id:
+                continue
+            texto = legacy.get((codigo_por_id[nid], os))
+            if texto:
+                descripciones[(os, nid)] = texto
 
     out = []
     for row in rows:
         item = PrestacionRead.model_validate(row)
         item.tipo_prestador = _tipo_prestador_de(row)
         try:
-            item.nombre_obra_social = nombres_os.get(int(row.cod_obr))
+            os_int = int(row.cod_obr)
+            item.nombre_obra_social = nombres_os.get(os_int)
         except (TypeError, ValueError):
-            pass
+            os_int = None
         if row.cod_clinica:
             item.nombre_clinica = nombres_clinica.get(int(row.cod_clinica))
-        if row.nomenclador_id is not None:
-            item.descripcion = descripciones.get(row.nomenclador_id)
+        if row.nomenclador_id is not None and os_int is not None:
+            item.descripcion = descripciones.get((os_int, row.nomenclador_id))
         out.append(item)
     return out
 

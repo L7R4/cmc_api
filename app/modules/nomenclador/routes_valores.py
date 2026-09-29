@@ -104,21 +104,17 @@ async def _valores_out(db: AsyncSession, valores: list[Valor]) -> list[ValorOut]
     """ValorOut con `descripcion_efectiva` y `especialidades` resueltas.
 
     `descripcion_efectiva`: normalmente `Valor.descripcion` ya viene cargada (el alta
-    manual la exige); si algún valor viejo/interno quedó sin ella, cae al catálogo.
+    manual la exige); si algún valor viejo/interno quedó sin ella, cae al fallback
+    legacy (ver service.descripciones_legacy).
     `especialidades`: dato del PAR (obra_social_nro, código) — se trae una sola vez
     por par, no por fila, aunque haya varias variantes NE del mismo par en la lista.
     """
     if not valores:
         return []
-    ids = {v.nomenclador_id for v in valores}
-    catalogo = {
-        nid: desc
-        for nid, desc in (await db.execute(
-            select(NomencladorCMC.id, NomencladorCMC.descripcion)
-            .where(NomencladorCMC.id.in_(ids))
-        )).all()
-    }
     pares = {(v.obra_social_nro, v.codigo) for v in valores}
+    legacy = await service.descripciones_legacy(
+        db, {(codigo, os_nro) for os_nro, codigo in pares}
+    )
     especialidades_por_par: dict[tuple[int, str], list[int]] = {}
     if pares:
         os_nros = {os for os, _ in pares}
@@ -137,8 +133,8 @@ async def _valores_out(db: AsyncSession, valores: list[Valor]) -> list[ValorOut]
     salida = []
     for v in valores:
         out = ValorOut.model_validate(v)
-        out.descripcion_efectiva = (
-            v.descripcion if (v.descripcion or "").strip() else (catalogo.get(v.nomenclador_id) or "")
+        out.descripcion_efectiva = service.descripcion_efectiva(
+            v, legacy.get((v.codigo, v.obra_social_nro))
         )
         out.especialidades = especialidades_por_par.get((v.obra_social_nro, v.codigo), [])
         salida.append(out)

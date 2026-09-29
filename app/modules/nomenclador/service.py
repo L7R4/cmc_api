@@ -19,6 +19,7 @@ from app.db.models.nomenclador_cmc import (
     HistorialPrecioCodigo,
     MedicoCodigoHabilitado,
     NomencladorCMC,
+    NomencladorDescripcionLegacy,
     Valor,
     ValorComponente,
     ValorEspecialidad,
@@ -67,16 +68,12 @@ def prioridad_origen(origen: str) -> int:
 async def resolver_nomenclador(
     db: AsyncSession, codigo: str, obra_social_nro: Optional[int] = None
 ) -> Optional[NomencladorCMC]:
-    """Código → fila del catálogo. El código ya es identidad única (salvo un puñado
-    de filas legacy propias de una OS que todavía no se fusionaron — ver plan de
-    migración, fase 3); `obra_social_nro` se mantiene en la firma sin usarse para no
-    tener que tocar cada uno de sus llamadores. Devuelve None si el código no existe.
-    """
-    stmt = (
-        select(NomencladorCMC)
-        .where(NomencladorCMC.codigo == codigo, NomencladorCMC.activo.is_(True))
-        .order_by(NomencladorCMC.obra_social_key.desc())
-        .limit(1)
+    """Código → fila del catálogo. `codigo` es identidad única (UNIQUE en DB desde
+    la fase 3 de la reestructura del nomenclador); `obra_social_nro` se mantiene en
+    la firma sin usarse para no tener que tocar cada uno de sus llamadores. Devuelve
+    None si el código no existe."""
+    stmt = select(NomencladorCMC).where(
+        NomencladorCMC.codigo == codigo, NomencladorCMC.activo.is_(True)
     )
     return (await db.execute(stmt)).scalar_one_or_none()
 
@@ -223,21 +220,54 @@ async def variantes_hermanas(db: AsyncSession, valor: Valor) -> list[Valor]:
     return list((await db.execute(stmt)).scalars())
 
 
-def descripcion_efectiva(
-    valor: Optional[Valor], nomenclador: Optional[NomencladorCMC]
-) -> str:
+async def descripciones_legacy(
+    db: AsyncSession, pares: set[tuple[str, Optional[int]]],
+) -> dict[tuple[str, Optional[int]], str]:
+    """Fallback de última instancia para (código, obra_social_nro) que no tienen
+    ningún `Valor` con descripción propia: snapshot congelado del catálogo del
+    Colegio al momento de la fase 1 de la reestructura del nomenclador (ver
+    `NomencladorDescripcionLegacy`). Se elimina recién cuando esos pares tengan
+    descripción por otro medio — ver plan de migración, obstáculo 2.
+
+    Misma precedencia que tenía el catálogo antes de la reestructura: propia de
+    la OS > compartida del Colegio. Devuelve un dict clavado por los MISMOS
+    `(codigo, obra_social_nro)` que se pidieron (aunque el match haya salido de
+    la fila compartida), para que el caller pueda indexar directo con `.get(par)`.
+    """
+    codigos = {c for c, _ in pares}
+    if not codigos:
+        return {}
+    filas = (await db.execute(
+        select(NomencladorDescripcionLegacy).where(NomencladorDescripcionLegacy.codigo.in_(codigos))
+    )).scalars().all()
+    propias: dict[tuple[str, int], str] = {}
+    compartidas: dict[str, str] = {}
+    for f in filas:
+        if f.obra_social_nro is None:
+            compartidas[f.codigo] = f.descripcion
+        else:
+            propias[(f.codigo, f.obra_social_nro)] = f.descripcion
+
+    out: dict[tuple[str, Optional[int]], str] = {}
+    for codigo, os_nro in pares:
+        if os_nro is not None and (codigo, os_nro) in propias:
+            out[(codigo, os_nro)] = propias[(codigo, os_nro)]
+        elif codigo in compartidas:
+            out[(codigo, os_nro)] = compartidas[codigo]
+    return out
+
+
+def descripcion_efectiva(valor: Optional[Valor], legacy: Optional[str] = None) -> str:
     """Cómo se nombra el código en el contexto de una OS.
 
-    La del valor pactado con esa obra social si la hay; si no, la del catálogo. Es la
-    única precedencia de descripción del sistema — antes cada camino elegía una fuente
-    distinta (el autocomplete el catálogo, el lookup de precio el valor) y mostraban
-    textos diferentes para el mismo código.
+    `Valor.descripcion` si la variante la tiene cargada (siempre, desde la fase 2
+    de la reestructura del nomenclador); si no, `legacy` — el fallback congelado
+    del catálogo del Colegio para las filas viejas que nunca llegaron a tener la
+    propia (ver `descripciones_legacy`). `""` si ninguna existe.
     """
     if valor is not None and valor.descripcion and valor.descripcion.strip():
         return valor.descripcion
-    if nomenclador is not None and nomenclador.descripcion:
-        return nomenclador.descripcion
-    return ""
+    return legacy or ""
 
 
 def categoria_efectiva(
@@ -1600,10 +1630,13 @@ async def listar_codigos_habilitados(
         )).all()
         desc_por_codigo = {nid: desc for nid, desc in desc_rows}
 
+    faltan = {(c.codigo, obra_social_nro) for c in codigos if not desc_por_codigo.get(c.id)}
+    legacy = await descripciones_legacy(db, faltan) if faltan else {}
+
     return [
         {
             "codigo": c.codigo,
-            "descripcion": desc_por_codigo.get(c.id) or c.descripcion,
+            "descripcion": desc_por_codigo.get(c.id) or legacy.get((c.codigo, obra_social_nro), ""),
             "categoria": c.categoria,
             "complejidad": c.complejidad,
             "especialidades": [
@@ -1771,10 +1804,15 @@ async def lookup_precio(
     # Todos los componentes suman (ya no hay opcionales): precio_base == precio_total.
     precio_base = precio_total
 
+    legacy_desc = None
+    if not (valor and valor.descripcion and valor.descripcion.strip()):
+        mapa = await descripciones_legacy(db, {(nomenclador.codigo, obra_social_nro)})
+        legacy_desc = mapa.get((nomenclador.codigo, obra_social_nro))
+
     return LookupPrecioOut(
         nomenclador_id=nomenclador_id,
         codigo_colegio=nomenclador.codigo,
-        descripcion=descripcion_efectiva(valor, nomenclador),
+        descripcion=descripcion_efectiva(valor, legacy_desc),
         obra_social_nro=obra_social_nro,
         nivel=valor.nivel if valor else None,
         origen=historial.origen,

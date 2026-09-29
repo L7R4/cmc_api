@@ -43,7 +43,7 @@ from app.db.models.nomenclador_cmc import (
     ValorEspecialidad,
 )
 from app.modules.nomenclador.routes_reportes import tabla_valores as _tabla_valores
-from app.modules.nomenclador.service import _especialidades_medico
+from app.modules.nomenclador.service import _especialidades_medico, descripciones_legacy
 from app.modules.nomenclador.schemas import TablaValoresItem
 from app.modules.avisos import service as avisos_service
 from app.modules.beneficios import service as beneficios_service
@@ -173,7 +173,7 @@ async def obras_sociales(
 
 @router.get("/nomenclador", response_model=List[NomencladorItem])
 async def nomenclador(
-    q: str = Query(..., min_length=2, description="Código o descripción a buscar"),
+    q: str = Query(..., min_length=2, description="Código a buscar"),
     obra_social_nro: Optional[int] = Query(
         None,
         description=(
@@ -214,7 +214,7 @@ async def nomenclador(
 
     condiciones = [
         NomencladorCMC.activo == True,  # noqa: E712
-        NomencladorCMC.codigo.contains(term) | NomencladorCMC.descripcion.contains(term),
+        NomencladorCMC.codigo.contains(term),
         ~_override_vigente("inhabilita"),
     ]
     if obra_social_nro is not None:
@@ -281,11 +281,14 @@ async def nomenclador(
             ).distinct()
         )).scalars().all())
 
+    faltan = {(nom.codigo, obra_social_nro) for nom in codigos_unicos if not desc_por_codigo.get(nom.codigo)}
+    legacy = await descripciones_legacy(db, faltan) if faltan else {}
+
     return [
         NomencladorItem(
             id=nom.id,
             codigo=nom.codigo,
-            descripcion=desc_por_codigo.get(nom.codigo) or nom.descripcion,
+            descripcion=desc_por_codigo.get(nom.codigo) or legacy.get((nom.codigo, obra_social_nro)) or "",
             categoria=nom.categoria,
             complejidad=nom.complejidad,
             sin_restriccion_especialidad=nom.codigo in codigos_sin_restriccion,

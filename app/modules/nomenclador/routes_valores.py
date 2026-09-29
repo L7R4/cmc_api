@@ -57,6 +57,28 @@ _UNIDADES_MAP: dict[str, str] = {
 # Conceptos generados en 0 para un valor "por presupuesto"
 _CONCEPTOS_PRESUPUESTO = ("Honorarios", "Gastos", "Ayudante")
 
+# Literal duplicado a propósito (no se importa desde `facturacion.service`): ese módulo
+# ya importa de `nomenclador.service`, así que ir al revés crearía un ciclo. El valor
+# tiene que coincidir con `facturacion.service.CATEGORIA_HONORARIOS_INDIVIDUALES`.
+_CATEGORIA_HONORARIOS_INDIVIDUALES = "Honorarios individuales"
+# Todo código de esta categoría es una práctica de equipo por convenio — a pedido
+# explícito, cualquier alta/edición de un Valor con esta categoría (efectiva: el
+# override de la OS si lo hay, si no la del catálogo) fuerza el máximo de ayudantes a
+# 2, pise lo que pise el que llama.
+_AYUDANTES_HONORARIOS_INDIVIDUALES = 2
+
+
+def _forzar_ayudantes_honorarios_individuales(
+    categoria: Optional[str], nom: Optional[NomencladorCMC], cantidad_ayudantes: Optional[int],
+) -> Optional[int]:
+    """`cantidad_ayudantes` a persistir: 2 si la categoría EFECTIVA (override de la OS
+    en `categoria`, si no la del catálogo `nom.categoria`) es 'Honorarios individuales',
+    lo que haya venido en el request/valor anterior en cualquier otro caso."""
+    efectiva = categoria if (categoria and categoria.strip()) else (nom.categoria if nom else None)
+    if efectiva == _CATEGORIA_HONORARIOS_INDIVIDUALES:
+        return _AYUDANTES_HONORARIOS_INDIVIDUALES
+    return cantidad_ayudantes
+
 
 def _componentes_presupuesto_cero() -> list[dict]:
     """Los 3 componentes estándar como fijos en 0, para un Valor por presupuesto.
@@ -222,6 +244,10 @@ async def _crear_valor_con_componentes(
     nom = await db.get(NomencladorCMC, nomenclador_id)
     if not nom:
         raise HTTPException(404, "Código de nomenclador no encontrado")
+
+    cantidad_ayudantes = _forzar_ayudantes_honorarios_individuales(
+        categoria, nom, cantidad_ayudantes,
+    )
 
     valor = Valor(
         obra_social_nro=obra_social_nro,
@@ -875,6 +901,16 @@ async def update_valor_metadata(id: int, body: ValorUpdate, db: AsyncSession = D
                     f"{comp.id} usa el galeno '{galeno.codigo}' nivel {galeno.nivel}. "
                     f"Use /actualizar con la nueva ecuación.",
                 )
+
+    # Recalculado en TODA edición, no solo cuando el PATCH toca categoria/cantidad_
+    # ayudantes: si el Valor ya es (o pasa a ser) 'Honorarios individuales', el máximo
+    # de ayudantes tiene que quedar en 2 sí o sí, pise lo que pise lo que traiga el body.
+    nom = await db.get(NomencladorCMC, obj.nomenclador_id)
+    categoria_resultante = cambios.get("categoria", obj.categoria)
+    cambios["cantidad_ayudantes"] = _forzar_ayudantes_honorarios_individuales(
+        categoria_resultante, nom, cambios.get("cantidad_ayudantes", obj.cantidad_ayudantes),
+    )
+
     for field, value in cambios.items():
         setattr(obj, field, value)
     await db.commit()

@@ -1006,6 +1006,18 @@ _GALENOS_NN_CODIGOS: set[str] = (
 # Rango global cubierto (fuera de esto el código no es candidato)
 _NN_RANGO_MIN, _NN_RANGO_MAX = 1, 419999
 
+# Nombre para mostrar de cada galeno base — mismo criterio que `slugify_codigo`
+# pero en el sentido inverso (acentos que el slug no puede reconstruir solo).
+_GALENOS_NN_NOMBRES: dict[str, str] = {
+    "galeno_quirurgico": "Galeno Quirúrgico",
+    "galeno_practica": "Galeno Práctica",
+    "galeno_radiologico": "Galeno Radiológico",
+    "gasto_quirurgico": "Gasto Quirúrgico",
+    "gasto_bioquimico": "Gasto Bioquímico",
+    "gasto_radiologico": "Gasto Radiológico",
+    "gasto_otros": "Gasto Otros",
+}
+
 
 def _galeno_por_rango(n: int, rangos: list[tuple[int, int, str]]) -> Optional[str]:
     """codigo del galeno del primer rango que contiene a n (None si ninguno)."""
@@ -1015,10 +1027,53 @@ def _galeno_por_rango(n: int, rangos: list[tuple[int, int, str]]) -> Optional[st
     return None
 
 
+async def crear_galenos_base(
+    obra_social_nro: int, vigencia_desde: datetime.date, db: AsyncSession,
+) -> list[Galeno]:
+    """Crea, en $0, los 7 galenos base que `generar_valores_nn_por_rangos` necesita
+    para poder sembrar el nomenclador NN de una OS recién creada.
+
+    Idempotente: si alguno ya está vigente (por ejemplo, un reintento tras un error
+    parcial) no lo duplica. $0 es a propósito — es un placeholder hasta que alguien
+    actualice el precio real desde `ActualizarPreciosGalenos`; por eso `generar_
+    valores_nn_por_rangos` necesita `permitir_valor_cero=True` para no rechazarlos."""
+    ya_vigentes = {
+        g.codigo
+        for g in (await db.execute(
+            select(Galeno).where(
+                Galeno.obra_social_nro == obra_social_nro,
+                Galeno.codigo.in_(_GALENOS_NN_CODIGOS),
+                Galeno.nivel.is_(None),
+                Galeno.vigencia_hasta.is_(None),
+                Galeno.activo == True,
+            )
+        )).scalars()
+    }
+    creados = []
+    for codigo in sorted(_GALENOS_NN_CODIGOS - ya_vigentes):
+        g = Galeno(
+            obra_social_nro=obra_social_nro,
+            codigo=codigo,
+            nombre=_GALENOS_NN_NOMBRES[codigo],
+            nivel=None,
+            vigencia_desde=vigencia_desde,
+            vigencia_hasta=None,
+            valor_unitario=Decimal("0"),
+            activo=True,
+        )
+        db.add(g)
+        creados.append(g)
+    if creados:
+        await db.flush()
+    return creados
+
+
 async def generar_valores_nn_por_rangos(
     obra_social_nro: int,
     vigencia_desde: datetime.date,
     db: AsyncSession,
+    *,
+    permitir_valor_cero: bool = False,
 ) -> dict:
     """
     Crea (o recrea) los valores NN de una OS para todos los códigos numéricos de
@@ -1033,6 +1088,12 @@ async def generar_valores_nn_por_rangos(
     Conflicto (ya hay un NN activo para (OS, código)): cierra el vigente y crea el nuevo
     (rota vigencia). Partial-success: los ítems con galeno faltante van a `errores`.
     No comitea: corre dentro de la transacción del caller.
+
+    `permitir_valor_cero=True` salta el chequeo 1b: lo usa únicamente el alta
+    automática de una OS nueva (`crear_galenos_base` deja los 7 galenos en $0 a
+    propósito) — todo Valor NN sale en $0 hasta que se actualicen los precios de
+    verdad, momento en el que rotan solos. Para el resto de los llamadores (endpoint
+    manual, CSV) el chequeo sigue de pie: un $0 ahí normalmente es un error de carga.
     """
     # 1. Galenos base vigentes de la OS (nivel NULL), indexados por codigo
     galenos = {
@@ -1049,12 +1110,13 @@ async def generar_valores_nn_por_rangos(
     }
 
     # 1b. Rechazar si algún galeno base tiene VU = 0 (no sirve para calcular precios)
-    galenos_en_cero = [cod for cod, g in galenos.items() if g.valor_unitario == Decimal("0")]
-    if galenos_en_cero:
-        raise ValueError(
-            f"Los siguientes galenos tienen valor_unitario = 0 en OS {obra_social_nro}: "
-            f"{', '.join(sorted(galenos_en_cero))}. Actualizá el precio antes de generar."
-        )
+    if not permitir_valor_cero:
+        galenos_en_cero = [cod for cod, g in galenos.items() if g.valor_unitario == Decimal("0")]
+        if galenos_en_cero:
+            raise ValueError(
+                f"Los siguientes galenos tienen valor_unitario = 0 en OS {obra_social_nro}: "
+                f"{', '.join(sorted(galenos_en_cero))}. Actualizá el precio antes de generar."
+            )
 
     # 2. Candidatos: activos con >=1 unidad no nula (el rango se filtra en Python)
     candidatos = (await db.execute(
@@ -1152,6 +1214,25 @@ async def generar_valores_nn_por_rangos(
         "recreados": recreados,
         "errores": errores,
     }
+
+
+async def sembrar_nomenclador_nuevo(
+    obra_social_nro: int, vigencia_desde: datetime.date, db: AsyncSession,
+) -> dict:
+    """Deja una OS recién creada con nomenclador NN operativo desde el día uno:
+    crea los 7 galenos base en $0 (`crear_galenos_base`) y siembra todos los
+    Valor NN con ellos (`generar_valores_nn_por_rangos`, con `permitir_valor_cero`
+    porque los galenos recién creados son $0 a propósito).
+
+    Todo sale en $0 hasta que alguien cargue el precio real de cada galeno desde
+    `ActualizarPreciosGalenos` — ahí los Valor NN rotan solos (mismo mecanismo que
+    cualquier otro cambio de precio de galeno). No comitea: el caller decide si
+    esto va en la misma transacción del alta de la OS o en una aparte."""
+    galenos_creados = await crear_galenos_base(obra_social_nro, vigencia_desde, db)
+    resultado = await generar_valores_nn_por_rangos(
+        obra_social_nro, vigencia_desde, db, permitir_valor_cero=True,
+    )
+    return {"galenos_creados": len(galenos_creados), **resultado}
 
 
 # ─────────────────────────────────────────────────────────────────────────────

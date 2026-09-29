@@ -692,9 +692,8 @@ class ValorUpdate(BaseModel):
     categoria: Optional[str] = None
     requiere_autorizacion: Optional[bool] = None
     cantidad_ayudantes: Optional[int] = Field(None, ge=0)
-    # None = no tocar; va con los metadatos, no con la ecuación de precio, para
-    # poder corregirlo sin abrir una vigencia nueva.
-    coseguro: Optional[Decimal] = Field(None, ge=0)
+    # coseguro NO va acá: es parte de la ecuación de precio, no un metadato — cambiarlo
+    # cierra la vigencia actual y abre una nueva (ver ValorCerrarYCrearIn.coseguro).
     observacion: Optional[str] = None
 
 

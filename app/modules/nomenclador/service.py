@@ -10,8 +10,7 @@ import datetime
 from decimal import Decimal
 from typing import List, Optional
 
-from sqlalchemy import and_, exists, func, or_, select, update
-from sqlalchemy.orm import aliased
+from sqlalchemy import and_, delete, exists, func, or_, select, true, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.common.money import quantize_money
@@ -20,9 +19,9 @@ from app.db.models.nomenclador_cmc import (
     HistorialPrecioCodigo,
     MedicoCodigoHabilitado,
     NomencladorCMC,
-    NomencladorEspecialidad,
     Valor,
     ValorComponente,
+    ValorEspecialidad,
 )
 from app.db.models.medico import ListadoMedico
 from app.db.models.catalogs import Especialidad
@@ -54,104 +53,158 @@ def prioridad_origen(origen: str) -> int:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Resolución del código contra una obra social
+# Resolución del código y especialidades habilitadas (por obra social)
 # ─────────────────────────────────────────────────────────────────────────────
 #
-# El código NO es identidad global: el mismo número puede nombrar prácticas distintas
-# según la OS. `nm_nomenclador.obra_social_nro` separa las dos poblaciones y acá se
-# elige entre ellas — misma forma que ORIGEN_PRIORIDAD: la especificidad gana.
+# Fase 2 de la reestructura del nomenclador: `nm_nomenclador` pasó a ser SOLO el
+# catálogo del Colegio (código + categoría + complejidad), sin ownership por OS —
+# `resolver_nomenclador`/`filtro_pertenencia` quedan acá por compatibilidad de firma
+# con sus muchos llamadores, pero ya no hacen precedencia. Las especialidades
+# habilitadas (antes en `nm_nomenclador_especialidad`, con precedencia OS-propia >
+# Colegio) viven ahora en `nm_valor_especialidad`, una fila por (obra_social_nro,
+# codigo, especialidad) sin ambigüedad que resolver.
 
 async def resolver_nomenclador(
-    db: AsyncSession, codigo: str, obra_social_nro: Optional[int]
+    db: AsyncSession, codigo: str, obra_social_nro: Optional[int] = None
 ) -> Optional[NomencladorCMC]:
-    """Código + OS → fila del catálogo. Precedencia: propia de la OS > compartida.
-
-    `obra_social_nro=None` (uso administrativo, sin OS en contexto) devuelve solo la
-    fila compartida: adivinar cuál de las propias corresponde sería peor que no
-    resolver. Devuelve None si el código no existe.
+    """Código → fila del catálogo. El código ya es identidad única (salvo un puñado
+    de filas legacy propias de una OS que todavía no se fusionaron — ver plan de
+    migración, fase 3); `obra_social_nro` se mantiene en la firma sin usarse para no
+    tener que tocar cada uno de sus llamadores. Devuelve None si el código no existe.
     """
-    condicion_pertenencia = NomencladorCMC.obra_social_nro.is_(None)
-    if obra_social_nro is not None:
-        condicion_pertenencia = or_(
-            condicion_pertenencia, NomencladorCMC.obra_social_nro == obra_social_nro
-        )
-
     stmt = (
         select(NomencladorCMC)
-        .where(
-            NomencladorCMC.codigo == codigo,
-            NomencladorCMC.activo.is_(True),
-            condicion_pertenencia,
-        )
-        # obra_social_key = coalesce(obra_social_nro, -1): la fila propia (N > 0) queda
-        # antes que la compartida (-1).
+        .where(NomencladorCMC.codigo == codigo, NomencladorCMC.activo.is_(True))
         .order_by(NomencladorCMC.obra_social_key.desc())
         .limit(1)
     )
     return (await db.execute(stmt)).scalar_one_or_none()
 
 
-def filtro_pertenencia(obra_social_nro: Optional[int]):
-    """Condición SQL reusable para listar el catálogo visible por una OS: sus códigos
-    propios más los compartidos. Sin OS → solo compartidos."""
-    if obra_social_nro is None:
-        return NomencladorCMC.obra_social_nro.is_(None)
-    return or_(
-        NomencladorCMC.obra_social_nro.is_(None),
-        NomencladorCMC.obra_social_nro == obra_social_nro,
-    )
-
-
-def _nivel_pertenencia_especialidad(nomenclador_id: int, obra_social_nro: Optional[int]):
-    """Sub-select con el `obra_social_key` que manda para ese código.
-
-    MAX(obra_social_key) sobre las filas visibles: si la OS tiene reglas propias (key = N)
-    gana sobre las compartidas (key = -1). Es la misma precedencia que `ORDER BY
-    obra_social_key DESC` en `resolver_nomenclador`, pero aplicada a una relación 1:N:
-    acá no se elige una fila, se elige el CONJUNTO de filas de un nivel.
-    """
-    E = NomencladorEspecialidad
-    visibles = [E.nomenclador_id == nomenclador_id, E.activo.is_(True)]
-    if obra_social_nro is None:
-        visibles.append(E.obra_social_nro.is_(None))
-    else:
-        visibles.append(
-            or_(E.obra_social_nro.is_(None), E.obra_social_nro == obra_social_nro)
-        )
-    return select(func.max(E.obra_social_key)).where(*visibles).scalar_subquery()
+def filtro_pertenencia(obra_social_nro: Optional[int] = None):
+    """Antes acotaba el catálogo a lo propio de una OS + lo compartido. El catálogo ya
+    no distingue por OS (ver `resolver_nomenclador`), así que esto no filtra nada —
+    se mantiene la firma por compatibilidad con sus llamadores."""
+    return true()
 
 
 async def especialidades_habilitadas_de(
-    db: AsyncSession, nomenclador_id: int, obra_social_nro: Optional[int]
+    db: AsyncSession, codigo: str, obra_social_nro: int
 ) -> set[int]:
-    """Especialidades que pueden facturar un código en el contexto de una obra social.
+    """Especialidades que pueden facturar un código en una obra social puntual.
 
-    Las reglas propias de la OS REEMPLAZAN a las compartidas, no se suman: si el Colegio
-    dice "lo hacen patólogos" y Sancor dice "lo hacen oftalmólogos", para Sancor lo hacen
-    oftalmólogos y punto. Sin reglas propias, valen las del Colegio.
+    Lee directo de `nm_valor_especialidad`: una fila por (obra_social_nro, codigo,
+    especialidad), sin precedencia que resolver — reemplaza a `nm_nomenclador_
+    especialidad`, que colgaba del código y necesitaba desempatar OS-propia vs.
+    compartida del Colegio.
     """
-    E = NomencladorEspecialidad
-    stmt = select(E.especialidad_id_colegio).where(
-        E.nomenclador_id == nomenclador_id,
-        E.activo.is_(True),
-        E.obra_social_key == _nivel_pertenencia_especialidad(nomenclador_id, obra_social_nro),
+    stmt = select(ValorEspecialidad.especialidad_id_colegio).where(
+        ValorEspecialidad.obra_social_nro == obra_social_nro,
+        ValorEspecialidad.codigo == codigo,
     )
     return {row for row in (await db.execute(stmt)).scalars()}
 
 
 async def validar_especialidad_habilitada(
-    db: AsyncSession, nomenclador_id: int, obra_social_nro: Optional[int], especialidad_id_colegio: int
+    db: AsyncSession, codigo: str, obra_social_nro: int, especialidad_id_colegio: int
 ) -> None:
-    """Toda variante NE implica que su especialidad puede facturar el código: la fila
-    NE deja de ser una restricción de precio y pasa a ser también una habilitación, así
-    que no puede existir una sin la otra. Usa el mismo set (y la misma precedencia
-    OS-reemplaza-Colegio) que el gate de `_validar_habilitacion_medico`."""
-    habilitadas = await especialidades_habilitadas_de(db, nomenclador_id, obra_social_nro)
-    if especialidad_id_colegio not in habilitadas:
-        raise ValueError(
-            f"La especialidad {especialidad_id_colegio} no está habilitada para este código "
-            "en nm_nomenclador_especialidad; cargarla ahí antes de crear la variante NE"
+    """Toda variante NE implica que su especialidad puede facturar el código: crear un
+    Valor NE para una especialidad la habilita automáticamente en (obra_social_nro,
+    codigo) si todavía no lo estaba — idempotente. Antes esto exigía cargar la
+    habilitación primero por separado; ahora las especialidades se administran
+    enteramente desde el modal de Valores (`ValorUpdate.especialidades`), así que
+    darla de alta acá evita un paso manual redundante al crear la primera variante.
+    """
+    from app.db.models.catalogs import Especialidad  # import local: evita ciclo con catalogs
+
+    existe = (await db.execute(
+        select(Especialidad.ID_COLEGIO_ESPE).where(
+            Especialidad.ID_COLEGIO_ESPE == especialidad_id_colegio
         )
+    )).scalar_one_or_none()
+    if existe is None:
+        raise ValueError(f"La especialidad {especialidad_id_colegio} no existe en el catálogo")
+
+    ya_existe = (await db.execute(
+        select(ValorEspecialidad.id).where(
+            ValorEspecialidad.obra_social_nro == obra_social_nro,
+            ValorEspecialidad.codigo == codigo,
+            ValorEspecialidad.especialidad_id_colegio == especialidad_id_colegio,
+        )
+    )).scalar_one_or_none()
+    if ya_existe is None:
+        db.add(ValorEspecialidad(
+            obra_social_nro=obra_social_nro, codigo=codigo,
+            especialidad_id_colegio=especialidad_id_colegio,
+        ))
+        await db.flush()
+
+
+async def reemplazar_especialidades(
+    db: AsyncSession, obra_social_nro: int, codigo: str, especialidad_ids: list[int],
+) -> None:
+    """Reemplaza POR COMPLETO las especialidades habilitadas de (obra_social_nro,
+    codigo) por la lista dada (no se suma a lo existente). Es el único lugar del
+    sistema donde se editan — ver `routes_valores.update_valor_metadata`.
+
+    Rechaza sacar una especialidad que todavía tiene un Valor NE activo dependiendo
+    de ella (quedaría huérfana) — mismo chequeo que existía en el CRUD de
+    `nm_nomenclador_especialidad` antes de la reestructura.
+    """
+    from app.db.models.catalogs import Especialidad
+
+    especialidad_ids = list(dict.fromkeys(especialidad_ids))  # sin duplicados, preserva orden
+    if especialidad_ids:
+        validas = set((await db.execute(
+            select(Especialidad.ID_COLEGIO_ESPE).where(
+                Especialidad.ID_COLEGIO_ESPE.in_(especialidad_ids)
+            )
+        )).scalars())
+        invalidas = set(especialidad_ids) - validas
+        if invalidas:
+            raise ValueError(f"Especialidad(es) inexistente(s): {sorted(invalidas)}")
+
+    activas_ne = set((await db.execute(
+        select(Valor.especialidad_id_colegio).where(
+            Valor.obra_social_nro == obra_social_nro,
+            Valor.codigo == codigo,
+            Valor.origen == "NE",
+            Valor.estado == "activo",
+        )
+    )).scalars())
+    faltantes = activas_ne - set(especialidad_ids)
+    if faltantes:
+        raise ValueError(
+            f"No se puede quitar la especialidad {sorted(faltantes)}: tiene un valor "
+            "NE activo que depende de ella. Ciérrelo primero."
+        )
+
+    await db.execute(delete(ValorEspecialidad).where(
+        ValorEspecialidad.obra_social_nro == obra_social_nro,
+        ValorEspecialidad.codigo == codigo,
+    ))
+    for eid in especialidad_ids:
+        db.add(ValorEspecialidad(
+            obra_social_nro=obra_social_nro, codigo=codigo, especialidad_id_colegio=eid,
+        ))
+    await db.flush()
+
+
+async def variantes_del_par(
+    db: AsyncSession, obra_social_nro: int, codigo: str, *, excluir_id: Optional[int] = None,
+) -> list[Valor]:
+    """Todas las filas de Valor ACTIVAS de (obra_social_nro, codigo) — cualquier
+    origen (NE + NN), a diferencia de `variantes_hermanas` que solo mira NE. Se usa
+    para propagar datos que son del PAR y no de la variante (descripcion,
+    sin_restriccion_especialidad) a todas sus filas — ver update_valor_metadata."""
+    stmt = select(Valor).where(
+        Valor.obra_social_nro == obra_social_nro,
+        Valor.codigo == codigo,
+        Valor.estado == "activo",
+    )
+    if excluir_id is not None:
+        stmt = stmt.where(Valor.id != excluir_id)
+    return list((await db.execute(stmt)).scalars())
 
 
 async def variantes_hermanas(db: AsyncSession, valor: Valor) -> list[Valor]:
@@ -202,21 +255,16 @@ def categoria_efectiva(
     return nomenclador.categoria if nomenclador is not None else None
 
 
-def requiere_autorizacion_efectiva(
-    valor: Optional[Valor], nomenclador: Optional[NomencladorCMC]
-) -> bool:
+def requiere_autorizacion_efectiva(valor: Optional[Valor]) -> bool:
     """¿La práctica necesita autorización previa de la obra social?
 
-    Override del valor de esa OS > default del Colegio. Se compara contra None y no
-    por truthiness a propósito: `False` en el valor significa "esta obra social dice
-    que no" y tiene que ganarle al catálogo, mientras que `None` es "no opinó" y hereda.
+    Dato 100% de `Valor` — el catálogo del Colegio ya no opina (ver plan de
+    reestructura del nomenclador). `None` en el valor (nadie cargó nada) = False.
 
     No confundir con `ObraManual.requiere_autorizacion` (validaciones), que es un
     todo-o-nada por obra social. Los dos niveles se combinan con OR en el gate de carga.
     """
-    if valor is not None and valor.requiere_autorizacion is not None:
-        return bool(valor.requiere_autorizacion)
-    return bool(nomenclador.requiere_autorizacion) if nomenclador is not None else False
+    return bool(valor.requiere_autorizacion) if valor is not None else False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1076,14 +1124,18 @@ async def generar_valores_nn_por_rangos(
     permitir_valor_cero: bool = False,
 ) -> dict:
     """
-    Crea (o recrea) los valores NN de una OS para todos los códigos numéricos de
-    nm_nomenclador en 1..419999 con al menos una unidad (unidades_*) no nula.
+    Crea (o recrea) los valores NN de una OS para todo código del Colegio en
+    1..419999 vinculado (`NomencladorCMC.nomenclador_nacional_id`) a un
+    Nomenclador Nacional activo con al menos una unidad (unidades_*) no nula.
 
     Cada valor lleva 3 componentes calculables:
       - Honorarios → galeno de honorarios del rango, cantidad = unidades_honorarios
       - Ayudante   → el MISMO galeno de honorarios, cantidad = unidades_ayudante
       - Gastos     → galeno de gastos del rango, cantidad = unidades_gastos
-    Cantidad por concepto: galeno.unidades_<c> → nomenclador.unidades_<c> → 0.
+    Cantidad por concepto: galeno.unidades_<c> → nn.unidades_<c> → 0. El rango
+    (qué galeno corresponde) se sigue calculando con el código DEL COLEGIO, no
+    con el código nacional — dos códigos del Colegio para el mismo NN pueden caer
+    en rangos distintos si numéricamente están lejos entre sí.
 
     Conflicto (ya hay un NN activo para (OS, código)): cierra el vigente y crea el nuevo
     (rota vigencia). Partial-success: los ítems con galeno faltante van a `errores`.
@@ -1118,21 +1170,32 @@ async def generar_valores_nn_por_rangos(
                 f"{', '.join(sorted(galenos_en_cero))}. Actualizá el precio antes de generar."
             )
 
-    # 2. Candidatos: activos con >=1 unidad no nula (el rango se filtra en Python)
-    candidatos = (await db.execute(
+    # 2. Candidatos: código del Colegio activo, vinculado a un NN activo con >=1
+    # unidad no nula (el rango se filtra en Python). `nomenclador_nacional` carga
+    # con joined (ver modelo), así que esto no dispara una query extra por fila.
+    candidatos_todos = (await db.execute(
         select(NomencladorCMC).where(
             NomencladorCMC.activo == True,
-            (NomencladorCMC.unidades_honorarios.is_not(None))
-            | (NomencladorCMC.unidades_ayudante.is_not(None))
-            | (NomencladorCMC.unidades_gastos.is_not(None)),
+            NomencladorCMC.nomenclador_nacional_id.is_not(None),
         )
     )).scalars().all()
+    candidatos = [
+        nom for nom in candidatos_todos
+        if nom.nomenclador_nacional is not None
+        and nom.nomenclador_nacional.activo
+        and (
+            nom.nomenclador_nacional.unidades_honorarios is not None
+            or nom.nomenclador_nacional.unidades_ayudante is not None
+            or nom.nomenclador_nacional.unidades_gastos is not None
+        )
+    ]
 
     corte = vigencia_desde - datetime.timedelta(days=1)
     total = creados = recreados = 0
     errores: list[dict] = []
 
     for nom in candidatos:
+        nn = nom.nomenclador_nacional
         if not nom.codigo.isdigit():
             continue
         n = int(nom.codigo)
@@ -1174,7 +1237,7 @@ async def generar_valores_nn_por_rangos(
         def _cant(concepto_attr: str, galeno: Galeno) -> Decimal:
             return (
                 getattr(galeno, concepto_attr)
-                or getattr(nom, concepto_attr)
+                or getattr(nn, concepto_attr)
                 or Decimal("0")
             )
 
@@ -1185,7 +1248,7 @@ async def generar_valores_nn_por_rangos(
                 nomenclador_id=nom.id,
                 origen="NN",
                 codigo=nom.codigo,
-                descripcion=None,  # hereda del catálogo (descripcion_efectiva)
+                descripcion=nn.descripcion,
                 nivel=None,
                 complejidad=None,
                 especialidad_id_colegio=None,
@@ -1337,14 +1400,17 @@ async def _validar_habilitacion_medico(
     deciden después las variantes de Valor.
 
     Orden de evaluación:
-    1. inhabilita vigente                  → rechazar
-    2. habilita vigente                    → permitir
-    3. nomenclador.sin_restriccion = True  → permitir
-    4. especialidad habilitada para el código EN ESA OS → permitir
-    5. ninguna                             → rechazar
+    1. inhabilita vigente                        → rechazar
+    2. habilita vigente                          → permitir
+    3. algún Valor activo de (OS, código)
+       con sin_restriccion_especialidad = True   → permitir
+    4. especialidad habilitada para (OS, código) → permitir
+    5. ninguna                                   → rechazar
 
-    `obra_social_nro` decide qué reglas de especialidad aplican (las propias de la OS
-    reemplazan a las del Colegio). Omitirlo evalúa solo contra las compartidas.
+    `sin_restriccion` y la especialidad habilitada viven en `nm_valores` /
+    `nm_valor_especialidad`, por obra social — sin `obra_social_nro` no hay nada
+    concreto contra qué evaluarlas, así que se rechaza directo (en la práctica
+    `lookup_precio`, el único llamador real, siempre manda una OS).
     """
     vigencia_ok = and_(
         (MedicoCodigoHabilitado.vigencia_desde.is_(None)) |
@@ -1373,7 +1439,21 @@ async def _validar_habilitacion_medico(
     if (await db.execute(stmt_hab)).first():
         return
 
-    if nomenclador.sin_restriccion_especialidad:
+    if obra_social_nro is None:
+        raise LookupError(
+            "No se puede evaluar la habilitación por especialidad sin una obra "
+            "social en contexto"
+        )
+
+    sin_restriccion = (await db.execute(
+        select(exists().where(
+            Valor.codigo == nomenclador.codigo,
+            Valor.obra_social_nro == obra_social_nro,
+            Valor.estado == "activo",
+            Valor.sin_restriccion_especialidad == True,
+        ))
+    )).scalar()
+    if sin_restriccion:
         return
 
     especialidades = _especialidades_medico(medico)
@@ -1383,9 +1463,7 @@ async def _validar_habilitacion_medico(
             "y este código se habilita por especialidad"
         )
 
-    # Las reglas propias de esta OS, si las hay, reemplazan a las del Colegio: la misma
-    # práctica puede exigir distinta especialidad según la obra social.
-    habilitadas = await especialidades_habilitadas_de(db, nomenclador.id, obra_social_nro)
+    habilitadas = await especialidades_habilitadas_de(db, nomenclador.codigo, obra_social_nro)
     if not habilitadas & set(especialidades):
         raise LookupError("Este código no corresponde a las especialidades del médico")
 
@@ -1401,16 +1479,16 @@ async def listar_codigos_habilitados(
     que `lookup_precio` aceptaría después): por especialidad + excepción individual
     `habilita` + `sin_restriccion_especialidad`, menos excepción individual
     `inhabilita` (gana sobre todo lo demás). Filtra códigos activos; `q` busca por
-    código o descripción.
+    código.
 
-    `obra_social_nro` aplica las reglas de especialidad de esa OS (las propias
-    reemplazan a las del Colegio) y también la descripción: si esa OS nombra el código
-    distinto en su propio `nm_valores` (misma precedencia que `descripcion_efectiva`),
-    esa es la que se devuelve en vez de la del catálogo. **Sin obra social el listado
-    es la UNIÓN**: aparece todo código que alguna regla habilite, aunque para una OS
-    puntual no aplique, y la descripción es siempre la del catálogo. Es deliberado —
-    este listado es "mis códigos" del médico, que no se mira parado en una obra
-    social; el rechazo fino ocurre al cotizar, que es donde sí hay OS.
+    `obra_social_nro` acota especialidad/sin_restriccion a lo que rige EN esa OS
+    (`nm_valor_especialidad` / `Valor.sin_restriccion_especialidad`) y también la
+    descripción: si esa OS nombra el código distinto en su propio `nm_valores`, esa es
+    la que se devuelve en vez de la del catálogo. **Sin obra social el listado es la
+    UNIÓN**: aparece todo código que alguna regla de CUALQUIER OS habilite, aunque
+    para una puntual no aplique, y la descripción es siempre la del catálogo. Es
+    deliberado — este listado es "mis códigos" del médico, que no se mira parado en
+    una obra social; el rechazo fino ocurre al cotizar, que es donde sí hay OS.
 
     Cada código trae además las especialidades DEL MÉDICO que lo habilitan (puede ser
     más de una si el código está vinculado a varias especialidades que el médico
@@ -1441,45 +1519,44 @@ async def listar_codigos_habilitados(
         )
     )).scalars().all())
 
-    # (nomenclador_id, especialidad_id_colegio) — se conserva el par para poder armar,
-    # más abajo, QUÉ especialidad del médico habilita cada código (puede ser más de una).
+    # (codigo, especialidad_id_colegio) — se conserva el par para poder armar, más
+    # abajo, QUÉ especialidad del médico habilita cada código (puede ser más de una).
     especialidades = _especialidades_medico(medico)
-    especialidad_rows: list[tuple[int, int]] = []
+    especialidad_rows: list[tuple[str, int]] = []
     if especialidades:
-        E = NomencladorEspecialidad
-        cond_esp = [
-            E.especialidad_id_colegio.in_(especialidades),
-            E.activo == True,
-        ]
+        cond_esp = [ValorEspecialidad.especialidad_id_colegio.in_(especialidades)]
         if obra_social_nro is not None:
-            # Precedencia por código: si esa OS tiene reglas propias, reemplazan a las
-            # compartidas. El MAX correlacionado elige el nivel que manda para CADA
-            # nomenclador_id (key N de la OS > key -1 del Colegio).
-            E2 = aliased(NomencladorEspecialidad)
-            nivel_que_manda = (
-                select(func.max(E2.obra_social_key))
-                .where(
-                    E2.nomenclador_id == E.nomenclador_id,
-                    E2.activo == True,
-                    or_(E2.obra_social_nro.is_(None), E2.obra_social_nro == obra_social_nro),
-                )
-                .scalar_subquery()
-            )
-            cond_esp += [
-                or_(E.obra_social_nro.is_(None), E.obra_social_nro == obra_social_nro),
-                E.obra_social_key == nivel_que_manda,
-            ]
+            cond_esp.append(ValorEspecialidad.obra_social_nro == obra_social_nro)
         especialidad_rows = (await db.execute(
-            select(E.nomenclador_id, E.especialidad_id_colegio).where(*cond_esp)
+            select(ValorEspecialidad.codigo, ValorEspecialidad.especialidad_id_colegio)
+            .where(*cond_esp)
         )).all()
-    especialidad_ids = {nid for nid, _ in especialidad_rows}
-    especialidades_por_codigo: dict[int, list[int]] = {}
-    for nid, eid in especialidad_rows:
-        especialidades_por_codigo.setdefault(nid, []).append(eid)
+    codigos_con_especialidad = {c for c, _ in especialidad_rows}
 
-    sin_restriccion_ids = set((await db.execute(
-        select(NomencladorCMC.id).where(NomencladorCMC.sin_restriccion_especialidad == True)
+    cond_sr = [Valor.sin_restriccion_especialidad == True, Valor.estado == "activo"]
+    if obra_social_nro is not None:
+        cond_sr.append(Valor.obra_social_nro == obra_social_nro)
+    codigos_sin_restriccion = set((await db.execute(
+        select(Valor.codigo).where(*cond_sr).distinct()
     )).scalars().all())
+
+    # Traducir los sets por CÓDIGO a ids de nm_nomenclador con un solo query — el resto
+    # de la función (habilita/inhabilita) ya trabaja por id, vía MedicoCodigoHabilitado.
+    codigos_relevantes = codigos_con_especialidad | codigos_sin_restriccion
+    id_por_codigo: dict[str, int] = {}
+    if codigos_relevantes:
+        id_por_codigo = {
+            codigo: nid for codigo, nid in (await db.execute(
+                select(NomencladorCMC.codigo, NomencladorCMC.id)
+                .where(NomencladorCMC.codigo.in_(codigos_relevantes))
+            )).all()
+        }
+    especialidad_ids = {id_por_codigo[c] for c in codigos_con_especialidad if c in id_por_codigo}
+    sin_restriccion_ids = {id_por_codigo[c] for c in codigos_sin_restriccion if c in id_por_codigo}
+    especialidades_por_codigo: dict[int, list[int]] = {}
+    for c, eid in especialidad_rows:
+        if c in id_por_codigo:
+            especialidades_por_codigo.setdefault(id_por_codigo[c], []).append(eid)
 
     ids_finales = (habilita_ids | especialidad_ids | sin_restriccion_ids) - inhabilita_ids
     if not ids_finales:
@@ -1491,8 +1568,7 @@ async def listar_codigos_habilitados(
         .order_by(NomencladorCMC.codigo.asc())
     )
     if q:
-        like = f"%{q}%"
-        stmt = stmt.where(or_(NomencladorCMC.codigo.ilike(like), NomencladorCMC.descripcion.ilike(like)))
+        stmt = stmt.where(NomencladorCMC.codigo.ilike(f"%{q}%"))
     codigos = list((await db.execute(stmt)).scalars().all())
 
     # Nombres de las especialidades DEL MÉDICO (alcanza con resolver esas, no todo el catálogo).
@@ -1704,7 +1780,7 @@ async def lookup_precio(
         origen=historial.origen,
         variante_especialidad_id=historial.especialidad_id_colegio,
         por_presupuesto=bool(valor and valor.por_presupuesto),
-        requiere_autorizacion=requiere_autorizacion_efectiva(valor, nomenclador),
+        requiere_autorizacion=requiere_autorizacion_efectiva(valor),
         fecha_practica=fecha,
         precio_base=precio_base,
         precio_total=precio_total,

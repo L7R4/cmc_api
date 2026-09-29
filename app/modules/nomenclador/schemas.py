@@ -48,31 +48,24 @@ def slugify_codigo(nombre: str) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class NomencladorCreate(BaseModel):
+    """Alta de un código del Colegio. Puro catálogo: código + clasificación + vínculo
+    opcional al Nomenclador Nacional. Descripción, especialidades y "sin restricción"
+    dejaron de vivir acá — son datos POR OBRA SOCIAL, se cargan desde el modal de
+    Valores (`nm_valor_especialidad` / `Valor.descripcion` / `Valor.sin_restriccion_
+    especialidad`; ver `nomenclador/routes_valores.py`)."""
     codigo: str
-    descripcion: str
-    # NULL = código compartido del Colegio/Nacional. Con número, el código es propio de
-    # esa obra social y solo se resuelve cuando se opera sobre ella.
-    obra_social_nro: Optional[int] = None
     categoria: Optional[str] = None
     complejidad: Optional[Literal["baja", "media", "alta"]] = None
-    sin_restriccion_especialidad: bool = False
-    # Default del Colegio; cada OS lo pisa con Valor.requiere_autorizacion
-    requiere_autorizacion: bool = False
-    unidades_honorarios: Optional[Decimal] = None
-    unidades_ayudante: Optional[Decimal] = None
-    unidades_gastos: Optional[Decimal] = None
+    # Código NN al que corresponde este código del Colegio (opcional). Alimenta la
+    # generación automática de Valores NN — ver NomencladorNacional.
+    nomenclador_nacional_id: Optional[int] = None
     observacion: Optional[str] = None
 
 
 class NomencladorUpdate(BaseModel):
-    descripcion: Optional[str] = None
     categoria: Optional[str] = None
     complejidad: Optional[Literal["baja", "media", "alta"]] = None
-    sin_restriccion_especialidad: Optional[bool] = None
-    requiere_autorizacion: Optional[bool] = None
-    unidades_honorarios: Optional[Decimal] = None
-    unidades_ayudante: Optional[Decimal] = None
-    unidades_gastos: Optional[Decimal] = None
+    nomenclador_nacional_id: Optional[int] = None
     activo: Optional[bool] = None
     observacion: Optional[str] = None
 
@@ -80,16 +73,9 @@ class NomencladorUpdate(BaseModel):
 class NomencladorOut(BaseModel):
     id: int
     codigo: str
-    # NULL = compartido; N = propio de esa obra social
-    obra_social_nro: Optional[int] = None
-    descripcion: str
     categoria: Optional[str]
     complejidad: Optional[str]
-    sin_restriccion_especialidad: bool
-    requiere_autorizacion: bool = False
-    unidades_honorarios: Optional[Decimal]
-    unidades_ayudante: Optional[Decimal]
-    unidades_gastos: Optional[Decimal]
+    nomenclador_nacional_id: Optional[int] = None
     activo: bool
     observacion: Optional[str]
     created_at: datetime.datetime
@@ -98,58 +84,62 @@ class NomencladorOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
-class DesacoplarOut(BaseModel):
-    """Resultado de separar un código compartido en una fila propia de una OS."""
-    nomenclador: NomencladorOut
-    origen_id: int
-    especialidades_clonadas: int
-    valores_repuntados: int
-    historial_repuntado: int
-    prestaciones_repuntadas: int
-
-
 # ─────────────────────────────────────────────────────────────────────────────
-# NomencladorEspecialidad
+# NomencladorNacional
 # ─────────────────────────────────────────────────────────────────────────────
 
-class NomencladorEspecialidadCreate(BaseModel):
-    especialidad_id_colegio: int
-    # NULL = regla del Colegio (vale para todas las OS); N = regla propia de esa obra
-    # social, que REEMPLAZA a las compartidas para ella.
-    obra_social_nro: Optional[int] = None
-    observacion: Optional[str] = None
+class NomencladorNacionalCreate(BaseModel):
+    codigo: str
+    descripcion: Optional[str] = None
+    unidades_honorarios: Optional[Decimal] = None
+    unidades_ayudante: Optional[Decimal] = None
+    unidades_gastos: Optional[Decimal] = None
+    categoria: Optional[str] = None
+    complejidad: Optional[Literal["baja", "media", "alta"]] = None
 
 
-class NomencladorEspecialidadOut(BaseModel):
+class NomencladorNacionalUpdate(BaseModel):
+    descripcion: Optional[str] = None
+    unidades_honorarios: Optional[Decimal] = None
+    unidades_ayudante: Optional[Decimal] = None
+    unidades_gastos: Optional[Decimal] = None
+    categoria: Optional[str] = None
+    complejidad: Optional[Literal["baja", "media", "alta"]] = None
+    activo: Optional[bool] = None
+
+
+class NomencladorNacionalOut(BaseModel):
     id: int
-    nomenclador_id: int
-    especialidad_id_colegio: int
-    # NULL = regla compartida; N = propia de esa obra social
-    obra_social_nro: Optional[int] = None
+    codigo: str
+    descripcion: Optional[str]
+    unidades_honorarios: Optional[Decimal]
+    unidades_ayudante: Optional[Decimal]
+    unidades_gastos: Optional[Decimal]
+    categoria: Optional[str]
+    complejidad: Optional[str]
     activo: bool
-    observacion: Optional[str]
     created_at: datetime.datetime
+    updated_at: datetime.datetime
 
     model_config = {"from_attributes": True}
 
 
-class NomencladorEspecialidadResumenOut(BaseModel):
-    """Fila enriquecida código↔especialidad para la vista de tabla del front.
+# ─────────────────────────────────────────────────────────────────────────────
+# ValorEspecialidad — especialidades habilitadas por (obra_social_nro, código)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Sin CRUD propio: se editan enteramente desde el modal de Valores (`ValorUpdate.
+# especialidades`, ver `routes_valores.update_valor_metadata`). `codigos_por_
+# especialidad` (antes NomencladorEspecialidadResumenOut) sigue existiendo como
+# consulta de solo lectura, ahora por OS.
 
-    Trae el código y descripción del nomenclador + el nombre de la especialidad
-    resuelto (ID_COLEGIO_ESPE → especialidad.ESPECIALIDAD) en una sola respuesta.
-    `especialidad` es None si el ID_COLEGIO_ESPE no matchea ninguna fila del catálogo.
-    """
-    id: int
-    nomenclador_id: int
+class CodigoPorEspecialidadOut(BaseModel):
+    """Fila código↔especialidad para una obra social puntual (vista de consulta)."""
     codigo: str
     descripcion: str
     especialidad_id_colegio: int
     especialidad: Optional[str] = None
-    obra_social_nro: Optional[int] = None
-    activo: bool
-    observacion: Optional[str] = None
-    created_at: datetime.datetime
+    obra_social_nro: int
 
     model_config = {"from_attributes": True}
 
@@ -590,7 +580,11 @@ class ValorCreate(BaseModel):
     nomenclador_id: int
     # Categoría/procedencia: fija la prioridad del lookup (NE > NN)
     origen: Origen
-    descripcion: Optional[str] = None
+    # Obligatoria: cómo nombra ESTA obra social al código. Ya no hereda en silencio
+    # del catálogo del Colegio — se carga acá, en el alta manual (a diferencia de la
+    # rotación de precio y de los procesos masivos, que sí la heredan del valor
+    # anterior/origen; ver actualizar_valor / replicar_*).
+    descripcion: str = Field(..., min_length=1)
     nivel: Optional[int] = None
     complejidad: Optional[Literal["baja", "media", "alta"]] = None
     # Override de categoría por OS; NULL hereda la del nomenclador
@@ -638,7 +632,7 @@ class ValorCreateMulti(BaseModel):
     obra_social_nro: int
     nomenclador_id: int
     origen: Literal[Origen.NE] = Origen.NE
-    descripcion: Optional[str] = None
+    descripcion: str = Field(..., min_length=1)
     nivel: Optional[int] = None
     complejidad: Optional[Literal["baja", "media", "alta"]] = None
     categoria: Optional[str] = None
@@ -686,7 +680,19 @@ class ValorCreateMulti(BaseModel):
 
 class ValorUpdate(BaseModel):
     # especialidad_id_colegio NO es editable: es la identidad de la variante
+    #
+    # descripcion / sin_restriccion_especialidad son datos del PAR (obra_social_nro,
+    # código), no de esta fila puntual: al guardarlos se propagan a TODAS las filas
+    # activas del mismo par (todas las variantes NE + la NN), para que no queden
+    # desincronizadas entre sí — ver routes_valores.update_valor_metadata.
     descripcion: Optional[str] = None
+    sin_restriccion_especialidad: Optional[bool] = None
+    # Especialidades habilitadas para facturar este código EN esta obra social.
+    # None = no tocar; [] = vaciar (rechazado si alguna tiene un Valor NE activo
+    # dependiendo de ella); lista = REEMPLAZA por completo la habilitación actual del
+    # par (no se suma). Es el único lugar del sistema donde se editan — ver
+    # nm_valor_especialidad / service.reemplazar_especialidades.
+    especialidades: Optional[List[int]] = None
     nivel: Optional[int] = None
     complejidad: Optional[Literal["baja", "media", "alta"]] = None
     categoria: Optional[str] = None
@@ -740,6 +746,11 @@ class ValorOut(BaseModel):
     requiere_autorizacion: Optional[bool] = None
     especialidad_id_colegio: Optional[int]
     por_presupuesto: bool = False
+    sin_restriccion_especialidad: bool = False
+    # Especialidades habilitadas HOY para (obra_social_nro, código) — dato del par,
+    # igual para todas las variantes activas. Se resuelve aparte (no es columna de
+    # Valor); ver routes_valores._valores_out.
+    especialidades: List[int] = []
     cantidad_ayudantes: Optional[int] = None
     coseguro: Decimal = Decimal("0")
     # Modalidad de la ecuación: 'galeno' | 'fijo' | 'por_presupuesto'
@@ -1063,6 +1074,9 @@ class TablaValoresItem(BaseModel):
     descripcion: Optional[str]
     nivel: Optional[int]
     por_presupuesto: bool = False
+    # Valor.sin_restriccion_especialidad de esta variante: el código lo puede
+    # facturar cualquier especialidad en esta OS.
+    sin_restriccion_especialidad: bool = False
     precio_total: Decimal
     vigencia_desde: datetime.date
     vigencia_hasta: Optional[datetime.date]

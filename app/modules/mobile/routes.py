@@ -20,7 +20,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from jose import ExpiredSignatureError, JWTError
 from pydantic import BaseModel
-from sqlalchemy import and_, exists, or_, select
+from sqlalchemy import and_, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import sessions
@@ -39,9 +39,9 @@ from app.db.models.nomenclador_cmc import (
     HistorialPrecioCodigo,
     MedicoCodigoHabilitado,
     NomencladorCMC,
-    NomencladorEspecialidad,
+    Valor,
+    ValorEspecialidad,
 )
-from app.modules.nomenclador import service as service_nm
 from app.modules.nomenclador.routes_reportes import tabla_valores as _tabla_valores
 from app.modules.nomenclador.service import _especialidades_medico
 from app.modules.nomenclador.schemas import TablaValoresItem
@@ -186,10 +186,11 @@ async def nomenclador(
     dep=Depends(get_current_user_with_scopes_and_role),
 ):
     """Búsqueda en el nomenclador CMC (solo activos), FILTRADA a los códigos del médico
-    logueado: los de SUS especialidades (nm_nomenclador_especialidad) + los universales
-    (sin_restriccion_especialidad) + habilitaciones individuales, menos inhabilitaciones.
-    Un cardiólogo no ve códigos exclusivos de otra especialidad. Misma regla que el gate
-    de facturación de la web. Los médicos con varias especialidades ven la unión."""
+    logueado: los de SUS especialidades (nm_valor_especialidad) + los universales
+    (Valor.sin_restriccion_especialidad) + habilitaciones individuales, menos
+    inhabilitaciones. Un cardiólogo no ve códigos exclusivos de otra especialidad.
+    Misma regla que el gate de facturación de la web. Los médicos con varias
+    especialidades ven la unión."""
     user, _scopes, _role = dep
     term = q.strip()
     hoy = datetime.date.today()
@@ -211,54 +212,87 @@ async def nomenclador(
             & vigencia_ok
         )
 
-    # Con OS en contexto se acotan las reglas a las visibles por esa obra social
-    # (propias + compartidas). Más permisivo que el gate de cotización a propósito: acá
-    # es un listado; el rechazo fino, con precedencia, ocurre al cotizar.
-    cond_esp = [
-        NomencladorEspecialidad.nomenclador_id == NomencladorCMC.id,
-        NomencladorEspecialidad.especialidad_id_colegio.in_(especialidades),
-        NomencladorEspecialidad.activo == True,  # noqa: E712
+    condiciones = [
+        NomencladorCMC.activo == True,  # noqa: E712
+        NomencladorCMC.codigo.contains(term) | NomencladorCMC.descripcion.contains(term),
+        ~_override_vigente("inhabilita"),
     ]
     if obra_social_nro is not None:
-        cond_esp.append(or_(
-            NomencladorEspecialidad.obra_social_nro.is_(None),
-            NomencladorEspecialidad.obra_social_nro == obra_social_nro,
-        ))
-    esp_habilitada = exists().where(*cond_esp)
+        # Especialidad/sin_restriccion viven por OS en nm_valores / nm_valor_
+        # especialidad. Más permisivo que el gate de cotización a propósito: acá es
+        # un listado, el rechazo fino ocurre al cotizar.
+        sin_restriccion = exists().where(
+            Valor.codigo == NomencladorCMC.codigo,
+            Valor.obra_social_nro == obra_social_nro,
+            Valor.estado == "activo",
+            Valor.sin_restriccion_especialidad == True,  # noqa: E712
+        )
+        esp_habilitada = exists().where(
+            ValorEspecialidad.codigo == NomencladorCMC.codigo,
+            ValorEspecialidad.obra_social_nro == obra_social_nro,
+            ValorEspecialidad.especialidad_id_colegio.in_(especialidades),
+        )
+        condiciones.append(or_(_override_vigente("habilita"), sin_restriccion, esp_habilitada))
+    else:
+        # Sin OS no hay reglas de especialidad/sin_restriccion contra qué evaluar:
+        # solo entra por excepción individual.
+        condiciones.append(_override_vigente("habilita"))
 
     stmt = (
         select(NomencladorCMC)
-        .where(
-            NomencladorCMC.activo == True,  # noqa: E712
-            NomencladorCMC.codigo.contains(term)
-            | NomencladorCMC.descripcion.contains(term),
-            # Códigos compartidos + los propios de la OS en contexto (ver
-            # NomencladorCMC.obra_social_nro).
-            service_nm.filtro_pertenencia(obra_social_nro),
-            ~_override_vigente("inhabilita"),
-            or_(
-                _override_vigente("habilita"),
-                NomencladorCMC.sin_restriccion_especialidad == True,  # noqa: E712
-                esp_habilitada,
-            ),
-        )
-        # La fila propia de la OS antes que la compartida, para el dedupe de abajo.
-        .order_by(NomencladorCMC.obra_social_key.desc(), NomencladorCMC.codigo)
+        .where(*condiciones)
+        .order_by(NomencladorCMC.codigo)
         .limit(30)
     )
     filas = (await db.execute(stmt)).scalars().all()
 
-    # Un mismo código puede venir dos veces (compartido + propio de la OS): gana el propio.
     vistos: set[str] = set()
-    salida: List[NomencladorCMC] = []
+    codigos_unicos: List[NomencladorCMC] = []
     for nom in filas:
         if nom.codigo in vistos:
             continue
         vistos.add(nom.codigo)
-        salida.append(nom)
-        if len(salida) >= 15:
+        codigos_unicos.append(nom)
+        if len(codigos_unicos) >= 15:
             break
-    return salida
+
+    # Descripción / sin_restriccion propias de la OS en contexto, si la hay — mismo
+    # fallback al catálogo que descripcion_efectiva cuando no hay Valor.
+    desc_por_codigo: dict[str, str] = {}
+    codigos_sin_restriccion: set[str] = set()
+    if obra_social_nro is not None and codigos_unicos:
+        codigos_str = [n.codigo for n in codigos_unicos]
+        desc_rows = await db.execute(
+            select(Valor.codigo, func.max(Valor.descripcion)).where(
+                Valor.obra_social_nro == obra_social_nro,
+                Valor.codigo.in_(codigos_str),
+                Valor.estado == "activo",
+                Valor.descripcion.is_not(None),
+                Valor.descripcion != "",
+            ).group_by(Valor.codigo)
+        )
+        desc_por_codigo = {c: d for c, d in desc_rows.all()}
+        codigos_sin_restriccion = set((await db.execute(
+            select(Valor.codigo).where(
+                Valor.obra_social_nro == obra_social_nro,
+                Valor.codigo.in_(codigos_str),
+                Valor.estado == "activo",
+                Valor.sin_restriccion_especialidad == True,  # noqa: E712
+            ).distinct()
+        )).scalars().all())
+
+    return [
+        NomencladorItem(
+            id=nom.id,
+            codigo=nom.codigo,
+            descripcion=desc_por_codigo.get(nom.codigo) or nom.descripcion,
+            categoria=nom.categoria,
+            complejidad=nom.complejidad,
+            sin_restriccion_especialidad=nom.codigo in codigos_sin_restriccion,
+            activo=nom.activo,
+        )
+        for nom in codigos_unicos
+    ]
 
 
 @router.get("/tabla-valores", response_model=List[TablaValoresItem])

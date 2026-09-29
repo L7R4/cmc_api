@@ -220,6 +220,7 @@ async def tabla_valores(
             descripcion=service.descripcion_efectiva(valor, nom),
             nivel=valor.nivel if valor else None,
             por_presupuesto=bool(valor and valor.por_presupuesto),
+            sin_restriccion_especialidad=bool(valor and valor.sin_restriccion_especialidad),
             precio_total=precio_total,
             vigencia_desde=h.vigencia_desde,
             vigencia_hasta=h.vigencia_hasta,

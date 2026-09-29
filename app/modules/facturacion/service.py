@@ -1101,8 +1101,8 @@ async def _requiere_autorizacion(
 ) -> bool:
     """¿Este código, para esta obra social, necesita autorización previa?
 
-    Override de `nm_valores.requiere_autorizacion` > default del catálogo
-    (ver service_nm.requiere_autorizacion_efectiva).
+    100% `nm_valores.requiere_autorizacion` — el catálogo ya no opina (ver
+    service_nm.requiere_autorizacion_efectiva).
     """
     obra_social_nro = _cod_obra_to_int(cod_obra) if cod_obra else None
     nom = await service_nm.resolver_nomenclador(db, codigo, obra_social_nro)
@@ -1123,7 +1123,7 @@ async def _requiere_autorizacion(
                 .limit(1)
             )
         ).scalar_one_or_none()
-    return service_nm.requiere_autorizacion_efectiva(valor, nom)
+    return service_nm.requiere_autorizacion_efectiva(valor)
 
 
 async def _validar_autorizacion_medico(

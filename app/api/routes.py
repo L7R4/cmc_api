@@ -1,6 +1,9 @@
 from fastapi import APIRouter
 
 from app.modules.nomenclador.routes_nomenclador import router as nomenclador_router
+from app.modules.nomenclador.routes_nomenclador_nacional import (
+    router as nomenclador_nacional_router,
+)
 from app.modules.nomenclador.routes_homologador import router as homologador_router
 from app.modules.nomenclador.routes_galenos import router as galenos_router
 from app.modules.nomenclador.routes_valores import router as valores_nm_router
@@ -114,6 +117,9 @@ api_router.include_router(archivos_router, prefix="/archivos", tags=["Archivos"]
 
 # ── Nomenclador y Valores ─────────────────────────────────────────────────────
 api_router.include_router(nomenclador_router,  prefix="/nomenclador",     tags=["Nomenclador"])
+api_router.include_router(
+    nomenclador_nacional_router, prefix="/nomenclador_nacional", tags=["Nomenclador Nacional"],
+)
 api_router.include_router(homologador_router,  prefix="/homologador",     tags=["Homologador"])
 api_router.include_router(galenos_router,      prefix="/galenos",         tags=["Galenos"])
 # Antes que `valores_nm_router`: comparten prefijo y ese router tiene `/{id}`,

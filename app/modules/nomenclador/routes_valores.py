@@ -18,6 +18,7 @@ from app.db.models.nomenclador_cmc import (
     NomencladorCMC,
     Valor,
     ValorComponente,
+    ValorEspecialidad,
 )
 from app.modules.nomenclador import service
 from app.modules.nomenclador.schemas import (
@@ -100,11 +101,12 @@ def _componentes_presupuesto_cero() -> list[dict]:
 # ─── helpers ─────────────────────────────────────────────────────────────────
 
 async def _valores_out(db: AsyncSession, valores: list[Valor]) -> list[ValorOut]:
-    """ValorOut con `descripcion_efectiva` resuelta.
+    """ValorOut con `descripcion_efectiva` y `especialidades` resueltas.
 
-    `Valor.descripcion` es el override de la OS y normalmente viene NULL (hereda del
-    catálogo), así que el ABM necesita el texto ya resuelto para mostrar. Se traen las
-    descripciones del catálogo en un solo query, no una por fila.
+    `descripcion_efectiva`: normalmente `Valor.descripcion` ya viene cargada (el alta
+    manual la exige); si algún valor viejo/interno quedó sin ella, cae al catálogo.
+    `especialidades`: dato del PAR (obra_social_nro, código) — se trae una sola vez
+    por par, no por fila, aunque haya varias variantes NE del mismo par en la lista.
     """
     if not valores:
         return []
@@ -116,12 +118,29 @@ async def _valores_out(db: AsyncSession, valores: list[Valor]) -> list[ValorOut]
             .where(NomencladorCMC.id.in_(ids))
         )).all()
     }
+    pares = {(v.obra_social_nro, v.codigo) for v in valores}
+    especialidades_por_par: dict[tuple[int, str], list[int]] = {}
+    if pares:
+        os_nros = {os for os, _ in pares}
+        codigos = {c for _, c in pares}
+        filas_esp = (await db.execute(
+            select(ValorEspecialidad).where(
+                ValorEspecialidad.obra_social_nro.in_(os_nros),
+                ValorEspecialidad.codigo.in_(codigos),
+            )
+        )).scalars().all()
+        for f in filas_esp:
+            clave = (f.obra_social_nro, f.codigo)
+            if clave in pares:
+                especialidades_por_par.setdefault(clave, []).append(f.especialidad_id_colegio)
+
     salida = []
     for v in valores:
         out = ValorOut.model_validate(v)
         out.descripcion_efectiva = (
             v.descripcion if (v.descripcion or "").strip() else (catalogo.get(v.nomenclador_id) or "")
         )
+        out.especialidades = especialidades_por_par.get((v.obra_social_nro, v.codigo), [])
         salida.append(out)
     return salida
 
@@ -196,6 +215,13 @@ def _completar_tres_componentes(componentes: list[dict]) -> list[dict]:
     return completos
 
 
+def _unidades_nn(nom: NomencladorCMC, attr: str) -> Optional[Decimal]:
+    """Unidad por defecto del código, vía el Nomenclador Nacional vinculado (NULL si
+    no está vinculado o el NN no tiene esa unidad cargada)."""
+    nn = nom.nomenclador_nacional
+    return getattr(nn, attr, None) if nn is not None else None
+
+
 def _resolver_cantidad(
     nom: NomencladorCMC, galeno: Optional[Galeno], concepto: str, cantidad: Decimal
 ) -> Decimal:
@@ -210,7 +236,7 @@ def _resolver_cantidad(
     galeno_default = getattr(galeno, attr, None) if galeno is not None else None
     if galeno_default:
         return galeno_default
-    default = getattr(nom, attr, None)
+    default = _unidades_nn(nom, attr)
     if not default:
         raise HTTPException(
             422,
@@ -254,8 +280,10 @@ async def _crear_valor_con_componentes(
         nomenclador_id=nomenclador_id,
         origen=origen,
         codigo=nom.codigo,
-        # Sin copia con avidez: NULL = hereda del catálogo (service.descripcion_efectiva).
-        # Copiarla haría que corregir el catálogo nunca propague.
+        # El alta manual (create_valor/create_valor_multi) la exige; los procesos
+        # internos (rotación, replicación, CSV, generación NN) la pasan heredada del
+        # valor/NN de origen. NULL solo puede pasar por un camino interno viejo — cae
+        # al fallback del catálogo (service.descripcion_efectiva) hasta que se cargue.
         descripcion=descripcion or None,
         nivel=nivel,
         complejidad=complejidad,
@@ -733,6 +761,10 @@ async def eliminar_valores_por_vigencia(
 
 @router.post("/", response_model=ValorOut, status_code=201)
 async def create_valor(body: ValorCreate, db: AsyncSession = Depends(get_db)):
+    nom = await db.get(NomencladorCMC, body.nomenclador_id)
+    if not nom:
+        raise HTTPException(404, "Código de nomenclador no encontrado")
+
     existente = await _buscar_valor_activo(
         db, body.obra_social_nro, body.nomenclador_id, body.origen.value,
         body.especialidad_id_colegio,
@@ -751,7 +783,7 @@ async def create_valor(body: ValorCreate, db: AsyncSession = Depends(get_db)):
     if body.origen.value == "NE":
         try:
             await service.validar_especialidad_habilitada(
-                db, body.nomenclador_id, body.obra_social_nro, body.especialidad_id_colegio
+                db, nom.codigo, body.obra_social_nro, body.especialidad_id_colegio
             )
         except ValueError as e:
             raise HTTPException(409, str(e))
@@ -785,10 +817,14 @@ async def create_valor_multi(body: ValorCreateMulti, db: AsyncSession = Depends(
     """Alta de una variante NE para varias especialidades a la vez: mismo precio,
     misma vigencia, una fila por especialidad. Reemplaza el alta NNE eliminada — ver
     ValorCreateMulti."""
+    nom = await db.get(NomencladorCMC, body.nomenclador_id)
+    if not nom:
+        raise HTTPException(404, "Código de nomenclador no encontrado")
+
     for especialidad_id in body.especialidades_id_colegio:
         try:
             await service.validar_especialidad_habilitada(
-                db, body.nomenclador_id, body.obra_social_nro, especialidad_id
+                db, nom.codigo, body.obra_social_nro, especialidad_id
             )
         except ValueError as e:
             raise HTTPException(409, str(e))
@@ -888,6 +924,9 @@ async def update_valor_metadata(id: int, body: ValorUpdate, db: AsyncSession = D
     if not obj:
         raise HTTPException(404, "Valor no encontrado")
     cambios = body.model_dump(exclude_none=True)
+    # `especialidades` no es columna de Valor (vive en nm_valor_especialidad, por
+    # par); se maneja aparte más abajo, nunca por el setattr genérico.
+    especialidades = cambios.pop("especialidades", None)
     if "nivel" in cambios and cambios["nivel"] != obj.nivel:
         # No permitir desincronizar el nivel respecto de galenos nivelados ya vinculados
         for comp in await _componentes_activos(db, obj.id):
@@ -913,6 +952,30 @@ async def update_valor_metadata(id: int, body: ValorUpdate, db: AsyncSession = D
 
     for field, value in cambios.items():
         setattr(obj, field, value)
+
+    # descripcion / sin_restriccion_especialidad son datos del PAR, no de esta fila:
+    # se propagan a todas las demás filas activas de (obra_social_nro, codigo) —
+    # incluida la NN, que `variantes_hermanas` (solo NE) no alcanza — para que no
+    # queden desincronizadas entre variantes.
+    campos_del_par = {
+        k: v for k, v in cambios.items() if k in ("descripcion", "sin_restriccion_especialidad")
+    }
+    if campos_del_par:
+        hermanas = await service.variantes_del_par(
+            db, obj.obra_social_nro, obj.codigo, excluir_id=obj.id,
+        )
+        for h in hermanas:
+            for field, value in campos_del_par.items():
+                setattr(h, field, value)
+
+    if especialidades is not None:
+        try:
+            await service.reemplazar_especialidades(
+                db, obj.obra_social_nro, obj.codigo, especialidades,
+            )
+        except ValueError as e:
+            raise HTTPException(409, str(e))
+
     await db.commit()
     await db.refresh(obj)
     return await _valor_out(db, obj)
@@ -1085,7 +1148,7 @@ async def replicar_estructura(body: ReplicarEstructuraIn, db: AsyncSession = Dep
             if origen.origen == "NE":
                 try:
                     await service.validar_especialidad_habilitada(
-                        db, destino.nomenclador_id, origen.obra_social_nro,
+                        db, nom_dest.codigo, origen.obra_social_nro,
                         origen.especialidad_id_colegio,
                     )
                 except ValueError as e:
@@ -1113,7 +1176,7 @@ async def replicar_estructura(body: ReplicarEstructuraIn, db: AsyncSession = Dep
                         galeno_id = remapeado.id
                     if body.usar_unidades_nomenclador:
                         attr = _UNIDADES_MAP[c.concepto]
-                        default = getattr(nom_dest, attr, None)
+                        default = _unidades_nn(nom_dest, attr)
                         if not default:
                             error_comp = (
                                 f"El código destino no tiene '{attr}' para "
@@ -1226,7 +1289,7 @@ async def replicar_a_obras_sociales(
             if origen.origen == "NE":
                 try:
                     await service.validar_especialidad_habilitada(
-                        db, origen.nomenclador_id, os_dest, origen.especialidad_id_colegio
+                        db, origen.codigo, os_dest, origen.especialidad_id_colegio
                     )
                 except ValueError as e:
                     errores.append({"obra_social_nro": os_dest, "motivo": str(e)})
@@ -1252,7 +1315,7 @@ async def replicar_a_obras_sociales(
                     galeno_id = galeno_dest.id
                     if body.usar_unidades_nomenclador and nom is not None:
                         attr = _UNIDADES_MAP[c.concepto]
-                        default = getattr(nom, attr, None)
+                        default = _unidades_nn(nom, attr)
                         if not default:
                             error_os = (
                                 f"El código no tiene '{attr}' para re-resolver la "
@@ -1745,7 +1808,7 @@ async def importar_valores_csv(
                         attr = _UNIDADES_MAP.get(concepto)
                         cantidad = (
                             (attr and getattr(galeno, attr, None))
-                            or (attr and getattr(nom, attr, None))
+                            or (attr and _unidades_nn(nom, attr))
                             or Decimal("0")
                         )
 
@@ -1783,7 +1846,7 @@ async def importar_valores_csv(
                 especialidades_destino = [especialidad]
             else:
                 habilitadas = await service.especialidades_habilitadas_de(
-                    db, nom.id, obra_social_nro
+                    db, nom.codigo, obra_social_nro
                 )
                 especialidades_destino = sorted(habilitadas)
                 if not especialidades_destino:
@@ -1791,8 +1854,8 @@ async def importar_valores_csv(
                         "fila": data["fila_inicio"],
                         "motivo": (
                             "origen NE sin especialidad y el código no tiene ninguna "
-                            "habilitada en nm_nomenclador_especialidad — cargarla antes "
-                            "de importar, o indicar una especialidad puntual en el CSV"
+                            "habilitada para esta OS — cargala primero desde el modal "
+                            "de Valores, o indicá una especialidad puntual en el CSV"
                         ),
                     }
 
@@ -1802,7 +1865,7 @@ async def importar_valores_csv(
                         validar_reglas_origen(origen, esp_destino, por_presupuesto, es_galeno)
                         if origen == "NE":
                             await service.validar_especialidad_habilitada(
-                                db, nom.id, obra_social_nro, esp_destino
+                                db, nom.codigo, obra_social_nro, esp_destino
                             )
                     except ValueError as e:
                         error_grupo = {"fila": data["fila_inicio"], "motivo": str(e)}

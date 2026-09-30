@@ -37,6 +37,16 @@ class NomencladorCMC(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     codigo: Mapped[str] = mapped_column(String(20), nullable=False, unique=True)
+    # Descripción DEFAULT del código a nivel catálogo — opcional. No es la fuente de
+    # verdad (esa sigue siendo `Valor.descripcion`, por obra social — ver
+    # `service.descripcion_efectiva`): es el valor que se ofrece para precargar al
+    # crear un Valor nuevo para este código, cuando esa OS todavía no tiene la suya.
+    descripcion: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    # "Sin restricción de especialidad" DEFAULT a nivel catálogo — opcional, mismo
+    # criterio que `descripcion`. NULL = el catálogo no opina; la fuente de verdad
+    # sigue siendo `Valor.sin_restriccion_especialidad`, por (OS, código). Se ofrece
+    # para precargar el campo al crear un Valor nuevo para este código.
+    sin_restriccion_especialidad: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
     categoria: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     complejidad: Mapped[Optional[str]] = mapped_column(
         Enum("baja", "media", "alta", name="nm_complejidad_enum"), nullable=True

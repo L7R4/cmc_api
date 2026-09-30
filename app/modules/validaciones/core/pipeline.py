@@ -26,7 +26,12 @@ from app.modules.validaciones.core.grabado import (
     to_dict,
 )
 from app.modules.validaciones.core.medicos import get_medico
-from app.modules.validaciones.core.periodos import gate_periodo, periodo_actual, periodo_cerrado
+from app.modules.validaciones.core.periodos import (
+    ORIGEN_MEDICO,
+    gate_periodo,
+    periodo_actual,
+    periodo_cerrado,
+)
 from app.modules.validaciones.legacy import espejo as espejo_legacy
 from app.modules.validaciones.schemas import PrestacionCreate
 
@@ -126,10 +131,17 @@ async def adjuntar_orden(
     return to_dict(fila, descripciones.get(fila.id_detalle_prestaciones, ""))
 
 
-async def eliminar_prestacion(db: AsyncSession, prestacion_id: int, nro_socio: int) -> None:
+async def eliminar_prestacion(
+    db: AsyncSession, prestacion_id: int, nro_socio: int, actor: str = ORIGEN_MEDICO,
+) -> None:
     """Baja lógica: la fila queda con `validacion_anulada=1` y `estado='X'` (el
     soft-delete de facturación), así deja de sumar en la factura y en la
     liquidación. No se borra: la traza de lo que la O.S. contestó se conserva.
+
+    `actor` distingue quién pide la baja: el médico dueño del token, o el
+    Colegio operando en su nombre (ver `periodos.actor_para`). El período
+    médico cerrado solo bloquea al actor médico — el Colegio puede seguir
+    dando de baja mientras su propia fase del período siga abierta.
 
     Antes de la baja local, le da a la O.S. la chance de anular la autorización
     allá (`ValidadorOS.anular`, default no-op). El lookup es `POR_NRO.get()`,
@@ -143,7 +155,7 @@ async def eliminar_prestacion(db: AsyncSession, prestacion_id: int, nro_socio: i
     """
     fila = await _prestacion_del_socio(db, prestacion_id, nro_socio)
     obra_social_id = int(fila.cod_obr)
-    if await periodo_cerrado(db, obra_social_id, fila.periodo):
+    if await periodo_cerrado(db, obra_social_id, fila.periodo, actor):
         raise HTTPException(409, "El período ya está cerrado: no se puede eliminar.")
 
     obra = obras.POR_NRO.get(obra_social_id)

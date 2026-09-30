@@ -259,6 +259,7 @@ async def _crear_valor_con_componentes(
     categoria: Optional[str] = None,
     requiere_autorizacion: Optional[bool] = None,
     coseguro: Decimal = Decimal("0"),
+    sin_restriccion_especialidad: bool = False,
     *,
     motivo: str = "carga_inicial",
     fecha_corte: Optional[datetime.date] = None,
@@ -286,6 +287,7 @@ async def _crear_valor_con_componentes(
         categoria=categoria,
         requiere_autorizacion=requiere_autorizacion,
         especialidad_id_colegio=especialidad_id_colegio,
+        sin_restriccion_especialidad=sin_restriccion_especialidad,
         por_presupuesto=por_presupuesto,
         cantidad_ayudantes=cantidad_ayudantes,
         coseguro=coseguro,
@@ -387,6 +389,7 @@ async def _clonar_valor(
         categoria=origen.categoria,
         requiere_autorizacion=origen.requiere_autorizacion,
         especialidad_id_colegio=origen.especialidad_id_colegio,
+        sin_restriccion_especialidad=origen.sin_restriccion_especialidad,
         cantidad_ayudantes=origen.cantidad_ayudantes,
         coseguro=origen.coseguro,
         vigencia_desde=vigencia_desde,
@@ -776,7 +779,23 @@ async def create_valor(body: ValorCreate, db: AsyncSession = Depends(get_db)):
             f"origen {body.origen.value} ({variante}) — use POST /valores_nm/{existente.id}/actualizar",
         )
 
-    if body.origen.value == "NE":
+    # sin_restriccion es dato del par: None hereda lo que ya tenga; explícito se
+    # fija en todas sus filas activas (y no puede apagarse con una NE sin
+    # especialidad colgando, ver service.fijar_sin_restriccion_par).
+    sin_restriccion = body.sin_restriccion_especialidad
+    if sin_restriccion is None:
+        sin_restriccion = await service.par_sin_restriccion(db, nom.codigo, body.obra_social_nro)
+    else:
+        try:
+            await service.fijar_sin_restriccion_par(
+                db, body.obra_social_nro, nom.codigo, sin_restriccion
+            )
+        except ValueError as e:
+            raise HTTPException(409, str(e))
+
+    # NE sin especialidad (par sin restricción) no habilita ninguna especialidad
+    # puntual: es el precio para todas.
+    if body.origen.value == "NE" and body.especialidad_id_colegio is not None:
         try:
             await service.validar_especialidad_habilitada(
                 db, nom.codigo, body.obra_social_nro, body.especialidad_id_colegio
@@ -801,6 +820,7 @@ async def create_valor(body: ValorCreate, db: AsyncSession = Depends(get_db)):
         categoria=body.categoria,
         requiere_autorizacion=body.requiere_autorizacion,
         coseguro=body.coseguro,
+        sin_restriccion_especialidad=sin_restriccion,
     )
 
     await db.commit()
@@ -834,6 +854,17 @@ async def create_valor_multi(body: ValorCreateMulti, db: AsyncSession = Depends(
                 f"{especialidad_id} en este código y OS — use POST /valores_nm/{existente.id}/actualizar",
             )
 
+    sin_restriccion = body.sin_restriccion_especialidad
+    if sin_restriccion is None:
+        sin_restriccion = await service.par_sin_restriccion(db, nom.codigo, body.obra_social_nro)
+    else:
+        try:
+            await service.fijar_sin_restriccion_par(
+                db, body.obra_social_nro, nom.codigo, sin_restriccion
+            )
+        except ValueError as e:
+            raise HTTPException(409, str(e))
+
     creados: list[Valor] = []
     for especialidad_id in body.especialidades_id_colegio:
         individual = body.a_valor_create(especialidad_id)
@@ -854,6 +885,7 @@ async def create_valor_multi(body: ValorCreateMulti, db: AsyncSession = Depends(
             categoria=individual.categoria,
             requiere_autorizacion=individual.requiere_autorizacion,
             coseguro=individual.coseguro,
+            sin_restriccion_especialidad=sin_restriccion,
         )
         creados.append(valor)
 
@@ -953,9 +985,16 @@ async def update_valor_metadata(id: int, body: ValorUpdate, db: AsyncSession = D
     # se propagan a todas las demás filas activas de (obra_social_nro, codigo) —
     # incluida la NN, que `variantes_hermanas` (solo NE) no alcanza — para que no
     # queden desincronizadas entre variantes.
-    campos_del_par = {
-        k: v for k, v in cambios.items() if k in ("descripcion", "sin_restriccion_especialidad")
-    }
+    # sin_restriccion va por el helper: además de propagar, rechaza apagarlo si el par
+    # tiene una NE sin especialidad (que sólo es válida mientras sea sin restricción).
+    if "sin_restriccion_especialidad" in cambios:
+        try:
+            await service.fijar_sin_restriccion_par(
+                db, obj.obra_social_nro, obj.codigo, cambios.pop("sin_restriccion_especialidad"),
+            )
+        except ValueError as e:
+            raise HTTPException(409, str(e))
+    campos_del_par = {k: v for k, v in cambios.items() if k == "descripcion"}
     if campos_del_par:
         hermanas = await service.variantes_del_par(
             db, obj.obra_social_nro, obj.codigo, excluir_id=obj.id,
@@ -1002,6 +1041,7 @@ async def actualizar_valor(
         validar_reglas_origen(
             anterior.origen, anterior.especialidad_id_colegio,
             body.por_presupuesto, es_galeno,
+            sin_restriccion=anterior.sin_restriccion_especialidad,
         )
     except ValueError as e:
         raise HTTPException(422, str(e))
@@ -1040,6 +1080,7 @@ async def actualizar_valor(
             else anterior.requiere_autorizacion
         ),
         coseguro=body.coseguro if body.coseguro is not None else anterior.coseguro,
+        sin_restriccion_especialidad=anterior.sin_restriccion_especialidad,
         motivo="valores_estructura",
         fecha_corte=fecha_corte,
     )
@@ -1074,6 +1115,7 @@ async def actualizar_valor(
                 else hermana.requiere_autorizacion
             ),
             coseguro=body.coseguro if body.coseguro is not None else hermana.coseguro,
+            sin_restriccion_especialidad=hermana.sin_restriccion_especialidad,
             motivo="valores_estructura",
             fecha_corte=fecha_corte,
         )
@@ -1140,8 +1182,9 @@ async def replicar_estructura(body: ReplicarEstructuraIn, db: AsyncSession = Dep
             nivel_destino = destino.nivel if destino.nivel is not None else origen.nivel
 
             # NE implica habilitación: el código destino puede no tener esta especialidad
-            # habilitada (es un código distinto al del origen).
-            if origen.origen == "NE":
+            # habilitada (es un código distinto al del origen). Una NE sin especialidad
+            # no habilita a nadie en particular: el destino pasa a sin restricción.
+            if origen.origen == "NE" and origen.especialidad_id_colegio is not None:
                 try:
                     await service.validar_especialidad_habilitada(
                         db, nom_dest.codigo, origen.obra_social_nro,
@@ -1150,6 +1193,10 @@ async def replicar_estructura(body: ReplicarEstructuraIn, db: AsyncSession = Dep
                 except ValueError as e:
                     errores.append({"nomenclador_id": destino.nomenclador_id, "motivo": str(e)})
                     continue
+            ne_sin_esp = origen.origen == "NE" and origen.especialidad_id_colegio is None
+            sin_restriccion_dest = ne_sin_esp or await service.par_sin_restriccion(
+                db, nom_dest.codigo, origen.obra_social_nro
+            )
 
             # Armar componentes destino: remapear galenos nivelados + re-resolver unidades
             componentes_destino = []
@@ -1206,6 +1253,10 @@ async def replicar_estructura(body: ReplicarEstructuraIn, db: AsyncSession = Dep
                     continue
                 _cerrar_valor(previo, fecha_corte)
                 await db.flush()
+            if ne_sin_esp:
+                await service.fijar_sin_restriccion_par(
+                    db, origen.obra_social_nro, nom_dest.codigo, True
+                )
 
             await service.persistir_valor(
                 db,
@@ -1214,10 +1265,13 @@ async def replicar_estructura(body: ReplicarEstructuraIn, db: AsyncSession = Dep
                     nomenclador_id=destino.nomenclador_id,
                     origen=origen.origen,
                     codigo=nom_dest.codigo,
-                    descripcion=nom_dest.descripcion,
+                    # nm_nomenclador ya no tiene descripción (fase 3): el destino es otro
+                    # código, así que se conserva la de su variante previa si la había.
+                    descripcion=previo.descripcion if previo else None,
                     nivel=nivel_destino,
                     complejidad=None,
                     especialidad_id_colegio=origen.especialidad_id_colegio,
+                    sin_restriccion_especialidad=sin_restriccion_dest,
                     cantidad_ayudantes=origen.cantidad_ayudantes,
                     coseguro=origen.coseguro,
                     vigencia_desde=body.vigencia_desde,
@@ -1282,7 +1336,8 @@ async def replicar_a_obras_sociales(
             # NE implica habilitación: la especialidad puede no estar habilitada para
             # este código en el destino (el set de habilitaciones es propio de cada OS).
             # Se salta y se reporta, no se aborta el lote.
-            if origen.origen == "NE":
+            ne_sin_esp = origen.origen == "NE" and origen.especialidad_id_colegio is None
+            if origen.origen == "NE" and not ne_sin_esp:
                 try:
                     await service.validar_especialidad_habilitada(
                         db, origen.codigo, os_dest, origen.especialidad_id_colegio
@@ -1347,6 +1402,12 @@ async def replicar_a_obras_sociales(
             if previo:
                 _cerrar_valor(previo, fecha_corte)
                 await db.flush()
+            if ne_sin_esp:
+                # La NE sin especialidad sólo es válida en un par sin restricción.
+                await service.fijar_sin_restriccion_par(db, os_dest, origen.codigo, True)
+            sin_restriccion_dest = ne_sin_esp or await service.par_sin_restriccion(
+                db, origen.codigo, os_dest
+            )
 
             await service.persistir_valor(
                 db,
@@ -1359,6 +1420,7 @@ async def replicar_a_obras_sociales(
                     nivel=origen.nivel,
                     complejidad=None,
                     especialidad_id_colegio=origen.especialidad_id_colegio,
+                    sin_restriccion_especialidad=sin_restriccion_dest,
                     cantidad_ayudantes=origen.cantidad_ayudantes,
                     coseguro=origen.coseguro,
                     vigencia_desde=body.vigencia_desde,
@@ -1836,10 +1898,14 @@ async def importar_valores_csv(
             # - NE con especialidad explícita en el CSV: solo esa (se valida habilitada).
             # - NE con especialidad vacía: reemplaza el rol de NNE — una fila por cada
             #   especialidad habilitada para el código (mismo precio/ecuación para todas).
+            sin_restriccion = await service.par_sin_restriccion(db, nom.codigo, obra_social_nro)
             if origen == "NN":
                 especialidades_destino = [None]
             elif especialidad is not None:
                 especialidades_destino = [especialidad]
+            elif sin_restriccion:
+                # Par sin restricción: una sola NE sin especialidad, precio para todas.
+                especialidades_destino = [None]
             else:
                 habilitadas = await service.especialidades_habilitadas_de(
                     db, nom.codigo, obra_social_nro
@@ -1858,8 +1924,11 @@ async def importar_valores_csv(
             if error_grupo is None:
                 for esp_destino in especialidades_destino:
                     try:
-                        validar_reglas_origen(origen, esp_destino, por_presupuesto, es_galeno)
-                        if origen == "NE":
+                        validar_reglas_origen(
+                            origen, esp_destino, por_presupuesto, es_galeno,
+                            sin_restriccion=sin_restriccion,
+                        )
+                        if origen == "NE" and esp_destino is not None:
                             await service.validar_especialidad_habilitada(
                                 db, nom.codigo, obra_social_nro, esp_destino
                             )
@@ -1891,6 +1960,7 @@ async def importar_valores_csv(
                         nivel=nivel_valor,
                         complejidad=prev.complejidad if prev else None,
                         especialidad_id_colegio=esp_destino,
+                        sin_restriccion_especialidad=sin_restriccion,
                         cantidad_ayudantes=prev.cantidad_ayudantes if prev else None,
                         coseguro=prev.coseguro if prev else Decimal("0"),
                         por_presupuesto=por_presupuesto,

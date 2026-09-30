@@ -254,11 +254,30 @@ async def tabla_valores(
     slot_rank = {esp: i for i, esp in enumerate(especialidades)}
     _SLOT_SIN_ESP = len(especialidades) + 1
 
+    # Códigos sin restricción de especialidad en esta OS: su NE sin especialidad es el
+    # precio para cualquier médico (ver service.lookup_precio).
+    nom_ids_ne_sin_esp = {
+        f.nomenclador_id for f in filas
+        if f.origen == Origen.NE.value and f.especialidad_id_colegio is None
+    }
+    sin_restriccion_ids: set[int] = set()
+    if nom_ids_ne_sin_esp:
+        sin_restriccion_ids = set((await db.execute(
+            select(Valor.nomenclador_id).where(
+                Valor.obra_social_nro == obra_social_nro,
+                Valor.nomenclador_id.in_(nom_ids_ne_sin_esp),
+                Valor.estado == "activo",
+                Valor.sin_restriccion_especialidad == True,
+            ).distinct()
+        )).scalars().all())
+
     def _aplicable(fila: HistorialPrecioCodigo) -> bool:
-        # NN siempre entra en juego. NE (siempre por especialidad) solo aplica si se pasó
-        # el perfil del médico y este posee esa especialidad; sin especialidades NE queda
-        # fuera y compite únicamente NN.
+        # NN siempre entra en juego. NE con especialidad solo aplica si se pasó el
+        # perfil del médico y este la posee; NE sin especialidad, si el código es sin
+        # restricción en esta OS (aplica a cualquier perfil, incluso sin especialidades).
         if fila.origen == Origen.NE.value:
+            if fila.especialidad_id_colegio is None:
+                return fila.nomenclador_id in sin_restriccion_ids
             return bool(especialidades) and fila.especialidad_id_colegio in slot_rank
         return True
 

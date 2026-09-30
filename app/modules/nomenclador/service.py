@@ -102,6 +102,56 @@ async def especialidades_habilitadas_de(
     return {row for row in (await db.execute(stmt)).scalars()}
 
 
+async def par_sin_restriccion(db: AsyncSession, codigo: str, obra_social_nro: int) -> bool:
+    """¿El par (obra_social_nro, codigo) es "sin restricción de especialidad"?
+
+    Es dato del PAR, no de una fila: vale True si alguna fila ACTIVA del par lo
+    tiene (mismo criterio que el paso 3 de `_validar_habilitacion_medico`).
+    """
+    return bool((await db.execute(
+        select(exists().where(
+            Valor.codigo == codigo,
+            Valor.obra_social_nro == obra_social_nro,
+            Valor.estado == "activo",
+            Valor.sin_restriccion_especialidad == True,
+        ))
+    )).scalar())
+
+
+async def fijar_sin_restriccion_par(
+    db: AsyncSession, obra_social_nro: int, codigo: str, valor: bool,
+    *, excluir_id: Optional[int] = None,
+) -> None:
+    """Deja `sin_restriccion_especialidad = valor` en TODAS las filas activas del par
+    (es dato del par, ver `variantes_del_par`).
+
+    Pasarlo a False se rechaza si el par tiene una variante NE activa SIN
+    especialidad: esa fila sólo es válida mientras el par es sin restricción (ver
+    `schemas.validar_reglas_origen`) — quedaría huérfana, sin especialidad con la
+    que cotizar. Hay que cerrarla primero.
+    """
+    if not valor:
+        stmt = select(Valor.id).where(
+            Valor.obra_social_nro == obra_social_nro,
+            Valor.codigo == codigo,
+            Valor.origen == "NE",
+            Valor.especialidad_id_colegio.is_(None),
+            Valor.estado == "activo",
+        )
+        if excluir_id is not None:
+            stmt = stmt.where(Valor.id != excluir_id)
+        huerfana = (await db.execute(stmt.limit(1))).scalar_one_or_none()
+        if huerfana is not None:
+            raise ValueError(
+                f"No se puede quitar 'sin restricción de especialidad': el valor NE "
+                f"{huerfana} no tiene especialidad y sólo es válido mientras el código "
+                "sea sin restricción. Ciérrelo primero o cárguelo por especialidad."
+            )
+    for v in await variantes_del_par(db, obra_social_nro, codigo, excluir_id=excluir_id):
+        v.sin_restriccion_especialidad = valor
+    await db.flush()
+
+
 async def validar_especialidad_habilitada(
     db: AsyncSession, codigo: str, obra_social_nro: int, especialidad_id_colegio: int
 ) -> None:
@@ -1748,11 +1798,20 @@ async def lookup_precio(
     # Las variantes sin especialidad pierden contra un match dentro del mismo origen
     _SLOT_SIN_ESP = len(especialidades) + 1
 
+    # Una NE sin especialidad sólo existe en un par sin restricción (ver
+    # validar_reglas_origen): es el precio para cualquier especialidad.
+    sin_restriccion = any(
+        f.origen == "NE" and f.especialidad_id_colegio is None for f in por_variante.values()
+    ) and await par_sin_restriccion(db, nomenclador.codigo, obra_social_nro)
+
     def _aplicable(fila) -> bool:
-        # NN nunca lleva especialidad: siempre aplicable. NE la exige (ver
-        # validar_reglas_origen) — misma condición que routes_reportes._aplicable.
+        # NN nunca lleva especialidad: siempre aplicable. NE con especialidad aplica
+        # si el médico la tiene; NE sin especialidad, sólo si el par es sin
+        # restricción — misma condición que routes_reportes._aplicable.
         if fila.origen == "NN":
             return True
+        if fila.especialidad_id_colegio is None:
+            return sin_restriccion
         return fila.especialidad_id_colegio in slot_rank
 
     candidatas = [f for f in por_variante.values() if _aplicable(f)]

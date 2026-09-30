@@ -515,11 +515,14 @@ def validar_reglas_origen(
     especialidad_id_colegio: Optional[int],
     por_presupuesto: bool,
     es_galeno: Optional[bool],
+    sin_restriccion: bool = False,
 ) -> None:
     """
     Reglas transversales por origen (válidas tanto en Pydantic como server-side):
     - NE exige especialidad_id_colegio (identifica qué especialidad habilitada cobra
-      esta variante); NN va siempre sin especialidad.
+      esta variante) SALVO que el par (OS, código) sea sin restricción de
+      especialidad: ahí una NE sin especialidad es el precio para cualquier médico
+      (ver service.lookup_precio). NN va siempre sin especialidad.
     - NN es siempre calculado: exige modalidad galeno y no puede ser por_presupuesto.
 
     Esta función solo valida forma (presencia/ausencia de especialidad). Que la
@@ -529,8 +532,11 @@ def validar_reglas_origen(
     `es_galeno`: True si la modalidad es calculable (galeno), False si fija, None si
     no aplica/desconocida (p.ej. por_presupuesto, donde no hay ecuación que evaluar).
     """
-    if origen == Origen.NE.value and especialidad_id_colegio is None:
-        raise ValueError("El origen NE exige especialidad_id_colegio")
+    if origen == Origen.NE.value and especialidad_id_colegio is None and not sin_restriccion:
+        raise ValueError(
+            "El origen NE exige especialidad_id_colegio, salvo que el código sea "
+            "sin restricción de especialidad (sin_restriccion_especialidad=true)"
+        )
     if origen != Origen.NE.value and especialidad_id_colegio is not None:
         raise ValueError("especialidad_id_colegio solo es válido para origen NE; NN debe ir sin especialidad")
     if origen == Origen.NN.value:
@@ -592,10 +598,14 @@ class ValorCreate(BaseModel):
     # Override por OS; NULL hereda nm_nomenclador.requiere_autorizacion. No es lo mismo
     # que False: False = "esta OS dice que no", NULL = "esta OS no opinó".
     requiere_autorizacion: Optional[bool] = None
-    # Especialidad que cobra esta variante. Obligatoria en NE (debe estar habilitada
-    # para el código en nm_nomenclador_especialidad, ver validar_especialidad_habilitada);
-    # NN va siempre NULL.
+    # Especialidad que cobra esta variante. Obligatoria en NE salvo que el código sea
+    # sin restricción (ver sin_restriccion_especialidad abajo): ahí puede ir NULL y
+    # es el precio para cualquier especialidad. Si viene, queda habilitada en
+    # nm_valor_especialidad (ver validar_especialidad_habilitada). NN va siempre NULL.
     especialidad_id_colegio: Optional[int] = None
+    # Dato del PAR (obra_social_nro, código): None = hereda lo que ya tenga el par;
+    # True/False = lo fija y se propaga a todas sus filas activas.
+    sin_restriccion_especialidad: Optional[bool] = None
     # True → código por presupuesto: se ignora la ecuación, los componentes H/G/A
     # se guardan en 0 y el monto lo informa la OS al facturar (modo manual)
     por_presupuesto: bool = False
@@ -619,8 +629,11 @@ class ValorCreate(BaseModel):
         if not self.por_presupuesto:
             validar_lista_componentes(self.componentes)
             es_galeno = any(c.galeno_id is not None for c in self.componentes)
+        # NE sin especialidad exige declararlo explícito: heredar "sin restricción"
+        # del par se resuelve en la ruta, contra la base.
         validar_reglas_origen(
-            self.origen.value, self.especialidad_id_colegio, self.por_presupuesto, es_galeno
+            self.origen.value, self.especialidad_id_colegio, self.por_presupuesto, es_galeno,
+            sin_restriccion=bool(self.sin_restriccion_especialidad),
         )
         return self
 
@@ -638,6 +651,8 @@ class ValorCreateMulti(BaseModel):
     categoria: Optional[str] = None
     requiere_autorizacion: Optional[bool] = None
     especialidades_id_colegio: List[int] = Field(..., min_length=1)
+    # Dato del PAR — misma semántica que ValorCreate.sin_restriccion_especialidad.
+    sin_restriccion_especialidad: Optional[bool] = None
     por_presupuesto: bool = False
     cantidad_ayudantes: Optional[int] = Field(None, ge=0)
     coseguro: Decimal = Field(Decimal("0"), ge=0)
@@ -669,6 +684,7 @@ class ValorCreateMulti(BaseModel):
             categoria=self.categoria,
             requiere_autorizacion=self.requiere_autorizacion,
             especialidad_id_colegio=especialidad_id_colegio,
+            sin_restriccion_especialidad=self.sin_restriccion_especialidad,
             por_presupuesto=self.por_presupuesto,
             cantidad_ayudantes=self.cantidad_ayudantes,
             coseguro=self.coseguro,

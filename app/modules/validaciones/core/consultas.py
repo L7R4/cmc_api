@@ -17,7 +17,7 @@ from app.modules.nomenclador import service as service_nm
 from app.modules.validaciones.core.contrato import factura_en_cero
 from app.modules.validaciones.core.grabado import to_dict
 from app.modules.validaciones.core.medicos import get_medico
-from app.modules.validaciones.core.periodos import partes_periodo, periodo_cerrado
+from app.modules.validaciones.core.periodos import ORIGEN_MEDICO, partes_periodo, periodo_cerrado
 
 
 # Cuántas filas del catálogo se leen por cada una que se devuelve en
@@ -153,10 +153,15 @@ async def listar_prestaciones(
 
 
 async def listar_periodos(
-    db: AsyncSession, nro_socio: int, obra_social_id: int
+    db: AsyncSession, nro_socio: int, obra_social_id: int, actor: str = ORIGEN_MEDICO,
 ) -> list[dict]:
     """Totales por período, el más reciente primero. Las rechazadas cuentan en
-    `cantidad` pero suman 0 — que es justo lo que van a facturar."""
+    `cantidad` pero suman 0 — que es justo lo que van a facturar.
+
+    `cerrado` refleja si `actor` puede seguir operando ese período (ver
+    `periodos.periodo_cerrado`): para el Colegio operando en nombre de un
+    médico, un período con la fase médico cerrada pero la fase Colegio abierta
+    sigue mostrando `cerrado=False`."""
     M = DetalleFacturacionCMC
     rows = (
         await db.execute(
@@ -180,7 +185,7 @@ async def listar_periodos(
                 "anio": anio,
                 "cantidad": cantidad,
                 "total": quantize_money(total or 0),
-                "cerrado": await periodo_cerrado(db, obra_social_id, periodo),
+                "cerrado": await periodo_cerrado(db, obra_social_id, periodo, actor),
             }
         )
     return salida

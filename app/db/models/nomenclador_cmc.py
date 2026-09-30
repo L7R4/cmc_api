@@ -288,8 +288,10 @@ class Valor(Base):
       origen → categoría/procedencia de la regla de precio; fija la PRIORIDAD del
                lookup (NE > NN). La prioridad NO vive en DB: es la posición en
                ORIGEN_PRIORIDAD (service.py). El String permite sumar orígenes sin migrar.
-      especialidad_id_colegio → obligatoria en NE (debe existir como habilitación activa
-               en nm_nomenclador_especialidad para el código); NN siempre va NULL.
+      especialidad_id_colegio → obligatoria en NE (queda habilitada en
+               nm_valor_especialidad para el par) SALVO que el par sea
+               sin_restriccion_especialidad: ahí una NE sin especialidad es el precio
+               para cualquier médico (service.lookup_precio). NN siempre va NULL.
     El lookup elige por mayor prioridad de origen y, dentro del origen, match de
     especialidad (orden de slots del médico) > sin especialidad.
     Máximo un activo por (obra_social_nro, nomenclador_id, origen, especialidad_id_colegio) — app-level.

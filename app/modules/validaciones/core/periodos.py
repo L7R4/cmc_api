@@ -11,6 +11,7 @@ from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.facturacion.service import (
+    ORIGEN_COLEGIO,
     ORIGEN_MEDICO,
     _gate_carga,
     _get_factura,
@@ -40,24 +41,39 @@ async def periodo_actual(db: AsyncSession, obra_social_id: int) -> str:
     return await get_periodo_medico(db, cod_obra)
 
 
-async def periodo_cerrado(db: AsyncSession, obra_social_id: int, periodo: str) -> bool:
-    """True si el médico ya no puede cargar en ese período de esa obra social.
+def actor_para(user: dict, socio: int) -> str:
+    """`ORIGEN_MEDICO` si el socio operado es el dueño del token, `ORIGEN_COLEGIO`
+    si es personal del Colegio operando en nombre de otro médico (mismo criterio
+    que `socio_objetivo`: pedir un socio distinto del propio ya exigió el scope
+    administrativo antes de llegar acá)."""
+    propio = user.get("nro_socio")
+    if propio is not None and int(propio) == int(socio):
+        return ORIGEN_MEDICO
+    return ORIGEN_COLEGIO
 
-    Mismo criterio que facturación (`_gate_carga`): la fase médico o la fase
-    colegio de la cabecera está cerrada. Sin cabecera → abierto (se crea con la
-    primera prestación).
+
+async def periodo_cerrado(
+    db: AsyncSession, obra_social_id: int, periodo: str, actor: str = ORIGEN_MEDICO,
+) -> bool:
+    """True si `actor` ya no puede operar en ese período de esa obra social.
+
+    Mismo criterio que facturación (`_gate_carga`): la fase colegio cierra para
+    cualquiera; la fase médico solo cierra para el actor médico — el Colegio
+    operando en nombre de un médico sigue pudiendo mientras su propia fase siga
+    abierta. Sin cabecera → abierto (se crea con la primera prestación).
     """
     try:
-        await gate_periodo(db, obra_social_id, periodo)
+        await gate_periodo(db, obra_social_id, periodo, actor)
     except HTTPException:
         return True
     return False
 
 
-async def gate_periodo(db: AsyncSession, obra_social_id: int, periodo: str) -> None:
-    """Corta con 409 si el período está cerrado para el médico. Se llama
-    **antes** de consultar al validador de la O.S.: no tiene sentido consumir
-    el token de la credencial del afiliado para una prestación que después no
-    vamos a poder grabar.
-    """
-    _gate_carga(await _get_factura(db, str(obra_social_id), periodo), ORIGEN_MEDICO)
+async def gate_periodo(
+    db: AsyncSession, obra_social_id: int, periodo: str, actor: str = ORIGEN_MEDICO,
+) -> None:
+    """Corta con 409 si el período está cerrado para `actor`. Se llama **antes**
+    de consultar al validador de la O.S.: no tiene sentido consumir el token de
+    la credencial del afiliado para una prestación que después no vamos a poder
+    grabar."""
+    _gate_carga(await _get_factura(db, str(obra_social_id), periodo), actor)

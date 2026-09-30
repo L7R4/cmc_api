@@ -226,7 +226,34 @@ class Settings(BaseSettings):
     OSPJN_PASSWORD: SecretStr = SecretStr("")
     OSPJN_TIMEOUT: int = 30
 
-    @field_validator("SANCOR_MODO", "NOBIS_MODO", "OSPJN_MODO", mode="after")
+
+    # ── Traditum (canal multi-financiador) ────────────────────────────────────
+    # Pasarela por la que hoy sale Medicus y por la que pueden salir Swiss
+    # Medical y Medifé: el financiador lo decide el mensaje, no el transporte.
+    # Mismo criterio que Sancor y Nobis, pero con default: el canal no dispara
+    # nada por sí solo, quien decide si sale a la red es la obra social.
+    #   simulado   → no sale ningún request
+    #   test       → traditumcanalws-testing.azurewebsites.net (lun-vie 8 a 20)
+    #   produccion → api.traditum.com
+    TRADITUM_MODO: str = "simulado"
+    TRADITUM_URL_TEST: str = "https://traditumcanalws-testing.azurewebsites.net"
+    TRADITUM_URL_PROD: str = "https://api.traditum.com"
+    TRADITUM_USUARIO: str = ""
+    TRADITUM_PASSWORD: SecretStr = SecretStr("")
+    # MSH-4, el sitio emisor que Traditum le asigna al Colegio. El
+    # TRIA00000001 de los ejemplos es de prueba y hay que reemplazarlo.
+    TRADITUM_SITIO_EMISOR: str = ""
+    TRADITUM_TIMEOUT: int = 30
+
+    # ── Medicus (O.S. 373, IIN 610109) ────────────────────────────────────────
+    # Arranca en simulado por la misma razón que Sancor: una autorización acá
+    # es un efecto real en el sistema de Medicus.
+    MEDICUS_MODO: str = "simulado"
+    # Número de prestador del Colegio ante Medicus: CUIT + nº de consultorio,
+    # 13 dígitos, lo otorga la prepaga. No se deriva del CUIT solo.
+    MEDICUS_PRESTADOR: str = ""
+
+    @field_validator("SANCOR_MODO", "NOBIS_MODO", "OSPJN_MODO", "TRADITUM_MODO", "MEDICUS_MODO", mode="after")
     @classmethod
     def _validar_modo_integrador(cls, v: str, info) -> str:
         v = (v or "").strip().lower()

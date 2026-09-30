@@ -13,13 +13,14 @@ from fastapi import HTTPException
 
 from app.modules.validaciones.core.contrato import ValidadorOS
 from app.modules.validaciones.obras.boreal import BOREAL
+from app.modules.validaciones.obras.medicus import MEDICUS
 from app.modules.validaciones.obras.nobis import NOBIS
 from app.modules.validaciones.obras.omint import OMINT
 from app.modules.validaciones.obras.ospjn import OSPJN
 from app.modules.validaciones.obras.ospm import OSPM
 from app.modules.validaciones.obras.sancor import SANCOR
 
-VALIDADORES: tuple[ValidadorOS, ...] = (BOREAL, OMINT, OSPM, OSPJN, NOBIS, SANCOR)
+VALIDADORES: tuple[ValidadorOS, ...] = (BOREAL, OMINT, OSPM, OSPJN, NOBIS, SANCOR, MEDICUS)
 
 POR_NRO: dict[int, ValidadorOS] = {v.nro: v for v in VALIDADORES}
 

@@ -41,7 +41,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import CodigoDescripcion, DetalleFacturacionCMC, GuardarAtencion, ListadoMedico
 from app.modules.validaciones.legacy import mapeo
-from app.modules.validaciones.legacy.perfiles import perfil_de
+from app.modules.validaciones.legacy.perfiles import SIN_ESPEJO, perfil_de, se_espeja
 
 log = logging.getLogger(__name__)
 
@@ -57,7 +57,18 @@ async def replicar_alta(
     `None` no es un error del que haya que enterarse en el endpoint: significa
     "esta prestación no se espejó", y el motivo queda en el log.
     """
-    perfil = perfil_de(int(detalle.cod_obr))
+    nro = int(detalle.cod_obr)
+
+    # Decidido: no es una anomalía, así que no ensucia el log con warnings.
+    if not se_espeja(nro):
+        log.debug(
+            "Espejo legacy: la obra social %s no se replica a propósito (%s).",
+            nro,
+            SIN_ESPEJO[nro],
+        )
+        return None
+
+    perfil = perfil_de(nro)
     if perfil is None:
         log.warning(
             "Espejo legacy: la obra social %s no tiene perfil en legacy/perfiles.py; "

@@ -45,6 +45,20 @@ async def _nombre_os(obra_social_nro: int, db: AsyncSession) -> str:
     return os.OBRA_SOCIAL if os else str(obra_social_nro)
 
 
+async def _nombres_os(nros: list[int], db: AsyncSession) -> dict[int, str]:
+    """Los nombres de varias obras sociales, en una sola consulta."""
+    if not nros:
+        return {}
+    filas = (
+        await db.execute(
+            select(ObrasSociales.NRO_OBRASOCIAL, ObrasSociales.OBRA_SOCIAL).where(
+                ObrasSociales.NRO_OBRASOCIAL.in_(nros)
+            )
+        )
+    ).all()
+    return {nro: nombre for nro, nombre in filas}
+
+
 @router.get("/ranking_valores", response_model=RankingValoresOut)
 async def ranking_valores(
     fecha_referencia: Optional[datetime.date] = Query(None),
@@ -67,19 +81,41 @@ async def ranking_valores(
         HistorialPrecioCodigo.vigencia_desde <= fecha,
         (HistorialPrecioCodigo.vigencia_hasta.is_(None))
         | (HistorialPrecioCodigo.vigencia_hasta >= fecha),
-    ).order_by(HistorialPrecioCodigo.precio_total.desc())
-    result = await db.execute(stmt)
-    historiales = result.scalars().all()
+    )
+    historiales = (await db.execute(stmt)).scalars().all()
 
-    ranking = []
-    for pos, h in enumerate(historiales, start=1):
-        nombre = await _nombre_os(h.obra_social_nro, db)
-        ranking.append(RankingItem(
+    # Una fila por obra social, no una por vigencia. El filtro es por rango y
+    # muchas filas viejas quedaron con `vigencia_hasta` en NULL, así que una
+    # misma obra social puede traer decenas de vigencias que cubren la fecha
+    # (el 420351 devuelve 2.121 filas para 53 obras sociales). Sin esto el
+    # ranking la lista varias veces, en posiciones distintas y con precios
+    # distintos. Vale la vigencia más reciente; a igual fecha, el precio mayor.
+    ultima: dict[int, HistorialPrecioCodigo] = {}
+    for h in historiales:
+        previa = ultima.get(h.obra_social_nro)
+        if (
+            previa is None
+            or h.vigencia_desde > previa.vigencia_desde
+            or (
+                h.vigencia_desde == previa.vigencia_desde
+                and h.precio_total > previa.precio_total
+            )
+        ):
+            ultima[h.obra_social_nro] = h
+
+    # Los nombres en una sola lectura: antes iba un SELECT por fila.
+    nombres = await _nombres_os(list(ultima), db)
+
+    ordenados = sorted(ultima.values(), key=lambda h: h.precio_total, reverse=True)
+    ranking = [
+        RankingItem(
             posicion=pos,
             obra_social_nro=h.obra_social_nro,
-            nombre_os=nombre,
+            nombre_os=nombres.get(h.obra_social_nro, str(h.obra_social_nro)),
             valor=h.precio_total,
-        ))
+        )
+        for pos, h in enumerate(ordenados, start=1)
+    ]
 
     return RankingValoresOut(
         fecha_referencia=fecha,
@@ -125,11 +161,31 @@ async def boletin(
     result = await db.execute(stmt)
     historiales = result.scalars().all()
 
+    # Los nomencladores y valores se leen en lote y no uno por fila: sin OS en
+    # contexto el boletín de un código devuelve una fila por cada vigencia que
+    # cubre la fecha (hoy el 420351 pasa las dos mil), y un db.get por fila eran
+    # más de cuatro mil idas a la base para armar una sola respuesta.
+    nom_ids = {h.nomenclador_id for h in historiales if h.nomenclador_id}
+    val_ids = {h.valores_id for h in historiales if h.valores_id}
+
+    noms = {}
+    if nom_ids:
+        filas = await db.execute(
+            select(NomencladorCMC).where(NomencladorCMC.id.in_(nom_ids))
+        )
+        noms = {n.id: n for n in filas.scalars()}
+
+    valores = {}
+    if val_ids:
+        filas = await db.execute(select(Valor).where(Valor.id.in_(val_ids)))
+        valores = {v.id: v for v in filas.scalars()}
+
     items = []
     for h in historiales:
-        nom = await db.get(NomencladorCMC, h.nomenclador_id)
-        valor = await db.get(Valor, h.valores_id)
+        nom = noms.get(h.nomenclador_id)
+        valor = valores.get(h.valores_id)
         items.append(BoletinItemOut(
+            obra_social_nro=h.obra_social_nro,
             codigo=nom.codigo if nom else str(h.nomenclador_id),
             origen=h.origen,
             descripcion=service.descripcion_efectiva(valor, nom),

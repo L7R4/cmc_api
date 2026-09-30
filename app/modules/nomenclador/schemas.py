@@ -48,31 +48,24 @@ def slugify_codigo(nombre: str) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class NomencladorCreate(BaseModel):
+    """Alta de un código del Colegio. Puro catálogo: código + clasificación + vínculo
+    opcional al Nomenclador Nacional. Descripción, especialidades y "sin restricción"
+    dejaron de vivir acá — son datos POR OBRA SOCIAL, se cargan desde el modal de
+    Valores (`nm_valor_especialidad` / `Valor.descripcion` / `Valor.sin_restriccion_
+    especialidad`; ver `nomenclador/routes_valores.py`)."""
     codigo: str
-    descripcion: str
-    # NULL = código compartido del Colegio/Nacional. Con número, el código es propio de
-    # esa obra social y solo se resuelve cuando se opera sobre ella.
-    obra_social_nro: Optional[int] = None
     categoria: Optional[str] = None
     complejidad: Optional[Literal["baja", "media", "alta"]] = None
-    sin_restriccion_especialidad: bool = False
-    # Default del Colegio; cada OS lo pisa con Valor.requiere_autorizacion
-    requiere_autorizacion: bool = False
-    unidades_honorarios: Optional[Decimal] = None
-    unidades_ayudante: Optional[Decimal] = None
-    unidades_gastos: Optional[Decimal] = None
+    # Código NN al que corresponde este código del Colegio (opcional). Alimenta la
+    # generación automática de Valores NN — ver NomencladorNacional.
+    nomenclador_nacional_id: Optional[int] = None
     observacion: Optional[str] = None
 
 
 class NomencladorUpdate(BaseModel):
-    descripcion: Optional[str] = None
     categoria: Optional[str] = None
     complejidad: Optional[Literal["baja", "media", "alta"]] = None
-    sin_restriccion_especialidad: Optional[bool] = None
-    requiere_autorizacion: Optional[bool] = None
-    unidades_honorarios: Optional[Decimal] = None
-    unidades_ayudante: Optional[Decimal] = None
-    unidades_gastos: Optional[Decimal] = None
+    nomenclador_nacional_id: Optional[int] = None
     activo: Optional[bool] = None
     observacion: Optional[str] = None
 
@@ -80,16 +73,9 @@ class NomencladorUpdate(BaseModel):
 class NomencladorOut(BaseModel):
     id: int
     codigo: str
-    # NULL = compartido; N = propio de esa obra social
-    obra_social_nro: Optional[int] = None
-    descripcion: str
     categoria: Optional[str]
     complejidad: Optional[str]
-    sin_restriccion_especialidad: bool
-    requiere_autorizacion: bool = False
-    unidades_honorarios: Optional[Decimal]
-    unidades_ayudante: Optional[Decimal]
-    unidades_gastos: Optional[Decimal]
+    nomenclador_nacional_id: Optional[int] = None
     activo: bool
     observacion: Optional[str]
     created_at: datetime.datetime
@@ -98,58 +84,62 @@ class NomencladorOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
-class DesacoplarOut(BaseModel):
-    """Resultado de separar un código compartido en una fila propia de una OS."""
-    nomenclador: NomencladorOut
-    origen_id: int
-    especialidades_clonadas: int
-    valores_repuntados: int
-    historial_repuntado: int
-    prestaciones_repuntadas: int
-
-
 # ─────────────────────────────────────────────────────────────────────────────
-# NomencladorEspecialidad
+# NomencladorNacional
 # ─────────────────────────────────────────────────────────────────────────────
 
-class NomencladorEspecialidadCreate(BaseModel):
-    especialidad_id_colegio: int
-    # NULL = regla del Colegio (vale para todas las OS); N = regla propia de esa obra
-    # social, que REEMPLAZA a las compartidas para ella.
-    obra_social_nro: Optional[int] = None
-    observacion: Optional[str] = None
+class NomencladorNacionalCreate(BaseModel):
+    codigo: str
+    descripcion: Optional[str] = None
+    unidades_honorarios: Optional[Decimal] = None
+    unidades_ayudante: Optional[Decimal] = None
+    unidades_gastos: Optional[Decimal] = None
+    categoria: Optional[str] = None
+    complejidad: Optional[Literal["baja", "media", "alta"]] = None
 
 
-class NomencladorEspecialidadOut(BaseModel):
+class NomencladorNacionalUpdate(BaseModel):
+    descripcion: Optional[str] = None
+    unidades_honorarios: Optional[Decimal] = None
+    unidades_ayudante: Optional[Decimal] = None
+    unidades_gastos: Optional[Decimal] = None
+    categoria: Optional[str] = None
+    complejidad: Optional[Literal["baja", "media", "alta"]] = None
+    activo: Optional[bool] = None
+
+
+class NomencladorNacionalOut(BaseModel):
     id: int
-    nomenclador_id: int
-    especialidad_id_colegio: int
-    # NULL = regla compartida; N = propia de esa obra social
-    obra_social_nro: Optional[int] = None
+    codigo: str
+    descripcion: Optional[str]
+    unidades_honorarios: Optional[Decimal]
+    unidades_ayudante: Optional[Decimal]
+    unidades_gastos: Optional[Decimal]
+    categoria: Optional[str]
+    complejidad: Optional[str]
     activo: bool
-    observacion: Optional[str]
     created_at: datetime.datetime
+    updated_at: datetime.datetime
 
     model_config = {"from_attributes": True}
 
 
-class NomencladorEspecialidadResumenOut(BaseModel):
-    """Fila enriquecida código↔especialidad para la vista de tabla del front.
+# ─────────────────────────────────────────────────────────────────────────────
+# ValorEspecialidad — especialidades habilitadas por (obra_social_nro, código)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Sin CRUD propio: se editan enteramente desde el modal de Valores (`ValorUpdate.
+# especialidades`, ver `routes_valores.update_valor_metadata`). `codigos_por_
+# especialidad` (antes NomencladorEspecialidadResumenOut) sigue existiendo como
+# consulta de solo lectura, ahora por OS.
 
-    Trae el código y descripción del nomenclador + el nombre de la especialidad
-    resuelto (ID_COLEGIO_ESPE → especialidad.ESPECIALIDAD) en una sola respuesta.
-    `especialidad` es None si el ID_COLEGIO_ESPE no matchea ninguna fila del catálogo.
-    """
-    id: int
-    nomenclador_id: int
+class CodigoPorEspecialidadOut(BaseModel):
+    """Fila código↔especialidad para una obra social puntual (vista de consulta)."""
     codigo: str
     descripcion: str
     especialidad_id_colegio: int
     especialidad: Optional[str] = None
-    obra_social_nro: Optional[int] = None
-    activo: bool
-    observacion: Optional[str] = None
-    created_at: datetime.datetime
+    obra_social_nro: int
 
     model_config = {"from_attributes": True}
 
@@ -525,11 +515,14 @@ def validar_reglas_origen(
     especialidad_id_colegio: Optional[int],
     por_presupuesto: bool,
     es_galeno: Optional[bool],
+    sin_restriccion: bool = False,
 ) -> None:
     """
     Reglas transversales por origen (válidas tanto en Pydantic como server-side):
     - NE exige especialidad_id_colegio (identifica qué especialidad habilitada cobra
-      esta variante); NN va siempre sin especialidad.
+      esta variante) SALVO que el par (OS, código) sea sin restricción de
+      especialidad: ahí una NE sin especialidad es el precio para cualquier médico
+      (ver service.lookup_precio). NN va siempre sin especialidad.
     - NN es siempre calculado: exige modalidad galeno y no puede ser por_presupuesto.
 
     Esta función solo valida forma (presencia/ausencia de especialidad). Que la
@@ -539,8 +532,11 @@ def validar_reglas_origen(
     `es_galeno`: True si la modalidad es calculable (galeno), False si fija, None si
     no aplica/desconocida (p.ej. por_presupuesto, donde no hay ecuación que evaluar).
     """
-    if origen == Origen.NE.value and especialidad_id_colegio is None:
-        raise ValueError("El origen NE exige especialidad_id_colegio")
+    if origen == Origen.NE.value and especialidad_id_colegio is None and not sin_restriccion:
+        raise ValueError(
+            "El origen NE exige especialidad_id_colegio, salvo que el código sea "
+            "sin restricción de especialidad (sin_restriccion_especialidad=true)"
+        )
     if origen != Origen.NE.value and especialidad_id_colegio is not None:
         raise ValueError("especialidad_id_colegio solo es válido para origen NE; NN debe ir sin especialidad")
     if origen == Origen.NN.value:
@@ -590,7 +586,11 @@ class ValorCreate(BaseModel):
     nomenclador_id: int
     # Categoría/procedencia: fija la prioridad del lookup (NE > NN)
     origen: Origen
-    descripcion: Optional[str] = None
+    # Obligatoria: cómo nombra ESTA obra social al código. Ya no hereda en silencio
+    # del catálogo del Colegio — se carga acá, en el alta manual (a diferencia de la
+    # rotación de precio y de los procesos masivos, que sí la heredan del valor
+    # anterior/origen; ver actualizar_valor / replicar_*).
+    descripcion: str = Field(..., min_length=1)
     nivel: Optional[int] = None
     complejidad: Optional[Literal["baja", "media", "alta"]] = None
     # Override de categoría por OS; NULL hereda la del nomenclador
@@ -598,10 +598,14 @@ class ValorCreate(BaseModel):
     # Override por OS; NULL hereda nm_nomenclador.requiere_autorizacion. No es lo mismo
     # que False: False = "esta OS dice que no", NULL = "esta OS no opinó".
     requiere_autorizacion: Optional[bool] = None
-    # Especialidad que cobra esta variante. Obligatoria en NE (debe estar habilitada
-    # para el código en nm_nomenclador_especialidad, ver validar_especialidad_habilitada);
-    # NN va siempre NULL.
+    # Especialidad que cobra esta variante. Obligatoria en NE salvo que el código sea
+    # sin restricción (ver sin_restriccion_especialidad abajo): ahí puede ir NULL y
+    # es el precio para cualquier especialidad. Si viene, queda habilitada en
+    # nm_valor_especialidad (ver validar_especialidad_habilitada). NN va siempre NULL.
     especialidad_id_colegio: Optional[int] = None
+    # Dato del PAR (obra_social_nro, código): None = hereda lo que ya tenga el par;
+    # True/False = lo fija y se propaga a todas sus filas activas.
+    sin_restriccion_especialidad: Optional[bool] = None
     # True → código por presupuesto: se ignora la ecuación, los componentes H/G/A
     # se guardan en 0 y el monto lo informa la OS al facturar (modo manual)
     por_presupuesto: bool = False
@@ -625,8 +629,11 @@ class ValorCreate(BaseModel):
         if not self.por_presupuesto:
             validar_lista_componentes(self.componentes)
             es_galeno = any(c.galeno_id is not None for c in self.componentes)
+        # NE sin especialidad exige declararlo explícito: heredar "sin restricción"
+        # del par se resuelve en la ruta, contra la base.
         validar_reglas_origen(
-            self.origen.value, self.especialidad_id_colegio, self.por_presupuesto, es_galeno
+            self.origen.value, self.especialidad_id_colegio, self.por_presupuesto, es_galeno,
+            sin_restriccion=bool(self.sin_restriccion_especialidad),
         )
         return self
 
@@ -638,12 +645,14 @@ class ValorCreateMulti(BaseModel):
     obra_social_nro: int
     nomenclador_id: int
     origen: Literal[Origen.NE] = Origen.NE
-    descripcion: Optional[str] = None
+    descripcion: str = Field(..., min_length=1)
     nivel: Optional[int] = None
     complejidad: Optional[Literal["baja", "media", "alta"]] = None
     categoria: Optional[str] = None
     requiere_autorizacion: Optional[bool] = None
     especialidades_id_colegio: List[int] = Field(..., min_length=1)
+    # Dato del PAR — misma semántica que ValorCreate.sin_restriccion_especialidad.
+    sin_restriccion_especialidad: Optional[bool] = None
     por_presupuesto: bool = False
     cantidad_ayudantes: Optional[int] = Field(None, ge=0)
     coseguro: Decimal = Field(Decimal("0"), ge=0)
@@ -675,6 +684,7 @@ class ValorCreateMulti(BaseModel):
             categoria=self.categoria,
             requiere_autorizacion=self.requiere_autorizacion,
             especialidad_id_colegio=especialidad_id_colegio,
+            sin_restriccion_especialidad=self.sin_restriccion_especialidad,
             por_presupuesto=self.por_presupuesto,
             cantidad_ayudantes=self.cantidad_ayudantes,
             coseguro=self.coseguro,
@@ -686,15 +696,26 @@ class ValorCreateMulti(BaseModel):
 
 class ValorUpdate(BaseModel):
     # especialidad_id_colegio NO es editable: es la identidad de la variante
+    #
+    # descripcion / sin_restriccion_especialidad son datos del PAR (obra_social_nro,
+    # código), no de esta fila puntual: al guardarlos se propagan a TODAS las filas
+    # activas del mismo par (todas las variantes NE + la NN), para que no queden
+    # desincronizadas entre sí — ver routes_valores.update_valor_metadata.
     descripcion: Optional[str] = None
+    sin_restriccion_especialidad: Optional[bool] = None
+    # Especialidades habilitadas para facturar este código EN esta obra social.
+    # None = no tocar; [] = vaciar (rechazado si alguna tiene un Valor NE activo
+    # dependiendo de ella); lista = REEMPLAZA por completo la habilitación actual del
+    # par (no se suma). Es el único lugar del sistema donde se editan — ver
+    # nm_valor_especialidad / service.reemplazar_especialidades.
+    especialidades: Optional[List[int]] = None
     nivel: Optional[int] = None
     complejidad: Optional[Literal["baja", "media", "alta"]] = None
     categoria: Optional[str] = None
     requiere_autorizacion: Optional[bool] = None
     cantidad_ayudantes: Optional[int] = Field(None, ge=0)
-    # None = no tocar; va con los metadatos, no con la ecuación de precio, para
-    # poder corregirlo sin abrir una vigencia nueva.
-    coseguro: Optional[Decimal] = Field(None, ge=0)
+    # coseguro NO va acá: es parte de la ecuación de precio, no un metadato — cambiarlo
+    # cierra la vigencia actual y abre una nueva (ver ValorCerrarYCrearIn.coseguro).
     observacion: Optional[str] = None
 
 
@@ -741,6 +762,11 @@ class ValorOut(BaseModel):
     requiere_autorizacion: Optional[bool] = None
     especialidad_id_colegio: Optional[int]
     por_presupuesto: bool = False
+    sin_restriccion_especialidad: bool = False
+    # Especialidades habilitadas HOY para (obra_social_nro, código) — dato del par,
+    # igual para todas las variantes activas. Se resuelve aparte (no es columna de
+    # Valor); ver routes_valores._valores_out.
+    especialidades: List[int] = []
     cantidad_ayudantes: Optional[int] = None
     coseguro: Decimal = Decimal("0")
     # Modalidad de la ecuación: 'galeno' | 'fijo' | 'por_presupuesto'
@@ -948,6 +974,42 @@ class HistorialPrecioOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class ValorSinHistorialOut(BaseModel):
+    """Un `Valor` activo que no tiene ninguna fila en `nm_historial_precio_codigo`."""
+    valor_id: int
+    obra_social_nro: int
+    nomenclador_id: int
+    codigo: str
+    origen: str
+    especialidad_id_colegio: Optional[int] = None
+    vigencia_desde: datetime.date
+
+
+class SinHistorialPorObraSocialOut(BaseModel):
+    obra_social_nro: int
+    #: Valores activos huérfanos de esa obra social.
+    valores: int
+    #: Códigos distintos afectados (un código aporta un valor por especialidad).
+    codigos: int
+    vigencia_min: datetime.date
+    vigencia_max: datetime.date
+
+
+class DiagnosticoSinHistorialOut(BaseModel):
+    """Resultado del chequeo de integridad valores ↔ historial.
+
+    `total` tiene que ser **0**. Si no lo es, esos valores se ven en el panel
+    pero son invisibles para `lookup_precio`, que cotiza sólo contra el
+    historial: o la prestación se factura con otra variante (típicamente la NN,
+    que gana por descarte) o queda sin precio. Ver
+    `service.valores_activos_sin_historial`.
+    """
+    total: int
+    por_obra_social: List[SinHistorialPorObraSocialOut]
+    #: Muestra acotada por `limite_detalle`; `total` es el número real.
+    detalle: List[ValorSinHistorialOut]
+
+
 class ResumenVigenciaOut(BaseModel):
     """Una vigencia de una obra social, ya agregada: cuántos códigos entraron y
     cuánto varió el precio promedio contra la vigencia anterior de cada código.
@@ -1033,6 +1095,9 @@ class TablaValoresItem(BaseModel):
     descripcion: Optional[str]
     nivel: Optional[int]
     por_presupuesto: bool = False
+    # Valor.sin_restriccion_especialidad de esta variante: el código lo puede
+    # facturar cualquier especialidad en esta OS.
+    sin_restriccion_especialidad: bool = False
     precio_total: Decimal
     vigencia_desde: datetime.date
     vigencia_hasta: Optional[datetime.date]

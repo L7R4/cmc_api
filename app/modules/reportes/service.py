@@ -25,7 +25,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import DetalleFacturacionCMC as D
 from app.db.models import ListadoMedico
 from app.db.models.catalogs import ObrasSociales
-from app.db.models.nomenclador_cmc import NomencladorCMC
+from app.db.models.nomenclador_cmc import NomencladorCMC, NomencladorDescripcionLegacy
+from app.modules.nomenclador import service as service_nm
 
 CERO = Decimal("0.00")
 
@@ -96,24 +97,35 @@ def _like(q: str) -> str:
 async def _codigos_que_matchean(db: AsyncSession, q: str) -> list[str]:
     """Códigos cuyo NÚMERO o DESCRIPCIÓN contienen el texto buscado.
 
-    La descripción vive en `nm_nomenclador`, no en `detalle_facturacion`, así
-    que se resuelve primero acá y después se filtra la agregación por `IN`. Es
-    más barato que joinear el nomenclador dentro del GROUP BY, y además permite
+    La descripción ya no vive en `nm_nomenclador` (pasó a ser un dato por obra
+    social, en `Valor` — ver plan de reestructura del nomenclador); este reporte
+    agrega across todas las OS, así que busca por texto contra el snapshot legacy
+    (`nm_nomenclador_descripcion_legacy`), la última descripción que tuvo el
+    catálogo del Colegio antes de la reestructura.
+
+    Se resuelve primero acá y después se filtra la agregación por `IN`. Es más
+    barato que joinear el nomenclador dentro del GROUP BY, y además permite
     buscar por texto ("consulta") además de por código.
     """
     patron = _like(q)
-    filas = (
+    por_codigo = (
         await db.execute(
-            select(NomencladorCMC.codigo).where(
-                NomencladorCMC.codigo.like(patron, escape="!")
-                | NomencladorCMC.descripcion.like(patron, escape="!")
-            )
-            # Tope: si alguien busca una letra sola no tiene sentido armar un IN
-            # con miles de códigos — con 500 alcanza para acotar de sobra.
+            select(NomencladorCMC.codigo)
+            .where(NomencladorCMC.codigo.like(patron, escape="!"))
             .limit(500)
         )
     ).scalars().all()
-    return list(filas)
+    por_desc = (
+        await db.execute(
+            select(NomencladorDescripcionLegacy.codigo)
+            .where(NomencladorDescripcionLegacy.descripcion.like(patron, escape="!"))
+            .distinct()
+            .limit(500)
+        )
+    ).scalars().all()
+    # Tope combinado: si alguien busca una letra sola no tiene sentido armar un
+    # IN con miles de códigos — con 500 de cada fuente alcanza de sobra.
+    return list(dict.fromkeys([*por_codigo, *por_desc]))
 
 
 async def _socios_que_matchean(db: AsyncSession, q: str) -> list[str]:
@@ -162,16 +174,15 @@ async def _nombres_obras(db: AsyncSession, nros: Sequence[str]) -> dict[str, str
 
 
 async def _descripciones(db: AsyncSession, codigos: Sequence[str]) -> dict[str, str]:
+    """Descripción "representativa" de cada código, sin distinguir obra social —
+    este reporte agrega across todas las OS, así que no hay una única fuente
+    (obra social, código) que elegir. Sale del snapshot legacy (última
+    descripción que tuvo el catálogo del Colegio antes de que pasara a vivir por
+    OS) — ver service_nm.descripciones_legacy."""
     if not codigos:
         return {}
-    filas = (
-        await db.execute(
-            select(NomencladorCMC.codigo, NomencladorCMC.descripcion).where(
-                NomencladorCMC.codigo.in_(list(codigos))
-            )
-        )
-    ).all()
-    return {c: d for c, d in filas}
+    legacy = await service_nm.descripciones_legacy(db, {(c, None) for c in codigos})
+    return {c: legacy.get((c, None), "") for c in codigos}
 
 
 # ── Resumen ───────────────────────────────────────────────────────────────────

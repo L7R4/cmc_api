@@ -27,6 +27,16 @@ from app.modules.validaciones.obras.ospm.schemas import EntradaOspm
 # Es una regla del convenio de OSPM, replicada de grabar_prestacion_ospm_1.php.
 PREFIJO_CONSULTA = "42"
 
+# OSPM no emite un número de autorización propio (no hay servicio en línea del
+# lado de la obra social, ver el docstring de `validar()`); el Colegio arma uno
+# local para que la prestación autorizada tenga con qué identificarse en pantalla
+# y en las búsquedas ("Autorización" / `orden_o_autorizacion`), igual que
+# Sancor/Nobis/OSPJN. Sin prefijo ni letras a pedido: 8 dígitos, nada más — el
+# arranque en `NUMERO_INICIAL` (en vez de 1) es lo que lo distingue de un
+# correlativo interno cualquiera.
+DIGITOS_VALIDACION = 8
+NUMERO_INICIAL = 24534444
+
 
 class ValidadorOspm(ValidadorOS):
     def __init__(self):
@@ -44,11 +54,15 @@ class ValidadorOspm(ValidadorOS):
         solo dato local, **el afiliado**, buscado en el padrón (`clientes_ospm`)
         por DNI.
 
-        | Afiliado | Resultado |
-        |---|---|
-        | activo | `autorizada` — factura |
-        | existe, inactivo | `rechazada` — "Rechazado. Afiliado suspendido" |
-        | no está en el padrón | `rechazada` — "Rechazado. Afiliado inexistente" |
+        | Afiliado | Resultado | Nº de validación |
+        |---|---|---|
+        | activo | `autorizada` — factura | se genera uno local (`_generar_nro_validacion`) |
+        | existe, inactivo | `rechazada` — "Rechazado. Afiliado suspendido" | ninguno |
+        | no está en el padrón | `rechazada` — "Rechazado. Afiliado inexistente" | ninguno |
+
+        Mismo criterio que el resto de las obras sociales (ver Sancor): sólo lo
+        que factura de verdad se queda con un número — un rechazo no autorizó
+        nada, así que no hay nada que identificar.
 
         Los dos rechazos quedan igual de grabados que el autorizado (fila en
         `detalle_facturacion` con `estado='X'`, sin facturar) — a diferencia de
@@ -76,10 +90,12 @@ class ValidadorOspm(ValidadorOS):
         if afiliado is None:
             estado, detalle = "rechazada", "Rechazado. Afiliado inexistente"
             nombre_afiliado = ""
+            nro_validacion = None
             traza_padron = {"documento": doc, "encontrado": False}
         elif not afiliado.activo:
             estado, detalle = "rechazada", "Rechazado. Afiliado suspendido"
             nombre_afiliado = afiliado.nombre
+            nro_validacion = None
             traza_padron = {
                 "documento": doc, "cuit": afiliado.CUIT,
                 "nombre": afiliado.nombre, "activo": afiliado.activo,
@@ -87,6 +103,7 @@ class ValidadorOspm(ValidadorOS):
         else:
             estado, detalle = "autorizada", "Autorizado. Afiliado activo en el padrón de OSPM."
             nombre_afiliado = afiliado.nombre
+            nro_validacion = await self._generar_nro_validacion(ctx.db)
             traza_padron = {
                 "documento": doc, "cuit": afiliado.CUIT,
                 "nombre": afiliado.nombre, "activo": afiliado.activo,
@@ -99,13 +116,36 @@ class ValidadorOspm(ValidadorOS):
             precio=precio,
             nro_afiliado=doc,
             nombre_afiliado=nombre_afiliado,
-            # Sin nº de autorización: OSPM no es un servicio en línea, no hay
-            # ningún número que la obra social le dé al Colegio (a diferencia
-            # de Sancor/Nobis/OSPJN).
-            nro_autorizacion=None,
+            nro_autorizacion=nro_validacion,
             coseguro=CERO,  # OSPM no cobra coseguro (el legacy lo fija en 0)
             traza={"padron": traza_padron},
         )
+
+    async def _generar_nro_validacion(self, db: AsyncSession) -> str:
+        """Siguiente número local: 8 dígitos, sin letras (ej. "24534445").
+
+        Secuencial simple (MAX + 1) sobre lo ya emitido, arrancando en
+        `NUMERO_INICIAL` la primera vez — mismo criterio, y mismo riesgo de
+        colisión aceptado por baja concurrencia (app interna, sin precedente de
+        `SELECT...FOR UPDATE`), que `crear_clinica` en `facturacion/service.py`.
+
+        El MAX sólo mira valores que sean EXACTAMENTE `DIGITOS_VALIDACION`
+        dígitos (regex, no un simple `LIKE`): sin letras no hay forma de
+        reconocer "esto lo generó este método" por prefijo, así que hay que
+        blindarse de cualquier otra cosa que pudiera haber en `autorizacion`
+        para `cod_obr=433` — un valor con más o menos dígitos, o con texto,
+        queda afuera del cálculo en vez de romper el `int()` o descarrilar la
+        numeración.
+        """
+        M = DetalleFacturacionCMC
+        patron_exacto = f"^[0-9]{{{DIGITOS_VALIDACION}}}$"
+        ultimo = (await db.execute(
+            select(func.max(M.autorizacion)).where(
+                M.cod_obr == str(self.nro), M.autorizacion.regexp_match(patron_exacto),
+            )
+        )).scalar_one()
+        siguiente = int(ultimo) + 1 if ultimo else NUMERO_INICIAL
+        return f"{siguiente:0{DIGITOS_VALIDACION}d}"
 
     async def _buscar_afiliado(self, db: AsyncSession, doc: str) -> Optional[ClientesOspm]:
         """Busca el afiliado por DNI. `None` si no está en el padrón — ya no es

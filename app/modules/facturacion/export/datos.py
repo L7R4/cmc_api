@@ -26,6 +26,7 @@ from app.db.models import (
     Especialidad,
     FacturacionCMC,
     ListadoMedico,
+    ObrasSociales,
 )
 from app.modules.facturacion import service
 from app.modules.facturacion.export.schemas import ExportOpciones
@@ -33,7 +34,7 @@ from app.modules.facturacion.export.schemas import ExportOpciones
 M = DetalleFacturacionCMC
 
 _COLUMNAS = (
-    M.id_detalle_prestaciones, M.cod_med, M.cod_nom, M.nomenclador_id,
+    M.id_detalle_prestaciones, M.cod_med, M.cod_obr, M.cod_nom, M.nomenclador_id,
     M.via, M.sesion, M.cantidad, M.honorarios, M.gastos, M.ayudante,
     M.importe_total, M.coseguro, M.porc, M.dni_p, M.nom_ape_p,
     M.cod_clinica, M.fecha_practica, M.autorizacion, M.tipo, M.diag,
@@ -47,6 +48,8 @@ class FilaExport:
     id: int
     cod_medico: str
     prestador_nombre: Optional[str]
+    cod_obr: Optional[str]
+    obra_social_nombre: Optional[str]
     matricula: Optional[int]
     autorizacion: Optional[str]
     fecha_practica: Optional[datetime.date]
@@ -92,6 +95,24 @@ def _cod_medico_a_int(cod_med) -> Optional[int]:
         return int(cod_med)
     except (TypeError, ValueError):
         return None
+
+
+async def _resolver_obras_sociales(db: AsyncSession, cods: set[str]) -> dict[str, str]:
+    """Nombre de obra social por `cod_obr` — mismo patrón que `_nombre_obra_social`
+    de `encabezado.py`, pero en batch: acá una fila por código, no una sola."""
+    nros: set[int] = set()
+    for c in cods:
+        try:
+            nros.add(int(c))
+        except (TypeError, ValueError):
+            continue
+    if not nros:
+        return {}
+    filas = (await db.execute(
+        select(ObrasSociales.NRO_OBRASOCIAL, ObrasSociales.OBRA_SOCIAL)
+        .where(ObrasSociales.NRO_OBRASOCIAL.in_(nros))
+    )).all()
+    return {str(nro): nombre for nro, nombre in filas}
 
 
 def _tipo_de(
@@ -218,10 +239,18 @@ async def _materializar_filas(
     especialidades = await _resolver_especialidades(
         db, {r.id_especialidad for r in filas_raw if r.id_especialidad}
     )
+    obras_sociales = await _resolver_obras_sociales(
+        db, {str(r.cod_obr) for r in filas_raw if r.cod_obr}
+    )
 
     filas: list[FilaExport] = []
     for r in filas_raw:
         cod_medico = str(r.cod_med)
+        # `cod_obr` tiene el mismo desalineo de tipos que `cod_med` (declarado
+        # String en el ORM, INT en la tabla legacy — ver el módulo docstring):
+        # normalizar a str acá, no sólo al armar el set de arriba, porque el
+        # lookup de abajo compara contra las claves str de `obras_sociales`.
+        cod_obr = str(r.cod_obr) if r.cod_obr is not None else None
         medico = medicos.get(cod_medico)
         h, g, a = service._dec(r.honorarios), service._dec(r.gastos), service._dec(r.ayudante)
         tipo = _tipo_de(
@@ -232,6 +261,8 @@ async def _materializar_filas(
             id=r.id_detalle_prestaciones,
             cod_medico=cod_medico,
             prestador_nombre=medico.NOMBRE if medico else None,
+            cod_obr=cod_obr,
+            obra_social_nombre=obras_sociales.get(cod_obr) if cod_obr else None,
             matricula=medico.MATRICULA_PROV if medico else None,
             autorizacion=r.autorizacion,
             fecha_practica=r.fecha_practica,

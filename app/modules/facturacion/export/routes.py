@@ -28,6 +28,7 @@ from app.modules.facturacion.export import excel as excel_mod
 from app.modules.facturacion.export import pdf as pdf_mod
 from app.modules.facturacion.export.schemas import (
     COLUMNAS_DEFAULT,
+    COLUMNAS_DEFAULT_POR_MEDICO,
     AgrupacionExport,
     ColumnaExport,
     ExportOpciones,
@@ -63,6 +64,38 @@ async def _resolver_opciones(
 
     return ExportOpciones(
         orden=orden, agrupacion=agrupacion, columnas=columnas or list(COLUMNAS_DEFAULT),
+        fecha_desde=fecha_desde, fecha_hasta=fecha_hasta, id_especialidad=id_especialidad,
+        cod_medicos=cod_medicos, revisado=revisado, tipos=tipos,
+    )
+
+
+async def _resolver_opciones_medico(
+    preset_id: Optional[int] = Query(None, description="Ignora el resto de los parámetros si viene"),
+    orden: OrdenExport = Query("nombre_socio"),
+    agrupacion: AgrupacionExport = Query("todo_junto"),
+    columnas: Optional[list[ColumnaExport]] = Query(None),
+    fecha_desde: Optional[datetime.date] = Query(None),
+    fecha_hasta: Optional[datetime.date] = Query(None),
+    id_especialidad: Optional[int] = Query(None),
+    cod_medicos: Optional[list[str]] = Query(None),
+    revisado: Optional[bool] = Query(None),
+    tipos: Optional[list[TipoPrestacion]] = Query(None),
+    db: AsyncSession = Depends(get_db),
+    user=Depends(get_current_user),
+) -> ExportOpciones:
+    """Mismos parámetros que `_resolver_opciones`, pero para "Detalle por
+    médico": ese export cruza obras sociales en vez de médicos (una sola
+    factura tiene una única OS), así que el default de columnas es otro —
+    ver `COLUMNAS_DEFAULT_POR_MEDICO`. Un preset guardado, si viene, pisa
+    igual que en el otro export."""
+    if preset_id is not None:
+        preset = await db.get(ExportPreset, preset_id)
+        if preset is None or preset.usuario != str(user["nro_socio"]):
+            raise HTTPException(404, "Preset no encontrado")
+        return ExportOpciones(**preset.opciones)
+
+    return ExportOpciones(
+        orden=orden, agrupacion=agrupacion, columnas=columnas or list(COLUMNAS_DEFAULT_POR_MEDICO),
         fecha_desde=fecha_desde, fecha_hasta=fecha_hasta, id_especialidad=id_especialidad,
         cod_medicos=cod_medicos, revisado=revisado, tipos=tipos,
     )
@@ -181,7 +214,7 @@ async def _export_detalle_medico(
 async def export_detalle_medico_pdf(
     nro_socio: int,
     periodo: str = Query(..., description="Período AAAAMM"),
-    opciones: ExportOpciones = Depends(_resolver_opciones),
+    opciones: ExportOpciones = Depends(_resolver_opciones_medico),
     db: AsyncSession = Depends(get_db),
     user=Depends(get_current_user),
 ):
@@ -195,7 +228,7 @@ async def export_detalle_medico_pdf(
 async def export_detalle_medico_xlsx(
     nro_socio: int,
     periodo: str = Query(..., description="Período AAAAMM"),
-    opciones: ExportOpciones = Depends(_resolver_opciones),
+    opciones: ExportOpciones = Depends(_resolver_opciones_medico),
     db: AsyncSession = Depends(get_db),
     user=Depends(get_current_user),
 ):

@@ -37,7 +37,12 @@ from app.modules.validaciones.core.consultas import buscar_codigos as _buscar_co
 from app.modules.validaciones.core.consultas import listar_periodos as _listar_periodos
 from app.modules.validaciones.core.consultas import listar_prestaciones as _listar_prestaciones
 from app.modules.validaciones.core.medicos import get_medico
-from app.modules.validaciones.core.periodos import partes_periodo, periodo_actual, periodo_cerrado
+from app.modules.validaciones.core.periodos import (
+    actor_para,
+    partes_periodo,
+    periodo_actual,
+    periodo_cerrado,
+)
 from app.modules.validaciones.schemas import (
     CodigoOut,
     PeriodoActualOut,
@@ -120,7 +125,7 @@ async def listar_periodos(
 ):
     """Totales por período cargado, el más reciente primero."""
     socio = _socio_objetivo(user, nro_socio)
-    return await _listar_periodos(db, socio, obra_social)
+    return await _listar_periodos(db, socio, obra_social, actor_para(user, socio))
 
 
 @router.get("/codigos", response_model=List[CodigoOut])
@@ -194,9 +199,13 @@ async def eliminar_prestacion(
     """Baja lógica: la fila queda con `validacion_anulada=1` y `estado='X'`, así
     sale de la factura sin perder la traza. En Sancor/Nobis además intenta
     anular la autorización en la obra social antes de marcar nada (ver
-    `ValidadorOS.anular` de cada obra en `obras/`)."""
+    `ValidadorOS.anular` de cada obra en `obras/`).
+
+    Si el período del médico ya cerró, solo el Colegio (operando con `nro_socio`
+    sobre otro médico) puede seguir dando la baja, y solo mientras su propia
+    fase del período siga abierta — ver `periodos.actor_para`."""
     socio = _socio_objetivo(user, nro_socio)
-    await pipeline.eliminar_prestacion(db, prestacion_id, socio)
+    await pipeline.eliminar_prestacion(db, prestacion_id, socio, actor_para(user, socio))
 
 
 # Endpoints propios de una obra social (hoy: `GET /sancor/estado`,

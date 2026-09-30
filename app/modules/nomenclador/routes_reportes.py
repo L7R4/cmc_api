@@ -141,21 +141,10 @@ async def boletin(
         stmt = stmt.where(HistorialPrecioCodigo.obra_social_nro == obra_social_nro)
 
     if codigo:
-        if obra_social_nro:
-            # Con OS en contexto el código resuelve a una sola fila (propia > compartida).
-            nom = await service.resolver_nomenclador(db, codigo, obra_social_nro)
-            if not nom:
-                raise HTTPException(404, f"Código '{codigo}' no encontrado")
-            stmt = stmt.where(HistorialPrecioCodigo.nomenclador_id == nom.id)
-        else:
-            # Sin OS el mismo código puede existir compartido y propio de varias obras
-            # sociales; el boletín las muestra todas en vez de elegir una arbitraria.
-            ids = (await db.execute(
-                select(NomencladorCMC.id).where(NomencladorCMC.codigo == codigo)
-            )).scalars().all()
-            if not ids:
-                raise HTTPException(404, f"Código '{codigo}' no encontrado")
-            stmt = stmt.where(HistorialPrecioCodigo.nomenclador_id.in_(ids))
+        nom = await service.resolver_nomenclador(db, codigo)
+        if not nom:
+            raise HTTPException(404, f"Código '{codigo}' no encontrado")
+        stmt = stmt.where(HistorialPrecioCodigo.nomenclador_id == nom.id)
 
     stmt = stmt.order_by(HistorialPrecioCodigo.obra_social_nro, HistorialPrecioCodigo.nomenclador_id)
     result = await db.execute(stmt)
@@ -182,13 +171,17 @@ async def boletin(
 
     items = []
     for h in historiales:
-        nom = noms.get(h.nomenclador_id)
-        valor = valores.get(h.valores_id)
+        nom = await db.get(NomencladorCMC, h.nomenclador_id)
+        valor = await db.get(Valor, h.valores_id)
+        legacy = None
+        if nom is not None and not (valor and valor.descripcion and valor.descripcion.strip()):
+            mapa = await service.descripciones_legacy(db, {(nom.codigo, h.obra_social_nro)})
+            legacy = mapa.get((nom.codigo, h.obra_social_nro))
         items.append(BoletinItemOut(
             obra_social_nro=h.obra_social_nro,
             codigo=nom.codigo if nom else str(h.nomenclador_id),
             origen=h.origen,
-            descripcion=service.descripcion_efectiva(valor, nom),
+            descripcion=service.descripcion_efectiva(valor, legacy),
             nivel=valor.nivel if valor else None,
             por_presupuesto=bool(valor and valor.por_presupuesto),
             precio_total=h.precio_total,
@@ -268,14 +261,20 @@ async def tabla_valores(
         except service_vias.ViaNoAplicableError:
             pass  # código no elegible para laparoscopía → queda con el precio tradicional
 
+        legacy = None
+        if nom is not None and not (valor and valor.descripcion and valor.descripcion.strip()):
+            mapa = await service.descripciones_legacy(db, {(nom.codigo, h.obra_social_nro)})
+            legacy = mapa.get((nom.codigo, h.obra_social_nro))
+
         return TablaValoresItem(
             nomenclador_id=h.nomenclador_id,
             codigo=nom.codigo if nom else str(h.nomenclador_id),
             origen=h.origen,
             especialidad_id_colegio=h.especialidad_id_colegio,
-            descripcion=service.descripcion_efectiva(valor, nom),
+            descripcion=service.descripcion_efectiva(valor, legacy),
             nivel=valor.nivel if valor else None,
             por_presupuesto=bool(valor and valor.por_presupuesto),
+            sin_restriccion_especialidad=bool(valor and valor.sin_restriccion_especialidad),
             precio_total=precio_total,
             vigencia_desde=h.vigencia_desde,
             vigencia_hasta=h.vigencia_hasta,
@@ -311,11 +310,30 @@ async def tabla_valores(
     slot_rank = {esp: i for i, esp in enumerate(especialidades)}
     _SLOT_SIN_ESP = len(especialidades) + 1
 
+    # Códigos sin restricción de especialidad en esta OS: su NE sin especialidad es el
+    # precio para cualquier médico (ver service.lookup_precio).
+    nom_ids_ne_sin_esp = {
+        f.nomenclador_id for f in filas
+        if f.origen == Origen.NE.value and f.especialidad_id_colegio is None
+    }
+    sin_restriccion_ids: set[int] = set()
+    if nom_ids_ne_sin_esp:
+        sin_restriccion_ids = set((await db.execute(
+            select(Valor.nomenclador_id).where(
+                Valor.obra_social_nro == obra_social_nro,
+                Valor.nomenclador_id.in_(nom_ids_ne_sin_esp),
+                Valor.estado == "activo",
+                Valor.sin_restriccion_especialidad == True,
+            ).distinct()
+        )).scalars().all())
+
     def _aplicable(fila: HistorialPrecioCodigo) -> bool:
-        # NN siempre entra en juego. NE (siempre por especialidad) solo aplica si se pasó
-        # el perfil del médico y este posee esa especialidad; sin especialidades NE queda
-        # fuera y compite únicamente NN.
+        # NN siempre entra en juego. NE con especialidad solo aplica si se pasó el
+        # perfil del médico y este la posee; NE sin especialidad, si el código es sin
+        # restricción en esta OS (aplica a cualquier perfil, incluso sin especialidades).
         if fila.origen == Origen.NE.value:
+            if fila.especialidad_id_colegio is None:
+                return fila.nomenclador_id in sin_restriccion_ids
             return bool(especialidades) and fila.especialidad_id_colegio in slot_rank
         return True
 

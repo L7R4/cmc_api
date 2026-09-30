@@ -1,3 +1,4 @@
+import datetime
 import os
 import uuid
 from typing import Optional
@@ -23,6 +24,7 @@ from app.modules.catalogs.schemas import (
     ObraSocialSimpleOut,
     ObraSocialUpdate,
 )
+from app.modules.nomenclador.service import sembrar_nomenclador_nuevo
 
 router = APIRouter()
 
@@ -348,6 +350,25 @@ async def create_obra_social(
         raise HTTPException(status_code=409, detail="Conflicto de integridad.") from e
 
     await db.refresh(obj)
+
+    # Nomenclador NN operativo desde el alta: 7 galenos base en $0 + todos los
+    # Valor NN calculados contra ellos (también en $0 hasta que alguien cargue el
+    # precio real). La OS ya quedó creada arriba — un fallo acá no la deshace,
+    # solo dice que el nomenclador de la OS todavía no se pudo sembrar.
+    try:
+        await sembrar_nomenclador_nuevo(
+            obj.NRO_OBRASOCIAL, payload.fecha_alta_convenio or datetime.date.today(), db,
+        )
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"La obra social {obj.NRO_OBRASOCIAL} se creó, pero no se pudo generar "
+                "su nomenclador NN inicial. Generalo a mano desde Nomenclador > Generar NN."
+            ),
+        )
 
     principal, asociadas = await _load_principal_and_asociadas(obj, db)
     return _build_out(obj, principal, asociadas)

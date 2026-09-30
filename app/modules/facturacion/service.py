@@ -7,7 +7,7 @@ from typing import NamedTuple, Optional, Sequence
 
 from fastapi import HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
-from sqlalchemy import and_, func, or_, select, tuple_, update
+from sqlalchemy import String, and_, case, cast, func, or_, select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -18,6 +18,7 @@ from app.common.uploads import DOCUMENTOS, validate_upload
 from app.db.models import (
     Afiliado,
     AuditLog,
+    Clinicas,
     DetalleFacturacionCMC,
     Documento,
     Especialidad,
@@ -164,8 +165,30 @@ async def buscar_medicos(db: AsyncSession, q: str, limit: int) -> list[dict]:
     # filas legacy con NOMBRE NULL (dato incompleto, no un médico usable en un
     # selector) que igual pueden calzar por NRO_SOCIO/MATRICULA — sin este
     # filtro, buscar exactamente ese número tira un 500 de validación.
+    # Orden de prioridad de coincidencia — mismo criterio que el filtro en memoria
+    # del front (`filtrarYOrdenar`, components/localSearch.ts): Nº de socio >
+    # Matrícula > Nombre y, dentro de cada campo, "empieza con" antes que
+    # "contiene". Sin este ORDER BY, el buscador remoto (el que usan las pantallas
+    # sin precarga, p.ej. /panel/facturacion/detalle-medico) devolvía las filas en
+    # el orden arbitrario de la tabla.
+    nro_socio_txt = cast(M.NRO_SOCIO, String)
+    matricula_txt = cast(M.MATRICULA_PROV, String)
+    orden = case(
+        (nro_socio_txt.like(f"{q}%"), 0),
+        (nro_socio_txt.like(f"%{q}%"), 1),
+        (matricula_txt.like(f"{q}%"), 2),
+        (matricula_txt.like(f"%{q}%"), 3),
+        (M.NOMBRE.ilike(f"{q}%"), 4),
+        else_=5,
+    )
+
     rows = list(
-        (await db.execute(select(M).where(cond, M.NOMBRE.isnot(None)).limit(limit)))
+        (await db.execute(
+            select(M)
+            .where(cond, M.NOMBRE.isnot(None))
+            .order_by(orden, M.NOMBRE)
+            .limit(limit)
+        ))
         .scalars()
         .all()
     )
@@ -671,8 +694,20 @@ async def resolver_periodo_colegio_carga(
     Validación: el override debe ser >= el automático. Un período **anterior** se rechaza
     acá (si ya está cerrado, la reapertura se hace con un complemento). El caso de un
     período ya cerrado igual queda cubierto aguas abajo por `_gate_carga` (409).
+
+    Obra social sin ningún período cerrado todavía (primera carga): `get_periodo_activo`
+    no tiene de qué partir y rechaza con 422 — no es un piso que validar, es la ausencia
+    total de uno. Sin override eso sigue siendo un error (no hay forma de resolver un
+    período solo); pero con override el operador ya eligió uno a mano (botón "editar
+    período" del front, habilitado justamente para este caso), así que se usa tal cual,
+    sin comparar contra un automático que no existe.
     """
-    automatico = await get_periodo_activo(db, cod_obra)
+    try:
+        automatico = await get_periodo_activo(db, cod_obra)
+    except HTTPException:
+        if periodo_override:
+            return periodo_override
+        raise
     if not periodo_override:
         return automatico
     if _periodo_to_date(periodo_override) < _periodo_to_date(automatico):
@@ -876,10 +911,10 @@ async def buscar_nomenclador(
 ) -> list[dict]:
     """Autocomplete de códigos para una obra social.
 
-    Muestra los códigos compartidos del Colegio más los propios de esa OS, y devuelve
-    la descripción con la que esa obra social nombra el código (la de su `nm_valores`
-    si la hay). Sin el contexto de la OS el autocomplete mostraba un texto y el
-    cotizador otro para el mismo código.
+    Devuelve la descripción con la que esa obra social nombra el código (la de su
+    `nm_valores` si la hay; si no, el fallback legacy). El código es identidad
+    única desde la fase 3 de la reestructura del nomenclador, así que ya no hace
+    falta elegir entre una fila "propia de la OS" y una compartida.
     """
     obra_social_nro = _cod_obra_to_int(cod_obra)
     N = NomencladorCMC
@@ -907,31 +942,23 @@ async def buscar_nomenclador(
         .outerjoin(desc_os, desc_os.c.nomenclador_id == N.id)
         .where(
             N.activo.is_(True),
-            service_nm.filtro_pertenencia(obra_social_nro),
-            or_(
-                N.codigo.ilike(f"{q}%"),
-                N.descripcion.ilike(f"%{q}%"),
-                desc_os.c.descripcion.ilike(f"%{q}%"),
-            ),
+            or_(N.codigo.ilike(f"{q}%"), desc_os.c.descripcion.ilike(f"%{q}%")),
         )
-        # La fila propia de la OS antes que la compartida, para el dedupe de abajo.
-        .order_by(N.obra_social_key.desc(), N.codigo)
-        .limit(limit * 2)
+        .order_by(N.codigo)
+        .limit(limit)
     )
+    filas = (await db.execute(stmt)).all()
 
-    vistos: set[str] = set()
-    salida: list[dict] = []
-    for nom, descripcion_os in (await db.execute(stmt)).all():
-        if nom.codigo in vistos:
-            continue  # ya salió la fila propia de la OS para este código
-        vistos.add(nom.codigo)
-        salida.append({
+    faltan = {(nom.codigo, obra_social_nro) for nom, desc in filas if not desc}
+    legacy = await service_nm.descripciones_legacy(db, faltan) if faltan else {}
+
+    return [
+        {
             "codigo": nom.codigo,
-            "descripcion": descripcion_os or nom.descripcion,
-        })
-        if len(salida) >= limit:
-            break
-    return salida
+            "descripcion": desc or legacy.get((nom.codigo, obra_social_nro)) or "",
+        }
+        for nom, desc in filas
+    ]
 
 
 # ── Resolución de precio — wrapper sobre lookup_precio ───────────────────────
@@ -1008,13 +1035,18 @@ async def resolver_precio(
 
 
 async def codigos_habilitados_medico(
-    db: AsyncSession, cod_medico: str, q: Optional[str] = None,
+    db: AsyncSession, cod_medico: str, q: Optional[str] = None, cod_obra: Optional[str] = None,
 ) -> list[dict]:
     """Códigos que un médico puede facturar. Delega el alcance completo (especialidad +
     excepciones individuales + sin restricción) en el módulo nomenclador — mismo
-    patrón de delegación que `resolver_precio` hacia `lookup_precio`."""
+    patrón de delegación que `resolver_precio` hacia `lookup_precio`.
+
+    `cod_obra`, si se manda, hace que la descripción de cada código sea la que esa OS
+    pactó (en vez de la del catálogo) — mismo criterio que `buscar_nomenclador` y que
+    lo que después muestra el cotizador."""
     medico = await check_medico_activo(db, cod_medico)
-    return await service_nm.listar_codigos_habilitados(db, medico, q)
+    obra_social_nro = _cod_obra_to_int(cod_obra) if cod_obra else None
+    return await service_nm.listar_codigos_habilitados(db, medico, q, obra_social_nro)
 
 
 # ── Tope de ayudantes por (código, OS) ───────────────────────────────────────
@@ -1061,8 +1093,8 @@ async def _requiere_autorizacion(
 ) -> bool:
     """¿Este código, para esta obra social, necesita autorización previa?
 
-    Override de `nm_valores.requiere_autorizacion` > default del catálogo
-    (ver service_nm.requiere_autorizacion_efectiva).
+    100% `nm_valores.requiere_autorizacion` — el catálogo ya no opina (ver
+    service_nm.requiere_autorizacion_efectiva).
     """
     obra_social_nro = _cod_obra_to_int(cod_obra) if cod_obra else None
     nom = await service_nm.resolver_nomenclador(db, codigo, obra_social_nro)
@@ -1083,7 +1115,7 @@ async def _requiere_autorizacion(
                 .limit(1)
             )
         ).scalar_one_or_none()
-    return service_nm.requiere_autorizacion_efectiva(valor, nom)
+    return service_nm.requiere_autorizacion_efectiva(valor)
 
 
 async def _validar_autorizacion_medico(
@@ -1695,6 +1727,10 @@ async def obtener_factura_detalle(db: AsyncSession, factura_id: int) -> dict:
         )).scalars().all()
         medicos = {str(m.NRO_SOCIO): m for m in med_rows}
 
+    nombres_clinica = await _nombres_clinica(
+        db, {int(r.cod_clinica) for r in rows if r.cod_clinica},
+    )
+
     # Nombre de especialidad por prestación — igual patrón que en
     # `_medicos_con_especialidades`: `id_especialidad` referencia
     # `Especialidad.ID_COLEGIO_ESPE`, no `Especialidad.ID` (divergen desde el 7).
@@ -1749,12 +1785,11 @@ async def obtener_factura_detalle(db: AsyncSession, factura_id: int) -> dict:
         h, ga, a = _dec(r.honorarios), _dec(r.gastos), _dec(r.ayudante)
         subtotal = _dec(r.importe_total)
         g["cantidad_prestaciones"] += 1
-        g["total_cantidad"] += r.cantidad or 0
+        g["total_cantidad"] += (r.cantidad or 1) * (r.sesion or 1)
         g["total_honorarios"] += h
         g["total_gastos"] += ga
         g["total_subtotal"] += subtotal
         ejecutor = medicos.get(str(r.cod_med_ejecutor)) if r.cod_med_ejecutor else None
-        clinica = medicos.get(str(r.cod_clinica)) if r.cod_clinica else None
         g["prestaciones"].append({
             "id": r.id_detalle_prestaciones,
             "periodo": r.periodo,
@@ -1768,13 +1803,14 @@ async def obtener_factura_detalle(db: AsyncSession, factura_id: int) -> dict:
             "nombre_ejecutor": ejecutor.NOMBRE if ejecutor else None,
             # Clínica bajo la que se ejecutó (tipo_orden='S'); None si el médico factura solo.
             "cod_clinica": r.cod_clinica or None,
-            "nombre_clinica": clinica.NOMBRE if clinica else None,
+            "nombre_clinica": nombres_clinica.get(int(r.cod_clinica)) if r.cod_clinica else None,
             "tipo_orden": r.tipo_orden,
             "cantidad": r.cantidad,
             "sesion": r.sesion,
             "porcentaje": r.porc,
             "honorarios": r.honorarios,
             "gastos": r.gastos,
+            "coseguro": r.coseguro,
             "tipo_prestador": _derivar_tipo_prestador(h, ga, a, r.tpo_funcion),
             "subtotal": r.importe_total,
             "tipo": _tipo_de(r),
@@ -1798,7 +1834,9 @@ async def obtener_factura_detalle(db: AsyncSession, factura_id: int) -> dict:
         "estado_doctor": factura.estado_doctor,
         "version": factura.version,
         "es_complemento": factura.version > 1,
-        "total_prestaciones": len(rows),
+        # Unidades facturadas, no filas: una prestación con cantidad=2 y sesion=3 cuenta 6
+        # (mismo criterio que el importe: cantidad * sesion).
+        "total_prestaciones": sum((r.cantidad or 1) * (r.sesion or 1) for r in rows),
         "total_importe": sum((g["total_subtotal"] for g in prestadores), Decimal("0")),
         "prestadores": prestadores,
     }
@@ -1946,26 +1984,53 @@ def _tipo_prestador_de(row: DetalleFacturacionCMC) -> Optional[str]:
     )
 
 
+async def _nombres_clinica(db: AsyncSession, cods: set[int]) -> dict[int, str]:
+    """Nombre de cada `cod_clinica`. Hay dos espacios de códigos que no se pisan: las
+    organizaciones cargadas por el módulo nuevo (`listado_medico` con es_organizacion=1,
+    NRO_SOCIO >= 9000) y las clínicas del sistema viejo (tabla `clinicas`, ID <= 99).
+    Resolver todo contra `listado_medico` devolvía el nombre de un MÉDICO cualquiera que
+    casualmente tuviera ese NRO_SOCIO (ej. cod_clinica=2 → un prestador)."""
+    if not cods:
+        return {}
+    orgs = (await db.execute(
+        select(ListadoMedico.NRO_SOCIO, ListadoMedico.NOMBRE)
+        .where(ListadoMedico.NRO_SOCIO.in_(cods), ListadoMedico.es_organizacion == True)  # noqa: E712
+    )).all()
+    nombres = {int(nro): nombre for nro, nombre in orgs}
+    faltan = cods - nombres.keys()
+    if faltan:
+        legacy = (await db.execute(
+            select(Clinicas.ID, Clinicas.CLINICA).where(Clinicas.ID.in_(faltan))
+        )).all()
+        nombres.update({int(cid): nombre for cid, nombre in legacy})
+    return nombres
+
+
 async def _to_prestacion_read_list(
     db: AsyncSession, rows: Sequence[DetalleFacturacionCMC],
 ) -> list[PrestacionRead]:
     """Convierte filas ORM a `PrestacionRead` completando `tipo_prestador` (no viene del
     ORM), `nombre_obra_social` (batch contra `obras_sociales`), `nombre_clinica` (batch
-    contra `listado_medico`) y `descripcion` (batch contra `nm_nomenclador`), sin N+1.
-    Mismo criterio que `obtener_prestacion` — reusado acá para que el listado también lo
-    traiga."""
+    contra `listado_medico`) y `descripcion` (batch contra `nm_valores`, por (obra
+    social, código) — ya no contra `nm_nomenclador`, ver plan de reestructura del
+    nomenclador), sin N+1. Mismo criterio que `obtener_prestacion` — reusado acá para
+    que el listado también lo traiga."""
     nros_os: set[int] = set()
     nros_clinica: set[int] = set()
     nomenclador_ids: set[int] = set()
+    pares_os_nom: set[tuple[int, int]] = set()
     for row in rows:
         try:
-            nros_os.add(int(row.cod_obr))
+            os_int = int(row.cod_obr)
+            nros_os.add(os_int)
         except (TypeError, ValueError):
-            pass
+            os_int = None
         if row.cod_clinica:  # 0 = sentinel legacy "sin clínica"
             nros_clinica.add(int(row.cod_clinica))
         if row.nomenclador_id is not None:
             nomenclador_ids.add(row.nomenclador_id)
+            if os_int is not None:
+                pares_os_nom.add((os_int, row.nomenclador_id))
     nombres_os: dict[int, str] = {}
     if nros_os:
         os_rows = (await db.execute(
@@ -1973,33 +2038,53 @@ async def _to_prestacion_read_list(
             .where(ObrasSociales.NRO_OBRASOCIAL.in_(nros_os))
         )).all()
         nombres_os = {nro: nombre for nro, nombre in os_rows}
-    nombres_clinica: dict[int, str] = {}
-    if nros_clinica:
-        cl_rows = (await db.execute(
-            select(ListadoMedico.NRO_SOCIO, ListadoMedico.NOMBRE)
-            .where(ListadoMedico.NRO_SOCIO.in_(nros_clinica))
+    nombres_clinica = await _nombres_clinica(db, nros_clinica)
+
+    descripciones: dict[tuple[int, int], str] = {}
+    if pares_os_nom:
+        valor_rows = (await db.execute(
+            select(Valor.obra_social_nro, Valor.nomenclador_id, func.max(Valor.descripcion))
+            .where(
+                tuple_(Valor.obra_social_nro, Valor.nomenclador_id).in_(pares_os_nom),
+                Valor.estado == "activo",
+                Valor.descripcion.is_not(None),
+                Valor.descripcion != "",
+            )
+            .group_by(Valor.obra_social_nro, Valor.nomenclador_id)
         )).all()
-        nombres_clinica = {nro: nombre for nro, nombre in cl_rows}
-    descripciones: dict[int, str] = {}
-    if nomenclador_ids:
-        nm_rows = (await db.execute(
-            select(NomencladorCMC.id, NomencladorCMC.descripcion)
-            .where(NomencladorCMC.id.in_(nomenclador_ids))
-        )).all()
-        descripciones = {nid: descripcion for nid, descripcion in nm_rows}
+        descripciones = {(os, nid): d for os, nid, d in valor_rows}
+
+        codigo_por_id = {
+            nid: cod for nid, cod in (await db.execute(
+                select(NomencladorCMC.id, NomencladorCMC.codigo).where(NomencladorCMC.id.in_(nomenclador_ids))
+            )).all()
+        }
+        faltan = {
+            (codigo_por_id[nid], os)
+            for os, nid in pares_os_nom
+            if (os, nid) not in descripciones and nid in codigo_por_id
+        }
+        legacy = await service_nm.descripciones_legacy(db, faltan) if faltan else {}
+        for os, nid in pares_os_nom:
+            if (os, nid) in descripciones or nid not in codigo_por_id:
+                continue
+            texto = legacy.get((codigo_por_id[nid], os))
+            if texto:
+                descripciones[(os, nid)] = texto
 
     out = []
     for row in rows:
         item = PrestacionRead.model_validate(row)
         item.tipo_prestador = _tipo_prestador_de(row)
         try:
-            item.nombre_obra_social = nombres_os.get(int(row.cod_obr))
+            os_int = int(row.cod_obr)
+            item.nombre_obra_social = nombres_os.get(os_int)
         except (TypeError, ValueError):
-            pass
+            os_int = None
         if row.cod_clinica:
             item.nombre_clinica = nombres_clinica.get(int(row.cod_clinica))
-        if row.nomenclador_id is not None:
-            item.descripcion = descripciones.get(row.nomenclador_id)
+        if row.nomenclador_id is not None and os_int is not None:
+            item.descripcion = descripciones.get((os_int, row.nomenclador_id))
         out.append(item)
     return out
 
@@ -2218,8 +2303,9 @@ async def editar_prestacion(
         raise HTTPException(404, "Prestación no encontrada")
     if row.estado != "A":
         raise HTTPException(409, "Prestación cerrada/liquidada, no se puede editar")
-    # La fase de la cabecera (según quién cargó la prestación) debe seguir abierta.
-    _gate_carga(await _get_factura(db, row.cod_obr, row.periodo), row.origen_carga)
+    # Editar no depende de la fase médico, solo de que el Colegio no haya cerrado
+    # el período — ver `_gate_edicion`.
+    _gate_edicion(await _get_factura(db, row.cod_obr, row.periodo))
 
     # Todo lo que sigue muta `row` (y a veces otras filas/cabeceras) antes de
     # llegar a `db.commit()`. Sin este try/except, una excepcion a mitad de
@@ -2246,8 +2332,9 @@ async def editar_prestacion(
             nuevo_cod_obra = data.get("cod_obra_social", row.cod_obr)
             nuevo_periodo = data.get("periodo", row.periodo)
             cabecera_destino = await _get_factura(db, nuevo_cod_obra, nuevo_periodo)
-            # Mismo gate que al cargar: no se puede aterrizar en un período/fase cerrada.
-            _gate_carga(cabecera_destino, row.origen_carga)
+            # Mismo criterio que arriba: el destino solo tiene que tener abierta la
+            # fase Colegio, la fase médico no aplica a una edición.
+            _gate_edicion(cabecera_destino)
             cod_obra_anterior, periodo_anterior = row.cod_obr, row.periodo
             row.cod_obr = nuevo_cod_obra
             row.periodo = nuevo_periodo
@@ -2526,8 +2613,9 @@ async def anular_prestacion(db: AsyncSession, prestacion_id: int) -> None:
         raise HTTPException(404, "Prestación no encontrada")
     if row.estado != "A":
         raise HTTPException(409, "Prestación cerrada/liquidada, no se puede anular")
-    # La fase de la cabecera (según quién cargó la prestación) debe seguir abierta.
-    _gate_carga(await _get_factura(db, row.cod_obr, row.periodo), row.origen_carga)
+    # Mismo criterio que editar_prestacion: anular no depende de la fase médico,
+    # solo de que el Colegio no haya cerrado el período — ver `_gate_edicion`.
+    _gate_edicion(await _get_factura(db, row.cod_obr, row.periodo))
     cod_obra, periodo = row.cod_obr, row.periodo
     row.estado = "X"
     await db.flush()
@@ -2610,7 +2698,7 @@ async def _ensure_factura_abierta(
 
 
 def _gate_carga(cabecera: Optional[FacturacionCMC], actor: str) -> None:
-    """Valida que la fase correspondiente al actor esté abierta antes de cargar/editar.
+    """Valida que la fase correspondiente al actor esté abierta antes de cargar.
     `cabecera=None` (aún no existe) se permite: se creará abierta."""
     if cabecera is None:
         return
@@ -2618,6 +2706,21 @@ def _gate_carga(cabecera: Optional[FacturacionCMC], actor: str) -> None:
         raise HTTPException(409, "El período está cerrado por el colegio")
     if actor == ORIGEN_MEDICO and cabecera.estado_doctor == DOCTOR_CERRADA:
         raise HTTPException(409, "El período está cerrado para carga de médicos")
+
+
+def _gate_edicion(cabecera: Optional[FacturacionCMC]) -> None:
+    """Valida que se pueda editar una prestación YA cargada en esta cabecera.
+
+    A propósito NO mira `estado_doctor`: la fase médico gatea si el MÉDICO puede
+    seguir mandando prestaciones nuevas (`_gate_carga`), no si una fila ya
+    cargada se puede corregir. Que el médico haya cerrado su ventana de carga no
+    puede dejar una prestación (suya o del Colegio) fuera de edición — el Colegio
+    tiene que poder seguir ajustándola mientras SU fase siga abierta. Lo único
+    que cierra la edición de verdad es que el Colegio cierre el período."""
+    if cabecera is None:
+        return
+    if cabecera.estado in FACTURA_ESTADOS_CERRADOS:
+        raise HTTPException(409, "El período está cerrado por el colegio")
 
 
 async def _cleanup_factura_si_vacia(

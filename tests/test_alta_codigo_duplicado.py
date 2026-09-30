@@ -1,10 +1,15 @@
 """Alta de código repetido: 409 con mensaje útil, no 500 genérico.
 
 Regresión de audit_log id 134733 (prod, 2026-09-14): un POST /api/nomenclador/ con
-codigo='320101' — ya existente en el catálogo compartido — chocaba contra
+codigo='320101' — ya existente en el catálogo — chocaba contra
 `uq_nm_nomenclador_codigo_os`. El IntegrityError subía como SQLAlchemyError y el
 handler global lo devolvía como 500 "Error al acceder a la base de datos", sin
 decirle al operador que el número ya estaba tomado.
+
+Actualizado para la fase 2 de la reestructura del nomenclador: `NomencladorCreate`
+ya no tiene `descripcion` ni `obra_social_nro` (el código pasó a ser único, sin
+versión propia de una obra social — ver plan de migración), así que el escenario
+"repetido dentro de una obra social" con mensaje propio dejó de existir.
 
 Pruebas puras: la sesión es un doble que solo responde el SELECT del chequeo.
 """
@@ -45,34 +50,23 @@ class _SesionFalsa:
 
 class _FilaExistente:
     id = 3747
-    descripcion = "ATENCION PREMATURO HASTA 1500 GRS."
 
 
 def _body(**extra):
-    datos = {"codigo": "320101", "descripcion": "Consulta nueva Pediatria"}
+    datos = {"codigo": "320101"}
     datos.update(extra)
     return NomencladorCreate(**datos)
 
 
 @pytest.mark.asyncio
-async def test_codigo_compartido_repetido_da_409_y_no_inserta():
+async def test_codigo_repetido_da_409_y_no_inserta():
     db = _SesionFalsa(_FilaExistente())
     with pytest.raises(HTTPException) as exc:
         await create_nomenclador(_body(), db)
     assert exc.value.status_code == 409
     assert "320101" in exc.value.detail
     assert "3747" in exc.value.detail
-    assert "catálogo compartido" in exc.value.detail
     assert db.agregados == []  # nunca llegó al INSERT
-
-
-@pytest.mark.asyncio
-async def test_repetido_dentro_de_una_obra_social_nombra_la_os():
-    db = _SesionFalsa(_FilaExistente())
-    with pytest.raises(HTTPException) as exc:
-        await create_nomenclador(_body(obra_social_nro=81), db)
-    assert exc.value.status_code == 409
-    assert "OS 81" in exc.value.detail
 
 
 @pytest.mark.asyncio

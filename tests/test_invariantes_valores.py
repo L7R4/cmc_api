@@ -21,15 +21,24 @@ async def test_no_queda_historial_nne(db):
 
 @pytest.mark.asyncio
 async def test_toda_ne_expandida_tiene_habilitacion(db):
-    """Las NE que esta migración generó (están en mig_nne_map) tienen que apuntar a
-    una especialidad que sigue activa en nm_nomenclador_especialidad."""
+    """Las NE ACTIVAS que esta migración generó (están en mig_nne_map) tienen que
+    apuntar a una especialidad que sigue habilitada en nm_valor_especialidad para ese
+    (obra_social_nro, código) — reemplaza a nm_nomenclador_especialidad, retirada en
+    la fase 3 de la reestructura del nomenclador.
+
+    Acotado a `v.estado = 'activo'` a propósito: a diferencia de la vieja
+    nm_nomenclador_especialidad (un ledger que no se tocaba al rotar un precio),
+    nm_valor_especialidad representa la habilitación VIGENTE — se calcula a partir
+    de los Valores activos (ver backfill de la fase 1). Una NE que ya rotó/cerró
+    (estado='cerrado') no puede facturarse de nuevo con ese precio viejo de todos
+    modos, así que no tiene sentido exigirle habilitación vigente."""
     r = await db.execute(text("""
         SELECT COUNT(*) FROM mig_nne_map m
-        JOIN nm_valores v ON v.id = m.nuevo_valor_id
-        LEFT JOIN nm_nomenclador_especialidad e
-          ON e.nomenclador_id = v.nomenclador_id
+        JOIN nm_valores v ON v.id = m.nuevo_valor_id AND v.estado = 'activo'
+        LEFT JOIN nm_valor_especialidad e
+          ON e.obra_social_nro = v.obra_social_nro
+         AND e.codigo = v.codigo
          AND e.especialidad_id_colegio = v.especialidad_id_colegio
-         AND e.activo = 1
         WHERE e.id IS NULL
     """))
     assert r.scalar_one() == 0
@@ -73,7 +82,7 @@ async def test_archivadas_no_expandidas_por_causa_conocida(db):
     colisión."""
     r = await db.execute(text("""
         SELECT COUNT(*) FROM nm_valores_mig_nne v
-        JOIN nm_nomenclador_especialidad e ON e.nomenclador_id = v.nomenclador_id AND e.activo = 1
+        JOIN nm_valor_especialidad e ON e.obra_social_nro = v.obra_social_nro AND e.codigo = v.codigo
         LEFT JOIN mig_nne_map m
           ON m.old_valor_id = v.id AND m.especialidad_id_colegio = e.especialidad_id_colegio
         LEFT JOIN mig_nne_colisiones col

@@ -181,16 +181,23 @@ def test_sin_filtro_publicado_trae_todo(cliente, headers_admin, medicos_sintetic
 # ── `descripcion` resuelta en batch ─────────────────────────────────────────
 
 def test_descripcion_se_resuelve_cuando_hay_nomenclador_id(cliente, headers_admin, medicos_sinteticos):
+    """La descripción sale de `Valor.descripcion` para (obra_social, código) — ya no
+    del catálogo del Colegio (retirado en la fase 3 de la reestructura del
+    nomenclador)."""
     prestacion_id, _ = _cargar_prestacion(cliente, headers_admin)
 
     con = _conn()
     try:
         with con.cursor() as cur:
-            cur.execute(
-                "INSERT INTO nm_nomenclador (codigo, descripcion) VALUES (%s, %s)",
-                (COD_NOMENCLADOR_TEST, "Consulta sintética de prueba"),
-            )
+            cur.execute("INSERT INTO nm_nomenclador (codigo) VALUES (%s)", (COD_NOMENCLADOR_TEST,))
             nomenclador_id = cur.lastrowid
+            cur.execute(
+                "INSERT INTO nm_valores "
+                "(obra_social_nro, nomenclador_id, origen, codigo, descripcion, vigencia_desde, estado) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                (int(COD_OBRA_TEST), nomenclador_id, "NN", COD_NOMENCLADOR_TEST,
+                 "Consulta sintética de prueba", datetime.date(2020, 1, 1), "activo"),
+            )
             cur.execute(
                 "UPDATE detalle_facturacion SET nomenclador_id = %s WHERE id_detalle_prestaciones = %s",
                 (nomenclador_id, prestacion_id),
@@ -202,6 +209,7 @@ def test_descripcion_se_resuelve_cuando_hay_nomenclador_id(cliente, headers_admi
         assert r.json()[0]["descripcion"] == "Consulta sintética de prueba"
     finally:
         with con.cursor() as cur:
+            cur.execute("DELETE FROM nm_valores WHERE codigo = %s", (COD_NOMENCLADOR_TEST,))
             cur.execute("DELETE FROM nm_nomenclador WHERE codigo = %s", (COD_NOMENCLADOR_TEST,))
         con.close()
 

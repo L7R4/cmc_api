@@ -58,14 +58,20 @@ async def test_afiliado_activo_autoriza_y_factura(monkeypatch):
     async def _duplicado(db, **kwargs):
         return False
 
+    async def _generar(db):
+        return "24534444"
+
     monkeypatch.setattr(validador, "_buscar_afiliado", _buscar)
     monkeypatch.setattr(validador, "_duplicado", _duplicado)
+    monkeypatch.setattr(validador, "_generar_nro_validacion", _generar)
 
     resultado = await validador.validar(_CtxFake(), _entrada())
 
     assert resultado.estado == "autorizada"
     assert resultado.detalle.startswith("Autorizado")
-    assert resultado.nro_autorizacion is None
+    # Autorizada sí se queda con un nº de validación — generado localmente,
+    # OSPM no tiene servicio en línea que emita uno (ver `_generar_nro_validacion`).
+    assert resultado.nro_autorizacion == "24534444"
     assert resultado.coseguro == Decimal("0")
     assert resultado.nombre_afiliado == "APELLIDO NOMBRE"
     assert resultado.traza["padron"]["activo"] is True
@@ -89,6 +95,9 @@ async def test_afiliado_inactivo_rechaza_suspendido(monkeypatch):
     assert resultado.estado == "rechazada"
     assert resultado.detalle == "Rechazado. Afiliado suspendido"
     assert resultado.nombre_afiliado == "APELLIDO NOMBRE"
+    # Un rechazo no autorizó nada: no se genera nº de validación (ni se toca
+    # `ctx.db`, que en este test es un `object()` sin `.execute`).
+    assert resultado.nro_autorizacion is None
 
 
 @pytest.mark.asyncio
@@ -112,6 +121,7 @@ async def test_afiliado_inexistente_rechaza_sin_duplicado(monkeypatch):
     assert resultado.estado == "rechazada"
     assert resultado.detalle == "Rechazado. Afiliado inexistente"
     assert resultado.nombre_afiliado == ""
+    assert resultado.nro_autorizacion is None
     assert resultado.traza["padron"] == {"documento": "99999999", "encontrado": False}
     assert duplicado_llamado is False
 
@@ -157,3 +167,43 @@ async def test_anular_sigue_siendo_no_op():
     validador = ValidadorOspm()
     assert type(validador).anular is ValidadorOS.anular
     assert await validador.anular(fila=None) is None
+
+
+class _DbFakeMax:
+    """Doble de `AsyncSession`: sólo responde al `SELECT MAX(...)` que hace
+    `_generar_nro_validacion` — sin red, sin DB real."""
+
+    def __init__(self, valor):
+        self._valor = valor
+
+    async def execute(self, _stmt):
+        class _Resultado:
+            def __init__(self, v):
+                self._v = v
+
+            def scalar_one(self):
+                return self._v
+
+        return _Resultado(self._valor)
+
+
+@pytest.mark.asyncio
+async def test_generar_nro_validacion_arranca_en_numero_inicial_sin_emitidos():
+    validador = ValidadorOspm()
+    nro = await validador._generar_nro_validacion(_DbFakeMax(None))
+    assert nro == "24534444"
+
+
+@pytest.mark.asyncio
+async def test_generar_nro_validacion_incrementa_el_ultimo_emitido():
+    validador = ValidadorOspm()
+    nro = await validador._generar_nro_validacion(_DbFakeMax("24534444"))
+    assert nro == "24534445"
+
+
+@pytest.mark.asyncio
+async def test_generar_nro_validacion_son_8_digitos_sin_letras():
+    validador = ValidadorOspm()
+    nro = await validador._generar_nro_validacion(_DbFakeMax(None))
+    assert len(nro) == 8
+    assert nro.isdigit()

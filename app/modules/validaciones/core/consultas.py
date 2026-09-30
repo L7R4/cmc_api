@@ -6,7 +6,7 @@ import datetime
 from typing import Optional, Sequence
 
 from fastapi import HTTPException
-from sqlalchemy import and_, func, or_, select, tuple_
+from sqlalchemy import func, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.common.money import quantize_money
@@ -17,7 +17,7 @@ from app.modules.nomenclador import service as service_nm
 from app.modules.validaciones.core.contrato import factura_en_cero
 from app.modules.validaciones.core.grabado import to_dict
 from app.modules.validaciones.core.medicos import get_medico
-from app.modules.validaciones.core.periodos import partes_periodo, periodo_cerrado
+from app.modules.validaciones.core.periodos import ORIGEN_MEDICO, partes_periodo, periodo_cerrado
 
 
 # Cuántas filas del catálogo se leen por cada una que se devuelve en
@@ -54,19 +54,14 @@ async def _descripciones(
 
     ids_catalogo = {f.nomenclador_id for f in filas if f.nomenclador_id}
     # Filas viejas sin backfill (código que ya no existe en el catálogo): se intenta
-    # igual por código contra los compartidos.
+    # igual por código — es identidad única desde la fase 3 de la reestructura.
     codigos_sueltos = {f.cod_nom for f in filas if not f.nomenclador_id and f.cod_nom}
 
     condiciones = []
     if ids_catalogo:
         condiciones.append(NomencladorCMC.id.in_(ids_catalogo))
     if codigos_sueltos:
-        condiciones.append(
-            and_(
-                NomencladorCMC.codigo.in_(codigos_sueltos),
-                NomencladorCMC.obra_social_nro.is_(None),
-            )
-        )
+        condiciones.append(NomencladorCMC.codigo.in_(codigos_sueltos))
 
     por_id: dict[int, NomencladorCMC] = {}
     por_codigo: dict[str, NomencladorCMC] = {}
@@ -75,8 +70,7 @@ async def _descripciones(
             await db.execute(select(NomencladorCMC).where(or_(*condiciones)))
         ).scalars():
             por_id[nom.id] = nom
-            if nom.obra_social_nro is None:
-                por_codigo[nom.codigo] = nom
+            por_codigo.setdefault(nom.codigo, nom)
 
     # Descripción pactada por (OS, código) para las combinaciones que aparecen.
     pares = {
@@ -104,12 +98,25 @@ async def _descripciones(
         ).all()
         desc_os = {(os_nro, nom_id): desc for os_nro, nom_id, desc in filas_valor}
 
+    # Fallback final: snapshot congelado del catálogo (ver service_nm.descripciones_
+    # legacy) para pares sin ningún Valor con descripción propia.
+    faltan = {
+        (nom.codigo, os_nro)
+        for f in filas
+        if f.nomenclador_id and (nom := por_id.get(f.nomenclador_id)) is not None
+        and (os_nro := _os_nro(f.cod_obr)) is not None
+        and (os_nro, f.nomenclador_id) not in desc_os
+    }
+    legacy = await service_nm.descripciones_legacy(db, faltan) if faltan else {}
+
     salida: dict[int, str] = {}
     for f in filas:
         nom = por_id.get(f.nomenclador_id) if f.nomenclador_id else por_codigo.get(f.cod_nom or "")
         os_nro = _os_nro(f.cod_obr)
         texto = desc_os.get((os_nro, f.nomenclador_id)) if f.nomenclador_id else None
-        salida[f.id_detalle_prestaciones] = texto or (nom.descripcion if nom else "") or ""
+        if not texto and nom is not None:
+            texto = legacy.get((nom.codigo, os_nro))
+        salida[f.id_detalle_prestaciones] = texto or ""
     return salida
 
 
@@ -146,10 +153,15 @@ async def listar_prestaciones(
 
 
 async def listar_periodos(
-    db: AsyncSession, nro_socio: int, obra_social_id: int
+    db: AsyncSession, nro_socio: int, obra_social_id: int, actor: str = ORIGEN_MEDICO,
 ) -> list[dict]:
     """Totales por período, el más reciente primero. Las rechazadas cuentan en
-    `cantidad` pero suman 0 — que es justo lo que van a facturar."""
+    `cantidad` pero suman 0 — que es justo lo que van a facturar.
+
+    `cerrado` refleja si `actor` puede seguir operando ese período (ver
+    `periodos.periodo_cerrado`): para el Colegio operando en nombre de un
+    médico, un período con la fase médico cerrada pero la fase Colegio abierta
+    sigue mostrando `cerrado=False`."""
     M = DetalleFacturacionCMC
     rows = (
         await db.execute(
@@ -173,7 +185,7 @@ async def listar_periodos(
                 "anio": anio,
                 "cantidad": cantidad,
                 "total": quantize_money(total or 0),
-                "cerrado": await periodo_cerrado(db, obra_social_id, periodo),
+                "cerrado": await periodo_cerrado(db, obra_social_id, periodo, actor),
             }
         )
     return salida
@@ -204,34 +216,23 @@ async def buscar_codigos(
     medico = await get_medico(db, nro_socio)
     hoy = datetime.date.today()
 
-    stmt = select(NomencladorCMC.codigo, NomencladorCMC.descripcion).where(
-        # Códigos compartidos del Colegio + los propios de esta obra social.
-        service_nm.filtro_pertenencia(obra_social_id)
-    )
+    # El código es identidad única desde la fase 3 de la reestructura del
+    # nomenclador: no hace falta filtrar por OS ni dedupear entre fila propia y
+    # compartida. La descripción sale de `resolver_precio` (vía descripcion_
+    # efectiva, con su propio fallback legacy) — no de acá.
+    stmt = select(NomencladorCMC.codigo).where(NomencladorCMC.activo.is_(True))
     termino = (q or "").strip()
     if termino:
-        like = f"%{termino}%"
-        stmt = stmt.where(
-            NomencladorCMC.codigo.like(like) | NomencladorCMC.descripcion.like(like)
-        )
-    # La fila propia de la OS antes que la compartida; el dedupe de abajo se queda con
-    # la primera que aparece de cada código.
-    #
-    # Se leen más filas de las que se devuelven porque de acá se cae por dos
-    # motivos: el dedupe y, ahora, la habilitación. El techo es lo que acota el
-    # costo — `resolver_precio` es una consulta por fila —, y el `break` corta
-    # apenas se juntan `limite` códigos usables, que es el caso normal.
-    stmt = stmt.order_by(
-        NomencladorCMC.codigo, NomencladorCMC.obra_social_key.desc()
-    ).limit(limite * _FACTOR_BARRIDO)
-    filas = (await db.execute(stmt)).all()
+        stmt = stmt.where(NomencladorCMC.codigo.like(f"%{termino}%"))
+    # Se leen más filas de las que se devuelven porque de acá se cae por la
+    # habilitación. El techo es lo que acota el costo — `resolver_precio` es una
+    # consulta por fila —, y el `break` corta apenas se juntan `limite` códigos
+    # usables, que es el caso normal.
+    stmt = stmt.order_by(NomencladorCMC.codigo).limit(limite * _FACTOR_BARRIDO)
+    codigos = (await db.execute(stmt)).scalars().all()
 
     salida: list[dict] = []
-    vistos: set[str] = set()
-    for codigo, descripcion in filas:
-        if codigo in vistos:
-            continue
-        vistos.add(codigo)
+    for codigo in codigos:
         if len(salida) >= limite:
             break
         try:
@@ -244,7 +245,7 @@ async def buscar_codigos(
         salida.append(
             {
                 "codigo": codigo,
-                "descripcion": precio.descripcion or descripcion or "",
+                "descripcion": precio.descripcion or "",
                 "honorarios": precio.honorarios,
                 "gastos": precio.gastos,
                 "total": precio.honorarios + precio.gastos,

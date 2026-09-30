@@ -44,9 +44,10 @@ from app.db.models.cmc_facturacion import (
     DetalleFacturacionCMC, FacturacionCMC, Afiliado, PeriodoMedicoActual, ExportPreset,
 )
 from app.db.models.nomenclador_cmc import (
-    NomencladorCMC, NomencladorEspecialidad, MedicoCodigoHabilitado,
+    NomencladorCMC, MedicoCodigoHabilitado,
     Homologador, Galeno, GalenoPlantilla, Valor, ValorComponente,
     HistorialPrecioCodigo, ValorDocumento,
+    NomencladorNacional, ValorEspecialidad, NomencladorDescripcionLegacy,
 )
 # Datos del propio Colegio (CUIT, CBU, teléfonos, casillas de correo).
 from app.db.models.institucion import Institucion, InstitucionTelefono, InstitucionEmail
@@ -101,9 +102,10 @@ __all__ = [
     # cmc_facturacion (detalle/facturacion CMC + padrón afiliado + período médico)
     "DetalleFacturacionCMC", "FacturacionCMC", "Afiliado", "PeriodoMedicoActual", "ExportPreset",
     # nomenclador / valores (sistema nuevo)
-    "NomencladorCMC", "NomencladorEspecialidad", "MedicoCodigoHabilitado",
+    "NomencladorCMC", "MedicoCodigoHabilitado",
     "Homologador", "Galeno", "GalenoPlantilla", "Valor", "ValorComponente",
     "HistorialPrecioCodigo", "ValorDocumento",
+    "NomencladorNacional", "ValorEspecialidad", "NomencladorDescripcionLegacy",
     # datos institucionales del Colegio
     "Institucion", "InstitucionTelefono", "InstitucionEmail",
     # calendarios (feriados, cumpleaños, tareas del mes)

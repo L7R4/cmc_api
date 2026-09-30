@@ -169,6 +169,10 @@ async def buscar_nomenclador(
 async def codigos_habilitados_medico(
     nro_socio: str,
     q: Optional[str] = Query(None, description="Filtro por código o descripción"),
+    cod_obra: Optional[str] = Query(
+        None, description="Obra social en la que se está cargando (cod_obr) — si se "
+        "manda, la descripción de cada código es la que esa OS pactó en su nm_valores"
+    ),
     db: AsyncSession = Depends(get_db),
     user=Depends(get_current_user),
 ):
@@ -180,7 +184,7 @@ async def codigos_habilitados_medico(
     consulta los propios. El personal del Colegio necesita `medico:leer`.
     """
     objetivo = socio_objetivo(user, int(nro_socio))
-    return await service.codigos_habilitados_medico(db, str(objetivo), q)
+    return await service.codigos_habilitados_medico(db, str(objetivo), q, cod_obra)
 
 
 # ── Grupo A2 — Afiliados ─────────────────────────────────────────────────────

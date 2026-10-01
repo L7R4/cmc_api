@@ -379,10 +379,26 @@ class GalenoOut(BaseModel):
     unidades_ayudante: Optional[Decimal]
     unidades_gastos: Optional[Decimal]
     activo: bool
+    visible: bool = True
     observacion: Optional[str]
     created_at: datetime.datetime
 
     model_config = {"from_attributes": True}
+
+
+class GalenoVisibilidadIn(BaseModel):
+    """Muestra u oculta un galeno (todas sus filas: niveles y vigencias) de una OS
+    en el boletín del médico. No afecta precios ni facturación."""
+    obra_social_nro: int
+    codigo: str
+    visible: bool
+
+
+class GalenoVisibilidadOut(BaseModel):
+    obra_social_nro: int
+    codigo: str
+    visible: bool
+    filas_actualizadas: int
 
 
 # ─────────────────────────────────────────────────────────────────────────────

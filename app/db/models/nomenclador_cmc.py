@@ -222,6 +222,9 @@ class Galeno(Base):
     unidades_ayudante: Mapped[Optional[Decimal]] = mapped_column(DECIMAL(10, 2), nullable=True)
     unidades_gastos: Mapped[Optional[Decimal]] = mapped_column(DECIMAL(10, 2), nullable=True)
     activo: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="1")
+    # Solo para el boletín del médico (/panel/boletin-valores): False lo oculta ahí.
+    # Se setea por (OS, código) en todas sus filas; las rotaciones lo heredan.
+    visible: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="1")
     observacion: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.now()

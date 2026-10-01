@@ -603,6 +603,7 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     ("POST", "/api/galenos/{id}/actualizar_unidades"): Scope.NOMENCLADOR_EDITAR,
     ("POST", "/api/galenos/actualizar_precio_masivo"): Scope.NOMENCLADOR_MASIVO,
     ("POST", "/api/galenos/replicar_en_familia"): Scope.NOMENCLADOR_EDITAR,
+    ("PATCH", "/api/galenos/visibilidad"): Scope.NOMENCLADOR_EDITAR,
     ("POST", "/api/galenos/importar_de_obra_social"): Scope.NOMENCLADOR_MASIVO,
     ("POST", "/api/galenos/importar_lote"): Scope.NOMENCLADOR_MASIVO,
 

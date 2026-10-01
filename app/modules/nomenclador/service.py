@@ -368,13 +368,24 @@ async def calcular_precio_total(
     result = await db.execute(stmt)
     componentes = result.scalars().all()
 
+    galenos = {
+        gid: await db.get(Galeno, gid)
+        for gid in {c.galeno_id for c in componentes if c.galeno_id is not None}
+    }
+    return precio_y_snapshot(componentes, galenos)
+
+
+def precio_y_snapshot(componentes, galenos: dict) -> tuple[Decimal, list]:
+    """Parte pura de `calcular_precio_total`: suma los componentes (ya ordenados
+    por `orden`) con los galenos dados por id. La usa también la aplicación en
+    bloque de `aplicar_plantilla`, que ya tiene los componentes y galenos en mano."""
     precio_total = Decimal("0")
     snapshot = []
 
     for comp in componentes:
         if comp.galeno_id is not None:
             # calculable
-            galeno = await db.get(Galeno, comp.galeno_id)
+            galeno = galenos.get(comp.galeno_id)
             precio_unidad = galeno.valor_unitario if galeno else Decimal("0")
             subtotal = quantize_money(comp.cantidad * precio_unidad)
             snapshot.append({
@@ -854,6 +865,7 @@ async def _rotar_galeno_destino(
         unidades_honorarios=fuente_unidades.unidades_honorarios,
         unidades_ayudante=fuente_unidades.unidades_ayudante,
         unidades_gastos=fuente_unidades.unidades_gastos,
+        visible=destino_g.visible,
     )
     db.add(nuevo)
     await db.flush()
@@ -954,6 +966,7 @@ async def _convertir_destino_a_nivelado(
             unidades_honorarios=g.unidades_honorarios,
             unidades_ayudante=g.unidades_ayudante,
             unidades_gastos=g.unidades_gastos,
+            visible=destino_viejo.visible,
         )
         db.add(nuevo)
         nuevos_por_nivel[g.nivel] = nuevo

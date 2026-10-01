@@ -10,6 +10,7 @@ from app.modules.nomenclador.routes_valores import router as valores_nm_router
 from app.modules.nomenclador.routes_valores_documentos import (
     router as valores_nm_documentos_router,
 )
+from app.modules.importaciones.routes import router as importaciones_router
 from app.modules.nomenclador.routes_reportes import router as reportes_nm_router
 
 from app.modules.archivos.routes import router as archivos_router
@@ -127,6 +128,9 @@ api_router.include_router(galenos_router,      prefix="/galenos",         tags=[
 api_router.include_router(valores_nm_documentos_router, prefix="/valores_nm", tags=["Valores"])
 api_router.include_router(valores_nm_router,   prefix="/valores_nm",      tags=["Valores"])
 api_router.include_router(reportes_nm_router,  prefix="/reportes_nm",     tags=["Reportes Valores"])
+
+# ── Importaciones masivas (reportes de obras sociales) ────────────────────────
+api_router.include_router(importaciones_router, prefix="/importaciones", tags=["Importaciones"])
 
 # ── Mobile app BFF (cmc-app) ──────────────────────────────────────────────────
 api_router.include_router(mobile_router, prefix="/mobile", tags=["Mobile"])

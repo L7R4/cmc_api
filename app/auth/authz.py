@@ -548,6 +548,8 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     ("DELETE", "/api/validaciones/prestaciones/{prestacion_id}"): Scope.VALIDACION_CARGAR,
     ("POST", "/api/validaciones/prestaciones/{prestacion_id}/orden"): Scope.VALIDACION_CARGAR,
     ("GET", "/api/validaciones/sancor/estado"): Scope.VALIDACION_CARGAR,
+    ("GET", "/api/validaciones/medicus/estado"): Scope.VALIDACION_CARGAR,
+    ("GET", "/api/validaciones/medicus/elegibilidad"): Scope.VALIDACION_CARGAR,
     ("GET", "/api/validaciones/nobis/afiliado"): Scope.VALIDACION_CARGAR,
     # Importar el padrón de OSPM: operación del Colegio, no del prestador —
     # mismo scope que el resto de las mutaciones de padrón.
@@ -642,6 +644,16 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     ("DELETE", "/api/valores_nm/por_vigencia"): Scope.NOMENCLADOR_MASIVO,
 
     # ── Reportes del nomenclador ─────────────────────────────────────────────
+    # Importaciones masivas. Carga prestaciones de terceros en nombre del
+    # Colegio, así que va con el mismo permiso que la carga manual del
+    # operador; no se agregó un scope nuevo.
+    ("GET", "/api/importaciones/prevencion/periodos"): Scope.FACTURACION_CARGAR,
+    ("POST", "/api/importaciones/prevencion/previsualizar"): Scope.FACTURACION_CARGAR,
+    ("POST", "/api/importaciones/prevencion/confirmar"): Scope.FACTURACION_CARGAR,
+    ("GET", "/api/importaciones/swiss/periodos"): Scope.FACTURACION_CARGAR,
+    ("POST", "/api/importaciones/swiss/previsualizar"): Scope.FACTURACION_CARGAR,
+    ("POST", "/api/importaciones/swiss/confirmar"): Scope.FACTURACION_CARGAR,
+
     ("GET", "/api/reportes_nm/boletin"): Scope.NOMENCLADOR_LEER,
     ("GET", "/api/reportes_nm/evolucion_precios"): Scope.NOMENCLADOR_LEER,
     ("GET", "/api/reportes_nm/ranking_valores"): Scope.NOMENCLADOR_LEER,

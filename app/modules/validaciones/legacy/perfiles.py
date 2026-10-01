@@ -92,6 +92,25 @@ PERFILES: dict[int, PerfilLegacy] = {
 }
 
 
+# Obras sociales que a propósito NO se replican al sistema viejo.
+#
+# No es lo mismo que faltar en PERFILES: eso es un olvido y hay un test que
+# lo caza. Esto es una decisión, con su motivo al lado, para que dentro de
+# seis meses se entienda por qué esa obra social no aparece en
+# `guardar_atencion` y nadie salga a buscar el bug.
+SIN_ESPEJO: dict[int, str] = {
+    373: (
+        "Medicus se integró cuando el legacy ya estaba en retirada: nace y vive "
+        "sólo en el sistema nuevo, así que no hay nada que replicar."
+    ),
+}
+
+
+def se_espeja(obra_social_id: int) -> bool:
+    """`False` si se decidió no replicarla. Ver `SIN_ESPEJO`."""
+    return obra_social_id not in SIN_ESPEJO
+
+
 def perfil_de(obra_social_id: int) -> Optional[PerfilLegacy]:
     """Perfil de esa obra social, o `None` si no está espejada.
 

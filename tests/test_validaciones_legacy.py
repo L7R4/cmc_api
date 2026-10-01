@@ -16,7 +16,7 @@ import pytest
 from app.db.models import DetalleFacturacionCMC, ListadoMedico
 from app.modules.validaciones import obras
 from app.modules.validaciones.legacy import mapeo
-from app.modules.validaciones.legacy.perfiles import PERFILES, perfil_de
+from app.modules.validaciones.legacy.perfiles import PERFILES, perfil_de, se_espeja
 
 
 def _detalle(**overrides) -> DetalleFacturacionCMC:
@@ -72,7 +72,11 @@ def test_toda_obra_social_registrada_tiene_perfil_legacy():
     llegar a la facturación del legacy sin que nadie se entere. Este test es el
     aviso temprano.
     """
-    sin_perfil = [(v.nro, v.nombre) for v in obras.VALIDADORES if perfil_de(v.nro) is None]
+    sin_perfil = [
+        (v.nro, v.nombre)
+        for v in obras.VALIDADORES
+        if perfil_de(v.nro) is None and se_espeja(v.nro)
+    ]
     assert not sin_perfil, (
         "Estas obras sociales están en obras/ pero no en legacy/perfiles.py, "
         f"así que no se espejan: {sin_perfil}"

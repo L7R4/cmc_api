@@ -1271,6 +1271,11 @@ class BoletinComponenteOut(BaseModel):
 
 
 class BoletinItemOut(BaseModel):
+    # Sin esto, pedir el boletín de un código SIN obra social devuelve una
+    # lista plana donde no se sabe a quién corresponde cada precio — que es
+    # justo el caso que el endpoint dice soportar («el boletín las muestra
+    # todas»). La columna ya estaba en la fila que se lee.
+    obra_social_nro: int
     codigo: str
     origen: str
     descripcion: Optional[str]

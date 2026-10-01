@@ -8,7 +8,6 @@ catálogo. Recién al aplicarla a una obra social se escribe lo que cuenta:
 """
 from __future__ import annotations
 
-import datetime
 import logging
 from typing import List
 
@@ -18,8 +17,6 @@ from sqlalchemy.orm import noload
 
 from app.db.models.catalogs import Especialidad
 from app.db.models.nomenclador_cmc import (
-    Galeno,
-    HistorialPrecioCodigo,
     NomencladorCMC,
     NomencladorPlantillaEspecialidad,
     Valor,
@@ -154,12 +151,14 @@ async def _crear_variantes_en_bloque(
     """Crea una NE por especialidad clonando `base`, con el mismo resultado que
     `_clonar_valor(..., como_ne_de_especialidad=esp, motivo="replicacion")` +
     `validar_especialidad_habilitada` por cada una, pero con una cantidad fija de
-    consultas por obra social (inserts multi-fila) en vez de ~25 por variante.
+    consultas por obra social en vez de ~25 por variante. El alta pasa por el punto
+    único en bloque (`service.persistir_valores_en_bloque`: valor + componentes +
+    historial juntos).
 
     Precondición: ninguna de `especialidades` tiene una NE activa en el par (el
     caller ya filtró las existentes). No hace commit.
     """
-    os_nro, nom_id, vigencia = base.obra_social_nro, base.nomenclador_id, base.vigencia_desde
+    os_nro = base.obra_social_nro
 
     # 1. Habilitación en nm_valor_especialidad (solo las que faltan).
     habilitadas = set((await db.execute(
@@ -176,96 +175,31 @@ async def _crear_variantes_en_bloque(
             for esp in faltantes
         ])
 
-    # 2. Los valores: mismos metadatos que `_clonar_valor` (incluido no copiar
-    #    `por_presupuesto`, igual que el clon de siempre).
-    await db.execute(insert(Valor), [
-        {
-            "obra_social_nro": os_nro, "nomenclador_id": nom_id, "origen": "NE",
-            "codigo": base.codigo, "descripcion": base.descripcion, "nivel": base.nivel,
-            "complejidad": base.complejidad, "categoria": base.categoria,
-            "requiere_autorizacion": base.requiere_autorizacion,
-            "especialidad_id_colegio": esp,
-            "sin_restriccion_especialidad": base.sin_restriccion_especialidad,
-            "cantidad_ayudantes": base.cantidad_ayudantes, "coseguro": base.coseguro,
-            "vigencia_desde": vigencia, "vigencia_hasta": None, "estado": "activo",
-            "observacion": base.observacion,
-        }
-        for esp in especialidades
-    ])
-    # Sin RETURNING en MySQL: se leen los ids recién creados. Son las únicas NE
-    # activas de esas especialidades en el par (precondición).
-    nuevos = dict((await db.execute(
-        select(Valor.especialidad_id_colegio, Valor.id).where(
-            Valor.obra_social_nro == os_nro, Valor.nomenclador_id == nom_id,
-            Valor.origen == "NE", Valor.estado == "activo",
-            Valor.especialidad_id_colegio.in_(especialidades),
-        )
-    )).all())
-
-    # 3. Componentes: copia de los activos de la base en cada valor nuevo.
-    comps_base = list((await db.execute(
-        select(ValorComponente).where(
-            ValorComponente.valor_id == base.id, ValorComponente.activo == True,
-        )
-    )).scalars())
-    if comps_base:
-        await db.execute(insert(ValorComponente), [
-            {
-                "valor_id": valor_id, "concepto": c.concepto, "galeno_id": c.galeno_id,
-                "cantidad": c.cantidad, "valor_unitario": c.valor_unitario,
-                "orden": c.orden, "observacion": c.observacion,
-            }
-            for valor_id in nuevos.values() for c in comps_base
-        ])
-    comps_por_valor: dict[int, list] = {vid: [] for vid in nuevos.values()}
-    for c in (await db.execute(
-        select(
-            ValorComponente.id, ValorComponente.valor_id, ValorComponente.concepto,
-            ValorComponente.galeno_id, ValorComponente.cantidad, ValorComponente.valor_unitario,
-        ).where(
-            ValorComponente.valor_id.in_(list(nuevos.values())),
-            ValorComponente.activo == True,
-        ).order_by(ValorComponente.valor_id, ValorComponente.orden)
-    )).all():
-        comps_por_valor[c.valor_id].append(c)
-
-    # 4. Historial (Regla B sin fecha de corte, como `regenerar_historial_por_valores`):
-    #    actualiza la fila de esa vigencia si ya existe; si no, inserta una nueva.
-    galenos = {
-        gid: await db.get(Galeno, gid)
-        for gid in {c.galeno_id for c in comps_base if c.galeno_id is not None}
-    }
-    previas = {
-        h.especialidad_id_colegio: h for h in (await db.execute(
-            select(HistorialPrecioCodigo).where(
-                HistorialPrecioCodigo.nomenclador_id == nom_id,
-                HistorialPrecioCodigo.obra_social_nro == os_nro,
-                HistorialPrecioCodigo.origen == "NE",
-                HistorialPrecioCodigo.especialidad_id_colegio.in_(especialidades),
-                HistorialPrecioCodigo.vigencia_desde == vigencia,
+    # 2. Valores + componentes + historial. Mismos metadatos que `_clonar_valor`
+    #    (incluido no copiar `por_presupuesto`, igual que el clon de siempre).
+    comps_base = [
+        {"concepto": c.concepto, "galeno_id": c.galeno_id, "cantidad": c.cantidad,
+         "valor_unitario": c.valor_unitario, "orden": c.orden, "observacion": c.observacion}
+        for c in (await db.execute(
+            select(ValorComponente).where(
+                ValorComponente.valor_id == base.id, ValorComponente.activo == True,
             )
         )).scalars()
-    }
-    ahora = datetime.datetime.utcnow()
-    filas_historial = []
-    for esp, valor_id in nuevos.items():
-        precio, snapshot = service.precio_y_snapshot(comps_por_valor[valor_id], galenos)
-        previa = previas.get(esp)
-        if previa is not None:
-            previa.precio_total = precio
-            previa.componentes_snapshot = snapshot
-            previa.motivo_cambio = "replicacion"
-            previa.vigencia_hasta = None
-            previa.valores_id = valor_id
-            previa.fecha_cambio = ahora
-            continue
-        filas_historial.append({
-            "nomenclador_id": nom_id, "obra_social_nro": os_nro, "origen": "NE",
-            "especialidad_id_colegio": esp, "vigencia_desde": vigencia,
-            "vigencia_hasta": None, "precio_total": precio, "valores_id": valor_id,
-            "componentes_snapshot": snapshot, "motivo_cambio": "replicacion",
-            "referencia_cambio_id": valor_id, "fecha_cambio": ahora,
-        })
-    if filas_historial:
-        await db.execute(insert(HistorialPrecioCodigo), filas_historial)
-    await db.flush()
+    ]
+    await service.persistir_valores_en_bloque(db, [
+        (
+            {
+                "obra_social_nro": os_nro, "nomenclador_id": base.nomenclador_id,
+                "origen": "NE", "codigo": base.codigo, "descripcion": base.descripcion,
+                "nivel": base.nivel, "complejidad": base.complejidad,
+                "categoria": base.categoria,
+                "requiere_autorizacion": base.requiere_autorizacion,
+                "especialidad_id_colegio": esp,
+                "sin_restriccion_especialidad": base.sin_restriccion_especialidad,
+                "cantidad_ayudantes": base.cantidad_ayudantes, "coseguro": base.coseguro,
+                "vigencia_desde": base.vigencia_desde, "observacion": base.observacion,
+            },
+            comps_base,
+        )
+        for esp in especialidades
+    ], motivo="replicacion")

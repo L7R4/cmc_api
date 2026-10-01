@@ -605,6 +605,58 @@ def validar_reglas_origen(
             )
 
 
+class CompletarBaseNNIn(BaseModel):
+    obra_social_nro: int
+    # True → calcula y devuelve lo que haría, sin guardar nada (vista previa).
+    dry_run: bool = False
+
+
+class GalenoBaseCreadoOut(BaseModel):
+    codigo: str
+    nombre: str
+
+
+class GalenoBaseExistenteOut(BaseModel):
+    codigo: str
+    nombre: str
+    valor_unitario: Decimal
+    vigencia_desde: datetime.date
+
+
+class CompletarBaseNNErrorOut(BaseModel):
+    codigo: str
+    motivo: str
+
+
+class CompletarBaseNNOut(BaseModel):
+    obra_social_nro: int
+    dry_run: bool
+    vigencia_desde: datetime.date
+    galenos_creados: List[GalenoBaseCreadoOut]
+    galenos_existentes: List[GalenoBaseExistenteOut]
+    total_candidatos: int
+    nn_creados: int
+    nn_existentes: int
+    habilitaciones_sembradas: int
+    errores: List[CompletarBaseNNErrorOut]
+
+
+class ComponenteNNSugeridoOut(BaseModel):
+    concepto: Literal["Honorarios", "Ayudante", "Gastos"]
+    galeno_id: int
+    galeno_nombre: str
+    cantidad: Decimal
+    orden: int
+
+
+class ComponentesNNSugeridosOut(BaseModel):
+    """Precarga del alta manual de un NN. `disponible=False` → `motivo` dice por qué
+    (sin NN vinculado, fuera de rango, galeno base no vigente en la OS)."""
+    disponible: bool
+    motivo: Optional[str] = None
+    componentes: List[ComponenteNNSugeridoOut] = []
+
+
 class ValorComponenteOut(BaseModel):
     id: int
     valor_id: int

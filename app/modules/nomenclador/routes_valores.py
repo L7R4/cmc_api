@@ -26,6 +26,10 @@ from app.modules.nomenclador.schemas import (
     ActualizarPorcentajeIn,
     AumentoPorcentualResult,
     ActualizarPorCodigosIn,
+    CompletarBaseNNIn,
+    CompletarBaseNNOut,
+    ComponenteNNSugeridoOut,
+    ComponentesNNSugeridosOut,
     DiagnosticoSinHistorialOut,
     GenerarValoresNNIn,
     GenerarValoresNNResult,
@@ -631,6 +635,33 @@ async def diagnostico_valores_sin_historial(
     )
 
 
+@router.get("/componentes_nn", response_model=ComponentesNNSugeridosOut)
+async def sugerir_componentes_nn(
+    obra_social_nro: int = Query(...),
+    nomenclador_id: int = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Componentes de un valor NN (galeno según el rango del código + unidades del
+    Nomenclador Nacional) para precargar el alta manual en Por obra social. Misma
+    regla que la generación automática (`service.componentes_nn`). No escribe nada."""
+    try:
+        comps = await service.componentes_nn_sugeridos(db, obra_social_nro, nomenclador_id)
+    except service.ComponentesNNNoDisponibles as e:
+        return ComponentesNNSugeridosOut(disponible=False, motivo=str(e))
+    nombres = {
+        g.id: g.nombre for g in (await db.execute(
+            select(Galeno).where(Galeno.id.in_({c["galeno_id"] for c in comps}))
+        )).scalars()
+    }
+    return ComponentesNNSugeridosOut(
+        disponible=True,
+        componentes=[
+            ComponenteNNSugeridoOut(**c, galeno_nombre=nombres.get(c["galeno_id"], ""))
+            for c in comps
+        ],
+    )
+
+
 @router.get("/vigencias")
 async def listar_vigencias_cargadas(
     obra_social_nro: int = Query(...),
@@ -958,6 +989,36 @@ async def generar_nn_por_rangos(
 
     await db.commit()
     return GenerarValoresNNResult(**resultado)
+
+
+@router.post("/completar_base_nn", response_model=CompletarBaseNNOut)
+async def completar_base_nn(body: CompletarBaseNNIn, db: AsyncSession = Depends(get_db)):
+    """Herramienta "Completar nomenclador NN": deja una OS (nueva o existente) con
+    los 7 galenos base y todos sus Valor NN, SIN tocar lo que ya tiene — lo que
+    existe se informa y se saltea. Lo faltante sale en $0 con vigencia 01/01/1900;
+    al cargar el precio real de cada galeno base, los NN rotan solos.
+    `dry_run=True` devuelve el mismo informe sin guardar nada."""
+    from app.modules.catalogs.routes_obras_sociales import VIGENCIA_NOMENCLADOR_INICIAL
+
+    existe = (await db.execute(
+        select(ObrasSociales.ID).where(ObrasSociales.NRO_OBRASOCIAL == body.obra_social_nro)
+    )).scalar_one_or_none()
+    if existe is None:
+        raise HTTPException(404, f"Obra social {body.obra_social_nro} no encontrada")
+
+    try:
+        r = await service.completar_base_nn(body.obra_social_nro, VIGENCIA_NOMENCLADOR_INICIAL, db)
+    except Exception:
+        await db.rollback()
+        raise
+    if body.dry_run:
+        await db.rollback()
+    else:
+        await db.commit()
+    return CompletarBaseNNOut(
+        obra_social_nro=body.obra_social_nro, dry_run=body.dry_run,
+        vigencia_desde=VIGENCIA_NOMENCLADOR_INICIAL, **r,
+    )
 
 
 @router.get("/{id}", response_model=ValorOut)

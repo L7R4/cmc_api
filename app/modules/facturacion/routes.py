@@ -530,16 +530,18 @@ async def cierre_preview(
 async def cerrar_periodo(
     cod_obra: str = Form(...),
     periodo: str = Form(..., description="YYYYMM"),
+    tipo_factura: Optional[str] = Form(None, description="Tipo de factura AFIP: A/B/C (opcional)"),
     nro_factura: Optional[str] = Form(None, description="Nro de factura AFIP (opcional)"),
     archivo: Optional[UploadFile] = File(None, description="Comprobante de la factura (opcional)"),
     user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """multipart/form-data. `archivo` es opcional: si se envía, se guarda como
-    comprobante de la factura (`documento_url` en la respuesta). `nro_factura` es
-    opcional: texto libre (ej. "00031-00009999")."""
+    comprobante de la factura (`documento_url` en la respuesta). `tipo_factura` y
+    `nro_factura` son opcionales: texto libre (ej. "A" y "00031-00009999")."""
     return await service.cerrar_periodo(
-        db, cod_obra, periodo, _usuario(user), archivo, nro_factura=nro_factura,
+        db, cod_obra, periodo, _usuario(user), archivo,
+        nro_factura=nro_factura, tipo_factura=tipo_factura,
     )
 
 

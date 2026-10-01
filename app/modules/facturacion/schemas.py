@@ -446,6 +446,7 @@ class CierreResponse(BaseModel):
     importe_total: Decimal
     documento_url: Optional[str] = None
     nro_factura: Optional[str] = None
+    tipo_factura: Optional[str] = None
 
 
 # ── Factura complementaria (nueva versión de un período+OS ya cerrado) ───────

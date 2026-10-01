@@ -57,7 +57,9 @@ def _linea_facturas(factura: FacturacionCMC) -> str:
         (factura.tipo_factura_2, factura.nro_factura_2),
         (factura.tipo_factura_3, factura.nro_factura_3),
     ]
-    textos = [f"{tipo} - {nro}" for tipo, nro in pares if tipo and nro]
+    # Basta el número: sin tipo cargado se muestra solo el número (antes se
+    # exigían ambos y una factura cerrada sin tipo salía con "-").
+    textos = [f"{tipo} - {nro}" if tipo else nro for tipo, nro in pares if nro]
     return "Tipo y Nº de Factura/s: " + (", ".join(textos) if textos else "-")
 
 

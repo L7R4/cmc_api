@@ -120,7 +120,10 @@ async def construir_contexto(
     return ContextoCaratula(
         membrete=await _membrete(db),
         nro_expediente=factura.id_prestaciones,
-        nro_factura=factura.nro_factura,
+        nro_factura=(
+            f"{factura.tipo_factura} - {factura.nro_factura}"
+            if factura.tipo_factura and factura.nro_factura else factura.nro_factura
+        ),
         periodo_label=service.periodo_label(factura.periodo) if factura.periodo else "",
         obra_social_nombre=obra_social_nombre,
         cod_obra=factura.cod_obr,

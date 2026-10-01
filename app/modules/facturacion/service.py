@@ -2867,13 +2867,16 @@ async def preview_cierre(db: AsyncSession, cod_obra: str, periodo: str) -> dict:
 async def cerrar_periodo(
     db: AsyncSession, cod_obra: str, periodo: str, usuario: str,
     archivo: Optional[UploadFile] = None, nro_factura: Optional[str] = None,
+    tipo_factura: Optional[str] = None,
 ) -> dict:
     """Cierra un período: crea la cabecera en `facturacion` (estado 'C') y pasa las
     prestaciones de la OS+período de 'A' → 'C'. A partir de acá liquidación las toma
     (`build_detalles_from_cmc` lee estado 'C') y dejan de ser editables. Si viene
     `archivo`, se guarda como comprobante de la factura (`documento_url`). Si viene
     `nro_factura`, se persiste tal cual (texto libre, ej. "00031-00009999") —
-    antes de este fix el endpoint no lo aceptaba y quedaba siempre en `""`."""
+    antes de este fix el endpoint no lo aceptaba y quedaba siempre en `""`. Lo mismo
+    con `tipo_factura` ("A"/"B"/"C"): el front lo mandaba pero se descartaba, y el
+    encabezado del detalle quedaba en "-"."""
     if await _periodo_cerrado(db, cod_obra, periodo):
         raise HTTPException(409, "El período ya tiene factura cerrada para esta obra social")
 
@@ -2922,7 +2925,9 @@ async def cerrar_periodo(
     cabecera.estado_doctor = DOCTOR_CERRADA
     cabecera.usuario = usuario
     if nro_factura is not None:
-        cabecera.nro_factura = nro_factura
+        cabecera.nro_factura = nro_factura.strip()
+    if tipo_factura is not None:
+        cabecera.tipo_factura = tipo_factura.strip().upper()
     for r in rows:
         r.estado = "C"
 
@@ -2944,6 +2949,7 @@ async def cerrar_periodo(
         "importe_total": total,
         "documento_url": url_archivo(cabecera.documento_url),
         "nro_factura": cabecera.nro_factura,
+        "tipo_factura": cabecera.tipo_factura,
     }
 
 

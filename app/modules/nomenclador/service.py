@@ -20,6 +20,7 @@ from app.db.models.nomenclador_cmc import (
     MedicoCodigoHabilitado,
     NomencladorCMC,
     NomencladorDescripcionLegacy,
+    NomencladorPlantillaEspecialidad,
     Valor,
     ValorComponente,
     ValorEspecialidad,
@@ -1274,6 +1275,20 @@ async def generar_valores_nn_por_rangos(
     total = creados = recreados = 0
     errores: list[dict] = []
 
+    # Paso 1 del gate (quién puede cobrar): se siembra desde el catálogo del código
+    # SOLO en los pares que todavía no tienen nada configurado en esta OS, así una
+    # regeneración no pisa lo que se editó a mano. Ver `_sembrar_habilitacion_nn`.
+    habilitacion = await _estado_habilitacion_os(db, obra_social_nro)
+    plantillas: dict[str, list[int]] = {}
+    for codigo, esp in (await db.execute(
+        select(
+            NomencladorPlantillaEspecialidad.codigo,
+            NomencladorPlantillaEspecialidad.especialidad_id_colegio,
+        )
+    )).all():
+        plantillas.setdefault(codigo, []).append(esp)
+    habilitaciones_sembradas = 0
+
     for nom in candidatos:
         nn = nom.nomenclador_nacional
         if not nom.codigo.isdigit():
@@ -1314,6 +1329,20 @@ async def generar_valores_nn_por_rangos(
             fecha_corte = None
             creados += 1
 
+        sin_restriccion = nom.codigo in habilitacion.sin_restriccion
+        if nom.codigo not in habilitacion.configurados:
+            if nom.sin_restriccion_especialidad:
+                sin_restriccion = True
+                habilitaciones_sembradas += 1
+            elif plantillas.get(nom.codigo):
+                for esp in plantillas[nom.codigo]:
+                    db.add(ValorEspecialidad(
+                        obra_social_nro=obra_social_nro, codigo=nom.codigo,
+                        especialidad_id_colegio=esp,
+                    ))
+                habilitaciones_sembradas += 1
+            habilitacion.configurados.add(nom.codigo)
+
         def _cant(concepto_attr: str, galeno: Galeno) -> Decimal:
             return (
                 getattr(galeno, concepto_attr)
@@ -1332,6 +1361,7 @@ async def generar_valores_nn_por_rangos(
                 nivel=None,
                 complejidad=None,
                 especialidad_id_colegio=None,
+                sin_restriccion_especialidad=sin_restriccion,
                 por_presupuesto=False,
                 vigencia_desde=vigencia_desde,
                 vigencia_hasta=None,
@@ -1355,8 +1385,33 @@ async def generar_valores_nn_por_rangos(
         "total_candidatos": total,
         "creados": creados,
         "recreados": recreados,
+        "habilitaciones_sembradas": habilitaciones_sembradas,
         "errores": errores,
     }
+
+
+class _HabilitacionOS:
+    """Qué pares (código) de una OS ya tienen configurado el paso 1 del gate."""
+
+    def __init__(self, configurados: set[str], sin_restriccion: set[str]):
+        self.configurados = configurados
+        self.sin_restriccion = sin_restriccion
+
+
+async def _estado_habilitacion_os(db: AsyncSession, obra_social_nro: int) -> _HabilitacionOS:
+    con_especialidades = set((await db.execute(
+        select(ValorEspecialidad.codigo).where(
+            ValorEspecialidad.obra_social_nro == obra_social_nro
+        ).distinct()
+    )).scalars())
+    sin_restriccion = set((await db.execute(
+        select(Valor.codigo).where(
+            Valor.obra_social_nro == obra_social_nro,
+            Valor.estado == "activo",
+            Valor.sin_restriccion_especialidad == True,
+        ).distinct()
+    )).scalars())
+    return _HabilitacionOS(con_especialidades | sin_restriccion, sin_restriccion)
 
 
 async def sembrar_nomenclador_nuevo(

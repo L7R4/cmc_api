@@ -13,6 +13,8 @@ versión propia de una obra social — ver plan de migración), así que el esce
 
 Pruebas puras: la sesión es un doble que solo responde el SELECT del chequeo.
 """
+import datetime
+
 import pytest
 from fastapi import HTTPException
 
@@ -26,6 +28,12 @@ class _Resultado:
 
     def scalar_one_or_none(self):
         return self._fila
+
+    def scalars(self):
+        return self
+
+    def all(self):
+        return []
 
 
 class _SesionFalsa:
@@ -41,11 +49,17 @@ class _SesionFalsa:
     def add(self, obj):
         self.agregados.append(obj)
 
+    async def flush(self):
+        pass
+
     async def commit(self):
         pass
 
-    async def refresh(self, _obj):
-        pass
+    async def refresh(self, obj):
+        # Lo que en la base resuelven los server_default al releer la fila.
+        ahora = datetime.datetime(2026, 9, 30)
+        obj.id, obj.activo = 1, True
+        obj.created_at = obj.updated_at = ahora
 
 
 class _FilaExistente:

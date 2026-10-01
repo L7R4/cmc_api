@@ -1,7 +1,7 @@
 import datetime
 import os
 import uuid
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Path, Query, Response, UploadFile, status
 from fastapi.concurrency import run_in_threadpool
@@ -24,9 +24,16 @@ from app.modules.catalogs.schemas import (
     ObraSocialSimpleOut,
     ObraSocialUpdate,
 )
+from app.modules.facturacion.service import asegurar_puntero_propio
+from app.modules.nomenclador.schemas import ObraSocialFamiliaItem
 from app.modules.nomenclador.service import sembrar_nomenclador_nuevo
 
 router = APIRouter()
+
+# Vigencia "irreal" del nomenclador sembrado en el alta: los galenos base y los Valor
+# NN salen en $0 con esta fecha, así cualquier precio real que se cargue después (con
+# su vigencia de verdad) rota sobre ellos sin chocar con una fecha del convenio.
+VIGENCIA_NOMENCLADOR_INICIAL = datetime.date(1900, 1, 1)
 
 UPLOAD_DIR = "uploads/obras_sociales"
 
@@ -355,10 +362,13 @@ async def create_obra_social(
     # Valor NN calculados contra ellos (también en $0 hasta que alguien cargue el
     # precio real). La OS ya quedó creada arriba — un fallo acá no la deshace,
     # solo dice que el nomenclador de la OS todavía no se pudo sembrar.
+    # Puntero de período propio: su `dia_corte` cierra solo su período, nunca el
+    # global que comparten las OS sin puntero (ver asegurar_puntero_propio).
+    await asegurar_puntero_propio(db, obj.NRO_OBRASOCIAL)
+    await db.commit()
+
     try:
-        await sembrar_nomenclador_nuevo(
-            obj.NRO_OBRASOCIAL, payload.fecha_alta_convenio or datetime.date.today(), db,
-        )
+        await sembrar_nomenclador_nuevo(obj.NRO_OBRASOCIAL, VIGENCIA_NOMENCLADOR_INICIAL, db)
         await db.commit()
     except Exception:
         await db.rollback()
@@ -372,6 +382,16 @@ async def create_obra_social(
 
     principal, asociadas = await _load_principal_and_asociadas(obj, db)
     return _build_out(obj, principal, asociadas)
+
+
+@router.get("/familia/{nro_obra_social}", response_model=List[ObraSocialFamiliaItem])
+async def familia_obra_social(nro_obra_social: int, db: AsyncSession = Depends(get_db)):
+    """Las OTRAS obras sociales activas de la familia (planes de la misma empresa).
+    Vacío si no tiene. Lo usan las opciones de "replicar en obras sociales
+    relacionadas" de Por obra social y Galenos."""
+    from app.modules.nomenclador.replicar_familia import familia_de
+
+    return await familia_de(db, nro_obra_social)
 
 
 @router.patch("/{id}", response_model=ObraSocialOut)
@@ -437,6 +457,8 @@ async def update_obra_social(
         obj.contactos = [c.model_dump() for c in payload.contactos]
     if payload.direcciones is not None:
         obj.direcciones = [d.model_dump() for d in payload.direcciones]
+    if "dia_corte" in changes:
+        await asegurar_puntero_propio(db, obj.NRO_OBRASOCIAL)
 
     try:
         await db.commit()

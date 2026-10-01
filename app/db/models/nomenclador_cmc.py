@@ -651,6 +651,38 @@ class ValorEspecialidad(Base):
     )
 
 
+class NomencladorPlantillaEspecialidad(Base):
+    """Especialidades SUGERIDAS para un código a nivel catálogo (sin obra social).
+
+    Es sólo una plantilla: no habilita a nadie a facturar. La habilitación real
+    sigue viviendo en `nm_valor_especialidad`, por (obra_social_nro, codigo), y
+    se escribe recién cuando la plantilla se aplica a una obra social (ver
+    `aplicar_plantilla.py`). Reemplaza en espíritu a la vieja
+    `nm_nomenclador_especialidad` y se cargó inicialmente desde `espe_cod`.
+
+    `codigo` es un string sin FK, igual que `ValorEspecialidad.codigo`.
+    """
+    __tablename__ = "nm_plantilla_especialidad_codigo"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    codigo: Mapped[str] = mapped_column(String(20), nullable=False)
+    # FK lógica a especialidad.ID_COLEGIO_ESPE
+    especialidad_id_colegio: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "codigo", "especialidad_id_colegio", name="uq_nm_plantilla_esp_codigo"
+        ),
+        Index("ix_nm_plantilla_esp_codigo", "codigo"),
+    )
+
+
 class NomencladorDescripcionLegacy(Base):
     """Copia de solo lectura de las descripciones que tenía `nm_nomenclador` antes
     de la fase 1 de la reestructura del nomenclador (ver plan de migración).

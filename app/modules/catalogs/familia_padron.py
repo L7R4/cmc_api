@@ -10,8 +10,10 @@ englobar todos sus planes.
 modela esto, pero hasta ahora era puramente decorativo (sólo se usaba para
 mostrar "principal"/"asociadas" en el CRUD de obras sociales). Este módulo
 lo convierte en la fuente de verdad del agrupamiento para todo lo relativo
-a padrones — nunca lo debe importar facturación/liquidación/valores, que
-necesitan el `NRO_OBRASOCIAL` exacto de cada plan.
+a padrones. Facturación y liquidación nunca deben usarlo para agrupar: necesitan
+el `NRO_OBRASOCIAL` exacto de cada plan. Valores y galenos lo usan solo para
+OFRECER replicar un cambio en los otros planes (`nomenclador/replicar_familia.py`);
+cada plan sigue guardando sus propios valores.
 """
 import logging
 

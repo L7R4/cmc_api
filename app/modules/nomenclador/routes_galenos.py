@@ -26,6 +26,8 @@ from app.modules.nomenclador.schemas import (
     GalenosImportarIn,
     GalenosImportarResult,
     GalenoUpdate,
+    ReplicarFamiliaGalenoIn,
+    ReplicarFamiliaOut,
     slugify_codigo,
 )
 
@@ -498,6 +500,18 @@ async def actualizar_unidades_galeno(
     return GalenoActualizarUnidadesResult(
         galeno=GalenoOut.model_validate(galeno), componentes_actualizados=n
     )
+
+
+@router.post("/replicar_en_familia", response_model=ReplicarFamiliaOut)
+async def replicar_galeno_en_familia(
+    body: ReplicarFamiliaGalenoIn, db: AsyncSession = Depends(get_db)
+):
+    """Replica en los otros planes de la familia el alta, el cambio de valor o el de
+    unidades recién hecho en la OS de origen (mismo código y nivel). Resultado por OS.
+    Ver `replicar_familia.py`."""
+    from app.modules.nomenclador.replicar_familia import replicar_galenos
+
+    return await replicar_galenos(db, body)
 
 
 @router.post("/actualizar_precio_masivo", response_model=ActualizacionMasivaResult)

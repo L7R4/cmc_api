@@ -129,6 +129,13 @@ async def boletin(
     fecha: datetime.date = Query(...),
     obra_social_nro: Optional[int] = Query(None),
     codigo: Optional[str] = Query(None),
+    especialidad: Optional[int] = Query(
+        None,
+        description=(
+            "ID_COLEGIO_ESPE. Si se envía, sólo vuelven los precios de esa especialidad "
+            "y los generales (sin especialidad): lo usa el boletín de pediatría (39)."
+        ),
+    ),
     db: AsyncSession = Depends(get_db),
 ):
     """Consulta detallada de valores por OS y/o código a una fecha."""
@@ -139,6 +146,11 @@ async def boletin(
     )
     if obra_social_nro:
         stmt = stmt.where(HistorialPrecioCodigo.obra_social_nro == obra_social_nro)
+    if especialidad is not None:
+        stmt = stmt.where(
+            (HistorialPrecioCodigo.especialidad_id_colegio == especialidad)
+            | (HistorialPrecioCodigo.especialidad_id_colegio.is_(None))
+        )
 
     if codigo:
         nom = await service.resolver_nomenclador(db, codigo)
@@ -188,6 +200,7 @@ async def boletin(
             componentes=_componentes_from_snapshot(h.componentes_snapshot),
             vigencia_desde=h.vigencia_desde,
             vigencia_hasta=h.vigencia_hasta,
+            especialidad_id_colegio=h.especialidad_id_colegio,
         ))
 
     return BoletinOut(fecha=fecha, obra_social_nro=obra_social_nro, items=items)

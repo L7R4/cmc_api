@@ -10,7 +10,7 @@ import datetime
 from decimal import Decimal
 from typing import List, Optional
 
-from sqlalchemy import and_, delete, exists, func, or_, select, true, update
+from sqlalchemy import and_, delete, exists, func, insert, or_, select, true, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.common.money import quantize_money
@@ -20,6 +20,7 @@ from app.db.models.nomenclador_cmc import (
     MedicoCodigoHabilitado,
     NomencladorCMC,
     NomencladorDescripcionLegacy,
+    NomencladorPlantillaEspecialidad,
     Valor,
     ValorComponente,
     ValorEspecialidad,
@@ -367,13 +368,24 @@ async def calcular_precio_total(
     result = await db.execute(stmt)
     componentes = result.scalars().all()
 
+    galenos = {
+        gid: await db.get(Galeno, gid)
+        for gid in {c.galeno_id for c in componentes if c.galeno_id is not None}
+    }
+    return precio_y_snapshot(componentes, galenos)
+
+
+def precio_y_snapshot(componentes, galenos: dict) -> tuple[Decimal, list]:
+    """Parte pura de `calcular_precio_total`: suma los componentes (ya ordenados
+    por `orden`) con los galenos dados por id. La usa también la aplicación en
+    bloque de `aplicar_plantilla`, que ya tiene los componentes y galenos en mano."""
     precio_total = Decimal("0")
     snapshot = []
 
     for comp in componentes:
         if comp.galeno_id is not None:
             # calculable
-            galeno = await db.get(Galeno, comp.galeno_id)
+            galeno = galenos.get(comp.galeno_id)
             precio_unidad = galeno.valor_unitario if galeno else Decimal("0")
             subtotal = quantize_money(comp.cantidad * precio_unidad)
             snapshot.append({
@@ -538,6 +550,126 @@ async def persistir_valor(
     await db.flush()
     await regenerar_historial_por_valores(valor.id, fecha_corte, db, motivo=motivo)
     return valor
+
+
+async def persistir_valores_en_bloque(
+    db: AsyncSession,
+    filas: list[tuple[dict, list[dict]]],
+    *,
+    motivo: str,
+) -> dict[tuple, int]:
+    """Versión EN BLOQUE de `persistir_valor`: mismo contrato (valor + componentes +
+    fila de historial, en la misma transacción), con una cantidad fija de consultas
+    en vez de ~10 por valor. Para altas masivas (aplicar la plantilla de un código a
+    muchas O.S., completar el nomenclador NN de una O.S.): hechas de a una tardaban
+    minutos contra la base de prod.
+
+    `filas`: `(campos_del_valor, componentes)`. `campos_del_valor` son las columnas
+    de `nm_valores` (sin id); `componentes`, dicts listos para `ValorComponente`.
+
+    Precondición: ninguna variante `(obra_social_nro, nomenclador_id, origen,
+    especialidad_id_colegio)` de `filas` tiene hoy un Valor activo — es como se
+    recuperan los ids (MySQL no tiene RETURNING). Por lo mismo no hay fecha de
+    corte: no cierra historial previo (no hay valor previo activo que cerrar). Si ya
+    existe una fila de historial con la misma vigencia_desde, se actualiza en vez
+    de duplicarla (igual que `regenerar_historial_por_valores`).
+
+    Devuelve `{(os, nomenclador_id, origen, especialidad_id_colegio): valor_id}`.
+    No hace commit.
+    """
+    if not filas:
+        return {}
+
+    def _clave(v: dict) -> tuple:
+        return (v["obra_social_nro"], v["nomenclador_id"], v["origen"],
+                v.get("especialidad_id_colegio"))
+
+    por_clave = {_clave(v): (v, comps) for v, comps in filas}
+    if len(por_clave) != len(filas):
+        raise ValueError("persistir_valores_en_bloque: variantes repetidas en el lote")
+
+    # 1. Valores
+    await db.execute(insert(Valor), [
+        {"estado": "activo", "vigencia_hasta": None, **v} for v, _ in filas
+    ])
+    os_nros = {k[0] for k in por_clave}
+    nom_ids = {k[1] for k in por_clave}
+    ids: dict[tuple, int] = {}
+    for vid, os_nro, nom_id, origen, esp in (await db.execute(
+        select(Valor.id, Valor.obra_social_nro, Valor.nomenclador_id, Valor.origen,
+               Valor.especialidad_id_colegio).where(
+            Valor.obra_social_nro.in_(os_nros), Valor.nomenclador_id.in_(nom_ids),
+            Valor.estado == "activo",
+        )
+    )).all():
+        clave = (os_nro, nom_id, origen, esp)
+        if clave in por_clave:
+            if clave in ids:  # violaría la precondición: ya había un activo
+                raise ValueError(f"persistir_valores_en_bloque: ya existía un activo para {clave}")
+            ids[clave] = vid
+
+    # 2. Componentes
+    comps_rows = [
+        {"valor_id": ids[clave], **c}
+        for clave, (_, comps) in por_clave.items() for c in comps
+    ]
+    if comps_rows:
+        await db.execute(insert(ValorComponente), comps_rows)
+    comps_por_valor: dict[int, list] = {vid: [] for vid in ids.values()}
+    for c in (await db.execute(
+        select(
+            ValorComponente.id, ValorComponente.valor_id, ValorComponente.concepto,
+            ValorComponente.galeno_id, ValorComponente.cantidad, ValorComponente.valor_unitario,
+        ).where(
+            ValorComponente.valor_id.in_(list(ids.values())), ValorComponente.activo == True,
+        ).order_by(ValorComponente.valor_id, ValorComponente.orden)
+    )).all():
+        comps_por_valor[c.valor_id].append(c)
+
+    # 3. Historial
+    galeno_ids = {c.galeno_id for cs in comps_por_valor.values() for c in cs if c.galeno_id}
+    galenos = {
+        g.id: g for g in (await db.execute(
+            select(Galeno).where(Galeno.id.in_(galeno_ids))
+        )).scalars()
+    } if galeno_ids else {}
+    previas: dict[tuple, HistorialPrecioCodigo] = {}
+    for h in (await db.execute(
+        select(HistorialPrecioCodigo).where(
+            HistorialPrecioCodigo.obra_social_nro.in_(os_nros),
+            HistorialPrecioCodigo.nomenclador_id.in_(nom_ids),
+            HistorialPrecioCodigo.vigencia_desde.in_({v["vigencia_desde"] for v, _ in filas}),
+        )
+    )).scalars():
+        clave = (h.obra_social_nro, h.nomenclador_id, h.origen, h.especialidad_id_colegio)
+        if clave in por_clave and por_clave[clave][0]["vigencia_desde"] == h.vigencia_desde:
+            previas[clave] = h
+
+    ahora = datetime.datetime.utcnow()
+    nuevas = []
+    for clave, vid in ids.items():
+        v = por_clave[clave][0]
+        precio, snapshot = precio_y_snapshot(comps_por_valor[vid], galenos)
+        previa = previas.get(clave)
+        if previa is not None:
+            previa.precio_total = precio
+            previa.componentes_snapshot = snapshot
+            previa.motivo_cambio = motivo
+            previa.vigencia_hasta = None
+            previa.valores_id = vid
+            previa.fecha_cambio = ahora
+            continue
+        nuevas.append({
+            "nomenclador_id": clave[1], "obra_social_nro": clave[0], "origen": clave[2],
+            "especialidad_id_colegio": clave[3], "vigencia_desde": v["vigencia_desde"],
+            "vigencia_hasta": None, "precio_total": precio, "valores_id": vid,
+            "componentes_snapshot": snapshot, "motivo_cambio": motivo,
+            "referencia_cambio_id": vid, "fecha_cambio": ahora,
+        })
+    if nuevas:
+        await db.execute(insert(HistorialPrecioCodigo), nuevas)
+    await db.flush()
+    return ids
 
 
 async def cerrar_historial_de_valor(
@@ -853,6 +985,7 @@ async def _rotar_galeno_destino(
         unidades_honorarios=fuente_unidades.unidades_honorarios,
         unidades_ayudante=fuente_unidades.unidades_ayudante,
         unidades_gastos=fuente_unidades.unidades_gastos,
+        visible=destino_g.visible,
     )
     db.add(nuevo)
     await db.flush()
@@ -953,6 +1086,7 @@ async def _convertir_destino_a_nivelado(
             unidades_honorarios=g.unidades_honorarios,
             unidades_ayudante=g.unidades_ayudante,
             unidades_gastos=g.unidades_gastos,
+            visible=destino_viejo.visible,
         )
         db.add(nuevo)
         nuevos_por_nivel[g.nivel] = nuevo
@@ -1155,6 +1289,88 @@ def _galeno_por_rango(n: int, rangos: list[tuple[int, int, str]]) -> Optional[st
     return None
 
 
+class ComponentesNNNoDisponibles(Exception):
+    """El código no admite componentes NN automáticos (motivo en el mensaje)."""
+
+
+def componentes_nn(nom: NomencladorCMC, galenos: dict[str, Galeno]) -> list[dict]:
+    """Los 3 componentes calculables de un valor NN de `nom`, con los galenos base
+    de la OS (`galenos`: vigentes, nivel NULL, por código). Regla única que usan la
+    generación masiva (`generar_valores_nn_por_rangos`) y el alta manual (modal de
+    Por obra social, vía `componentes_nn_sugeridos`):
+      - Honorarios → galeno de honorarios del rango, cantidad = unidades_honorarios
+      - Ayudante   → el MISMO galeno de honorarios,  cantidad = unidades_ayudante
+      - Gastos     → galeno de gastos del rango,     cantidad = unidades_gastos
+    Cantidad por concepto: galeno.unidades_<c> → nn.unidades_<c> → 0. El rango se
+    calcula con el código DEL COLEGIO.
+
+    Lanza `ComponentesNNNoDisponibles` si el código no es numérico, está fuera de
+    1..419999, no tiene Nomenclador Nacional vinculado o la OS no tiene vigente
+    alguno de los dos galenos del rango.
+    """
+    nn = nom.nomenclador_nacional
+    if nn is None:
+        raise ComponentesNNNoDisponibles(
+            f"El código {nom.codigo} no está vinculado a un código del Nomenclador Nacional"
+        )
+    if not nom.codigo.isdigit() or not (_NN_RANGO_MIN <= int(nom.codigo) <= _NN_RANGO_MAX):
+        raise ComponentesNNNoDisponibles(
+            f"El código {nom.codigo} está fuera de los rangos del Nomenclador Nacional "
+            f"({_NN_RANGO_MIN}–{_NN_RANGO_MAX})"
+        )
+    n = int(nom.codigo)
+    cod_hon = _galeno_por_rango(n, _RANGOS_HONORARIOS)
+    cod_gas = _galeno_por_rango(n, _RANGOS_GASTOS)
+    g_hon, g_gas = galenos.get(cod_hon), galenos.get(cod_gas)
+    if g_hon is None or g_gas is None:
+        faltan = [
+            _GALENOS_NN_NOMBRES.get(c, c)
+            for c, g in ((cod_hon, g_hon), (cod_gas, g_gas)) if g is None
+        ]
+        raise ComponentesNNNoDisponibles(
+            f"La obra social no tiene vigente: {', '.join(faltan)}"
+        )
+
+    def _cant(attr: str, galeno: Galeno) -> Decimal:
+        return getattr(galeno, attr) or getattr(nn, attr) or Decimal("0")
+
+    return [
+        {"concepto": "Honorarios", "galeno_id": g_hon.id,
+         "cantidad": _cant("unidades_honorarios", g_hon), "orden": 0},
+        {"concepto": "Gastos", "galeno_id": g_gas.id,
+         "cantidad": _cant("unidades_gastos", g_gas), "orden": 1},
+        {"concepto": "Ayudante", "galeno_id": g_hon.id,
+         "cantidad": _cant("unidades_ayudante", g_hon), "orden": 2},
+    ]
+
+
+async def _galenos_base_nn(db: AsyncSession, obra_social_nro: int) -> dict[str, Galeno]:
+    """Galenos base NN vigentes de la OS (nivel NULL), indexados por código."""
+    return {
+        g.codigo: g
+        for g in (await db.execute(
+            select(Galeno).where(
+                Galeno.obra_social_nro == obra_social_nro,
+                Galeno.codigo.in_(_GALENOS_NN_CODIGOS),
+                Galeno.nivel.is_(None),
+                Galeno.vigencia_hasta.is_(None),
+                Galeno.activo == True,
+            )
+        )).scalars()
+    }
+
+
+async def componentes_nn_sugeridos(
+    db: AsyncSession, obra_social_nro: int, nomenclador_id: int
+) -> list[dict]:
+    """Componentes NN de un código para una OS, para precargar el alta manual.
+    Todo motivo para no poder sugerirlos sale como `ComponentesNNNoDisponibles`."""
+    nom = await db.get(NomencladorCMC, nomenclador_id)
+    if nom is None:
+        raise ComponentesNNNoDisponibles("Código de nomenclador no encontrado")
+    return componentes_nn(nom, await _galenos_base_nn(db, obra_social_nro))
+
+
 async def crear_galenos_base(
     obra_social_nro: int, vigencia_desde: datetime.date, db: AsyncSession,
 ) -> list[Galeno]:
@@ -1228,18 +1444,7 @@ async def generar_valores_nn_por_rangos(
     manual, CSV) el chequeo sigue de pie: un $0 ahí normalmente es un error de carga.
     """
     # 1. Galenos base vigentes de la OS (nivel NULL), indexados por codigo
-    galenos = {
-        g.codigo: g
-        for g in (await db.execute(
-            select(Galeno).where(
-                Galeno.obra_social_nro == obra_social_nro,
-                Galeno.codigo.in_(_GALENOS_NN_CODIGOS),
-                Galeno.nivel.is_(None),
-                Galeno.vigencia_hasta.is_(None),
-                Galeno.activo == True,
-            )
-        )).scalars()
-    }
+    galenos = await _galenos_base_nn(db, obra_social_nro)
 
     # 1b. Rechazar si algún galeno base tiene VU = 0 (no sirve para calcular precios)
     if not permitir_valor_cero:
@@ -1250,49 +1455,27 @@ async def generar_valores_nn_por_rangos(
                 f"{', '.join(sorted(galenos_en_cero))}. Actualizá el precio antes de generar."
             )
 
-    # 2. Candidatos: código del Colegio activo, vinculado a un NN activo con >=1
-    # unidad no nula (el rango se filtra en Python). `nomenclador_nacional` carga
-    # con joined (ver modelo), así que esto no dispara una query extra por fila.
-    candidatos_todos = (await db.execute(
-        select(NomencladorCMC).where(
-            NomencladorCMC.activo == True,
-            NomencladorCMC.nomenclador_nacional_id.is_not(None),
-        )
-    )).scalars().all()
-    candidatos = [
-        nom for nom in candidatos_todos
-        if nom.nomenclador_nacional is not None
-        and nom.nomenclador_nacional.activo
-        and (
-            nom.nomenclador_nacional.unidades_honorarios is not None
-            or nom.nomenclador_nacional.unidades_ayudante is not None
-            or nom.nomenclador_nacional.unidades_gastos is not None
-        )
-    ]
+    candidatos = await _candidatos_nn(db)
 
     corte = vigencia_desde - datetime.timedelta(days=1)
     total = creados = recreados = 0
     errores: list[dict] = []
 
+    # Paso 1 del gate (quién puede cobrar): se siembra desde el catálogo del código
+    # SOLO en los pares que todavía no tienen nada configurado en esta OS, así una
+    # regeneración no pisa lo que se editó a mano. Ver `_habilitacion_a_sembrar`.
+    habilitacion = await _estado_habilitacion_os(db, obra_social_nro)
+    plantillas = await _plantillas_por_codigo(db)
+    habilitaciones_sembradas = 0
+
     for nom in candidatos:
         nn = nom.nomenclador_nacional
-        if not nom.codigo.isdigit():
-            continue
-        n = int(nom.codigo)
-        if not (_NN_RANGO_MIN <= n <= _NN_RANGO_MAX):
-            continue
         total += 1
 
-        cod_hon = _galeno_por_rango(n, _RANGOS_HONORARIOS)
-        cod_gas = _galeno_por_rango(n, _RANGOS_GASTOS)
-        g_hon = galenos.get(cod_hon)
-        g_gas = galenos.get(cod_gas)
-        if g_hon is None or g_gas is None:
-            faltan = [c for c, g in ((cod_hon, g_hon), (cod_gas, g_gas)) if g is None]
-            errores.append({
-                "codigo": nom.codigo,
-                "motivo": f"galeno(s) no vigente(s) en la OS: {', '.join(faltan)}",
-            })
+        try:
+            componentes = componentes_nn(nom, galenos)
+        except ComponentesNNNoDisponibles as e:
+            errores.append({"codigo": nom.codigo, "motivo": str(e)})
             continue
 
         # Conflicto: cerrar el NN activo previo (cerrar y recrear)
@@ -1314,12 +1497,13 @@ async def generar_valores_nn_por_rangos(
             fecha_corte = None
             creados += 1
 
-        def _cant(concepto_attr: str, galeno: Galeno) -> Decimal:
-            return (
-                getattr(galeno, concepto_attr)
-                or getattr(nn, concepto_attr)
-                or Decimal("0")
-            )
+        sin_restriccion, esps, sembrada = _habilitacion_a_sembrar(nom, habilitacion, plantillas)
+        for esp in esps:
+            db.add(ValorEspecialidad(
+                obra_social_nro=obra_social_nro, codigo=nom.codigo,
+                especialidad_id_colegio=esp,
+            ))
+        habilitaciones_sembradas += sembrada
 
         await persistir_valor(
             db,
@@ -1332,19 +1516,13 @@ async def generar_valores_nn_por_rangos(
                 nivel=None,
                 complejidad=None,
                 especialidad_id_colegio=None,
+                sin_restriccion_especialidad=sin_restriccion,
                 por_presupuesto=False,
                 vigencia_desde=vigencia_desde,
                 vigencia_hasta=None,
                 estado="activo",
             ),
-            [
-                {"concepto": "Honorarios", "galeno_id": g_hon.id,
-                 "cantidad": _cant("unidades_honorarios", g_hon), "orden": 0},
-                {"concepto": "Gastos", "galeno_id": g_gas.id,
-                 "cantidad": _cant("unidades_gastos", g_gas), "orden": 1},
-                {"concepto": "Ayudante", "galeno_id": g_hon.id,
-                 "cantidad": _cant("unidades_ayudante", g_hon), "orden": 2},
-            ],
+            componentes,
             motivo="carga_inicial",
             # Redundante pasar la vigencia aparte: `regenerar_historial_por_valores`
             # toma la del propio valor cuando no se le fuerza otra.
@@ -1355,6 +1533,175 @@ async def generar_valores_nn_por_rangos(
         "total_candidatos": total,
         "creados": creados,
         "recreados": recreados,
+        "habilitaciones_sembradas": habilitaciones_sembradas,
+        "errores": errores,
+    }
+
+
+class _HabilitacionOS:
+    """Qué pares (código) de una OS ya tienen configurado el paso 1 del gate."""
+
+    def __init__(self, configurados: set[str], sin_restriccion: set[str]):
+        self.configurados = configurados
+        self.sin_restriccion = sin_restriccion
+
+
+async def _estado_habilitacion_os(db: AsyncSession, obra_social_nro: int) -> _HabilitacionOS:
+    con_especialidades = set((await db.execute(
+        select(ValorEspecialidad.codigo).where(
+            ValorEspecialidad.obra_social_nro == obra_social_nro
+        ).distinct()
+    )).scalars())
+    sin_restriccion = set((await db.execute(
+        select(Valor.codigo).where(
+            Valor.obra_social_nro == obra_social_nro,
+            Valor.estado == "activo",
+            Valor.sin_restriccion_especialidad == True,
+        ).distinct()
+    )).scalars())
+    return _HabilitacionOS(con_especialidades | sin_restriccion, sin_restriccion)
+
+
+async def _candidatos_nn(db: AsyncSession) -> list[NomencladorCMC]:
+    """Códigos que llevan NN: del Colegio, activos, numéricos en 1..419999 y
+    vinculados a un Nomenclador Nacional activo con al menos una unidad no nula.
+    `nomenclador_nacional` carga con joined (ver modelo): sin query extra por fila."""
+    todos = (await db.execute(
+        select(NomencladorCMC).where(
+            NomencladorCMC.activo == True,
+            NomencladorCMC.nomenclador_nacional_id.is_not(None),
+        )
+    )).scalars().all()
+    return [
+        nom for nom in todos
+        if nom.nomenclador_nacional is not None
+        and nom.nomenclador_nacional.activo
+        and (
+            nom.nomenclador_nacional.unidades_honorarios is not None
+            or nom.nomenclador_nacional.unidades_ayudante is not None
+            or nom.nomenclador_nacional.unidades_gastos is not None
+        )
+        and nom.codigo.isdigit()
+        and _NN_RANGO_MIN <= int(nom.codigo) <= _NN_RANGO_MAX
+    ]
+
+
+async def _plantillas_por_codigo(db: AsyncSession) -> dict[str, list[int]]:
+    plantillas: dict[str, list[int]] = {}
+    for codigo, esp in (await db.execute(
+        select(
+            NomencladorPlantillaEspecialidad.codigo,
+            NomencladorPlantillaEspecialidad.especialidad_id_colegio,
+        )
+    )).all():
+        plantillas.setdefault(codigo, []).append(esp)
+    return plantillas
+
+
+def _habilitacion_a_sembrar(
+    nom: NomencladorCMC, habilitacion: _HabilitacionOS, plantillas: dict[str, list[int]],
+) -> tuple[bool, list[int], bool]:
+    """Paso 1 del gate para el NN de `nom`: `(sin_restriccion, especialidades a
+    habilitar, se_sembró)`. Solo siembra si el par todavía no tiene nada
+    configurado en la OS (no pisa lo editado a mano): "sin restricción" si el
+    catálogo lo marca, si no las especialidades de la plantilla. Marca el código
+    como configurado en `habilitacion`."""
+    sin_restriccion = nom.codigo in habilitacion.sin_restriccion
+    if nom.codigo in habilitacion.configurados:
+        return sin_restriccion, [], False
+    habilitacion.configurados.add(nom.codigo)
+    if nom.sin_restriccion_especialidad:
+        return True, [], True
+    if plantillas.get(nom.codigo):
+        return sin_restriccion, list(plantillas[nom.codigo]), True
+    return sin_restriccion, [], False
+
+
+async def completar_base_nn(
+    obra_social_nro: int, vigencia_desde: datetime.date, db: AsyncSession,
+) -> dict:
+    """Completa la base del nomenclador NN de una OS SIN tocar lo que ya tiene:
+
+    1. Los 7 galenos base (`galeno_quirurgico`, …, `gasto_otros`): los que falten se
+       crean en $0; los que ya están vigentes se informan y no se tocan.
+    2. Un Valor NN por cada código candidato (`_candidatos_nn`) que todavía no tenga
+       un NN activo en la OS, con los componentes de `componentes_nn` y el paso 1
+       del gate sembrado desde el catálogo (`_habilitacion_a_sembrar`). Los NN que
+       ya existen se cuentan y no se tocan (a diferencia de
+       `generar_valores_nn_por_rangos`, que los cierra y recrea).
+
+    Todo en bloque (`persistir_valores_en_bloque`): una OS son ~2.200 códigos, y de
+    a uno eran ~20.000 consultas — minutos contra la base de prod.
+
+    Con los galenos en $0 los NN salen en $0; al cargar el precio real de cada
+    galeno base los NN rotan solos. No comitea."""
+    # 1. Galenos base
+    previos = await _galenos_base_nn(db, obra_social_nro)
+    galenos_existentes = [
+        {"codigo": c, "nombre": g.nombre, "valor_unitario": g.valor_unitario,
+         "vigencia_desde": g.vigencia_desde}
+        for c, g in sorted(previos.items())
+    ]
+    creados = await crear_galenos_base(obra_social_nro, vigencia_desde, db)
+    galenos_creados = [{"codigo": g.codigo, "nombre": g.nombre} for g in creados]
+    galenos = await _galenos_base_nn(db, obra_social_nro)
+
+    # 2. Valores NN faltantes
+    candidatos = await _candidatos_nn(db)
+    con_nn = set((await db.execute(
+        select(Valor.nomenclador_id).where(
+            Valor.obra_social_nro == obra_social_nro,
+            Valor.origen == "NN",
+            Valor.especialidad_id_colegio.is_(None),
+            Valor.estado == "activo",
+        )
+    )).scalars())
+    habilitacion = await _estado_habilitacion_os(db, obra_social_nro)
+    plantillas = await _plantillas_por_codigo(db)
+
+    filas: list[tuple[dict, list[dict]]] = []
+    habilitar: list[dict] = []
+    habilitaciones_sembradas = nn_existentes = 0
+    errores: list[dict] = []
+    for nom in candidatos:
+        if nom.id in con_nn:
+            nn_existentes += 1
+            continue
+        try:
+            componentes = componentes_nn(nom, galenos)
+        except ComponentesNNNoDisponibles as e:
+            errores.append({"codigo": nom.codigo, "motivo": str(e)})
+            continue
+        sin_restriccion, esps, sembrada = _habilitacion_a_sembrar(nom, habilitacion, plantillas)
+        habilitaciones_sembradas += sembrada
+        habilitar += [
+            {"obra_social_nro": obra_social_nro, "codigo": nom.codigo,
+             "especialidad_id_colegio": esp}
+            for esp in esps
+        ]
+        filas.append((
+            {
+                "obra_social_nro": obra_social_nro, "nomenclador_id": nom.id,
+                "origen": "NN", "codigo": nom.codigo,
+                "descripcion": nom.nomenclador_nacional.descripcion,
+                "nivel": None, "complejidad": None, "especialidad_id_colegio": None,
+                "sin_restriccion_especialidad": sin_restriccion, "por_presupuesto": False,
+                "vigencia_desde": vigencia_desde,
+            },
+            componentes,
+        ))
+
+    if habilitar:
+        await db.execute(insert(ValorEspecialidad), habilitar)
+    await persistir_valores_en_bloque(db, filas, motivo="carga_inicial")
+
+    return {
+        "galenos_creados": galenos_creados,
+        "galenos_existentes": galenos_existentes,
+        "total_candidatos": len(candidatos),
+        "nn_creados": len(filas),
+        "nn_existentes": nn_existentes,
+        "habilitaciones_sembradas": habilitaciones_sembradas,
         "errores": errores,
     }
 
@@ -1362,20 +1709,23 @@ async def generar_valores_nn_por_rangos(
 async def sembrar_nomenclador_nuevo(
     obra_social_nro: int, vigencia_desde: datetime.date, db: AsyncSession,
 ) -> dict:
-    """Deja una OS recién creada con nomenclador NN operativo desde el día uno:
-    crea los 7 galenos base en $0 (`crear_galenos_base`) y siembra todos los
-    Valor NN con ellos (`generar_valores_nn_por_rangos`, con `permitir_valor_cero`
-    porque los galenos recién creados son $0 a propósito).
+    """Deja una OS recién creada con nomenclador NN operativo desde el día uno: los
+    7 galenos base en $0 y todos los Valor NN calculados contra ellos. Es
+    `completar_base_nn` sobre una OS vacía (no hay nada previo que respetar).
 
     Todo sale en $0 hasta que alguien cargue el precio real de cada galeno desde
     `ActualizarPreciosGalenos` — ahí los Valor NN rotan solos (mismo mecanismo que
     cualquier otro cambio de precio de galeno). No comitea: el caller decide si
     esto va en la misma transacción del alta de la OS o en una aparte."""
-    galenos_creados = await crear_galenos_base(obra_social_nro, vigencia_desde, db)
-    resultado = await generar_valores_nn_por_rangos(
-        obra_social_nro, vigencia_desde, db, permitir_valor_cero=True,
-    )
-    return {"galenos_creados": len(galenos_creados), **resultado}
+    r = await completar_base_nn(obra_social_nro, vigencia_desde, db)
+    return {
+        "galenos_creados": len(r["galenos_creados"]),
+        "total_candidatos": r["total_candidatos"],
+        "creados": r["nn_creados"],
+        "recreados": 0,
+        "habilitaciones_sembradas": r["habilitaciones_sembradas"],
+        "errores": r["errores"],
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────

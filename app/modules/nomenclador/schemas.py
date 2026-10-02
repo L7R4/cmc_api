@@ -48,40 +48,81 @@ def slugify_codigo(nombre: str) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class NomencladorCreate(BaseModel):
-    """Alta de un código del Colegio. Puro catálogo: código + clasificación + vínculo
-    opcional al Nomenclador Nacional. Descripción, especialidades y "sin restricción"
-    dejaron de vivir acá — son datos POR OBRA SOCIAL, se cargan desde el modal de
-    Valores (`nm_valor_especialidad` / `Valor.descripcion` / `Valor.sin_restriccion_
-    especialidad`; ver `nomenclador/routes_valores.py`)."""
+    """Alta de un código del Colegio: código + clasificación + datos default del
+    catálogo (descripción, "sin restricción") + plantilla de especialidades sugeridas.
+    Todo lo "default" es sólo una sugerencia: los datos que mandan son POR OBRA SOCIAL
+    (`Valor.descripcion`, `Valor.sin_restriccion_especialidad`, `nm_valor_especialidad`)
+    y se escriben al aplicar la plantilla a una obra social
+    (`POST /{id}/aplicar-especialidades`) o desde el modal de Valores."""
     codigo: str
+    descripcion: Optional[str] = None
     categoria: Optional[str] = None
     complejidad: Optional[Literal["baja", "media", "alta"]] = None
     # Código NN al que corresponde este código del Colegio (opcional). Alimenta la
     # generación automática de Valores NN — ver NomencladorNacional.
     nomenclador_nacional_id: Optional[int] = None
     observacion: Optional[str] = None
+    sin_restriccion_especialidad: Optional[bool] = None
+    # ID_COLEGIO_ESPE de las especialidades sugeridas (plantilla). Ignorada si
+    # `sin_restriccion_especialidad` es True.
+    especialidades: List[int] = Field(default_factory=list)
 
 
 class NomencladorUpdate(BaseModel):
+    # `descripcion` se distingue por `model_fields_set`: mandar "" la limpia.
+    descripcion: Optional[str] = None
     categoria: Optional[str] = None
     complejidad: Optional[Literal["baja", "media", "alta"]] = None
     nomenclador_nacional_id: Optional[int] = None
     activo: Optional[bool] = None
     observacion: Optional[str] = None
+    sin_restriccion_especialidad: Optional[bool] = None
+    # None = no tocar la plantilla; lista (aunque vacía) = reemplazarla por completo.
+    especialidades: Optional[List[int]] = None
 
 
 class NomencladorOut(BaseModel):
     id: int
     codigo: str
+    descripcion: Optional[str] = None
     categoria: Optional[str]
     complejidad: Optional[str]
     nomenclador_nacional_id: Optional[int] = None
+    sin_restriccion_especialidad: Optional[bool] = None
     activo: bool
     observacion: Optional[str]
     created_at: datetime.datetime
     updated_at: datetime.datetime
 
     model_config = {"from_attributes": True}
+
+
+class NomencladorDetalleOut(NomencladorOut):
+    """`NomencladorOut` + la plantilla de especialidades sugeridas del código."""
+    especialidades: List[int] = Field(default_factory=list)
+
+
+class AplicarEspecialidadesIn(BaseModel):
+    """Aplica la plantilla YA GUARDADA del código (especialidades o "sin restricción")
+    a estas obras sociales. Se guarda primero, se aplica después."""
+    obra_social_nros: List[int] = Field(min_length=1)
+
+
+class AplicarEspecialidadesAplicadaOut(BaseModel):
+    obra_social_nro: int
+    variantes_creadas: int
+    # Variantes que ya existían y no se tocaron.
+    variantes_existentes: int = 0
+
+
+class AplicarEspecialidadesOmitidaOut(BaseModel):
+    obra_social_nro: int
+    motivo: str
+
+
+class AplicarEspecialidadesOut(BaseModel):
+    aplicadas: List[AplicarEspecialidadesAplicadaOut]
+    omitidas: List[AplicarEspecialidadesOmitidaOut]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -338,10 +379,26 @@ class GalenoOut(BaseModel):
     unidades_ayudante: Optional[Decimal]
     unidades_gastos: Optional[Decimal]
     activo: bool
+    visible: bool = True
     observacion: Optional[str]
     created_at: datetime.datetime
 
     model_config = {"from_attributes": True}
+
+
+class GalenoVisibilidadIn(BaseModel):
+    """Muestra u oculta un galeno (todas sus filas: niveles y vigencias) de una OS
+    en el boletín del médico. No afecta precios ni facturación."""
+    obra_social_nro: int
+    codigo: str
+    visible: bool
+
+
+class GalenoVisibilidadOut(BaseModel):
+    obra_social_nro: int
+    codigo: str
+    visible: bool
+    filas_actualizadas: int
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -548,6 +605,58 @@ def validar_reglas_origen(
             )
 
 
+class CompletarBaseNNIn(BaseModel):
+    obra_social_nro: int
+    # True → calcula y devuelve lo que haría, sin guardar nada (vista previa).
+    dry_run: bool = False
+
+
+class GalenoBaseCreadoOut(BaseModel):
+    codigo: str
+    nombre: str
+
+
+class GalenoBaseExistenteOut(BaseModel):
+    codigo: str
+    nombre: str
+    valor_unitario: Decimal
+    vigencia_desde: datetime.date
+
+
+class CompletarBaseNNErrorOut(BaseModel):
+    codigo: str
+    motivo: str
+
+
+class CompletarBaseNNOut(BaseModel):
+    obra_social_nro: int
+    dry_run: bool
+    vigencia_desde: datetime.date
+    galenos_creados: List[GalenoBaseCreadoOut]
+    galenos_existentes: List[GalenoBaseExistenteOut]
+    total_candidatos: int
+    nn_creados: int
+    nn_existentes: int
+    habilitaciones_sembradas: int
+    errores: List[CompletarBaseNNErrorOut]
+
+
+class ComponenteNNSugeridoOut(BaseModel):
+    concepto: Literal["Honorarios", "Ayudante", "Gastos"]
+    galeno_id: int
+    galeno_nombre: str
+    cantidad: Decimal
+    orden: int
+
+
+class ComponentesNNSugeridosOut(BaseModel):
+    """Precarga del alta manual de un NN. `disponible=False` → `motivo` dice por qué
+    (sin NN vinculado, fuera de rango, galeno base no vigente en la OS)."""
+    disponible: bool
+    motivo: Optional[str] = None
+    componentes: List[ComponenteNNSugeridoOut] = []
+
+
 class ValorComponenteOut(BaseModel):
     id: int
     valor_id: int
@@ -719,6 +828,31 @@ class ValorUpdate(BaseModel):
     observacion: Optional[str] = None
 
 
+class ValorNucleoUpdate(BaseModel):
+    """Edición del "núcleo" de un código en una obra social: lo que vale PARA TODAS
+    sus variantes por especialidad. Una sola transacción; ver `nucleo.py`.
+
+    - Metadatos (`descripcion`, `nivel`, `complejidad`, `cantidad_ayudantes`,
+      `observacion`): None = no tocar; si vienen, van a todas las variantes activas.
+    - `ecuacion`: si viene, rota vigencia + componentes + coseguro de TODAS las
+      variantes NE activas (mismo efecto que `aplicar_a_variantes=True`).
+    - Especialidades: `sin_restriccion_especialidad` True deja UNA sola fila "sin
+      especialidad" (cierra las demás); False + `especialidades` deja exactamente
+      esa lista (crea las nuevas clonando la primera variante, cierra las sacadas).
+    """
+    descripcion: Optional[str] = None
+    nivel: Optional[int] = None
+    complejidad: Optional[Literal["baja", "media", "alta"]] = None
+    cantidad_ayudantes: Optional[int] = Field(None, ge=0)
+    observacion: Optional[str] = None
+    ecuacion: Optional["ValorCerrarYCrearIn"] = None
+    sin_restriccion_especialidad: bool = False
+    especialidades: List[int] = Field(default_factory=list)
+    # Qué núcleo se edita cuando el código tiene NE y NN a la vez. NE = las variantes
+    # por especialidad; NN = su fila única (mismo valor para cualquier especialidad).
+    origen: Literal["NE", "NN"] = "NE"
+
+
 class ValorCerrarYCrearIn(BaseModel):
     # La variante (especialidad_id_colegio) se conserva del valor que se cierra
     vigencia_desde: datetime.date
@@ -744,6 +878,104 @@ class ValorCerrarYCrearIn(BaseModel):
         if not self.por_presupuesto:
             validar_lista_componentes(self.componentes)
         return self
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Replicar en obras sociales de la misma familia (planes de una misma empresa)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ReplicaAltaIn(BaseModel):
+    """El mismo alta que se hizo en la OS de origen (ValorCreate / ValorCreateMulti)."""
+    origen: Origen
+    # Vacío = una sola fila sin especialidad (NN, o NE sin restricción).
+    especialidades_id_colegio: List[int] = Field(default_factory=list)
+    sin_restriccion_especialidad: Optional[bool] = None
+    descripcion: str = Field(..., min_length=1)
+    nivel: Optional[int] = None
+    complejidad: Optional[Literal["baja", "media", "alta"]] = None
+    categoria: Optional[str] = None
+    requiere_autorizacion: Optional[bool] = None
+    por_presupuesto: bool = False
+    cantidad_ayudantes: Optional[int] = Field(None, ge=0)
+    coseguro: Decimal = Field(Decimal("0"), ge=0)
+    vigencia_desde: datetime.date
+    observacion: Optional[str] = None
+    componentes: List[ValorComponenteIn] = []
+
+
+class ReplicaVarianteIn(BaseModel):
+    """La misma rotación que se hizo sobre una variante en la OS de origen."""
+    origen: Origen
+    especialidad_id_colegio: Optional[int] = None
+    ecuacion: ValorCerrarYCrearIn
+
+
+class ReplicarFamiliaValorIn(BaseModel):
+    origen_obra_social_nro: int
+    nomenclador_id: int
+    destinos: List[int] = Field(min_length=1)
+    operacion: Literal["alta", "nucleo", "variante"]
+    alta: Optional[ReplicaAltaIn] = None
+    nucleo: Optional[ValorNucleoUpdate] = None
+    variante: Optional[ReplicaVarianteIn] = None
+
+    @model_validator(mode="after")
+    def _payload_de_la_operacion(self) -> "ReplicarFamiliaValorIn":
+        if getattr(self, self.operacion) is None:
+            raise ValueError(f"Falta el payload de la operación '{self.operacion}'")
+        return self
+
+
+class ReplicaGalenoNivel(BaseModel):
+    nivel: Optional[int] = None
+    valor_unitario: Decimal
+    unidades_honorarios: Optional[Decimal] = None
+    unidades_ayudante: Optional[Decimal] = None
+    unidades_gastos: Optional[Decimal] = None
+
+
+class ReplicarFamiliaGalenoIn(BaseModel):
+    origen_obra_social_nro: int
+    destinos: List[int] = Field(min_length=1)
+    operacion: Literal["alta", "precio", "unidades"]
+    codigo: str
+    vigencia_desde: datetime.date
+    # alta: nombre + niveles creados en la OS de origen.
+    nombre: Optional[str] = None
+    niveles: List[ReplicaGalenoNivel] = Field(default_factory=list)
+    # precio / unidades: el nivel editado.
+    nivel: Optional[int] = None
+    nuevo_valor_unitario: Optional[Decimal] = None
+    # unidades: solo se aplican las que vienen en el body (mismo contrato que
+    # actualizar_unidades: null limpia el default sin propagar).
+    unidades_honorarios: Optional[Decimal] = None
+    unidades_ayudante: Optional[Decimal] = None
+    unidades_gastos: Optional[Decimal] = None
+
+    @model_validator(mode="after")
+    def _payload(self) -> "ReplicarFamiliaGalenoIn":
+        if self.operacion == "alta" and (not self.nombre or not self.niveles):
+            raise ValueError("El alta requiere nombre y niveles")
+        if self.operacion == "precio" and self.nuevo_valor_unitario is None:
+            raise ValueError("Actualizar valor requiere nuevo_valor_unitario")
+        return self
+
+
+class ReplicaResultadoItem(BaseModel):
+    obra_social_nro: int
+    nombre: str
+    estado: Literal["replicado", "creado", "omitido", "error"]
+    motivo: Optional[str] = None
+
+
+class ReplicarFamiliaOut(BaseModel):
+    resultados: List[ReplicaResultadoItem]
+
+
+class ObraSocialFamiliaItem(BaseModel):
+    nro_obra_social: int
+    nombre: str
+    es_principal: bool
 
 
 class ValorOut(BaseModel):
@@ -792,6 +1024,45 @@ class ActualizarPorcentajeIn(BaseModel):
     vigencia_desde: datetime.date
     filtro_codigos: Optional[List[str]] = None   # None = todos
     filtro_rango: Optional[dict] = None          # {"desde": "080000", "hasta": "089999"}
+    # Aumentar los valores de precio fijo del origen/alcance de arriba.
+    incluir_valores_fijos: bool = True
+    # Códigos de galeno de la OS a aumentar (todos sus niveles vigentes). Eso
+    # actualiza todos los valores calculables que los usan (NN y NE por galeno),
+    # sin importar el origen ni el alcance de códigos. None/[] = no tocar galenos.
+    galeno_codigos: Optional[List[str]] = None
+    # True = vista previa: calcula lo mismo sin guardar nada.
+    dry_run: bool = False
+
+    @model_validator(mode="after")
+    def _algo_que_aumentar(self) -> "ActualizarPorcentajeIn":
+        if not self.incluir_valores_fijos and not self.galeno_codigos:
+            raise ValueError("Elegí valores fijos, galenos o ambos")
+        if self.porcentaje == 0:
+            raise ValueError("El porcentaje no puede ser 0")
+        return self
+
+
+class AumentoDetalleItem(BaseModel):
+    tipo: Literal["valor", "galeno"]
+    codigo: str
+    descripcion: Optional[str] = None
+    especialidad_id_colegio: Optional[int] = None
+    nivel: Optional[int] = None
+    vigencia_actual: Optional[datetime.date] = None
+    actual: Decimal
+    nuevo: Optional[Decimal] = None
+    # "actualiza" | "omitido" | "error"
+    estado: Literal["actualiza", "omitido", "error"] = "omitido"
+    motivo: Optional[str] = None
+
+
+class AumentoPorcentualResult(BaseModel):
+    actualizados: int              # valores fijos (o revertidos)
+    galenos_actualizados: int = 0
+    omitidos: int = 0
+    errores: List[dict]
+    detalle: List[AumentoDetalleItem]
+    dry_run: bool = False
 
 
 class ActualizarPorCodigosItem(BaseModel):
@@ -814,6 +1085,8 @@ class ActualizarPorCodigosIn(BaseModel):
 class RevertirActualizacionIn(BaseModel):
     obra_social_nro: int
     vigencia_revertir: datetime.date
+    # True = vista previa de lo que se revertiría, sin guardar.
+    dry_run: bool = False
 
 
 class ActualizacionMasivaResult(BaseModel):
@@ -834,6 +1107,9 @@ class GenerarValoresNNResult(BaseModel):
     total_candidatos: int   # códigos en rango (1..419999) con >=1 unidad
     creados: int            # valores NN nuevos
     recreados: int          # tenían NN activo → se cerró y recreó
+    # códigos cuyo "quién puede cobrar" se sembró desde el catálogo (plantilla o sin
+    # restricción) porque todavía no tenían nada configurado en esta OS
+    habilitaciones_sembradas: int = 0
     errores: List[dict]     # [{codigo, motivo}] (ej: galeno faltante en la OS)
 
 

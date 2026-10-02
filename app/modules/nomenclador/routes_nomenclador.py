@@ -15,14 +15,17 @@ from app.db.models.nomenclador_cmc import (
     Valor,
     ValorEspecialidad,
 )
-from app.modules.nomenclador import service
+from app.modules.nomenclador import aplicar_plantilla, service
 from app.modules.nomenclador.service import _especialidades_medico
 from app.modules.nomenclador.schemas import (
+    AplicarEspecialidadesIn,
+    AplicarEspecialidadesOut,
     CodigoPorEspecialidadOut,
     MedicoHabilitacionCreate,
     MedicoHabilitacionOut,
     MedicoHabilitacionUpdate,
     NomencladorCreate,
+    NomencladorDetalleOut,
     NomencladorOut,
     NomencladorUpdate,
 )
@@ -210,16 +213,20 @@ async def list_codigos_por_especialidad(
     ]
 
 
-@router.post("/", response_model=NomencladorOut, status_code=201)
-async def create_nomenclador(body: NomencladorCreate, db: AsyncSession = Depends(get_db)):
-    """Alta de un código del catálogo.
+async def _detalle(db: AsyncSession, obj: NomencladorCMC) -> NomencladorDetalleOut:
+    out = NomencladorDetalleOut.model_validate(obj)
+    out.especialidades = await aplicar_plantilla.leer_plantilla(db, obj.codigo)
+    return out
 
-    El par (codigo, obra_social_nro) es único: `uq_nm_nomenclador_codigo_os`. Sin
-    este chequeo previo, repetir un número ya existente sube como IntegrityError y
-    el handler global lo convierte en un 500 "Error al acceder a la base de datos",
-    que no le dice al operador lo único que necesita saber: que ese número ya está
-    tomado y por qué práctica. El código es único: ya no hay versión "propia de una
-    obra social" (ver plan de reestructura del nomenclador).
+
+@router.post("/", response_model=NomencladorDetalleOut, status_code=201)
+async def create_nomenclador(body: NomencladorCreate, db: AsyncSession = Depends(get_db)):
+    """Alta de un código del catálogo, con su plantilla de especialidades sugeridas.
+
+    `codigo` es único. Sin este chequeo previo, repetir un número ya existente sube
+    como IntegrityError y el handler global lo convierte en un 500 "Error al acceder
+    a la base de datos", que no le dice al operador lo único que necesita saber: que
+    ese número ya está tomado y por qué práctica.
     """
     ya_existe = (
         await db.execute(
@@ -233,10 +240,18 @@ async def create_nomenclador(body: NomencladorCreate, db: AsyncSession = Depends
             "Usá otro número o editá el existente.",
         )
 
-    obj = NomencladorCMC(**body.model_dump())
+    datos = body.model_dump(exclude={"especialidades"})
+    datos["descripcion"] = (datos.get("descripcion") or "").strip() or None
+    obj = NomencladorCMC(**datos)
     db.add(obj)
     try:
+        await db.flush()
+        if not body.sin_restriccion_especialidad:
+            await aplicar_plantilla.reemplazar_plantilla(db, obj.codigo, body.especialidades)
         await db.commit()
+    except ValueError as e:
+        await db.rollback()
+        raise HTTPException(422, str(e))
     except IntegrityError:
         # Carrera: entre el SELECT de arriba y este commit, otra petición tomó el
         # mismo número. El chequeo previo da el mensaje bueno en el caso normal;
@@ -246,27 +261,62 @@ async def create_nomenclador(body: NomencladorCreate, db: AsyncSession = Depends
             409, f"El código {body.codigo} ya existe. Actualizá la lista y reintentá."
         )
     await db.refresh(obj)
-    return obj
+    return await _detalle(db, obj)
 
 
-@router.get("/{id}", response_model=NomencladorOut)
+@router.get("/{id}", response_model=NomencladorDetalleOut)
 async def get_nomenclador(id: int, db: AsyncSession = Depends(get_db)):
     obj = await db.get(NomencladorCMC, id)
     if not obj:
         raise HTTPException(404, "Código no encontrado")
-    return obj
+    return await _detalle(db, obj)
 
 
-@router.put("/{id}", response_model=NomencladorOut)
+@router.put("/{id}", response_model=NomencladorDetalleOut)
 async def update_nomenclador(id: int, body: NomencladorUpdate, db: AsyncSession = Depends(get_db)):
     obj = await db.get(NomencladorCMC, id)
     if not obj:
         raise HTTPException(404, "Código no encontrado")
-    for field, value in body.model_dump(exclude_none=True).items():
+    for field, value in body.model_dump(
+        exclude_none=True, exclude={"especialidades", "descripcion"}
+    ).items():
         setattr(obj, field, value)
-    await db.commit()
+    if "descripcion" in body.model_fields_set:
+        obj.descripcion = (body.descripcion or "").strip() or None
+    try:
+        if obj.sin_restriccion_especialidad:
+            # Con "sin restricción" la plantilla no aplica: se vacía.
+            await aplicar_plantilla.reemplazar_plantilla(db, obj.codigo, [])
+        elif body.especialidades is not None:
+            await aplicar_plantilla.reemplazar_plantilla(db, obj.codigo, body.especialidades)
+        await db.commit()
+    except ValueError as e:
+        await db.rollback()
+        raise HTTPException(422, str(e))
     await db.refresh(obj)
-    return obj
+    return await _detalle(db, obj)
+
+
+@router.post("/{id}/aplicar-especialidades", response_model=AplicarEspecialidadesOut)
+async def aplicar_especialidades(
+    id: int, body: AplicarEspecialidadesIn, db: AsyncSession = Depends(get_db)
+):
+    """Aplica la plantilla GUARDADA del código a las obras sociales dadas: crea las
+    variantes NE por especialidad (precio y vigencia de la primera variante de cada
+    obra social) o fija "sin restricción". Las obras sociales que no tienen el código
+    vuelven en `omitidas`. Cada obra social se procesa por separado."""
+    nom = await db.get(NomencladorCMC, id)
+    if not nom:
+        raise HTTPException(404, "Código no encontrado")
+    if not nom.sin_restriccion_especialidad and not await aplicar_plantilla.leer_plantilla(
+        db, nom.codigo
+    ):
+        raise HTTPException(
+            422,
+            "El código no tiene especialidades sugeridas ni está marcado como sin "
+            "restricción: guardalo con alguna de las dos antes de aplicar.",
+        )
+    return await aplicar_plantilla.aplicar_a_obras_sociales(db, nom, body.obra_social_nros)
 
 
 @router.patch("/{id}/activar", response_model=NomencladorOut)

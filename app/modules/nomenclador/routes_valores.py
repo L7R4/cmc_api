@@ -24,7 +24,12 @@ from app.modules.nomenclador import service
 from app.modules.nomenclador.schemas import (
     ActualizacionMasivaResult,
     ActualizarPorcentajeIn,
+    AumentoPorcentualResult,
     ActualizarPorCodigosIn,
+    CompletarBaseNNIn,
+    CompletarBaseNNOut,
+    ComponenteNNSugeridoOut,
+    ComponentesNNSugeridosOut,
     DiagnosticoSinHistorialOut,
     GenerarValoresNNIn,
     GenerarValoresNNResult,
@@ -41,6 +46,9 @@ from app.modules.nomenclador.schemas import (
     ValorComponenteOut,
     ValorCreate,
     ValorCreateMulti,
+    ValorNucleoUpdate,
+    ReplicarFamiliaOut,
+    ReplicarFamiliaValorIn,
     ValorOut,
     ValorUpdate,
     validar_reglas_origen,
@@ -367,11 +375,19 @@ async def _clonar_valor(
     *,
     motivo: str,
     fecha_corte: Optional[datetime.date] = None,
+    como_ne_de_especialidad: Optional[int] = None,
+    como_ne_sin_especialidad: bool = False,
+    sin_restriccion: Optional[bool] = None,
 ) -> Valor:
     """
     Crea un nuevo Valor copiando metadatos (incluida la variante) y componentes
     del origen. `transform_componente(comp) -> dict` permite ajustar cada
     componente clonado.
+
+    `como_ne_de_especialidad`: el clon es una variante NE de esa especialidad en
+    vez de repetir la variante del origen (ver `aplicar_plantilla`).
+    `como_ne_sin_especialidad`: el clon es la NE "sin especialidad" del par sin
+    restricción. `sin_restriccion`: pisa el flag del par en el clon.
     """
     stmt_comp = select(ValorComponente).where(
         ValorComponente.valor_id == origen.id, ValorComponente.activo == True
@@ -381,15 +397,25 @@ async def _clonar_valor(
     nuevo = Valor(
         obra_social_nro=origen.obra_social_nro,
         nomenclador_id=origen.nomenclador_id,
-        origen=origen.origen,
+        origen=(
+            "NE" if (como_ne_de_especialidad is not None or como_ne_sin_especialidad)
+            else origen.origen
+        ),
         codigo=origen.codigo,
         descripcion=origen.descripcion,
         nivel=nivel if nivel is not None else origen.nivel,
         complejidad=origen.complejidad,
         categoria=origen.categoria,
         requiere_autorizacion=origen.requiere_autorizacion,
-        especialidad_id_colegio=origen.especialidad_id_colegio,
-        sin_restriccion_especialidad=origen.sin_restriccion_especialidad,
+        especialidad_id_colegio=(
+            None if como_ne_sin_especialidad
+            else como_ne_de_especialidad
+            if como_ne_de_especialidad is not None
+            else origen.especialidad_id_colegio
+        ),
+        sin_restriccion_especialidad=(
+            origen.sin_restriccion_especialidad if sin_restriccion is None else sin_restriccion
+        ),
         cantidad_ayudantes=origen.cantidad_ayudantes,
         coseguro=origen.coseguro,
         vigencia_desde=vigencia_desde,
@@ -606,6 +632,33 @@ async def diagnostico_valores_sin_historial(
     """
     return await service.valores_activos_sin_historial(
         db, obra_social_nro=obra_social_nro, limite_detalle=limite_detalle
+    )
+
+
+@router.get("/componentes_nn", response_model=ComponentesNNSugeridosOut)
+async def sugerir_componentes_nn(
+    obra_social_nro: int = Query(...),
+    nomenclador_id: int = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Componentes de un valor NN (galeno según el rango del código + unidades del
+    Nomenclador Nacional) para precargar el alta manual en Por obra social. Misma
+    regla que la generación automática (`service.componentes_nn`). No escribe nada."""
+    try:
+        comps = await service.componentes_nn_sugeridos(db, obra_social_nro, nomenclador_id)
+    except service.ComponentesNNNoDisponibles as e:
+        return ComponentesNNSugeridosOut(disponible=False, motivo=str(e))
+    nombres = {
+        g.id: g.nombre for g in (await db.execute(
+            select(Galeno).where(Galeno.id.in_({c["galeno_id"] for c in comps}))
+        )).scalars()
+    }
+    return ComponentesNNSugeridosOut(
+        disponible=True,
+        componentes=[
+            ComponenteNNSugeridoOut(**c, galeno_nombre=nombres.get(c["galeno_id"], ""))
+            for c in comps
+        ],
     )
 
 
@@ -938,12 +991,69 @@ async def generar_nn_por_rangos(
     return GenerarValoresNNResult(**resultado)
 
 
+@router.post("/completar_base_nn", response_model=CompletarBaseNNOut)
+async def completar_base_nn(body: CompletarBaseNNIn, db: AsyncSession = Depends(get_db)):
+    """Herramienta "Completar nomenclador NN": deja una OS (nueva o existente) con
+    los 7 galenos base y todos sus Valor NN, SIN tocar lo que ya tiene — lo que
+    existe se informa y se saltea. Lo faltante sale en $0 con vigencia 01/01/1900;
+    al cargar el precio real de cada galeno base, los NN rotan solos.
+    `dry_run=True` devuelve el mismo informe sin guardar nada."""
+    from app.modules.catalogs.routes_obras_sociales import VIGENCIA_NOMENCLADOR_INICIAL
+
+    existe = (await db.execute(
+        select(ObrasSociales.ID).where(ObrasSociales.NRO_OBRASOCIAL == body.obra_social_nro)
+    )).scalar_one_or_none()
+    if existe is None:
+        raise HTTPException(404, f"Obra social {body.obra_social_nro} no encontrada")
+
+    try:
+        r = await service.completar_base_nn(body.obra_social_nro, VIGENCIA_NOMENCLADOR_INICIAL, db)
+    except Exception:
+        await db.rollback()
+        raise
+    if body.dry_run:
+        await db.rollback()
+    else:
+        await db.commit()
+    return CompletarBaseNNOut(
+        obra_social_nro=body.obra_social_nro, dry_run=body.dry_run,
+        vigencia_desde=VIGENCIA_NOMENCLADOR_INICIAL, **r,
+    )
+
+
 @router.get("/{id}", response_model=ValorOut)
 async def get_valor(id: int, db: AsyncSession = Depends(get_db)):
     obj = await db.get(Valor, id)
     if not obj:
         raise HTTPException(404, "Valor no encontrado")
     return await _valor_out(db, obj)
+
+
+@router.post("/replicar_en_familia", response_model=ReplicarFamiliaOut)
+async def replicar_en_familia(body: ReplicarFamiliaValorIn, db: AsyncSession = Depends(get_db)):
+    """Replica en los otros planes de la familia la operación recién hecha en la OS de
+    origen (alta, lápiz del código o de una variante). Resultado por OS. Ver
+    `replicar_familia.py`."""
+    from app.modules.nomenclador.replicar_familia import replicar_valores
+
+    return await replicar_valores(db, body)
+
+
+@router.put("/par/{obra_social_nro}/{nomenclador_id}", response_model=List[ValorOut])
+async def actualizar_nucleo_del_par(
+    obra_social_nro: int, nomenclador_id: int, body: ValorNucleoUpdate,
+    db: AsyncSession = Depends(get_db),
+):
+    """Edita el núcleo de un código en una obra social: lo que vale PARA TODAS sus
+    especialidades (metadatos, ecuación y el conjunto de especialidades / "sin
+    restricción"). Devuelve las variantes activas resultantes. Ver `nucleo.py`."""
+    from app.modules.nomenclador.nucleo import actualizar_nucleo
+
+    valores = await actualizar_nucleo(db, obra_social_nro, nomenclador_id, body)
+    await db.commit()
+    for v in valores:
+        await db.refresh(v)
+    return await _valores_out(db, valores)
 
 
 @router.put("/{id}", response_model=ValorOut)
@@ -1025,6 +1135,17 @@ async def actualizar_valor(
     La variante (especialidad_id_colegio) se conserva: para crear otra variante
     del mismo código usar POST /valores_nm/.
     """
+    nuevo = await _actualizar_valor_core(db, id, body)
+    await db.commit()
+    await db.refresh(nuevo)
+    return await _valor_out(db, nuevo)
+
+
+async def _actualizar_valor_core(
+    db: AsyncSession, id: int, body: ValorCerrarYCrearIn
+) -> Valor:
+    """Cuerpo de `actualizar_valor` sin commit (lo reusa la edición del núcleo, que
+    tiene que rotar la ecuación y cambiar las especialidades en UNA transacción)."""
     anterior = await db.get(Valor, id)
     if not anterior:
         raise HTTPException(404, "Valor no encontrado")
@@ -1120,9 +1241,7 @@ async def actualizar_valor(
             fecha_corte=fecha_corte,
         )
 
-    await db.commit()
-    await db.refresh(nuevo)
-    return await _valor_out(db, nuevo)
+    return nuevo
 
 
 @router.delete("/{id}", status_code=204)
@@ -1441,65 +1560,13 @@ async def replicar_a_obras_sociales(
 
 # ─── Actualizaciones masivas ──────────────────────────────────────────────────
 
-@router.post("/actualizar_porcentaje", response_model=ActualizacionMasivaResult)
+@router.post("/actualizar_porcentaje", response_model=AumentoPorcentualResult)
 async def actualizar_porcentaje(body: ActualizarPorcentajeIn, db: AsyncSession = Depends(get_db)):
-    """
-    Aplica un porcentaje lineal a los valores de modalidad FIJA del scope
-    (todas las variantes). Los valores calculables (galeno × unidades) quedan
-    en `omitidos`: su precio se actualiza vía /galenos/actualizar_precio[_masivo].
-    """
-    stmt = select(Valor).where(
-        Valor.obra_social_nro == body.obra_social_nro,
-        Valor.origen == body.origen.value,
-        Valor.estado == "activo",
-    )
-    if body.filtro_codigos:
-        stmt = stmt.where(Valor.codigo.in_(body.filtro_codigos))
-    if body.filtro_rango:
-        stmt = stmt.where(
-            Valor.codigo >= body.filtro_rango["desde"],
-            Valor.codigo <= body.filtro_rango["hasta"],
-        )
-    result = await db.execute(stmt)
-    valores = result.scalars().all()
+    """Aumento (o baja) porcentual de una OS: valores de precio fijo y/o galenos.
+    Con `dry_run` devuelve la vista previa exacta sin guardar. Ver `aumento.py`."""
+    from app.modules.nomenclador.aumento import aplicar_aumento
 
-    factor = Decimal("1") + body.porcentaje / Decimal("100")
-    fecha_corte = body.vigencia_desde - datetime.timedelta(days=1)
-    actualizados = 0
-    omitidos = 0
-    errores = []
-
-    def _ajustar_fijo(c: ValorComponente) -> dict:
-        nuevo_vu = c.valor_unitario
-        if c.valor_unitario is not None:
-            nuevo_vu = (c.valor_unitario * factor).quantize(Decimal("0.01"))
-        return {
-            "concepto": c.concepto,
-            "galeno_id": c.galeno_id,
-            "cantidad": c.cantidad,
-            "valor_unitario": nuevo_vu,            "orden": c.orden,
-            "observacion": c.observacion,
-        }
-
-    for v in valores:
-        try:
-            comps = await _componentes_activos(db, v.id)
-            if not comps or service.modalidad_de(comps) == "galeno":
-                omitidos += 1
-                continue
-
-            _cerrar_valor(v, fecha_corte)
-            await db.flush()
-            nuevo = await _clonar_valor(
-                db, v, body.vigencia_desde, transform_componente=_ajustar_fijo,
-                motivo="valor_fijo_actualizado", fecha_corte=fecha_corte,
-            )
-            actualizados += 1
-        except Exception as e:
-            errores.append({"nomenclador_id": v.nomenclador_id, "motivo": str(e)})
-
-    await db.commit()
-    return ActualizacionMasivaResult(actualizados=actualizados, errores=errores, omitidos=omitidos)
+    return await aplicar_aumento(db, body)
 
 
 @router.post("/actualizar_por_codigos", response_model=ActualizacionMasivaResult)
@@ -1586,95 +1653,14 @@ async def actualizar_por_codigos(body: ActualizarPorCodigosIn, db: AsyncSession 
     return ActualizacionMasivaResult(actualizados=actualizados, errores=errores)
 
 
-@router.post("/revertir_ultima_actualizacion", response_model=ActualizacionMasivaResult)
+@router.post("/revertir_ultima_actualizacion", response_model=AumentoPorcentualResult)
 async def revertir_ultima_actualizacion(body: RevertirActualizacionIn, db: AsyncSession = Depends(get_db)):
-    """
-    Elimina (soft) todos los valores con vigencia_desde = fecha_revertir para
-    el scope dado y reactiva los valores anteriores de la misma variante.
-    Los componentes del valor reactivado se repuntan al galeno vigente
-    (las rotaciones de galeno posteriores no se deshacen).
-    """
-    stmt = select(Valor).where(
-        Valor.obra_social_nro == body.obra_social_nro,
-        Valor.vigencia_desde == body.vigencia_revertir,
-        Valor.estado == "activo",
-    )
-    valores_a_revertir = (await db.execute(stmt)).scalars().all()
+    """Deshace el aumento de una fecha: solo los valores que abrió un aumento con esa
+    vigencia y los galenos rotados ese día; nunca deja un código sin precio. Con
+    `dry_run` muestra antes qué va a revertir. Ver `aumento.py`."""
+    from app.modules.nomenclador.aumento import revertir_aumento
 
-    actualizados = 0
-    errores = []
-    fecha_corte = body.vigencia_revertir - datetime.timedelta(days=1)
-
-    for v in valores_a_revertir:
-        try:
-            # Buscar el valor inmediatamente anterior de la MISMA variante
-            stmt_prev = (
-                select(Valor)
-                .where(
-                    Valor.obra_social_nro == body.obra_social_nro,
-                    Valor.nomenclador_id == v.nomenclador_id,
-                    _cond_variante_valor(v.origen, v.especialidad_id_colegio),
-                    Valor.estado == "cerrado",
-                    Valor.id != v.id,
-                    Valor.vigencia_desde < body.vigencia_revertir,
-                )
-                .order_by(Valor.vigencia_desde.desc())
-                .limit(1)
-            )
-            anterior = (await db.execute(stmt_prev)).scalars().first()
-
-            # Resolver los repuntes de galeno ANTES de mutar nada (todo o nada)
-            repuntes: list[tuple[ValorComponente, int]] = []
-            if anterior:
-                for comp in await _componentes_activos(db, anterior.id):
-                    if comp.galeno_id is None:
-                        continue
-                    galeno = await db.get(Galeno, comp.galeno_id)
-                    if galeno is None:
-                        raise ValueError(f"Componente {comp.id} apunta a un galeno inexistente")
-                    if galeno.vigencia_hasta is None and galeno.activo:
-                        continue  # ya vigente
-                    vigente = await service.buscar_galeno_vigente(
-                        db, anterior.obra_social_nro, galeno.codigo, galeno.nivel
-                    )
-                    if not vigente:
-                        raise ValueError(
-                            f"No hay galeno vigente '{galeno.codigo}' "
-                            f"nivel {galeno.nivel} para reactivar el valor anterior"
-                        )
-                    repuntes.append((comp, vigente.id))
-
-            _cerrar_valor(v, body.vigencia_revertir)
-            await db.flush()
-
-            if anterior:
-                anterior.estado = "activo"
-                anterior.vigencia_hasta = None
-                for comp, galeno_vigente_id in repuntes:
-                    comp.galeno_id = galeno_vigente_id
-                await db.flush()
-                # Cerrar la fila de historial que apuntaba al valor revertido
-                await db.execute(
-                    update(HistorialPrecioCodigo)
-                    .where(
-                        HistorialPrecioCodigo.valores_id == v.id,
-                        HistorialPrecioCodigo.vigencia_hasta.is_(None),
-                    )
-                    .values(vigencia_hasta=fecha_corte)
-                )
-                await service.regenerar_historial_por_valores(
-                    anterior.id, None, db, motivo="reversion"
-                )
-            else:
-                # No hay valor anterior: la variante queda sin precio desde la reversión
-                await service.cerrar_historial_de_valor(v.id, fecha_corte, db)
-
-            actualizados += 1
-        except Exception as e:
-            errores.append({"nomenclador_id": v.nomenclador_id, "motivo": str(e)})
-
-    await db.commit()
-    return ActualizacionMasivaResult(actualizados=actualizados, errores=errores)
+    return await revertir_aumento(db, body)
 
 
 # ─── Lookup de precio ─────────────────────────────────────────────────────────

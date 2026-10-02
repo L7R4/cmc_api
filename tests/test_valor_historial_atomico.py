@@ -106,6 +106,49 @@ def test_ningun_valor_se_crea_fuera_del_punto_unico():
     )
 
 
+#: Única función que puede hacer `insert(Valor)` (alta en bloque): escribe los
+#: componentes y el historial de todo el lote antes de devolver.
+PUNTO_UNICO_EN_BLOQUE = "persistir_valores_en_bloque"
+
+
+def _inserts_de_valor(arbol: ast.Module) -> list[int]:
+    """Líneas con `insert(Valor)` (Core/ORM bulk insert): saltea `persistir_valor`
+    igual que un `Valor(...)` suelto, y el test de arriba no lo ve."""
+    return [
+        nodo.lineno
+        for nodo in ast.walk(arbol)
+        if isinstance(nodo, ast.Call)
+        and getattr(nodo.func, "id", getattr(nodo.func, "attr", None)) == "insert"
+        and nodo.args
+        and isinstance(nodo.args[0], ast.Name)
+        and nodo.args[0].id == "Valor"
+    ]
+
+
+def test_ningun_insert_en_bloque_de_valor_fuera_del_punto_unico():
+    fugas: list[str] = []
+    vistos = 0
+    for ruta in sorted((RAIZ / "app").rglob("*.py")):
+        arbol = ast.parse(ruta.read_text(encoding="utf-8"))
+        rangos = [
+            (n.lineno, n.end_lineno) for n in ast.walk(arbol)
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and n.name == PUNTO_UNICO_EN_BLOQUE
+        ]
+        for linea in _inserts_de_valor(arbol):
+            vistos += 1
+            if not any(ini <= linea <= fin for ini, fin in rangos):
+                fugas.append(f"{ruta.relative_to(RAIZ).as_posix()}:{linea}")
+
+    assert vistos > 0, "no se encontró el insert en bloque de Valor — ¿se movió el código?"
+    assert not fugas, (
+        "Hay `insert(Valor)` fuera del punto único en bloque:\n  "
+        + "\n  ".join(fugas)
+        + f"\n\nLas altas masivas tienen que pasar por `service.{PUNTO_UNICO_EN_BLOQUE}`, "
+          "que escribe valores, componentes e historial del lote juntos."
+    )
+
+
 @pytest.mark.asyncio
 async def test_no_hay_valores_activos_sin_historial(db):
     """El invariante sobre el dato. Tiene que dar 0."""

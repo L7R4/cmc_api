@@ -26,6 +26,10 @@ from app.modules.nomenclador.schemas import (
     GalenosImportarIn,
     GalenosImportarResult,
     GalenoUpdate,
+    GalenoVisibilidadIn,
+    GalenoVisibilidadOut,
+    ReplicarFamiliaGalenoIn,
+    ReplicarFamiliaOut,
     slugify_codigo,
 )
 
@@ -109,6 +113,7 @@ async def _rotar_precio_galeno(
         unidades_ayudante=galeno_anterior.unidades_ayudante,
         unidades_gastos=galeno_anterior.unidades_gastos,
         observacion=galeno_anterior.observacion,
+        visible=galeno_anterior.visible,
     )
     db.add(nuevo_galeno)
     await db.flush()
@@ -145,6 +150,31 @@ async def list_galenos(
     stmt = stmt.order_by(Galeno.codigo, Galeno.nivel, Galeno.vigencia_desde.desc())
     result = await db.execute(stmt)
     return result.scalars().all()
+
+
+@router.patch("/visibilidad", response_model=GalenoVisibilidadOut)
+async def cambiar_visibilidad_galeno(
+    body: GalenoVisibilidadIn, db: AsyncSession = Depends(get_db)
+):
+    """Muestra/oculta el galeno de una OS en el boletín del médico
+    (`/panel/boletin-valores`). Pisa `visible` en TODAS las filas del (OS, código)
+    —niveles y vigencias— para que no dependa de qué fila esté vigente; las
+    rotaciones de precio posteriores lo heredan."""
+    filas = list((await db.execute(select(Galeno).where(
+        Galeno.obra_social_nro == body.obra_social_nro,
+        Galeno.codigo == body.codigo,
+    ))).scalars())
+    if not filas:
+        raise HTTPException(
+            404, f"No existe el galeno '{body.codigo}' para la OS {body.obra_social_nro}"
+        )
+    for g in filas:
+        g.visible = body.visible
+    await db.commit()
+    return GalenoVisibilidadOut(
+        obra_social_nro=body.obra_social_nro, codigo=body.codigo,
+        visible=body.visible, filas_actualizadas=len(filas),
+    )
 
 
 @router.post("/", response_model=GalenoOut, status_code=201)
@@ -498,6 +528,18 @@ async def actualizar_unidades_galeno(
     return GalenoActualizarUnidadesResult(
         galeno=GalenoOut.model_validate(galeno), componentes_actualizados=n
     )
+
+
+@router.post("/replicar_en_familia", response_model=ReplicarFamiliaOut)
+async def replicar_galeno_en_familia(
+    body: ReplicarFamiliaGalenoIn, db: AsyncSession = Depends(get_db)
+):
+    """Replica en los otros planes de la familia el alta, el cambio de valor o el de
+    unidades recién hecho en la OS de origen (mismo código y nivel). Resultado por OS.
+    Ver `replicar_familia.py`."""
+    from app.modules.nomenclador.replicar_familia import replicar_galenos
+
+    return await replicar_galenos(db, body)
 
 
 @router.post("/actualizar_precio_masivo", response_model=ActualizacionMasivaResult)

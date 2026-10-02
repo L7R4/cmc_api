@@ -538,24 +538,50 @@ async def _avanzar_puntero_a_objetivo(
     return len(cabeceras)
 
 
+async def asegurar_puntero_propio(db: AsyncSession, nro_obra_social: int) -> Optional[PeriodoMedicoActual]:
+    """Crea el puntero de período propio de la OS (copia del global) si no lo tiene.
+    Así su `dia_corte` cierra SOLO su período y nunca el global, que comparten todas
+    las OS sin puntero propio. No hace commit. `None` si no hay global del que copiar."""
+    propio = (await db.execute(
+        select(PeriodoMedicoActual).where(PeriodoMedicoActual.obra_social_id == nro_obra_social)
+    )).scalar_one_or_none()
+    if propio is not None:
+        return propio
+    global_ = (await db.execute(
+        select(PeriodoMedicoActual).where(PeriodoMedicoActual.obra_social_id.is_(None))
+    )).scalar_one_or_none()
+    if global_ is None:
+        return None
+    propio = PeriodoMedicoActual(obra_social_id=nro_obra_social, periodo=global_.periodo)
+    db.add(propio)
+    await db.flush()
+    return propio
+
+
 async def asegurar_periodo_medico_vigente(db: AsyncSession, cod_obra: str) -> str:
     """Safety-net lazy: antes de cargar/consultar, avanza el puntero de la OS si ya
     venció su `dia_corte`. Garantiza que un médico nunca cargue en un período vencido
-    aunque el cron de cierre no haya corrido. Devuelve el período vigente."""
+    aunque el cron de cierre no haya corrido. Devuelve el período vigente.
+
+    El puntero GLOBAL (lo comparten todas las OS sin puntero propio) se avanza
+    siempre con el corte por defecto, igual que el cron — nunca con el de una OS en
+    particular: si no, una OS con corte 5 cerraría el día 6 el período de todas. Una
+    OS sin puntero propio pero con corte distinto del default recibe uno propio."""
     nro = _cod_obra_to_int(cod_obra)
+    dia_corte = await _get_dia_corte(db, cod_obra)
     row = (await db.execute(
         select(PeriodoMedicoActual).where(PeriodoMedicoActual.obra_social_id == nro)
     )).scalar_one_or_none()
+    if row is None and dia_corte != DIA_CORTE_DEFAULT:
+        row = await asegurar_puntero_propio(db, nro)
     if row is None:
-        # Sin override propio: hereda del global, pero no crea fila — solo el global
-        # importa para esta OS hasta que alguien la fije explícitamente.
         row = (await db.execute(
             select(PeriodoMedicoActual).where(PeriodoMedicoActual.obra_social_id.is_(None))
         )).scalar_one_or_none()
         if row is None:
             raise HTTPException(422, "No hay período de médico configurado")
+        dia_corte = DIA_CORTE_DEFAULT
 
-    dia_corte = await _get_dia_corte(db, cod_obra)
     await _avanzar_puntero_a_objetivo(db, row, dia_corte, datetime.date.today())
     await db.commit()
     return row.periodo
@@ -1314,12 +1340,29 @@ async def _montos_de_item(
 
 
 # ── Guardado ─────────────────────────────────────────────────────────────────
+async def exigir_obra_social_activa(db: AsyncSession, cod_obra: str) -> None:
+    """422 si la obra social está dada de baja (`MARCA='N'`): no se le cargan
+    prestaciones nuevas ni se le mueven prestaciones. Lo ya cargado sigue visible."""
+    try:
+        nro = int(cod_obra)
+    except (TypeError, ValueError):
+        return
+    marca = (await db.execute(
+        select(ObrasSociales.MARCA).where(ObrasSociales.NRO_OBRASOCIAL == nro).limit(1)
+    )).scalar_one_or_none()
+    if marca == "N":
+        raise HTTPException(
+            422, f"La obra social {nro} está desactivada: no se le pueden cargar prestaciones."
+        )
+
+
 async def guardar_prestaciones(
     db: AsyncSession,
     payload: PrestacionesCreate,
     usuario: str,
     actor: str = ORIGEN_COLEGIO,
 ) -> GuardadoResponse:
+    await exigir_obra_social_activa(db, payload.obra_social)
     if actor == ORIGEN_MEDICO:
         # El médico NO elige período: carga siempre en el período de médicos vigente
         # (puntero `periodo_medico_actual`, global/override). Cuando se le cierra el
@@ -1366,6 +1409,7 @@ async def guardar_prestaciones_complementaria(
     factura = await db.get(FacturacionCMC, payload.factura_id)
     if factura is None:
         raise HTTPException(404, "Factura no encontrada")
+    await exigir_obra_social_activa(db, factura.cod_obr)
     if factura.version <= 1:
         raise HTTPException(
             422, "Esta factura no es un complemento — para cargar en la factura "
@@ -2331,6 +2375,8 @@ async def editar_prestacion(
         if cambia_ubicacion:
             nuevo_cod_obra = data.get("cod_obra_social", row.cod_obr)
             nuevo_periodo = data.get("periodo", row.periodo)
+            if nuevo_cod_obra != row.cod_obr:
+                await exigir_obra_social_activa(db, nuevo_cod_obra)
             cabecera_destino = await _get_factura(db, nuevo_cod_obra, nuevo_periodo)
             # Mismo criterio que arriba: el destino solo tiene que tener abierta la
             # fase Colegio, la fase médico no aplica a una edición.
@@ -2821,13 +2867,16 @@ async def preview_cierre(db: AsyncSession, cod_obra: str, periodo: str) -> dict:
 async def cerrar_periodo(
     db: AsyncSession, cod_obra: str, periodo: str, usuario: str,
     archivo: Optional[UploadFile] = None, nro_factura: Optional[str] = None,
+    tipo_factura: Optional[str] = None,
 ) -> dict:
     """Cierra un período: crea la cabecera en `facturacion` (estado 'C') y pasa las
     prestaciones de la OS+período de 'A' → 'C'. A partir de acá liquidación las toma
     (`build_detalles_from_cmc` lee estado 'C') y dejan de ser editables. Si viene
     `archivo`, se guarda como comprobante de la factura (`documento_url`). Si viene
     `nro_factura`, se persiste tal cual (texto libre, ej. "00031-00009999") —
-    antes de este fix el endpoint no lo aceptaba y quedaba siempre en `""`."""
+    antes de este fix el endpoint no lo aceptaba y quedaba siempre en `""`. Lo mismo
+    con `tipo_factura` ("A"/"B"/"C"): el front lo mandaba pero se descartaba, y el
+    encabezado del detalle quedaba en "-"."""
     if await _periodo_cerrado(db, cod_obra, periodo):
         raise HTTPException(409, "El período ya tiene factura cerrada para esta obra social")
 
@@ -2876,7 +2925,9 @@ async def cerrar_periodo(
     cabecera.estado_doctor = DOCTOR_CERRADA
     cabecera.usuario = usuario
     if nro_factura is not None:
-        cabecera.nro_factura = nro_factura
+        cabecera.nro_factura = nro_factura.strip()
+    if tipo_factura is not None:
+        cabecera.tipo_factura = tipo_factura.strip().upper()
     for r in rows:
         r.estado = "C"
 
@@ -2898,6 +2949,7 @@ async def cerrar_periodo(
         "importe_total": total,
         "documento_url": url_archivo(cabecera.documento_url),
         "nro_factura": cabecera.nro_factura,
+        "tipo_factura": cabecera.tipo_factura,
     }
 
 

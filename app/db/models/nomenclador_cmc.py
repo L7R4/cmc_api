@@ -37,6 +37,16 @@ class NomencladorCMC(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     codigo: Mapped[str] = mapped_column(String(20), nullable=False, unique=True)
+    # Descripción DEFAULT del código a nivel catálogo — opcional. No es la fuente de
+    # verdad (esa sigue siendo `Valor.descripcion`, por obra social — ver
+    # `service.descripcion_efectiva`): es el valor que se ofrece para precargar al
+    # crear un Valor nuevo para este código, cuando esa OS todavía no tiene la suya.
+    descripcion: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    # "Sin restricción de especialidad" DEFAULT a nivel catálogo — opcional, mismo
+    # criterio que `descripcion`. NULL = el catálogo no opina; la fuente de verdad
+    # sigue siendo `Valor.sin_restriccion_especialidad`, por (OS, código). Se ofrece
+    # para precargar el campo al crear un Valor nuevo para este código.
+    sin_restriccion_especialidad: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
     categoria: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     complejidad: Mapped[Optional[str]] = mapped_column(
         Enum("baja", "media", "alta", name="nm_complejidad_enum"), nullable=True
@@ -212,6 +222,9 @@ class Galeno(Base):
     unidades_ayudante: Mapped[Optional[Decimal]] = mapped_column(DECIMAL(10, 2), nullable=True)
     unidades_gastos: Mapped[Optional[Decimal]] = mapped_column(DECIMAL(10, 2), nullable=True)
     activo: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="1")
+    # Solo para el boletín del médico (/panel/boletin-valores): False lo oculta ahí.
+    # Se setea por (OS, código) en todas sus filas; las rotaciones lo heredan.
+    visible: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="1")
     observacion: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.now()
@@ -638,6 +651,38 @@ class ValorEspecialidad(Base):
         ),
         Index("ix_nm_valor_especialidad_os_codigo", "obra_social_nro", "codigo"),
         Index("ix_nm_valor_especialidad_especialidad", "especialidad_id_colegio"),
+    )
+
+
+class NomencladorPlantillaEspecialidad(Base):
+    """Especialidades SUGERIDAS para un código a nivel catálogo (sin obra social).
+
+    Es sólo una plantilla: no habilita a nadie a facturar. La habilitación real
+    sigue viviendo en `nm_valor_especialidad`, por (obra_social_nro, codigo), y
+    se escribe recién cuando la plantilla se aplica a una obra social (ver
+    `aplicar_plantilla.py`). Reemplaza en espíritu a la vieja
+    `nm_nomenclador_especialidad` y se cargó inicialmente desde `espe_cod`.
+
+    `codigo` es un string sin FK, igual que `ValorEspecialidad.codigo`.
+    """
+    __tablename__ = "nm_plantilla_especialidad_codigo"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    codigo: Mapped[str] = mapped_column(String(20), nullable=False)
+    # FK lógica a especialidad.ID_COLEGIO_ESPE
+    especialidad_id_colegio: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "codigo", "especialidad_id_colegio", name="uq_nm_plantilla_esp_codigo"
+        ),
+        Index("ix_nm_plantilla_esp_codigo", "codigo"),
     )
 
 

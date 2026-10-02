@@ -1184,26 +1184,21 @@ async def derivar_tipo(
     return tipo_por_codigo(cod_nomenclador) or await _get_categoria(db, cod_nomenclador, cod_obra)
 
 
-async def _gasto_forzado_a_cero(
-    db: AsyncSession,
-    cod_nomenclador: str,
-    es_sanatorio: bool,
-    tipo_calculo: str,
-    cod_obra: Optional[str] = None,
-) -> bool:
+TIPOS_SIN_GASTOS = frozenset({TIPO_SANATORIO, CATEGORIA_HONORARIOS_INDIVIDUALES})
+
+
+def gasto_forzado_a_cero(tipo: Optional[str]) -> bool:
     """True → los gastos de la fila deben guardarse en 0.
 
-    Bajo sanatorio los gastos los factura la clínica, no el médico. Aplica sólo a los
-    códigos de categoría 'Honorarios individuales' y sólo en cálculo automático — en
-    manual el operador manda (decisión usuario 2026-07-31).
+    Si la prestación es 'Sanatorio' u 'Honorarios individuales' (hubo clínica, como
+    prestador o como ámbito) los gastos los factura la clínica, no el médico: van en 0
+    SIEMPRE, sea cálculo automático o manual y venga el monto que venga (decisión
+    usuario 2026-10-02; antes solo aplicaba en automático y a 'Honorarios individuales').
 
     El front ya envía `gastos=0` en ese escenario; esto lo hace cumplir del lado del
     backend para que ningún camino (edición, carga del médico, API directa) lo saltee.
     """
-    if not es_sanatorio or tipo_calculo != "A":
-        return False
-    categoria = await _get_categoria(db, cod_nomenclador, cod_obra)
-    return categoria == CATEGORIA_HONORARIOS_INDIVIDUALES
+    return tipo in TIPOS_SIN_GASTOS
 
 
 
@@ -1528,11 +1523,10 @@ async def _insertar_prestaciones(
             db, item, cod_obra, medico_precio,
             item.cod_nomenclador, item.tipo_calculo, fecha_precio,
         )
-        # Sanatorio + Honorarios individuales + automático ⇒ los gastos los factura la
-        # clínica: se fuerzan a 0 antes de aplicar el porcentaje.
-        if await _gasto_forzado_a_cero(
-            db, item.cod_nomenclador, prestador.es_sanatorio, item.tipo_calculo, cod_obra
-        ):
+        tipo = await derivar_tipo(db, item.cod_nomenclador, prestador.tipo, cod_obra)
+        # Sanatorio / Honorarios individuales ⇒ los gastos los factura la clínica: se
+        # fuerzan a 0 antes de aplicar el porcentaje.
+        if gasto_forzado_a_cero(tipo):
             g_base = Decimal("0")
         h, g, a = _aplicar_porcentaje(h_base, g_base, a_base, item.porcentaje)
         # El coseguro es del acto, no de cada prestador: sólo la fila del cirujano lo
@@ -1545,7 +1539,6 @@ async def _insertar_prestaciones(
         total = calcular_importe_total(h, g, a, item.cantidad, item.sesion, coseguro=coseguro)
         # Importe 0 permitido: un concepto en 0 no afecta la suma de la liquidación.
 
-        tipo = await derivar_tipo(db, item.cod_nomenclador, prestador.tipo, cod_obra)
         # Fila del catálogo con la que se cotizó: `cod_nom` solo desambigua junto con
         # `cod_obr` desde que el código puede ser propio de una OS.
         nomenclador = await service_nm.resolver_nomenclador(
@@ -2479,7 +2472,6 @@ async def editar_prestacion(
         row.cod_clinica = prestador.cod_clinica
         row.tipo_orden = prestador.tipo_orden
         row.cod_med_ejecutor = None  # ya no se persiste (ver resolver_prestador)
-        es_sanatorio = prestador.es_sanatorio
 
         # Recalcular `tipo` si cambió el prestador (clínica/ámbito), el código (su categoría)
         # o la OS (la categoría/override puede ser propio de cada obra social).
@@ -2539,11 +2531,11 @@ async def editar_prestacion(
             row.honorarios, row.gastos, row.ayudante = h, g, a
             row.tpo_funcion = tpo_funcion_de(h, g, a, rol_efectivo)
 
-        # Misma regla que en la carga: bajo sanatorio los gastos los factura la clínica.
+        # Misma regla que en la carga: con clínica los gastos los factura la clínica.
         # Va FUERA del bloque de recotización — si no, un PATCH que no toca ningún campo de
         # precio (ej. solo `cantidad`) dejaría gastos viejos en una fila que pasó a sanatorio.
         # Forzar a 0 es idempotente y no depende del porcentaje (0 escalado sigue siendo 0).
-        if await _gasto_forzado_a_cero(db, row.cod_nom, es_sanatorio, tipo_calculo, row.cod_obr):
+        if gasto_forzado_a_cero(row.tipo):
             row.gastos = Decimal("0")
             row.tpo_funcion = tpo_funcion_de(
                 row.honorarios or Decimal("0"), Decimal("0"), row.ayudante or Decimal("0"),

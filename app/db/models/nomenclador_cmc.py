@@ -334,7 +334,7 @@ class Valor(Base):
     )
     # Override de categoría por OS; NULL → hereda NomencladorCMC.categoria.
     # Decide el `tipo` de la prestación y si los gastos se fuerzan a 0 bajo sanatorio
-    # (ver facturacion/service.py::derivar_tipo y _gasto_forzado_a_cero).
+    # (ver facturacion/service.py::derivar_tipo y gasto_forzado_a_cero).
     categoria: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     # ¿La práctica necesita autorización previa de esta obra social? `None` = nadie
     # cargó nada, se interpreta como False (ver service.requiere_autorizacion_efectiva).

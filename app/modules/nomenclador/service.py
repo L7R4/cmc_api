@@ -327,7 +327,7 @@ def categoria_efectiva(
     """Categoría del código para una OS: override del valor > la del catálogo.
 
     Decide el `tipo` de la prestación y si los gastos se fuerzan a 0 bajo sanatorio
-    (ver facturacion/service.py::derivar_tipo y _gasto_forzado_a_cero) — por eso el
+    (ver facturacion/service.py::derivar_tipo y gasto_forzado_a_cero) — por eso el
     override por OS: la misma práctica puede ser 'Practica' para una obra social y
     'Honorarios individuales' para otra.
     """

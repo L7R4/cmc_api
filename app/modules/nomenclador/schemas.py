@@ -1390,3 +1390,180 @@ class EvolucionPrecioItem(BaseModel):
     precio_total: Decimal
     motivo_cambio: str
     fecha_cambio: datetime.datetime
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Etapa 3 — código dado de alta en una obra social (nm_codigo_obra_social)
+# ─────────────────────────────────────────────────────────────────────────────
+
+EstadoCodigoOS = Literal["sin_alta", "sin_precio", "con_precio", "suspendido"]
+Complejidad = Literal["baja", "media", "alta"]
+
+
+class AltaCodigoItem(BaseModel):
+    """Un (obra social, código) a dar de alta. Lo no informado se toma del catálogo:
+    descripción del Colegio y su plantilla de especialidades / "sin restricción"."""
+    obra_social_nro: int
+    nomenclador_id: int
+    descripcion: Optional[str] = Field(None, max_length=255)
+    # None = usar la plantilla del Colegio (si el par todavía no tiene especialidades
+    # configuradas). Lista (aunque vacía) = reemplazar por esa lista.
+    especialidades: Optional[List[int]] = None
+    sin_restriccion_especialidad: Optional[bool] = None
+
+
+class AltaCodigosIn(BaseModel):
+    items: List[AltaCodigoItem] = Field(..., min_length=1)
+    # Condiciones comunes a todos los items.
+    requiere_autorizacion: Optional[bool] = None
+    cantidad_ayudantes: Optional[int] = Field(None, ge=0)
+
+
+class AltaCodigoResultado(BaseModel):
+    obra_social_nro: int
+    nomenclador_id: int
+    codigo: str
+    estado: Literal["creado", "reactivado", "ya_existia", "error"]
+    motivo: Optional[str] = None
+    # True si quedó dado de alta pero nadie puede facturarlo (sin especialidades
+    # y sin "sin restricción").
+    sin_quien_factura: bool = False
+
+
+class AltaCodigosOut(BaseModel):
+    resultados: List[AltaCodigoResultado]
+
+
+class CodigoObraSocialUpdate(BaseModel):
+    """Datos del par editables en la etapa 3. Sólo se aplica lo que viene."""
+    descripcion: Optional[str] = Field(None, max_length=255)
+    categoria: Optional[str] = Field(None, max_length=100)
+    complejidad: Optional[Complejidad] = None
+    requiere_autorizacion: Optional[bool] = None
+    cantidad_ayudantes: Optional[int] = Field(None, ge=0)
+    observacion: Optional[str] = None
+    sin_restriccion_especialidad: Optional[bool] = None
+    especialidades: Optional[List[int]] = None
+
+
+class CodigoObraSocialOut(BaseModel):
+    obra_social_nro: int
+    nomenclador_id: int
+    codigo: str
+    descripcion: Optional[str] = None
+    descripcion_colegio: Optional[str] = None
+    categoria: Optional[str] = None
+    complejidad: Optional[str] = None
+    requiere_autorizacion: Optional[bool] = None
+    cantidad_ayudantes: Optional[int] = None
+    observacion: Optional[str] = None
+    sin_restriccion_especialidad: bool = False
+    especialidades: List[int] = []
+    estado: EstadoCodigoOS
+    tiene_precio: bool = False
+
+
+class CodigoPorOSItem(BaseModel):
+    """Fila de "Códigos por obra social": un código del catálogo y su estado en la O.S."""
+    nomenclador_id: int
+    codigo: str
+    descripcion_colegio: Optional[str] = None
+    descripcion_os: Optional[str] = None
+    estado: EstadoCodigoOS
+    sin_restriccion_especialidad: bool = False
+    especialidades_os: int = 0
+    especialidades_plantilla: int = 0
+    plantilla_sin_restriccion: bool = False
+
+
+class CodigosPorOSOut(BaseModel):
+    obra_social_nro: int
+    total: int
+    page: int
+    size: int
+    conteos: dict[str, int]
+    items: List[CodigoPorOSItem]
+
+
+class FichaObraSocialItem(BaseModel):
+    obra_social_nro: int
+    nombre: str
+    estado: EstadoCodigoOS
+    sin_restriccion_especialidad: bool = False
+    especialidades: int = 0
+    # Resumen del precio vigente hoy: "igual" (una sola variante para todas las
+    # especialidades) con su total, o "por_especialidad" con la cantidad.
+    precio_tipo: Optional[Literal["igual", "por_especialidad"]] = None
+    precio_total: Optional[Decimal] = None
+    variantes: int = 0
+    vigencia_desde: Optional[datetime.date] = None
+    prestaciones_sin_valorizar: int = 0
+
+
+class FichaCodigoOut(BaseModel):
+    nomenclador_id: int
+    codigo: str
+    descripcion: Optional[str] = None
+    categoria: Optional[str] = None
+    complejidad: Optional[str] = None
+    activo: bool = True
+    plantilla_especialidades: List[int] = []
+    plantilla_sin_restriccion: bool = False
+    conteos: dict[str, int]
+    obras_sociales: List[FichaObraSocialItem]
+
+
+# ─── Etapa 2 — plantilla de especialidades (quién factura) ───────────────────
+
+class PlantillaEspecialidadesIn(BaseModel):
+    sin_restriccion_especialidad: bool = False
+    especialidades: List[int] = []
+
+
+class PlantillaEspecialidadesOut(BaseModel):
+    nomenclador_id: int
+    codigo: str
+    sin_restriccion_especialidad: bool
+    especialidades: List[int]
+
+
+class PropagarEspecialidadesIn(BaseModel):
+    obra_social_nros: List[int] = Field(..., min_length=1)
+    # agregar = sólo suma lo nuevo de la plantilla; igualar = además quita lo que
+    # la O.S. tenga de más (salvo especialidades con precio NE activo).
+    modo: Literal["agregar", "igualar"] = "agregar"
+    dry_run: bool = False
+
+
+class PropagarEspecialidadesItem(BaseModel):
+    obra_social_nro: int
+    nombre: str
+    estado: Literal["actualizada", "sin_cambios", "salteada", "error"]
+    motivo: Optional[str] = None
+    agrega: List[int] = []
+    quita: List[int] = []
+    # Se quitarían pero tienen precio NE activo: se quedan.
+    conserva_por_precio: List[int] = []
+
+
+class PropagarEspecialidadesOut(BaseModel):
+    dry_run: bool
+    modo: Literal["agregar", "igualar"]
+    resultados: List[PropagarEspecialidadesItem]
+
+
+class AplicarAltaIn(BaseModel):
+    obra_social_nros: List[int] = Field(..., min_length=1)
+
+
+class AplicarAltaItem(BaseModel):
+    obra_social_nro: int
+    nombre: str
+    estado: Literal["alta_creada", "especialidades_agregadas", "sin_cambios", "error"]
+    motivo: Optional[str] = None
+    especialidades_agregadas: List[int] = []
+    sin_quien_factura: bool = False
+
+
+class AplicarAltaOut(BaseModel):
+    resultados: List[AplicarAltaItem]

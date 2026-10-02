@@ -11,7 +11,7 @@ from app.common.files import url_archivo
 from app.core.config import settings
 from app.db.database import get_db
 from app.db.models import ListadoMedico, NomencladorCMC, ObrasSociales
-from app.modules.facturacion import service
+from app.modules.facturacion import revalorizar as revalorizar_mod, service
 from app.modules.facturacion.schemas import (
     ActividadEventoOut,
     AfiliadoCreate,
@@ -524,6 +524,16 @@ async def cierre_preview(
     db: AsyncSession = Depends(get_db),
 ):
     return await service.preview_cierre(db, cod_obra, periodo)
+
+
+@router.post("/revalorizar", response_model=revalorizar_mod.RevalorizarOut)
+async def revalorizar_prestaciones(
+    body: revalorizar_mod.RevalorizarIn, db: AsyncSession = Depends(get_db),
+):
+    """Recalcula las prestaciones ABIERTAS de un código y O.S. que se cargaron en $0
+    por falta de precio, ahora que el código tiene precio. `dry_run` = vista previa
+    (antes / después). Las de períodos cerrados no se tocan."""
+    return await revalorizar_mod.revalorizar(db, body)
 
 
 @router.post("/cierre", response_model=CierreResponse)

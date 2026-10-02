@@ -603,6 +603,19 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     ("POST", "/api/galenos/{id}/actualizar_unidades"): Scope.NOMENCLADOR_EDITAR,
     ("POST", "/api/galenos/actualizar_precio_masivo"): Scope.NOMENCLADOR_MASIVO,
     ("POST", "/api/galenos/replicar_en_familia"): Scope.NOMENCLADOR_EDITAR,
+    # Etapa 3 — códigos por obra social (alta sin precio)
+    ("GET", "/api/codigos_os/"): Scope.NOMENCLADOR_LEER,
+    ("POST", "/api/codigos_os/alta"): Scope.NOMENCLADOR_EDITAR,
+    ("GET", "/api/codigos_os/{obra_social_nro}/{nomenclador_id}"): Scope.NOMENCLADOR_LEER,
+    ("PATCH", "/api/codigos_os/{obra_social_nro}/{nomenclador_id}"): Scope.NOMENCLADOR_EDITAR,
+    ("POST", "/api/codigos_os/{obra_social_nro}/{nomenclador_id}/suspender"): Scope.NOMENCLADOR_EDITAR,
+    ("POST", "/api/codigos_os/{obra_social_nro}/{nomenclador_id}/reactivar"): Scope.NOMENCLADOR_EDITAR,
+    # Etapa 2 — plantilla de especialidades + ficha del código
+    ("GET", "/api/nomenclador/{id}/ficha"): Scope.NOMENCLADOR_LEER,
+    ("PUT", "/api/nomenclador/{id}/especialidades"): Scope.NOMENCLADOR_EDITAR,
+    ("POST", "/api/nomenclador/{id}/especialidades/propagar"): Scope.NOMENCLADOR_EDITAR,
+    # Revalorizar prestaciones cargadas sin precio (se dispara al cargar el precio)
+    ("POST", "/api/facturacion/revalorizar"): Scope.NOMENCLADOR_EDITAR,
     ("PATCH", "/api/galenos/visibilidad"): Scope.NOMENCLADOR_EDITAR,
     ("POST", "/api/galenos/importar_de_obra_social"): Scope.NOMENCLADOR_MASIVO,
     ("POST", "/api/galenos/importar_lote"): Scope.NOMENCLADOR_MASIVO,

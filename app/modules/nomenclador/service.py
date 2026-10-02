@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.common.money import quantize_money
 from app.db.models.nomenclador_cmc import (
+    CodigoObraSocial,
     Galeno,
     HistorialPrecioCodigo,
     MedicoCodigoHabilitado,
@@ -106,9 +107,16 @@ async def especialidades_habilitadas_de(
 async def par_sin_restriccion(db: AsyncSession, codigo: str, obra_social_nro: int) -> bool:
     """¿El par (obra_social_nro, codigo) es "sin restricción de especialidad"?
 
-    Es dato del PAR, no de una fila: vale True si alguna fila ACTIVA del par lo
-    tiene (mismo criterio que el paso 3 de `_validar_habilitacion_medico`).
+    Es dato del PAR: lo decide el alta del código en la O.S. (`nm_codigo_obra_social`,
+    etapa 3). Sólo si el par no tiene alta (datos previos a la etapa 3) cae al
+    criterio viejo: True si alguna fila ACTIVA de `nm_valores` lo tiene.
     """
+    flag_par = (await db.execute(select(CodigoObraSocial.sin_restriccion_especialidad).where(
+        CodigoObraSocial.codigo == codigo,
+        CodigoObraSocial.obra_social_nro == obra_social_nro,
+    ).limit(1))).scalar_one_or_none()
+    if flag_par is not None:
+        return bool(flag_par)
     return bool((await db.execute(
         select(exists().where(
             Valor.codigo == codigo,
@@ -117,6 +125,30 @@ async def par_sin_restriccion(db: AsyncSession, codigo: str, obra_social_nro: in
             Valor.sin_restriccion_especialidad == True,
         ))
     )).scalar())
+
+
+async def _par_de(
+    db: AsyncSession, obra_social_nro: Optional[int], nomenclador_id: int
+) -> Optional[CodigoObraSocial]:
+    """El alta del código en la O.S. (etapa 3), si existe."""
+    if obra_social_nro is None:
+        return None
+    return (await db.execute(select(CodigoObraSocial).where(
+        CodigoObraSocial.obra_social_nro == obra_social_nro,
+        CodigoObraSocial.nomenclador_id == nomenclador_id,
+    ))).scalar_one_or_none()
+
+
+async def _tiene_valor_activo(
+    db: AsyncSession, obra_social_nro: Optional[int], nomenclador_id: int
+) -> bool:
+    if obra_social_nro is None:
+        return False
+    return (await db.execute(select(Valor.id).where(
+        Valor.obra_social_nro == obra_social_nro,
+        Valor.nomenclador_id == nomenclador_id,
+        Valor.estado == "activo",
+    ).limit(1))).scalar_one_or_none() is not None
 
 
 async def fijar_sin_restriccion_par(
@@ -150,6 +182,12 @@ async def fijar_sin_restriccion_par(
             )
     for v in await variantes_del_par(db, obra_social_nro, codigo, excluir_id=excluir_id):
         v.sin_restriccion_especialidad = valor
+    # El alta del código en la O.S. (etapa 3) es quien manda (ver par_sin_restriccion).
+    await db.execute(
+        update(CodigoObraSocial)
+        .where(CodigoObraSocial.obra_social_nro == obra_social_nro, CodigoObraSocial.codigo == codigo)
+        .values(sin_restriccion_especialidad=valor)
+    )
     await db.flush()
 
 
@@ -545,6 +583,8 @@ async def persistir_valor(
     """
     db.add(valor)
     await db.flush()
+    from app.modules.nomenclador import alta_os  # import local: alta_os importa este módulo
+    await alta_os.asegurar_pares(db, [alta_os.campos_de_valor(valor)])
     for datos in componentes:
         db.add(ValorComponente(valor_id=valor.id, **datos))
     await db.flush()
@@ -587,6 +627,10 @@ async def persistir_valores_en_bloque(
     por_clave = {_clave(v): (v, comps) for v, comps in filas}
     if len(por_clave) != len(filas):
         raise ValueError("persistir_valores_en_bloque: variantes repetidas en el lote")
+
+    # 0. El código queda dado de alta en cada O.S. (etapa 3) si todavía no lo estaba.
+    from app.modules.nomenclador import alta_os  # import local: alta_os importa este módulo
+    await alta_os.asegurar_pares(db, [v for v, _ in filas])
 
     # 1. Valores
     await db.execute(insert(Valor), [
@@ -1875,15 +1919,7 @@ async def _validar_habilitacion_medico(
             "social en contexto"
         )
 
-    sin_restriccion = (await db.execute(
-        select(exists().where(
-            Valor.codigo == nomenclador.codigo,
-            Valor.obra_social_nro == obra_social_nro,
-            Valor.estado == "activo",
-            Valor.sin_restriccion_especialidad == True,
-        ))
-    )).scalar()
-    if sin_restriccion:
+    if await par_sin_restriccion(db, nomenclador.codigo, obra_social_nro):
         return
 
     especialidades = _especialidades_medico(medico)
@@ -2093,6 +2129,13 @@ async def lookup_precio(
     if not nomenclador:
         raise LookupError("Código no encontrado en el nomenclador", 404)
 
+    # Etapa 3: el código tiene que estar dado de alta (y no suspendido) en la O.S.
+    par = await _par_de(db, obra_social_nro, nomenclador_id)
+    if par is not None and par.estado == "suspendido":
+        raise LookupError("El código está suspendido en esta obra social")
+    if par is None and not await _tiene_valor_activo(db, obra_social_nro, nomenclador_id):
+        raise LookupError("El código no está dado de alta en esta obra social")
+
     # Gate de habilitación (¿puede hacer la práctica?)
     await _validar_habilitacion_medico(db, medico, nomenclador, fecha, obra_social_nro)
 
@@ -2130,6 +2173,11 @@ async def lookup_precio(
         if existe_algun_precio:
             raise LookupError(
                 "No existe vigencia correspondiente para este código",
+                sin_precio=True,
+            )
+        if par is not None:
+            raise LookupError(
+                "El código está dado de alta en esta obra social pero todavía no tiene precio",
                 sin_precio=True,
             )
         raise LookupError(

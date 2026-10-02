@@ -48,7 +48,7 @@ from app.db.models.nomenclador_cmc import (
     Homologador, Galeno, GalenoPlantilla, Valor, ValorComponente,
     HistorialPrecioCodigo, ValorDocumento,
     NomencladorNacional, ValorEspecialidad, NomencladorDescripcionLegacy,
-    NomencladorPlantillaEspecialidad,
+    NomencladorPlantillaEspecialidad, CodigoObraSocial,
 )
 # Datos del propio Colegio (CUIT, CBU, teléfonos, casillas de correo).
 from app.db.models.institucion import Institucion, InstitucionTelefono, InstitucionEmail
@@ -107,7 +107,7 @@ __all__ = [
     "Homologador", "Galeno", "GalenoPlantilla", "Valor", "ValorComponente",
     "HistorialPrecioCodigo", "ValorDocumento",
     "NomencladorNacional", "ValorEspecialidad", "NomencladorDescripcionLegacy",
-    "NomencladorPlantillaEspecialidad",
+    "NomencladorPlantillaEspecialidad", "CodigoObraSocial",
     # datos institucionales del Colegio
     "Institucion", "InstitucionTelefono", "InstitucionEmail",
     # calendarios (feriados, cumpleaños, tareas del mes)

@@ -20,7 +20,7 @@ from app.db.models.nomenclador_cmc import (
     ValorComponente,
     ValorEspecialidad,
 )
-from app.modules.nomenclador import service
+from app.modules.nomenclador import alta_os, service
 from app.modules.nomenclador.schemas import (
     ActualizacionMasivaResult,
     ActualizarPorcentajeIn,
@@ -306,6 +306,7 @@ async def _crear_valor_con_componentes(
     )
     db.add(valor)
     await db.flush()
+    await alta_os.asegurar_pares(db, [alta_os.campos_de_valor(valor)])
 
     # Por presupuesto: se ignora la ecuación entrante y se guardan los 3 conceptos en 0
     if por_presupuesto:
@@ -425,6 +426,7 @@ async def _clonar_valor(
     )
     db.add(nuevo)
     await db.flush()
+    await alta_os.asegurar_pares(db, [alta_os.campos_de_valor(nuevo)])
 
     for c in comps:
         datos = {
@@ -816,6 +818,8 @@ async def create_valor(body: ValorCreate, db: AsyncSession = Depends(get_db)):
     nom = await db.get(NomencladorCMC, body.nomenclador_id)
     if not nom:
         raise HTTPException(404, "Código de nomenclador no encontrado")
+    # Etapa 4 (precio) exige la etapa 3 (alta del código en la O.S.).
+    await alta_os.exigir_alta_activa(db, body.obra_social_nro, body.nomenclador_id)
 
     existente = await _buscar_valor_activo(
         db, body.obra_social_nro, body.nomenclador_id, body.origen.value,
@@ -889,6 +893,8 @@ async def create_valor_multi(body: ValorCreateMulti, db: AsyncSession = Depends(
     nom = await db.get(NomencladorCMC, body.nomenclador_id)
     if not nom:
         raise HTTPException(404, "Código de nomenclador no encontrado")
+    # Etapa 4 (precio) exige la etapa 3 (alta del código en la O.S.).
+    await alta_os.exigir_alta_activa(db, body.obra_social_nro, body.nomenclador_id)
 
     for especialidad_id in body.especialidades_id_colegio:
         try:
@@ -1121,6 +1127,8 @@ async def update_valor_metadata(id: int, body: ValorUpdate, db: AsyncSession = D
         except ValueError as e:
             raise HTTPException(409, str(e))
 
+    await db.flush()
+    await alta_os.sincronizar_par_desde_valor(db, obj)
     await db.commit()
     await db.refresh(obj)
     return await _valor_out(db, obj)

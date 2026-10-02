@@ -56,7 +56,20 @@ async def actualizar_nucleo(
     db: AsyncSession, os_nro: int, nom_id: int, body: ValorNucleoUpdate
 ) -> List[Valor]:
     """Aplica `body` al núcleo. Devuelve las variantes activas del par al terminar.
+    Los datos del par también quedan en el alta del código en la O.S. (etapa 3).
     No hace commit."""
+    from app.modules.nomenclador import alta_os
+
+    valores = await _actualizar_nucleo(db, os_nro, nom_id, body)
+    if valores:
+        base = next((v for v in valores if v.origen == "NE"), valores[0])
+        await alta_os.sincronizar_par_desde_valor(db, base)
+    return valores
+
+
+async def _actualizar_nucleo(
+    db: AsyncSession, os_nro: int, nom_id: int, body: ValorNucleoUpdate
+) -> List[Valor]:
     from app.modules.nomenclador.routes_valores import (
         _actualizar_valor_core,
         _clonar_valor,

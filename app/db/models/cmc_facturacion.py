@@ -131,6 +131,11 @@ class DetalleFacturacionCMC(Base):
     # llegaron por excepción luego de cerrar/enviar el período — se reenvían aparte a la
     # OS con nota de crédito externa). Histórico → 1.
     version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+    # Prestación cargada en $0 porque el código estaba dado de alta en la O.S. pero
+    # todavía sin precio (`CARGA_SIN_PRECIO`). Guarda QUÉ conceptos hay que cotizar al
+    # revalorizar ("H", "G", "A" combinados, ej. "HG"), porque con todo en $0 ya no
+    # se puede deducir de los montos. NULL = valorizada. Ver `revalorizar.py`.
+    sin_valorizar: Mapped[Optional[str]] = mapped_column(String(3), nullable=True)
 
     # ── Validación contra la obra social (módulo `validaciones`) ──────────────
     # Las prestaciones que el médico valida contra el portal/servicio de la O.S.

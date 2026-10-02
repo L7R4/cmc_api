@@ -26,6 +26,8 @@ from app.modules.nomenclador.schemas import (
     ActualizarPorcentajeIn,
     AumentoPorcentualResult,
     ActualizarPorCodigosIn,
+    AltaNECeroIn,
+    AltaNECeroOut,
     CompletarBaseNNIn,
     CompletarBaseNNOut,
     ComponenteNNSugeridoOut,
@@ -1018,6 +1020,71 @@ async def completar_base_nn(body: CompletarBaseNNIn, db: AsyncSession = Depends(
     return CompletarBaseNNOut(
         obra_social_nro=body.obra_social_nro, dry_run=body.dry_run,
         vigencia_desde=VIGENCIA_NOMENCLADOR_INICIAL, **r,
+    )
+
+
+@router.post("/alta_ne_cero", response_model=AltaNECeroOut)
+async def alta_ne_cero(body: AltaNECeroIn, db: AsyncSession = Depends(get_db)):
+    """Herramienta "Agregar código a obras sociales": da de alta el código como NE en
+    $0 en las obras sociales elegidas, una variante por especialidad de su plantilla
+    (o una sin especialidad si es "sin restricción"), con la vigencia indicada. Lo
+    que ya existe no se toca (ver `aplicar_plantilla.alta_ne_en_cero`).
+    `dry_run=True` devuelve el mismo informe sin guardar nada."""
+    from app.db.models.catalogs import Especialidad  # import local, como en el resto del módulo
+    from app.modules.nomenclador.aplicar_plantilla import alta_ne_en_cero
+
+    nom = await service.resolver_nomenclador(db, body.codigo.strip())
+    if nom is None:
+        raise HTTPException(404, f"Código '{body.codigo}' no encontrado")
+
+    nombres_os = dict((await db.execute(
+        select(ObrasSociales.NRO_OBRASOCIAL, ObrasSociales.OBRA_SOCIAL).where(
+            ObrasSociales.NRO_OBRASOCIAL.in_(body.obra_social_nros)
+        )
+    )).all())
+    faltantes = sorted(set(body.obra_social_nros) - set(nombres_os))
+    if faltantes:
+        raise HTTPException(404, f"Obra(s) social(es) no encontrada(s): {faltantes}")
+
+    try:
+        r = await alta_ne_en_cero(
+            db, nom, body.obra_social_nros, body.vigencia_desde,
+            _forzar_ayudantes_honorarios_individuales(None, nom, None),
+        )
+    except ValueError as e:
+        await db.rollback()
+        raise HTTPException(422, str(e))
+    except Exception:
+        await db.rollback()
+        raise
+
+    plantilla = r["plantilla"]
+    nombres_esp = dict((await db.execute(
+        select(Especialidad.ID_COLEGIO_ESPE, Especialidad.ESPECIALIDAD).where(
+            Especialidad.ID_COLEGIO_ESPE.in_(plantilla)
+        )
+    )).all()) if plantilla else {}
+    descripcion, codigo = nom.descripcion, nom.codigo
+
+    if body.dry_run:
+        await db.rollback()
+    else:
+        await db.commit()
+
+    return AltaNECeroOut(
+        codigo=codigo,
+        descripcion=descripcion,
+        sin_restriccion=r["sin_restriccion"],
+        plantilla=[
+            {"id_colegio": e, "nombre": (nombres_esp.get(e) or str(e)).strip()} for e in plantilla
+        ],
+        vigencia_desde=body.vigencia_desde,
+        dry_run=body.dry_run,
+        total_creadas=sum(len(o["creadas"]) for o in r["resultados"]),
+        obras_sociales=[
+            {**o, "nombre": nombres_os.get(o["obra_social_nro"], str(o["obra_social_nro"]))}
+            for o in r["resultados"]
+        ],
     )
 
 

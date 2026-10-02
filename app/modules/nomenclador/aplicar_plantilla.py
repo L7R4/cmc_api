@@ -8,8 +8,10 @@ catálogo. Recién al aplicarla a una obra social se escribe lo que cuenta:
 """
 from __future__ import annotations
 
+import datetime
 import logging
-from typing import List
+from decimal import Decimal
+from typing import List, Optional
 
 from sqlalchemy import delete, insert, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,7 +19,9 @@ from sqlalchemy.orm import noload
 
 from app.db.models.catalogs import Especialidad
 from app.db.models.nomenclador_cmc import (
+    HistorialPrecioCodigo,
     NomencladorCMC,
+    NomencladorNacional,
     NomencladorPlantillaEspecialidad,
     Valor,
     ValorComponente,
@@ -143,6 +147,162 @@ async def aplicar_a_obras_sociales(
             ))
 
     return AplicarEspecialidadesOut(aplicadas=aplicadas, omitidas=omitidas)
+
+
+MOTIVO_PAR_CON_RESTRICCION = (
+    "El código ya está cargado en esta obra social por especialidad: no se agrega "
+    "el valor sin especialidad para no tocar lo existente"
+)
+
+
+def _componentes_cero() -> list[dict]:
+    """Honorarios, Gastos y Ayudante como fijos en $0 (mismos 3 conceptos que lleva
+    todo Valor; ver `routes_valores._componentes_presupuesto_cero`)."""
+    return [
+        {"concepto": concepto, "galeno_id": None, "cantidad": Decimal("0"),
+         "valor_unitario": Decimal("0"), "orden": orden, "observacion": None}
+        for orden, concepto in enumerate(("Honorarios", "Gastos", "Ayudante"))
+    ]
+
+
+async def alta_ne_en_cero(
+    db: AsyncSession,
+    nom: NomencladorCMC,
+    obra_social_nros: List[int],
+    vigencia_desde: datetime.date,
+    cantidad_ayudantes: Optional[int],
+) -> dict:
+    """Herramienta "Agregar código a obras sociales": da de alta `nom` como NE en $0
+    en cada obra social, una variante por especialidad de su plantilla — o una sola
+    sin especialidad si el código es "sin restricción" en el catálogo. Lo que ya
+    existe NO se toca: las variantes NE activas se informan y se saltean.
+
+    Cada obra social va en su propio savepoint (una que falla no arrastra a las
+    demás). No hace commit: el caller decide (commit o rollback para la vista previa).
+
+    Ojo con el precio: un NE gana sobre el NN al cotizar (`lookup_precio`), así que
+    si la OS ya tiene el código en NN con precio, desde la vigencia del NE en $0 los
+    médicos de esas especialidades pasarían a cotizar $0. Se informa en
+    `nn_con_precio` para que la pantalla lo advierta.
+    """
+    sin_restriccion = bool(nom.sin_restriccion_especialidad)
+    plantilla = [] if sin_restriccion else await leer_plantilla(db, nom.codigo)
+    if not sin_restriccion and not plantilla:
+        raise ValueError(
+            f"El código {nom.codigo} no tiene especialidades en su plantilla: cargalas "
+            "primero en la ficha del código."
+        )
+
+    aplicables = [None] if sin_restriccion else plantilla
+    resultados: list[dict] = []
+    for os_nro in dict.fromkeys(obra_social_nros):
+        try:
+            async with db.begin_nested():
+                resultados.append(await _alta_ne_en_cero_os(
+                    db, nom, os_nro, aplicables, sin_restriccion, vigencia_desde,
+                    cantidad_ayudantes,
+                ))
+        except Exception:
+            log.exception("Alta NE en $0 del código %s en la O.S. %s falló", nom.codigo, os_nro)
+            resultados.append({
+                "obra_social_nro": os_nro, "estado": "error", "creadas": [],
+                "existentes": [], "motivo": "Error inesperado", "nn_con_precio": False,
+            })
+    return {"plantilla": plantilla, "sin_restriccion": sin_restriccion, "resultados": resultados}
+
+
+async def _descripcion_catalogo(db: AsyncSession, nom: NomencladorCMC) -> Optional[str]:
+    """La del catálogo del Colegio; si está vacía, la del Nomenclador Nacional
+    vinculado (como el alta de los NN). None si no hay ninguna."""
+    if nom.descripcion and nom.descripcion.strip():
+        return nom.descripcion.strip()
+    if nom.nomenclador_nacional_id is not None:
+        nn = await db.get(NomencladorNacional, nom.nomenclador_nacional_id)
+        if nn is not None and nn.descripcion and nn.descripcion.strip():
+            return nn.descripcion.strip()
+    return None
+
+
+async def _alta_ne_en_cero_os(
+    db: AsyncSession,
+    nom: NomencladorCMC,
+    os_nro: int,
+    aplicables: list[Optional[int]],
+    sin_restriccion: bool,
+    vigencia_desde: datetime.date,
+    cantidad_ayudantes: Optional[int],
+) -> dict:
+    activos = list((await db.execute(
+        select(Valor).where(
+            Valor.obra_social_nro == os_nro,
+            Valor.nomenclador_id == nom.id,
+            Valor.estado == "activo",
+        ).options(noload(Valor.componentes))
+    )).scalars())
+    ne_existentes = {v.especialidad_id_colegio for v in activos if v.origen == "NE"}
+    # "Sin restricción" es dato del PAR: las filas nuevas heredan lo que ya tenga.
+    par_sin_restriccion = any(v.sin_restriccion_especialidad for v in activos)
+
+    nn_ids = [v.id for v in activos if v.origen == "NN"]
+    nn_con_precio = bool(nn_ids) and (await db.execute(
+        select(HistorialPrecioCodigo.id).where(
+            HistorialPrecioCodigo.valores_id.in_(nn_ids),
+            HistorialPrecioCodigo.vigencia_hasta.is_(None),
+            HistorialPrecioCodigo.precio_total > 0,
+        ).limit(1)
+    )).scalar_one_or_none() is not None
+
+    # La descripción es dato del PAR: si la OS ya tiene el código con la suya (la del
+    # convenio), las variantes nuevas la heredan; si no, la del catálogo.
+    descripcion = next(
+        (v.descripcion for v in activos if v.descripcion and v.descripcion.strip()),
+        await _descripcion_catalogo(db, nom),
+    )
+
+    a_crear = [esp for esp in aplicables if esp not in ne_existentes]
+    existentes = [esp for esp in aplicables if esp in ne_existentes]
+    base = {"obra_social_nro": os_nro, "existentes": existentes, "nn_con_precio": nn_con_precio}
+
+    # Un NE sin especialidad solo vale en un par sin restricción; si el código ya
+    # está en la OS por especialidad, marcarlo sin restricción tocaría lo existente.
+    if sin_restriccion and a_crear and activos and not par_sin_restriccion:
+        return {**base, "estado": "omitida", "creadas": [], "motivo": MOTIVO_PAR_CON_RESTRICCION}
+    if not a_crear:
+        return {**base, "estado": "sin_cambios", "creadas": [], "motivo": None}
+
+    habilitar = [esp for esp in a_crear if esp is not None]
+    if habilitar:
+        habilitadas = set((await db.execute(
+            select(ValorEspecialidad.especialidad_id_colegio).where(
+                ValorEspecialidad.obra_social_nro == os_nro,
+                ValorEspecialidad.codigo == nom.codigo,
+                ValorEspecialidad.especialidad_id_colegio.in_(habilitar),
+            )
+        )).scalars())
+        faltantes = [esp for esp in habilitar if esp not in habilitadas]
+        if faltantes:
+            await db.execute(insert(ValorEspecialidad), [
+                {"obra_social_nro": os_nro, "codigo": nom.codigo, "especialidad_id_colegio": esp}
+                for esp in faltantes
+            ])
+
+    await service.persistir_valores_en_bloque(db, [
+        (
+            {
+                "obra_social_nro": os_nro, "nomenclador_id": nom.id, "origen": "NE",
+                "codigo": nom.codigo, "descripcion": descripcion, "nivel": None,
+                "complejidad": None, "categoria": None, "requiere_autorizacion": None,
+                "especialidad_id_colegio": esp,
+                "sin_restriccion_especialidad": sin_restriccion or par_sin_restriccion,
+                "por_presupuesto": False, "cantidad_ayudantes": cantidad_ayudantes,
+                "coseguro": Decimal("0"), "vigencia_desde": vigencia_desde,
+                "observacion": None,
+            },
+            _componentes_cero(),
+        )
+        for esp in a_crear
+    ], motivo="carga_inicial")
+    return {**base, "estado": "creada", "creadas": a_crear, "motivo": None}
 
 
 async def _crear_variantes_en_bloque(

@@ -641,6 +641,47 @@ class CompletarBaseNNOut(BaseModel):
     errores: List[CompletarBaseNNErrorOut]
 
 
+VIGENCIA_ALTA_NE_CERO_DEFAULT = datetime.date(2026, 1, 1)
+
+
+class AltaNECeroIn(BaseModel):
+    codigo: str
+    obra_social_nros: List[int] = Field(..., min_length=1)
+    vigencia_desde: datetime.date = VIGENCIA_ALTA_NE_CERO_DEFAULT
+    # True → calcula y devuelve lo que haría, sin guardar nada (vista previa).
+    dry_run: bool = False
+
+
+class EspecialidadNombreOut(BaseModel):
+    id_colegio: int
+    nombre: str
+
+
+class AltaNECeroOSOut(BaseModel):
+    obra_social_nro: int
+    nombre: str
+    # creada: se agregó al menos una variante · sin_cambios: ya tenía todas ·
+    # omitida: no se pudo agregar sin tocar lo existente · error: falló.
+    estado: Literal["creada", "sin_cambios", "omitida", "error"]
+    # Especialidades (ID_COLEGIO_ESPE); None = la variante sin especialidad.
+    creadas: List[Optional[int]]
+    existentes: List[Optional[int]]
+    motivo: Optional[str] = None
+    # Ya tiene el código en NN con precio > 0: el NE en $0 le ganaría al cotizar.
+    nn_con_precio: bool = False
+
+
+class AltaNECeroOut(BaseModel):
+    codigo: str
+    descripcion: Optional[str]
+    sin_restriccion: bool
+    plantilla: List[EspecialidadNombreOut]
+    vigencia_desde: datetime.date
+    dry_run: bool
+    total_creadas: int
+    obras_sociales: List[AltaNECeroOSOut]
+
+
 class ComponenteNNSugeridoOut(BaseModel):
     concepto: Literal["Honorarios", "Ayudante", "Gastos"]
     galeno_id: int

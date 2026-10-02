@@ -1077,6 +1077,10 @@ class BoletinItemOut(BaseModel):
     componentes: List[BoletinComponenteOut]
     vigencia_desde: datetime.date
     vigencia_hasta: Optional[datetime.date]
+    # De qué especialidad es el precio (ID_COLEGIO_ESPE); NULL = general. Un
+    # mismo código puede tener precio de pediatría y precio general vigentes a
+    # la vez, y sin esto el boletín no puede elegir el que corresponde.
+    especialidad_id_colegio: Optional[int] = None
 
 
 class BoletinOut(BaseModel):

@@ -67,7 +67,11 @@ async def list_nomenclador(
 
     stmt = select(NomencladorCMC)
     if q:
-        stmt = stmt.where(NomencladorCMC.codigo.contains(q))
+        # Por código o por descripción del catálogo (los buscadores de práctica dicen
+        # "por código o por nombre"; antes solo miraba el código).
+        stmt = stmt.where(
+            NomencladorCMC.codigo.contains(q) | NomencladorCMC.descripcion.ilike(f"%{q}%")
+        )
     if categoria:
         stmt = stmt.where(NomencladorCMC.categoria == categoria)
     if complejidad:

@@ -791,7 +791,8 @@ class NomencladorRefOut(BaseModel):
     descripcion: Optional[str] = None
     categoria: Optional[str] = None
     complejidad: Optional[str] = None
-    obra_social_nro: Optional[int] = None   # NULL = código compartido del Colegio
+    # (Ya no lleva `obra_social_nro`: el catálogo dejó de tener códigos propios de una
+    # OS y la columna no existe más en `nm_nomenclador` — leerla rompía la ficha.)
     # True cuando `detalle_facturacion.nomenclador_id` era NULL y la fila se resolvió
     # por (cod_nom, cod_obr) en vez de venir del vínculo persistido.
     resuelto_por_codigo: bool = False

@@ -2253,7 +2253,6 @@ async def obtener_prestacion_ficha(
         nomenclador = NomencladorRefOut(
             id=nom_row.id, codigo=nom_row.codigo, descripcion=nom_row.descripcion,
             categoria=nom_row.categoria, complejidad=nom_row.complejidad,
-            obra_social_nro=nom_row.obra_social_nro,
             resuelto_por_codigo=resuelto_por_codigo,
         )
 

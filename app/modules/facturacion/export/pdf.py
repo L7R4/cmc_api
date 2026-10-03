@@ -220,14 +220,14 @@ class _Tabla:
         pdf.set_xy(self.x0, y_fin)
         self._limites_fila.append(y_fin)
 
-    def fila_texto_libre(self, texto: str) -> None:
+    def fila_texto_libre(self, texto: str, negrita: bool = True) -> None:
         self.asegurar_pagina()
         pdf = self.pdf
         # Cierra el tramo de columnas actual justo antes de esta fila combinada
         # — sin esto las verticales internas seguirían de largo por encima del
         # texto, como si la fila tuviera columnas que en realidad no tiene.
         self._cerrar_segmento_columnas(pdf.get_y())
-        pdf.set_font(_FONT, "B", _SIZE_DATO)
+        pdf.set_font(_FONT, "B" if negrita else "I", _SIZE_DATO)
         pdf.set_xy(self.x0, pdf.get_y())
         pdf.multi_cell(self.x1 - self.x0, _ALTO_FILA, texto, align="L", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
         y_fin = pdf.get_y()
@@ -293,7 +293,11 @@ def build_pdf_detalle(
         tabla.asegurar_pagina(titulo_seccion=seccion.titulo, forzar=True)
         hay_resumen_grupo = False
         for grupo in seccion.grupos:
+            if grupo.titulo:
+                tabla.fila_texto_libre(grupo.titulo)
             for linea in grupo.lineas:
+                if linea.subtitulo:
+                    tabla.fila_texto_libre(linea.subtitulo, negrita=False)
                 tabla.fila(valores_fila(cols, linea.fila))
                 for hijo in linea.hijos:
                     tabla.fila(valores_fila(cols, hijo, es_hijo=True))

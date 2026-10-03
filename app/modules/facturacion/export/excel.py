@@ -29,6 +29,7 @@ FORMATO_MONEDA = "#,##0.00"
 _ALINEACION = {"L": "left", "C": "center", "R": "right"}
 _FUENTE_HEADER = Font(bold=True)
 _FUENTE_NEGRITA = Font(bold=True)
+_FUENTE_CURSIVA = Font(italic=True)
 
 
 def _sanitizar_nombre_hoja(nombre: str, usados: set[str]) -> str:
@@ -42,10 +43,12 @@ def _sanitizar_nombre_hoja(nombre: str, usados: set[str]) -> str:
     return candidato
 
 
-def _celda(ws, valor, *, negrita: bool = False, numero: bool = False, alineacion: str = "L"):
+def _celda(ws, valor, *, negrita: bool = False, cursiva: bool = False, numero: bool = False, alineacion: str = "L"):
     c = WriteOnlyCell(ws, value=valor)
     if negrita:
         c.font = _FUENTE_NEGRITA
+    elif cursiva:
+        c.font = _FUENTE_CURSIVA
     if numero:
         c.number_format = FORMATO_MONEDA
     c.alignment = Alignment(horizontal=_ALINEACION.get(alineacion, "left"))
@@ -146,19 +149,27 @@ def build_excel_detalle(armado: Armado, opciones: ExportOpciones, encabezado: En
     fila_encabezado_col = len(encabezado.lineas) + 2  # + fila en blanco + la propia fila
     wb = Workbook(write_only=True)
     usados: set[str] = set()
-    multi_hoja = len(armado.secciones) > 1
+    multi_hoja = len(armado.secciones) > 1 and not armado.una_hoja
 
     ultima_ws = None
     for seccion in armado.secciones:
-        nombre = _sanitizar_nombre_hoja(seccion.titulo or "Detalle", usados) if multi_hoja else "Detalle"
-        ws = wb.create_sheet(nombre)
-        _configurar_hoja(ws, cols, fila_encabezado_col)
-        _fila_encabezado_institucional(ws, encabezado.lineas)
-        _fila_encabezado(ws, cols)
+        if multi_hoja or ultima_ws is None:
+            nombre = _sanitizar_nombre_hoja(seccion.titulo or "Detalle", usados) if multi_hoja else "Detalle"
+            ws = wb.create_sheet(nombre)
+            _configurar_hoja(ws, cols, fila_encabezado_col)
+            _fila_encabezado_institucional(ws, encabezado.lineas)
+            _fila_encabezado(ws, cols)
+        if armado.una_hoja and seccion.titulo:
+            # En una sola hoja, el título de la sección es la fila de corte.
+            ws.append([_celda(ws, seccion.titulo, negrita=True)])
 
         hay_resumen_grupo = False
         for grupo in seccion.grupos:
+            if grupo.titulo:
+                ws.append([_celda(ws, grupo.titulo, negrita=True)])
             for linea in grupo.lineas:
+                if linea.subtitulo:
+                    ws.append([_celda(ws, linea.subtitulo, cursiva=True)])
                 _fila_dato(ws, cols, linea.fila)
                 for hijo in linea.hijos:
                     _fila_dato(ws, cols, hijo, es_hijo=True)

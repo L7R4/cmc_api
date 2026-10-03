@@ -14,9 +14,13 @@ Las 4 modalidades (`ExportOpciones.agrupacion`) comparten una sola estructura:
   esos grupos; DENTRO de cada grupo el orden es siempre el legacy fijo
   (tipo C→P→H→S, después fecha) — igual que hacía el PHP, que jamás dejaba
   elegir el orden interno del socio.
-- **por_socio**: una `Seccion` por prestador (con su propio "RESUMEN SOCIO"),
-  cada una arranca en página/hoja nueva. `orden` decide el orden de las
-  secciones.
+- **por_socio**: orden FIJO (ignora `orden`), en dos `Seccion`: "MEDICOS" y,
+  al final, "CLINICAS / SANATORIOS". Médicos A-Z; dentro de cada uno, con
+  subtítulo por tramo: consultas y prácticas por fecha (más nueva primero) y
+  honorarios individuales por paciente A-Z. Las clínicas (prestaciones tipo
+  Sanatorio, cuyo socio es la clínica) A-Z y, dentro, por paciente A-Z. Cada
+  grupo lleva su título y su "RESUMEN SOCIO"; en Excel va todo en una sola hoja
+  (`Armado.una_hoja`).
 - **por_tipo**: una `Seccion` por tipo (Consulta/Practica/Honorarios
   individuales/Sanatorio) que tenga filas, cada una arranca en página/hoja
   nueva con su propio subtotal. Documento entero, y adentro sí, `orden` ordena
@@ -76,6 +80,8 @@ _FECHA_MAX = datetime.date.max
 class LineaPrestacion:
     fila: FilaExport
     hijos: list[FilaExport] = field(default_factory=list)
+    # Subtítulo del tramo que arranca en esta línea ("CONSULTAS", ...) — sólo en por_socio.
+    subtitulo: str | None = None
 
 
 @dataclass
@@ -96,6 +102,8 @@ class GrupoSocio:
     total_gastos: Decimal
     total_coseguro: Decimal
     total_general: Decimal
+    # Fila de título antes de las líneas del grupo (por_socio: "1076 - ACOSTA, ...").
+    titulo: str | None = None
 
 
 @dataclass
@@ -121,6 +129,9 @@ class Armado:
     secciones: list[Seccion]
     resumen: ResumenGeneral
     total_prestaciones: int
+    # Excel: todas las secciones en una sola hoja (con su título como fila de corte)
+    # en vez de una hoja por sección.
+    una_hoja: bool = False
 
 
 def _clave_fila(f: FilaExport, orden: str):
@@ -249,6 +260,82 @@ def _agrupar_por_socio(
     return grupos
 
 
+def _clave_fecha_desc(f: FilaExport) -> tuple:
+    """Más nueva primero; el id desempata de forma estable."""
+    return (-(f.fecha_practica or datetime.date.min).toordinal(), f.id)
+
+
+def _clave_paciente(f: FilaExport) -> tuple:
+    """Paciente A-Z; dentro del mismo paciente, más nueva primero."""
+    return ((f.afiliado or "").casefold(), *_clave_fecha_desc(f))
+
+
+# Tramos dentro de cada médico en por_socio: (tipo, subtítulo, orden del tramo).
+_TRAMOS_MEDICO: list[tuple[str, str, Callable[[FilaExport], tuple]]] = [
+    ("Consulta", "CONSULTAS", _clave_fecha_desc),
+    ("Practica", "PRACTICAS", _clave_fecha_desc),
+    ("Honorarios individuales", "HONORARIOS INDIVIDUALES", _clave_paciente),
+]
+SECCION_MEDICOS = "MEDICOS"
+SECCION_CLINICAS = "CLINICAS / SANATORIOS"
+
+
+def _armar_por_socio(
+    principales: list[FilaExport], hijos_por_cabeza: dict[int, list[FilaExport]],
+) -> list[Seccion]:
+    medicos: dict[str, list[FilaExport]] = {}
+    clinicas: dict[str, list[FilaExport]] = {}
+    for f in principales:
+        destino = clinicas if f.tipo == "Sanatorio" else medicos
+        destino.setdefault(f.cod_medico, []).append(f)
+
+    def _titulo(f: FilaExport) -> str:
+        return f"{f.cod_medico} - {f.prestador_nombre}" if f.prestador_nombre else f"Socio {f.cod_medico}"
+
+    def _nuevo_grupo(filas: list[FilaExport], lineas: list[LineaPrestacion]) -> GrupoSocio:
+        stats, hon, gas, cos, gral = _stats_de_lineas(lineas)
+        f0 = filas[0]
+        return GrupoSocio(
+            cod_medico=f0.cod_medico, nombre=f0.prestador_nombre, matricula=f0.matricula,
+            lineas=lineas, mostrar_resumen=True, stats_por_tipo=stats,
+            total_honorarios=quantize_money(hon), total_gastos=quantize_money(gas),
+            total_coseguro=quantize_money(cos), total_general=quantize_money(gral),
+            titulo=_titulo(f0),
+        )
+
+    grupos_medicos: list[GrupoSocio] = []
+    for filas in medicos.values():
+        lineas: list[LineaPrestacion] = []
+        tipos_tramo = {t for t, _, _ in _TRAMOS_MEDICO}
+        for tipo, subtitulo, clave in _TRAMOS_MEDICO:
+            tramo = sorted((f for f in filas if f.tipo == tipo), key=clave)
+            for i, f in enumerate(tramo):
+                lineas.append(LineaPrestacion(
+                    fila=f, hijos=hijos_por_cabeza.get(f.id, []), subtitulo=subtitulo if i == 0 else None,
+                ))
+        # Filas legacy sin tipo reconocible: al final del socio, sin perderlas.
+        otras = sorted((f for f in filas if f.tipo not in tipos_tramo), key=_clave_legacy_interna)
+        for i, f in enumerate(otras):
+            lineas.append(LineaPrestacion(
+                fila=f, hijos=hijos_por_cabeza.get(f.id, []), subtitulo="OTRAS" if i == 0 else None,
+            ))
+        grupos_medicos.append(_nuevo_grupo(filas, lineas))
+
+    grupos_clinicas = [
+        _nuevo_grupo(filas, _lineas_con_equipo(sorted(filas, key=_clave_paciente), hijos_por_cabeza))
+        for filas in clinicas.values()
+    ]
+    for grupos in (grupos_medicos, grupos_clinicas):
+        grupos.sort(key=lambda g: ((g.nombre or "").casefold(), g.cod_medico or ""))
+
+    secciones = []
+    if grupos_medicos:
+        secciones.append(Seccion(titulo=SECCION_MEDICOS, grupos=grupos_medicos))
+    if grupos_clinicas:
+        secciones.append(Seccion(titulo=SECCION_CLINICAS, grupos=grupos_clinicas))
+    return secciones
+
+
 def armar(filas: list[FilaExport], opciones: ExportOpciones) -> Armado:
     total_prestaciones = len(filas)
     principales, hijos_por_cabeza = _separar_equipo(filas)
@@ -258,11 +345,7 @@ def armar(filas: list[FilaExport], opciones: ExportOpciones) -> Armado:
         secciones = [Seccion(titulo=None, grupos=grupos)]
 
     elif opciones.agrupacion == "por_socio":
-        grupos = _agrupar_por_socio(principales, hijos_por_cabeza, opciones.orden)
-        secciones = [
-            Seccion(titulo=g.nombre or f"Socio {g.cod_medico}", grupos=[g])
-            for g in grupos
-        ]
+        secciones = _armar_por_socio(principales, hijos_por_cabeza)
 
     elif opciones.agrupacion == "por_tipo":
         secciones = []
@@ -297,7 +380,10 @@ def armar(filas: list[FilaExport], opciones: ExportOpciones) -> Armado:
         mostrar_coseguro=mostrar_coseguro, total_coseguro=quantize_money(total_coseguro),
     )
 
-    return Armado(secciones=secciones, resumen=resumen, total_prestaciones=total_prestaciones)
+    return Armado(
+        secciones=secciones, resumen=resumen, total_prestaciones=total_prestaciones,
+        una_hoja=opciones.agrupacion == "por_socio",
+    )
 
 
 # ── Especificación de columnas (compartida por excel.py y pdf.py) ───────────

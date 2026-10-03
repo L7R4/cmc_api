@@ -1184,23 +1184,6 @@ async def derivar_tipo(
     return tipo_por_codigo(cod_nomenclador) or await _get_categoria(db, cod_nomenclador, cod_obra)
 
 
-TIPOS_SIN_GASTOS = frozenset({TIPO_SANATORIO, CATEGORIA_HONORARIOS_INDIVIDUALES})
-
-
-def gasto_forzado_a_cero(tipo: Optional[str]) -> bool:
-    """True → los gastos de la fila deben guardarse en 0.
-
-    Si la prestación es 'Sanatorio' u 'Honorarios individuales' (hubo clínica, como
-    prestador o como ámbito) los gastos los factura la clínica, no el médico: van en 0
-    SIEMPRE, sea cálculo automático o manual y venga el monto que venga (decisión
-    usuario 2026-10-02; antes solo aplicaba en automático y a 'Honorarios individuales').
-
-    El front ya envía `gastos=0` en ese escenario; esto lo hace cumplir del lado del
-    backend para que ningún camino (edición, carga del médico, API directa) lo saltee.
-    """
-    return tipo in TIPOS_SIN_GASTOS
-
-
 
 # ── Normalizaciones y cálculo ────────────────────────────────────────────────
 def fecha_para_precio(fecha: Optional[datetime.date]) -> datetime.date:
@@ -1524,10 +1507,9 @@ async def _insertar_prestaciones(
             item.cod_nomenclador, item.tipo_calculo, fecha_precio,
         )
         tipo = await derivar_tipo(db, item.cod_nomenclador, prestador.tipo, cod_obra)
-        # Sanatorio / Honorarios individuales ⇒ los gastos los factura la clínica: se
-        # fuerzan a 0 antes de aplicar el porcentaje.
-        if gasto_forzado_a_cero(tipo):
-            g_base = Decimal("0")
+        # Con clínica (Sanatorio / Honorarios individuales) el formulario propone gastos
+        # en 0, pero el operador los puede corregir: acá se respeta lo que mandó (en
+        # automático, gastos=0 ya deja el concepto afuera — ver `_montos_de_item`).
         h, g, a = _aplicar_porcentaje(h_base, g_base, a_base, item.porcentaje)
         # El coseguro es del acto, no de cada prestador: sólo la fila del cirujano lo
         # lleva. El pediatra cotiza su propio código, que puede traer coseguro propio:
@@ -2530,17 +2512,6 @@ async def editar_prestacion(
             row.honorarios, row.gastos, row.ayudante = h, g, a
             row.tpo_funcion = tpo_funcion_de(h, g, a, rol_efectivo)
 
-        # Misma regla que en la carga: con clínica los gastos los factura la clínica.
-        # Va FUERA del bloque de recotización — si no, un PATCH que no toca ningún campo de
-        # precio (ej. solo `cantidad`) dejaría gastos viejos en una fila que pasó a sanatorio.
-        # Forzar a 0 es idempotente y no depende del porcentaje (0 escalado sigue siendo 0).
-        if gasto_forzado_a_cero(row.tipo):
-            row.gastos = Decimal("0")
-            row.tpo_funcion = tpo_funcion_de(
-                row.honorarios or Decimal("0"), Decimal("0"), row.ayudante or Decimal("0"),
-                rol_efectivo,
-            )
-
         # Invariante del rol: la fila del pediatra nunca lleva coseguro (el acto es uno
         # solo y lo cobra el cirujano) — independiente de qué disparó este PATCH.
         if es_pediatra:
@@ -2808,6 +2779,14 @@ async def mover_prestaciones_periodo(
             422,
             {"mensaje": "Algunas prestaciones no existen o no están en estado 'A' (abierto)",
              "faltantes": faltantes},
+        )
+    # Las marcadas (auditadas) se quedan en su período: solo se mueven las no marcadas.
+    marcadas = [r.id_detalle_prestaciones for r in rows if r.revisado]
+    if marcadas:
+        raise HTTPException(
+            409,
+            {"mensaje": "Hay prestaciones marcadas: desmarcalas para moverlas de período",
+             "marcadas": marcadas},
         )
 
     # La versión es propia de cada período: al mover, las filas se reetiquetan con la

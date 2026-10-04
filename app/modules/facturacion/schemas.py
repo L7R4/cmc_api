@@ -159,6 +159,11 @@ class PrestacionItem(BaseModel):
     # Sólo aplica a la fila principal — las de ayudante del equipo van en 0.
     coseguro: Optional[Decimal] = Field(None, ge=0)
 
+    # Sólo cuando el código se carga SIN PRECIO (todo en $0): qué conceptos se
+    # cotizarán al revalorizar, porque con montos en 0 no se puede deducir de ellos.
+    # H = honorarios, G = gastos, A = ayudante. None → "HG" (o "H" para el pediatra).
+    concepto_sin_precio: Optional[Literal["H", "G", "HG", "A"]] = None
+
     # Vínculo a la fila del médico (cabeza del equipo) cuando el ayudante se carga aparte.
     grupo_equipo_id: Optional[int] = None
 
@@ -316,6 +321,10 @@ class PrecioResponse(BaseModel):
     # Coseguro sugerido desde el Valor del código — el operador lo puede editar al
     # cargar la prestación (ver PrestacionItem.coseguro).
     coseguro: Decimal = Decimal("0")
+    # True → el código está dado de alta en la O.S. pero sin precio vigente y
+    # `CARGA_SIN_PRECIO` deja cargarlo en $0: la prestación queda "sin valorizar"
+    # hasta que se cargue el precio y se revalorice (ver revalorizar.py).
+    sin_precio: bool = False
 
 
 class PrestacionRead(BaseModel):
@@ -364,6 +373,9 @@ class PrestacionRead(BaseModel):
     nombre_paciente: Optional[str] = Field(None, alias="nom_ape_p")
     revisado: bool = False
     autorizacion: Optional[str] = None
+    # Conceptos pendientes de una prestación cargada en $0 por falta de precio
+    # ("H"/"G"/"A"); None = valorizada. El listado lo muestra como "Sin valorizar".
+    sin_valorizar: Optional[str] = None
     # Fecha de CARGA (columna `created`) — es el criterio de orden de los listados: el
     # ID autoincremental no sirve porque las importaciones de CMC intercalan rangos.
     # Optional aunque la columna sea NOT NULL: un zero-date legacy ('0000-00-00')
@@ -436,6 +448,7 @@ class CierrePreviewResponse(BaseModel):
     cantidad: int
     importe_total: Decimal
     cerrado: bool   # True si la última versión ya está cerrada para esa OS+período
+    sin_valorizar: int = 0  # prestaciones cargadas en $0 por falta de precio
 
 
 class CierreResponse(BaseModel):

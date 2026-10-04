@@ -2,11 +2,11 @@ from typing import List, Optional
 
 import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import and_, exists, func, or_, select
+from sqlalchemy import and_, case, exists, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth.deps import get_current_user_with_scopes_and_role
+from app.auth.deps import get_current_user, get_current_user_with_scopes_and_role
 from app.db.database import get_db
 from app.db.models import Especialidad
 from app.db.models.nomenclador_cmc import (
@@ -15,11 +15,16 @@ from app.db.models.nomenclador_cmc import (
     Valor,
     ValorEspecialidad,
 )
-from app.modules.nomenclador import aplicar_plantilla, service
+from app.modules.nomenclador import alta_os, aplicar_plantilla, service
 from app.modules.nomenclador.service import _especialidades_medico
 from app.modules.nomenclador.schemas import (
-    AplicarEspecialidadesIn,
-    AplicarEspecialidadesOut,
+    AplicarAltaIn,
+    AplicarAltaOut,
+    FichaCodigoOut,
+    PlantillaEspecialidadesIn,
+    PlantillaEspecialidadesOut,
+    PropagarEspecialidadesIn,
+    PropagarEspecialidadesOut,
     CodigoPorEspecialidadOut,
     MedicoHabilitacionCreate,
     MedicoHabilitacionOut,
@@ -38,6 +43,13 @@ router = APIRouter()
 @router.get("/", response_model=List[NomencladorOut])
 async def list_nomenclador(
     q: Optional[str] = Query(None),
+    en_descripcion: bool = Query(
+        False,
+        description=(
+            "Con `q`: busca también en la descripción del catálogo. Primero los que "
+            "empiezan con `q` en el código, después el resto en orden de código."
+        ),
+    ),
     categoria: Optional[str] = Query(None),
     complejidad: Optional[str] = Query(None),
     obra_social_nro: Optional[int] = Query(
@@ -72,6 +84,14 @@ async def list_nomenclador(
         stmt = stmt.where(
             NomencladorCMC.codigo.contains(q) | NomencladorCMC.descripcion.ilike(f"%{q}%")
         )
+    if q and en_descripcion:
+        stmt = stmt.where(or_(
+            NomencladorCMC.codigo.contains(q), NomencladorCMC.descripcion.contains(q),
+        )).order_by(
+            case((NomencladorCMC.codigo.startswith(q), 0), else_=1), NomencladorCMC.codigo,
+        )
+    elif q:
+        stmt = stmt.where(NomencladorCMC.codigo.contains(q))
     if categoria:
         stmt = stmt.where(NomencladorCMC.categoria == categoria)
     if complejidad:
@@ -240,8 +260,7 @@ async def create_nomenclador(body: NomencladorCreate, db: AsyncSession = Depends
     if ya_existe:
         raise HTTPException(
             409,
-            f"El código {body.codigo} ya existe (id {ya_existe.id}). "
-            "Usá otro número o editá el existente.",
+            f"El código {body.codigo} ya existe. Usá otro número o editá el existente.",
         )
 
     datos = body.model_dump(exclude={"especialidades"})
@@ -301,26 +320,74 @@ async def update_nomenclador(id: int, body: NomencladorUpdate, db: AsyncSession 
     return await _detalle(db, obj)
 
 
-@router.post("/{id}/aplicar-especialidades", response_model=AplicarEspecialidadesOut)
+@router.post("/{id}/aplicar-especialidades", response_model=AplicarAltaOut)
 async def aplicar_especialidades(
-    id: int, body: AplicarEspecialidadesIn, db: AsyncSession = Depends(get_db)
+    id: int, body: AplicarAltaIn,
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
-    """Aplica la plantilla GUARDADA del código a las obras sociales dadas: crea las
-    variantes NE por especialidad (precio y vigencia de la primera variante de cada
-    obra social) o fija "sin restricción". Las obras sociales que no tienen el código
-    vuelven en `omitidas`. Cada obra social se procesa por separado."""
+    """"Guardar y aplicar": en las O.S. que no tienen el código lo da de alta SIN
+    PRECIO con la plantilla; en las que ya lo tienen, les suma las especialidades de
+    la plantilla que les falten. Nunca crea precios (etapa 4). Éxito parcial."""
     nom = await db.get(NomencladorCMC, id)
     if not nom:
         raise HTTPException(404, "Código no encontrado")
-    if not nom.sin_restriccion_especialidad and not await aplicar_plantilla.leer_plantilla(
-        db, nom.codigo
-    ):
-        raise HTTPException(
-            422,
-            "El código no tiene especialidades sugeridas ni está marcado como sin "
-            "restricción: guardalo con alguna de las dos antes de aplicar.",
+    resultados = await alta_os.guardar_y_aplicar(
+        db, nom, body.obra_social_nros, str(user.get("nro_socio", "")) or None,
+    )
+    await db.commit()
+    return AplicarAltaOut(resultados=resultados)
+
+
+@router.get("/{id}/ficha", response_model=FichaCodigoOut)
+async def ficha_codigo(id: int, db: AsyncSession = Depends(get_db)):
+    """Ficha del código: su estado (sin alta / sin precio / con precio / suspendido)
+    en cada obra social activa, con quién lo factura y el precio vigente."""
+    return await alta_os.ficha(db, id)
+
+
+@router.put("/{id}/especialidades", response_model=PlantillaEspecialidadesOut)
+async def guardar_plantilla_especialidades(
+    id: int, body: PlantillaEspecialidadesIn, db: AsyncSession = Depends(get_db),
+):
+    """Etapa 2: quién puede facturar el código según el Colegio. No toca ninguna
+    O.S. (para eso, `/especialidades/propagar`); se copia en cada alta nueva."""
+    nom = await db.get(NomencladorCMC, id)
+    if not nom:
+        raise HTTPException(404, "Código no encontrado")
+    try:
+        await aplicar_plantilla.reemplazar_plantilla(
+            db, nom.codigo, [] if body.sin_restriccion_especialidad else body.especialidades,
         )
-    return await aplicar_plantilla.aplicar_a_obras_sociales(db, nom, body.obra_social_nros)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    nom.sin_restriccion_especialidad = body.sin_restriccion_especialidad
+    await db.commit()
+    return PlantillaEspecialidadesOut(
+        nomenclador_id=nom.id, codigo=nom.codigo,
+        sin_restriccion_especialidad=bool(nom.sin_restriccion_especialidad),
+        especialidades=await aplicar_plantilla.leer_plantilla(db, nom.codigo),
+    )
+
+
+@router.post("/{id}/especialidades/propagar", response_model=PropagarEspecialidadesOut)
+async def propagar_especialidades(
+    id: int, body: PropagarEspecialidadesIn, db: AsyncSession = Depends(get_db),
+):
+    """"Actualizar en obras sociales": lleva la plantilla a las O.S. que ya tienen el
+    código dado de alta. `agregar` suma lo nuevo; `igualar` además quita lo que
+    sobra (salvo especialidades con precio propio). `dry_run` = vista previa."""
+    nom = await db.get(NomencladorCMC, id)
+    if not nom:
+        raise HTTPException(404, "Código no encontrado")
+    resultados = await alta_os.propagar_plantilla(
+        db, nom, body.obra_social_nros, body.modo, body.dry_run,
+    )
+    if body.dry_run:
+        await db.rollback()
+    else:
+        await db.commit()
+    return PropagarEspecialidadesOut(dry_run=body.dry_run, modo=body.modo, resultados=resultados)
 
 
 @router.patch("/{id}/activar", response_model=NomencladorOut)

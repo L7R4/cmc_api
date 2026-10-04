@@ -20,7 +20,7 @@ from app.db.models.nomenclador_cmc import (
     ValorComponente,
     ValorEspecialidad,
 )
-from app.modules.nomenclador import service
+from app.modules.nomenclador import alta_os, service
 from app.modules.nomenclador.schemas import (
     ActualizacionMasivaResult,
     ActualizarPorcentajeIn,
@@ -55,7 +55,7 @@ from app.modules.nomenclador.schemas import (
     ValorUpdate,
     validar_reglas_origen,
 )
-from app.modules.nomenclador.service import LookupError, NivelInconsistenteError
+from app.modules.nomenclador.service import LookupError
 
 router = APIRouter()
 
@@ -243,13 +243,53 @@ def _resolver_cantidad(
     if galeno_default:
         return galeno_default
     default = _unidades_nn(nom, attr)
-    if not default:
+    # Sin cantidad ni unidades configuradas: el componente queda en 0 (no se exige).
+    return default or Decimal("0")
+
+
+async def _galenos_de_componentes(db: AsyncSession, componentes_in: list) -> dict[int, Galeno]:
+    """Los galenos de la ecuación, ya validados (existen y están vigentes)."""
+    out: dict[int, Galeno] = {}
+    for comp_in in componentes_in:
+        gid = comp_in.galeno_id
+        if gid is None or gid in out:
+            continue
+        galeno = await db.get(Galeno, gid)
+        if not galeno:
+            raise HTTPException(
+                404, "No se encontró uno de los galenos elegidos. Cierre el modal y vuelva a abrirlo."
+            )
+        if not galeno.activo:
+            raise HTTPException(
+                409, f"El galeno {galeno.nombre} falló. Cierre el modal y vuelva a abrirlo."
+            )
+        out[gid] = galeno
+    return out
+
+
+def _nivel_de_galenos(galenos, nivel: Optional[int]) -> Optional[int]:
+    """Con galenos nivelados, el nivel del valor es el de ellos (pisa el que venga).
+    Sin galenos nivelados, queda el que se haya cargado."""
+    niveles = sorted({g.nivel for g in galenos if g.nivel is not None})
+    if len(niveles) > 1:
         raise HTTPException(
             422,
-            f"El componente '{concepto}' requiere cantidad explícita, o que el galeno "
-            f"o el código tengan '{attr}' configurado",
+            "Los galenos elegidos son de distintos niveles "
+            f"({', '.join(map(str, niveles))}): usá galenos del mismo nivel.",
         )
-    return default
+    return niveles[0] if niveles else nivel
+
+
+async def nivel_fijado_por_galeno(db: AsyncSession, valor_id: int) -> Optional[int]:
+    """Nivel de los galenos nivelados que usa un valor (None si no usa ninguno).
+    Un valor así sólo cambia de nivel cambiando su galeno, no editando el nivel."""
+    for comp in await _componentes_activos(db, valor_id):
+        if comp.galeno_id is None:
+            continue
+        galeno = await db.get(Galeno, comp.galeno_id)
+        if galeno is not None and galeno.nivel is not None:
+            return galeno.nivel
+    return None
 
 
 async def _crear_valor_con_componentes(
@@ -282,6 +322,10 @@ async def _crear_valor_con_componentes(
         categoria, nom, cantidad_ayudantes,
     )
 
+    galenos = {} if por_presupuesto else await _galenos_de_componentes(db, componentes_in)
+    # El nivel lo define el galeno nivelado: no se elige aparte.
+    nivel = _nivel_de_galenos(galenos.values(), nivel)
+
     valor = Valor(
         obra_social_nro=obra_social_nro,
         nomenclador_id=nomenclador_id,
@@ -308,6 +352,7 @@ async def _crear_valor_con_componentes(
     )
     db.add(valor)
     await db.flush()
+    await alta_os.asegurar_pares(db, [alta_os.campos_de_valor(valor)])
 
     # Por presupuesto: se ignora la ecuación entrante y se guardan los 3 conceptos en 0
     if por_presupuesto:
@@ -324,19 +369,7 @@ async def _crear_valor_con_componentes(
     for comp_in in componentes_in:
         cantidad = comp_in.cantidad
         if comp_in.galeno_id is not None:
-            galeno = await db.get(Galeno, comp_in.galeno_id)
-            if not galeno:
-                raise HTTPException(404, f"Galeno {comp_in.galeno_id} no encontrado")
-            if not galeno.activo:
-                raise HTTPException(
-                    409,
-                    f"El galeno {comp_in.galeno_id} ('{galeno.nombre}') está inactivo — "
-                    f"usá el galeno vigente para '{galeno.codigo}'"
-                )
-            try:
-                service.validar_nivel_galeno(galeno, nivel)
-            except NivelInconsistenteError as e:
-                raise HTTPException(422, e.message)
+            galeno = galenos[comp_in.galeno_id]
             cantidad = _resolver_cantidad(nom, galeno, comp_in.concepto, cantidad)
             if galeno_relleno is None:
                 galeno_relleno = comp_in.galeno_id
@@ -427,6 +460,7 @@ async def _clonar_valor(
     )
     db.add(nuevo)
     await db.flush()
+    await alta_os.asegurar_pares(db, [alta_os.campos_de_valor(nuevo)])
 
     for c in comps:
         datos = {
@@ -442,6 +476,20 @@ async def _clonar_valor(
     await db.flush()
     await service.regenerar_historial_por_valores(nuevo.id, fecha_corte, db, motivo=motivo)
     return nuevo
+
+
+async def _mensaje_ya_existe(db: AsyncSession, origen: str, especialidad_id: Optional[int]) -> str:
+    if origen == "NN":
+        que = "el nomenclador nacional"
+    elif especialidad_id is None:
+        que = "cualquier especialidad (sin restricción)"
+    else:
+        nombres = await service.nombres_de_especialidades(db, [especialidad_id])
+        que = f"la especialidad {nombres.get(especialidad_id, especialidad_id)}"
+    return (
+        f"Ya existe un valor activo para este código, obra social y {que}. "
+        "Actualice el valor existente."
+    )
 
 
 def _cerrar_valor(valor: Valor, fecha_corte: datetime.date) -> None:
@@ -818,21 +866,17 @@ async def create_valor(body: ValorCreate, db: AsyncSession = Depends(get_db)):
     nom = await db.get(NomencladorCMC, body.nomenclador_id)
     if not nom:
         raise HTTPException(404, "Código de nomenclador no encontrado")
+    # Etapa 4 (precio) exige la etapa 3 (alta del código en la O.S.).
+    await alta_os.exigir_alta_activa(db, body.obra_social_nro, body.nomenclador_id)
 
     existente = await _buscar_valor_activo(
         db, body.obra_social_nro, body.nomenclador_id, body.origen.value,
         body.especialidad_id_colegio,
     )
     if existente:
-        variante = (
-            f"especialidad {body.especialidad_id_colegio}"
-            if body.especialidad_id_colegio is not None else "sin especialidad"
-        )
-        raise HTTPException(
-            409,
-            f"Ya existe un valor activo (id {existente.id}) para este código, OS, "
-            f"origen {body.origen.value} ({variante}) — use POST /valores_nm/{existente.id}/actualizar",
-        )
+        raise HTTPException(409, await _mensaje_ya_existe(
+            db, body.origen.value, body.especialidad_id_colegio,
+        ))
 
     # sin_restriccion es dato del par: None hereda lo que ya tenga; explícito se
     # fija en todas sus filas activas (y no puede apagarse con una NE sin
@@ -891,6 +935,8 @@ async def create_valor_multi(body: ValorCreateMulti, db: AsyncSession = Depends(
     nom = await db.get(NomencladorCMC, body.nomenclador_id)
     if not nom:
         raise HTTPException(404, "Código de nomenclador no encontrado")
+    # Etapa 4 (precio) exige la etapa 3 (alta del código en la O.S.).
+    await alta_os.exigir_alta_activa(db, body.obra_social_nro, body.nomenclador_id)
 
     for especialidad_id in body.especialidades_id_colegio:
         try:
@@ -903,11 +949,7 @@ async def create_valor_multi(body: ValorCreateMulti, db: AsyncSession = Depends(
             db, body.obra_social_nro, body.nomenclador_id, "NE", especialidad_id
         )
         if existente:
-            raise HTTPException(
-                409,
-                f"Ya existe un valor NE activo (id {existente.id}) para la especialidad "
-                f"{especialidad_id} en este código y OS — use POST /valores_nm/{existente.id}/actualizar",
-            )
+            raise HTTPException(409, await _mensaje_ya_existe(db, "NE", especialidad_id))
 
     sin_restriccion = body.sin_restriccion_especialidad
     if sin_restriccion is None:
@@ -1132,19 +1174,9 @@ async def update_valor_metadata(id: int, body: ValorUpdate, db: AsyncSession = D
     # `especialidades` no es columna de Valor (vive en nm_valor_especialidad, por
     # par); se maneja aparte más abajo, nunca por el setattr genérico.
     especialidades = cambios.pop("especialidades", None)
-    if "nivel" in cambios and cambios["nivel"] != obj.nivel:
-        # No permitir desincronizar el nivel respecto de galenos nivelados ya vinculados
-        for comp in await _componentes_activos(db, obj.id):
-            if comp.galeno_id is None:
-                continue
-            galeno = await db.get(Galeno, comp.galeno_id)
-            if galeno and galeno.nivel is not None and galeno.nivel != cambios["nivel"]:
-                raise HTTPException(
-                    422,
-                    f"No se puede cambiar a nivel {cambios['nivel']}: el componente "
-                    f"{comp.id} usa el galeno '{galeno.codigo}' nivel {galeno.nivel}. "
-                    f"Use /actualizar con la nueva ecuación.",
-                )
+    if "nivel" in cambios and await nivel_fijado_por_galeno(db, obj.id) is not None:
+        # Con galeno nivelado el nivel es el del galeno: cambia sólo cambiando el galeno.
+        cambios.pop("nivel")
 
     # Recalculado en TODA edición, no solo cuando el PATCH toca categoria/cantidad_
     # ayudantes: si el Valor ya es (o pasa a ser) 'Honorarios individuales', el máximo
@@ -1188,6 +1220,8 @@ async def update_valor_metadata(id: int, body: ValorUpdate, db: AsyncSession = D
         except ValueError as e:
             raise HTTPException(409, str(e))
 
+    await db.flush()
+    await alta_os.sincronizar_par_desde_valor(db, obj)
     await db.commit()
     await db.refresh(obj)
     return await _valor_out(db, obj)
@@ -1240,6 +1274,16 @@ async def _actualizar_valor_core(
     hermanas = (
         await service.variantes_hermanas(db, anterior) if body.aplicar_a_variantes else []
     )
+
+    # Rotar con una fecha igual o anterior dejaría la fila vieja "vigente hasta" antes
+    # de su "vigente desde".
+    ultima = max([anterior.vigencia_desde, *(h.vigencia_desde for h in hermanas)])
+    if body.vigencia_desde <= ultima:
+        raise HTTPException(
+            422,
+            f"La nueva vigencia tiene que ser posterior al {ultima.strftime('%d/%m/%Y')}, "
+            "desde cuando rige el precio actual.",
+        )
 
     fecha_corte = body.vigencia_desde - datetime.timedelta(days=1)
     _cerrar_valor(anterior, fecha_corte)

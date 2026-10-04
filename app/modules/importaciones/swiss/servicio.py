@@ -3,8 +3,11 @@
 Mismo camino que Prevención (ver `importaciones/nucleo.py`), con cuatro
 diferencias que vienen del reporte:
 
-  * **El código hay que traducirlo.** Swiss manda ocho dígitos y el Colegio usa
-    seis. Ver `homologador.py`.
+  * **El código va tal cual.** Swiss factura con su nomenclador, mayormente de
+    ocho dígitos, y esos códigos están dados de alta en el catálogo con sus
+    precios. No se recortan a seis: `01030101` y `01030102` (Módulo 1 y 2 de
+    Neurocirugía) caerían los dos en `010301` con precios distintos. Un código que
+    no está en el catálogo queda sin cotizar, con el motivo.
   * **La cantidad viene en el archivo**, no se asume 1: hay ítems con más de
     una unidad.
   * **El copago es coseguro ya cobrado al afiliado.** Se descuenta del importe,
@@ -58,7 +61,6 @@ from app.modules.importaciones.schemas import (
     ImportacionOut,
 )
 from app.modules.importaciones.swiss import NRO_SWISS
-from app.modules.importaciones.swiss import homologador
 from app.modules.validaciones.core.periodos import periodo_actual
 
 log = logging.getLogger(__name__)
@@ -144,9 +146,9 @@ async def procesar(
             resultados.append(r)
             continue
 
-        codigo = homologador.homologar(f.codigo)
+        codigo = (f.codigo or "").strip()
         if not codigo:
-            r.motivo = f"El código {f.codigo!r} de Swiss no tiene equivalente en el nomenclador."
+            r.motivo = "La fila no trae código de prestación."
             resultados.append(r)
             continue
 

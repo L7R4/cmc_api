@@ -294,6 +294,61 @@ class GalenoPlantilla(Base):
     )
 
 
+class NomencladorNivelado(Base):
+    """Nomenclador nivelado compartido por las obras sociales (Cirugía adulto 7 y 10
+    niveles, Cirugía infantil, FASGO, Urología…): a cada código le corresponde un
+    nivel (o N unidades fijas) igual en todas las O.S.; lo que cambia entre ellas es
+    el precio del galeno por nivel.
+
+    `galeno_grupo` es el `grupo` de `nm_galenos_plantilla` con el que se cotiza: de
+    ahí salen el galeno (slug) y sus niveles. Aplicarlo a una O.S. da de alta los
+    códigos y crea sus precios con el galeno del nivel (ver `nivelados.aplicar`).
+    """
+    __tablename__ = "nm_nomenclador_nivelado"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    slug: Mapped[str] = mapped_column(String(60), nullable=False, unique=True)
+    nombre: Mapped[str] = mapped_column(String(120), nullable=False)
+    galeno_grupo: Mapped[str] = mapped_column(String(100), nullable=False)
+    niveles: Mapped[int] = mapped_column(Integer, nullable=False)
+    activo: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="1")
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class NomencladorNiveladoCodigo(Base):
+    """Un código dentro de un nomenclador nivelado: su nivel, o `unidades` fijas
+    (FASGO "50 unidades": Honorarios = N × el galeno de nivel 1). Exactamente uno de
+    los dos — MySQL 5.7 no aplica CHECK, lo valida el schema."""
+    __tablename__ = "nm_nomenclador_nivelado_codigo"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    nomenclador_nivelado_id: Mapped[int] = mapped_column(
+        ForeignKey("nm_nomenclador_nivelado.id"), nullable=False
+    )
+    nomenclador_id: Mapped[int] = mapped_column(ForeignKey("nm_nomenclador.id"), nullable=False)
+    nivel: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    unidades: Mapped[Optional[Decimal]] = mapped_column(DECIMAL(10, 2), nullable=True)
+    observacion: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "nomenclador_nivelado_id", "nomenclador_id", name="uq_nm_nivelado_codigo"
+        ),
+        Index("ix_nm_nivelado_codigo_nomenclador", "nomenclador_id"),
+    )
+
+
 class Valor(Base):
     """
     Variante de precio para un código+OS+vigencia.
@@ -682,6 +737,61 @@ class NomencladorPlantillaEspecialidad(Base):
             "codigo", "especialidad_id_colegio", name="uq_nm_plantilla_esp_codigo"
         ),
         Index("ix_nm_plantilla_esp_codigo", "codigo"),
+    )
+
+
+class CodigoObraSocial(Base):
+    """El código DADO DE ALTA en una obra social (etapa 3 del flujo del nomenclador:
+    código → quién factura → alta en O.S. → precio).
+
+    Que exista la fila dice que la obra social reconoce el código, aunque todavía no
+    tenga precio: facturación lo admite (y, sin precio, lo carga en $0 si
+    `CARGA_SIN_PRECIO` lo permite, marcado `sin_valorizar`). Sin fila, el código no
+    está en esa O.S.
+
+    Guarda los datos del PAR (obra social, código) que antes sólo vivían repetidos en
+    cada `Valor` activo: descripción en la O.S., "sin restricción", autorización,
+    ayudantes, categoría y complejidad. Mientras dure la migración se mantienen
+    sincronizados en las dos tablas (`alta_os.sincronizar_valores`): las variantes
+    de precio siguen leyéndolos de `Valor`, y lo que no tiene precio los lee de acá.
+    El coseguro NO está acá: es del precio (vive en `Valor`).
+
+    Quién factura (las especialidades) sigue en `nm_valor_especialidad`.
+    """
+    __tablename__ = "nm_codigo_obra_social"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    obra_social_nro: Mapped[int] = mapped_column(Integer, nullable=False)
+    nomenclador_id: Mapped[int] = mapped_column(ForeignKey("nm_nomenclador.id"), nullable=False)
+    # Snapshot del código, igual que `Valor.codigo` (clave de nm_valor_especialidad).
+    codigo: Mapped[str] = mapped_column(String(20), nullable=False)
+    descripcion: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    categoria: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    complejidad: Mapped[Optional[str]] = mapped_column(
+        Enum("baja", "media", "alta", name="nm_cos_complejidad_enum"), nullable=True
+    )
+    requiere_autorizacion: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    cantidad_ayudantes: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    sin_restriccion_especialidad: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="0"
+    )
+    observacion: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    estado: Mapped[str] = mapped_column(
+        Enum("activo", "suspendido", name="nm_cos_estado_enum"),
+        nullable=False, default="activo", server_default="activo",
+    )
+    creado_por: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint("obra_social_nro", "nomenclador_id", name="uq_nm_codigo_os"),
+        Index("ix_nm_codigo_os_os_codigo", "obra_social_nro", "codigo"),
+        Index("ix_nm_codigo_os_nomenclador", "nomenclador_id"),
     )
 
 

@@ -598,7 +598,7 @@ def validar_reglas_origen(
         raise ValueError("especialidad_id_colegio solo es válido para origen NE; NN debe ir sin especialidad")
     if origen == Origen.NN.value:
         if por_presupuesto:
-            raise ValueError("El origen NN es siempre calculado: no admite 'por_presupuesto'")
+            raise ValueError("El nomenclador nacional no admite precio por presupuesto.")
         if es_galeno is False:
             raise ValueError(
                 "El origen NN exige modalidad galeno (todos los componentes calculables)"
@@ -889,6 +889,9 @@ class ValorNucleoUpdate(BaseModel):
     ecuacion: Optional["ValorCerrarYCrearIn"] = None
     sin_restriccion_especialidad: bool = False
     especialidades: List[int] = Field(default_factory=list)
+    # False = no tocar quién factura (ni crear ni cerrar variantes): el lápiz del
+    # código sólo rota precios; quién factura se edita en el alta (etapa 3).
+    tocar_especialidades: bool = True
     # Qué núcleo se edita cuando el código tiene NE y NN a la vez. NE = las variantes
     # por especialidad; NN = su fila única (mismo valor para cualquier especialidad).
     origen: Literal["NE", "NN"] = "NE"
@@ -1435,3 +1438,280 @@ class EvolucionPrecioItem(BaseModel):
     precio_total: Decimal
     motivo_cambio: str
     fecha_cambio: datetime.datetime
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Etapa 3 — código dado de alta en una obra social (nm_codigo_obra_social)
+# ─────────────────────────────────────────────────────────────────────────────
+
+EstadoCodigoOS = Literal["sin_alta", "sin_precio", "con_precio", "suspendido"]
+Complejidad = Literal["baja", "media", "alta"]
+
+
+class AltaCodigoItem(BaseModel):
+    """Un (obra social, código) a dar de alta. Lo no informado se toma del catálogo:
+    descripción del Colegio y su plantilla de especialidades / "sin restricción"."""
+    obra_social_nro: int
+    nomenclador_id: int
+    descripcion: Optional[str] = Field(None, max_length=255)
+    # None = usar la plantilla del Colegio (si el par todavía no tiene especialidades
+    # configuradas). Lista (aunque vacía) = reemplazar por esa lista.
+    especialidades: Optional[List[int]] = None
+    sin_restriccion_especialidad: Optional[bool] = None
+
+
+class AltaCodigosIn(BaseModel):
+    items: List[AltaCodigoItem] = Field(..., min_length=1)
+    # Condiciones comunes a todos los items.
+    requiere_autorizacion: Optional[bool] = None
+    cantidad_ayudantes: Optional[int] = Field(None, ge=0)
+
+
+class AltaCodigoResultado(BaseModel):
+    obra_social_nro: int
+    nomenclador_id: int
+    codigo: str
+    estado: Literal["creado", "reactivado", "ya_existia", "error"]
+    motivo: Optional[str] = None
+    # True si quedó dado de alta pero nadie puede facturarlo (sin especialidades
+    # y sin "sin restricción").
+    sin_quien_factura: bool = False
+
+
+class AltaCodigosOut(BaseModel):
+    resultados: List[AltaCodigoResultado]
+
+
+class CodigoObraSocialUpdate(BaseModel):
+    """Datos del par editables en la etapa 3. Sólo se aplica lo que viene."""
+    descripcion: Optional[str] = Field(None, max_length=255)
+    categoria: Optional[str] = Field(None, max_length=100)
+    complejidad: Optional[Complejidad] = None
+    requiere_autorizacion: Optional[bool] = None
+    cantidad_ayudantes: Optional[int] = Field(None, ge=0)
+    observacion: Optional[str] = None
+    sin_restriccion_especialidad: Optional[bool] = None
+    especialidades: Optional[List[int]] = None
+    # Si quitar especialidades (o "sin restricción") deja precios activos sin con qué
+    # cotizar: False → 409 `precios_dependientes` para que la pantalla pregunte;
+    # True → esos precios se cierran con vigencia hasta ayer.
+    cerrar_precios: bool = False
+
+
+class CodigoObraSocialOut(BaseModel):
+    obra_social_nro: int
+    nomenclador_id: int
+    codigo: str
+    descripcion: Optional[str] = None
+    descripcion_colegio: Optional[str] = None
+    categoria: Optional[str] = None
+    complejidad: Optional[str] = None
+    requiere_autorizacion: Optional[bool] = None
+    cantidad_ayudantes: Optional[int] = None
+    observacion: Optional[str] = None
+    sin_restriccion_especialidad: bool = False
+    especialidades: List[int] = []
+    estado: EstadoCodigoOS
+    tiene_precio: bool = False
+
+
+class CodigoPorOSItem(BaseModel):
+    """Fila de "Códigos por obra social": un código del catálogo y su estado en la O.S."""
+    nomenclador_id: int
+    codigo: str
+    descripcion_colegio: Optional[str] = None
+    descripcion_os: Optional[str] = None
+    estado: EstadoCodigoOS
+    sin_restriccion_especialidad: bool = False
+    especialidades_os: int = 0
+    especialidades_plantilla: int = 0
+    plantilla_sin_restriccion: bool = False
+
+
+class CodigosPorOSOut(BaseModel):
+    obra_social_nro: int
+    total: int
+    page: int
+    size: int
+    conteos: dict[str, int]
+    items: List[CodigoPorOSItem]
+
+
+class FichaObraSocialItem(BaseModel):
+    obra_social_nro: int
+    nombre: str
+    estado: EstadoCodigoOS
+    sin_restriccion_especialidad: bool = False
+    especialidades: int = 0
+    # Resumen del precio vigente hoy: "igual" (una sola variante para todas las
+    # especialidades) con su total, o "por_especialidad" con la cantidad.
+    precio_tipo: Optional[Literal["igual", "por_especialidad"]] = None
+    precio_total: Optional[Decimal] = None
+    variantes: int = 0
+    vigencia_desde: Optional[datetime.date] = None
+    prestaciones_sin_valorizar: int = 0
+
+
+class FichaCodigoOut(BaseModel):
+    nomenclador_id: int
+    codigo: str
+    descripcion: Optional[str] = None
+    categoria: Optional[str] = None
+    complejidad: Optional[str] = None
+    activo: bool = True
+    plantilla_especialidades: List[int] = []
+    plantilla_sin_restriccion: bool = False
+    conteos: dict[str, int]
+    obras_sociales: List[FichaObraSocialItem]
+
+
+# ─── Etapa 2 — plantilla de especialidades (quién factura) ───────────────────
+
+class PlantillaEspecialidadesIn(BaseModel):
+    sin_restriccion_especialidad: bool = False
+    especialidades: List[int] = []
+
+
+class PlantillaEspecialidadesOut(BaseModel):
+    nomenclador_id: int
+    codigo: str
+    sin_restriccion_especialidad: bool
+    especialidades: List[int]
+
+
+class PropagarEspecialidadesIn(BaseModel):
+    obra_social_nros: List[int] = Field(..., min_length=1)
+    # agregar = sólo suma lo nuevo de la plantilla; igualar = además quita lo que
+    # la O.S. tenga de más (salvo especialidades con precio NE activo).
+    modo: Literal["agregar", "igualar"] = "agregar"
+    dry_run: bool = False
+
+
+class PropagarEspecialidadesItem(BaseModel):
+    obra_social_nro: int
+    nombre: str
+    estado: Literal["actualizada", "sin_cambios", "salteada", "error"]
+    motivo: Optional[str] = None
+    agrega: List[int] = []
+    quita: List[int] = []
+    # Se quitarían pero tienen precio NE activo: se quedan.
+    conserva_por_precio: List[int] = []
+
+
+class PropagarEspecialidadesOut(BaseModel):
+    dry_run: bool
+    modo: Literal["agregar", "igualar"]
+    resultados: List[PropagarEspecialidadesItem]
+
+
+class AplicarAltaIn(BaseModel):
+    obra_social_nros: List[int] = Field(..., min_length=1)
+
+
+class AplicarAltaItem(BaseModel):
+    obra_social_nro: int
+    nombre: str
+    estado: Literal["alta_creada", "especialidades_agregadas", "sin_cambios", "error"]
+    motivo: Optional[str] = None
+    especialidades_agregadas: List[int] = []
+    sin_quien_factura: bool = False
+
+
+class AplicarAltaOut(BaseModel):
+    resultados: List[AplicarAltaItem]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Nomencladores nivelados (Cirugía adulto 7/10, Cirugía infantil, FASGO, Urología…)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class NomencladorNiveladoOut(BaseModel):
+    id: int
+    slug: str
+    nombre: str
+    galeno_grupo: str
+    galeno_codigo: Optional[str] = None
+    galeno_nombre: Optional[str] = None
+    niveles: int
+    total_codigos: int
+    por_nivel: dict[int, int]
+    con_unidades: int
+
+
+class NiveladoCodigoOut(BaseModel):
+    nomenclador_id: int
+    codigo: str
+    descripcion: Optional[str] = None
+    activo: bool
+    nivel: Optional[int] = None
+    unidades: Optional[Decimal] = None
+    observacion: Optional[str] = None
+
+
+class NiveladoCodigosOut(BaseModel):
+    items: List[NiveladoCodigoOut]
+    total: int
+    page: int
+    size: int
+
+
+class NiveladoCodigoIn(BaseModel):
+    """Nivel o unidades fijas: exactamente uno."""
+    nivel: Optional[int] = Field(None, ge=1)
+    unidades: Optional[Decimal] = Field(None, gt=0)
+    observacion: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _uno_de_los_dos(self) -> "NiveladoCodigoIn":
+        if (self.nivel is None) == (self.unidades is None):
+            raise ValueError("Indicá el nivel o las unidades fijas (uno de los dos).")
+        return self
+
+
+class NiveladoCodigoAltaIn(NiveladoCodigoIn):
+    nomenclador_id: int
+
+
+class AplicarNiveladoIn(BaseModel):
+    obra_social_nro: int
+    vigencia_desde: datetime.date
+    dry_run: bool = True
+
+
+EstadoAplicarNivelado = Literal[
+    "crear", "creado", "ya_tiene_precio", "sin_quien_factura", "suspendido", "omitido",
+]
+
+
+class AplicarNiveladoFila(BaseModel):
+    nomenclador_id: int
+    codigo: str
+    descripcion: Optional[str] = None
+    nivel: Optional[int] = None
+    unidades: Optional[Decimal] = None
+    estado: EstadoAplicarNivelado
+    # Cuántos precios (uno por especialidad, o uno "sin restricción").
+    precios: int = 0
+    # Honorarios + ayudante + gastos con el galeno de la O.S. (orientativo).
+    precio: Optional[Decimal] = None
+    motivo: Optional[str] = None
+
+
+class AplicarNiveladoResumen(BaseModel):
+    total: int
+    crear: int
+    ya_tiene_precio: int
+    sin_quien_factura: int
+    suspendido: int
+    omitido: int
+    precios: int
+    altas: int
+
+
+class AplicarNiveladoOut(BaseModel):
+    dry_run: bool
+    obra_social_nro: int
+    nomenclador: str
+    galeno_nombre: str
+    resumen: AplicarNiveladoResumen
+    filas: List[AplicarNiveladoFila]

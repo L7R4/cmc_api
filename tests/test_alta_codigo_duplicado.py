@@ -78,8 +78,7 @@ async def test_codigo_repetido_da_409_y_no_inserta():
     with pytest.raises(HTTPException) as exc:
         await create_nomenclador(_body(), db)
     assert exc.value.status_code == 409
-    assert "320101" in exc.value.detail
-    assert "3747" in exc.value.detail
+    assert exc.value.detail == "El código 320101 ya existe. Usá otro número o editá el existente."
     assert db.agregados == []  # nunca llegó al INSERT
 
 

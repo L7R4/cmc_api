@@ -1,4 +1,5 @@
 import datetime
+from types import SimpleNamespace
 import os
 import shutil
 import uuid
@@ -19,6 +20,7 @@ from app.db.models import (
     Afiliado,
     AuditLog,
     Clinicas,
+    CodigoObraSocial,
     DetalleFacturacionCMC,
     Documento,
     Especialidad,
@@ -31,7 +33,7 @@ from app.db.models import (
 )
 from app.modules.medicos.helpers import parse_conceps_espec
 from app.modules.nomenclador import service as service_nm
-from app.modules.nomenclador import service_vias
+from app.modules.nomenclador import alta_os, service_vias
 from app.modules.nomenclador.service import LookupError as PrecioLookupError
 
 from app.modules.facturacion.schemas import (
@@ -963,12 +965,16 @@ async def buscar_nomenclador(
         .subquery()
     )
 
+    # Códigos dados de alta SIN precio: la descripción sale del alta (etapa 3).
+    P = CodigoObraSocial
+    descripcion = func.coalesce(desc_os.c.descripcion, P.descripcion).label("descripcion")
     stmt = (
-        select(N, desc_os.c.descripcion)
+        select(N, descripcion)
         .outerjoin(desc_os, desc_os.c.nomenclador_id == N.id)
+        .outerjoin(P, and_(P.nomenclador_id == N.id, P.obra_social_nro == obra_social_nro))
         .where(
             N.activo.is_(True),
-            or_(N.codigo.ilike(f"{q}%"), desc_os.c.descripcion.ilike(f"%{q}%")),
+            or_(N.codigo.ilike(f"{q}%"), descripcion.ilike(f"%{q}%")),
         )
         .order_by(N.codigo)
         .limit(limit)
@@ -1018,11 +1024,16 @@ async def resolver_precio(
         # igual. Admitido=True con montos en 0 para que la carga siga su curso
         # normal (mismo camino que un código "por presupuesto").
         if settings.CARGA_SIN_PRECIO and e.sin_precio:
+            # Sin precio: los datos del código salen de su alta en la O.S. (etapa 3).
+            par = await alta_os.get_par(db, obra_social_nro, nomenclador.id)
             return PrecioResponse(
-                admitido=True, motivo=e.message,
+                admitido=True, motivo=e.message, sin_precio=True,
                 honorarios=Decimal("0"), gastos=Decimal("0"), ayudante=Decimal("0"),
-                descripcion="", fuente=FUENTE_PRECIO, via=via,
+                descripcion=(par.descripcion if par and par.descripcion else "") or "",
+                fuente=FUENTE_PRECIO, via=via,
                 admite_pediatra=admite_pediatra,
+                requiere_autorizacion=bool(par and par.requiere_autorizacion),
+                cantidad_ayudantes=(par.cantidad_ayudantes if par else None),
             )
         return PrecioResponse(
             admitido=False, motivo=e.message,
@@ -1107,6 +1118,11 @@ async def _get_categoria(
                 .limit(1)
             )
         ).scalar_one_or_none()
+        if valor is None:
+            # Código dado de alta sin precio: la categoría del par (etapa 3).
+            par = await alta_os.get_par(db, obra_social_nro, nom.id)
+            if par is not None and par.categoria and par.categoria.strip():
+                return par.categoria
     return service_nm.categoria_efectiva(valor, nom)
 
 
@@ -1141,6 +1157,10 @@ async def _requiere_autorizacion(
                 .limit(1)
             )
         ).scalar_one_or_none()
+        if valor is None:
+            par = await alta_os.get_par(db, obra_social_nro, nom.id)
+            if par is not None:
+                return bool(par.requiere_autorizacion)
     return service_nm.requiere_autorizacion_efectiva(valor)
 
 
@@ -1285,7 +1305,7 @@ async def _montos_de_item(
     cod_nomenclador: str,
     tipo_calculo: str,
     fecha: datetime.date,
-) -> tuple[Decimal, Decimal, Decimal, Optional[list[dict]], Decimal]:
+) -> tuple[Decimal, Decimal, Decimal, Optional[list[dict]], Decimal, Optional[str]]:
     """Resuelve los montos base (h, g, a) SIN porcentaje, el snapshot y el coseguro
     efectivo (sin escalar por cantidad/sesión — eso lo hace calcular_importe_total).
 
@@ -1305,16 +1325,37 @@ async def _montos_de_item(
         if not precio.admitido:
             raise HTTPException(422, precio.motivo)
         coseguro = coseguro_item if coseguro_item is not None else precio.coseguro
+        # Sin precio (alta sin valorizar): todo en $0 y se anota qué conceptos se
+        # cotizarán al revalorizar (ver revalorizar.py).
+        if precio.sin_precio:
+            return (Decimal("0"), Decimal("0"), Decimal("0"), None, Decimal("0"),
+                    conceptos_sin_precio(item))
         # Por presupuesto: el lookup admite con H/G/A en 0; el monto lo informa la OS
         # y lo carga el operador a mano (montos del item).
         if precio.por_presupuesto:
-            return hi, gi, ai, precio.snapshot, coseguro
+            return hi, gi, ai, precio.snapshot, coseguro, None
         # Para cada concepto marcado en > 0 por el front, usar el valor autoritativo del lookup.
         h = precio.honorarios if hi > 0 else Decimal("0")
         g = precio.gastos if gi > 0 else Decimal("0")
         a = precio.ayudante if ai > 0 else Decimal("0")
-        return h, g, a, precio.snapshot, coseguro
-    return hi, gi, ai, None, (coseguro_item if coseguro_item is not None else Decimal("0"))
+        return h, g, a, precio.snapshot, coseguro, None
+    return hi, gi, ai, None, (coseguro_item if coseguro_item is not None else Decimal("0")), None
+
+
+def conceptos_sin_precio(item) -> str:
+    """Qué conceptos cotizar al revalorizar una prestación cargada sin precio. Lo
+    manda el front (`concepto_sin_precio`); si no, se deduce de lo que se pueda: el
+    pediatra cobra honorarios, un monto > 0 marca su concepto, y por defecto la fila
+    del médico cobra honorarios + gastos."""
+    explicito = getattr(item, "concepto_sin_precio", None)
+    if explicito:
+        return explicito
+    if getattr(item, "rol", None) == ROL_PEDIATRA:
+        return "H"
+    if item.ayudante and item.ayudante > 0:
+        return "A"
+    marcados = ("H" if item.honorarios and item.honorarios > 0 else "") +                ("G" if item.gastos and item.gastos > 0 else "")
+    return marcados or "HG"
 
 
 # ── Guardado ─────────────────────────────────────────────────────────────────
@@ -1502,7 +1543,7 @@ async def _insertar_prestaciones(
 
         # El precio sale de la especialidad del médico ejecutor (= el propio médico si el
         # payee no es una clínica).
-        h_base, g_base, a_base, snapshot, coseguro = await _montos_de_item(
+        h_base, g_base, a_base, snapshot, coseguro, sin_valorizar = await _montos_de_item(
             db, item, cod_obra, medico_precio,
             item.cod_nomenclador, item.tipo_calculo, fecha_precio,
         )
@@ -1566,6 +1607,7 @@ async def _insertar_prestaciones(
             origen_carga=actor,
             usuario=usuario,
             version=version_destino,
+            sin_valorizar=sin_valorizar,
         )
         db.add(row)
         await db.flush()  # asigna id_detalle_prestaciones (PK)
@@ -2487,17 +2529,27 @@ async def editar_prestacion(
             hi = row.honorarios or Decimal("0")
             gi = row.gastos or Decimal("0")
             ai = row.ayudante or Decimal("0")
+            if tipo_calculo == "A" and row.sin_valorizar and not ("honorarios" in data or "gastos" in data or "ayudante" in data):
+                # Cargada sin precio: los montos están en 0, los conceptos los dice la marca.
+                hi, gi, ai = (Decimal("1") if c in row.sin_valorizar else Decimal("0") for c in "HGA")
             if tipo_calculo == "A":
                 via = row.via or service_vias.VIA_TRADICIONAL
                 precio = await resolver_precio(db, row.cod_obr, medico_precio, row.cod_nom, fecha, via=via)
                 if not precio.admitido:
                     raise HTTPException(422, precio.motivo)
-                if precio.por_presupuesto:
+                if precio.sin_precio:
+                    row.sin_valorizar = row.sin_valorizar or conceptos_sin_precio(
+                        SimpleNamespace(rol=rol_efectivo, honorarios=hi, gastos=gi, ayudante=ai)
+                    )
+                    hb = gb = ab = Decimal("0")
+                elif precio.por_presupuesto:
                     hb, gb, ab = hi, gi, ai
                 else:
                     hb = precio.honorarios if hi > 0 else Decimal("0")
                     gb = precio.gastos if gi > 0 else Decimal("0")
                     ab = precio.ayudante if ai > 0 else Decimal("0")
+                if not precio.sin_precio:
+                    row.sin_valorizar = None
                 row.calculo_snapshot = precio.snapshot
                 # El código/OS que cotiza pudo haber cambiado — el coseguro viejo era del
                 # código/OS anterior. Si el operador no lo tocó en este mismo PATCH, se
@@ -2509,6 +2561,7 @@ async def editar_prestacion(
             else:  # manual
                 hb, gb, ab = hi, gi, ai
                 row.calculo_snapshot = None
+                row.sin_valorizar = None
             h, g, a = _aplicar_porcentaje(hb, gb, ab, row.porc or 100)
             row.honorarios, row.gastos, row.ayudante = h, g, a
             row.tpo_funcion = tpo_funcion_de(h, g, a, rol_efectivo)
@@ -2820,8 +2873,11 @@ async def preview_cierre(db: AsyncSession, cod_obra: str, periodo: str) -> dict:
     M = DetalleFacturacionCMC
     cabecera = await _get_factura(db, cod_obra, periodo)
     version_actual = cabecera.version if cabecera is not None else 1
-    cantidad, total = (await db.execute(
-        select(func.count(), func.coalesce(func.sum(M.importe_total), 0)).where(
+    cantidad, total, sin_valorizar = (await db.execute(
+        select(
+            func.count(), func.coalesce(func.sum(M.importe_total), 0),
+            func.count(M.sin_valorizar),
+        ).where(
             M.cod_obr == cod_obra, M.periodo == periodo,
             M.version == version_actual, M.estado == "A",
         )
@@ -2832,6 +2888,8 @@ async def preview_cierre(db: AsyncSession, cod_obra: str, periodo: str) -> dict:
         "cantidad": int(cantidad or 0),
         "importe_total": Decimal(str(total or 0)),  # str() evita ruido float→Decimal
         "cerrado": await _periodo_cerrado(db, cod_obra, periodo),
+        # Cargadas en $0 por falta de precio (ver revalorizar.py): el cierre avisa.
+        "sin_valorizar": int(sin_valorizar or 0),
     }
 
 

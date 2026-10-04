@@ -17,7 +17,6 @@ from app.db.models.catalogs import Especialidad
 from app.db.models.nomenclador_cmc import NomencladorCMC, Valor, ValorEspecialidad
 from app.modules.nomenclador import aplicar_plantilla, service
 from app.modules.nomenclador.routes_nomenclador import aplicar_especialidades
-from app.modules.nomenclador.schemas import AplicarEspecialidadesIn
 
 VIGENCIA = datetime.date(2026, 7, 1)
 NOMENCLADOR_ID = 897  # 030801 — cualquier código real sirve
@@ -155,17 +154,28 @@ async def test_aplicar_sin_restriccion_fija_el_flag_y_no_crea_variantes(sin_comm
 
 
 @pytest.mark.asyncio
-async def test_endpoint_sin_plantilla_ni_sin_restriccion_da_422(sin_commit):
+async def test_guardar_y_aplicar_sin_plantilla_da_de_alta_sin_quien_factura(sin_commit):
+    """Modelo en 4 etapas: "Guardar y aplicar" ya no exige plantilla. Da de alta el
+    código SIN PRECIO y avisa que nadie puede facturarlo todavía."""
+    from app.db.models.catalogs import ObrasSociales
+    from app.modules.nomenclador.schemas import AplicarAltaIn
+
     db = sin_commit
+    db.add(ObrasSociales(NRO_OBRASOCIAL=OS_SIN_CODIGO, OBRA_SOCIAL="PRUEBA SIN CODIGO", MARCA="S", cuit="0"))
+    await db.flush()
     nom = await db.get(NomencladorCMC, NOMENCLADOR_ID)
     nom.sin_restriccion_especialidad = None
     await aplicar_plantilla.reemplazar_plantilla(db, nom.codigo, [])
 
-    with pytest.raises(HTTPException) as e:
-        await aplicar_especialidades(
-            NOMENCLADOR_ID, AplicarEspecialidadesIn(obra_social_nros=[OS_CON_CODIGO]), db
-        )
-    assert e.value.status_code == 422
+    r = await aplicar_especialidades(
+        NOMENCLADOR_ID, AplicarAltaIn(obra_social_nros=[OS_SIN_CODIGO]), {"nro_socio": 1}, db,
+    )
+    [item] = r.resultados
+    assert item.estado == "alta_creada" and item.sin_quien_factura
+    sin_precio = (await db.execute(select(Valor).where(
+        Valor.obra_social_nro == OS_SIN_CODIGO, Valor.nomenclador_id == NOMENCLADOR_ID,
+    ))).scalars().all()
+    assert sin_precio == []  # nunca crea precios
 
 
 @pytest.mark.asyncio

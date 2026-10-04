@@ -29,6 +29,7 @@ from app.common.money import quantize_money
 from app.db.models import DetalleFacturacionCMC
 from app.modules.facturacion.service import (
     ORIGEN_COLEGIO,
+    TIPO_SANATORIO,
     _ensure_factura_abierta,
     _gate_carga,
     _get_factura,
@@ -214,7 +215,7 @@ async def procesar(
             cod_nom=codigo,
             nro_orden="0",  # NOT NULL legacy; se iguala al PK después del flush
             tipo=await derivar_tipo(
-                db, codigo, bool(medico.es_organizacion), str(NRO_SWISS)
+                db, codigo, TIPO_SANATORIO if medico.es_organizacion else None, str(NRO_SWISS)
             ),
             tpo_funcion=tpo_funcion_derivado(honorarios, gastos, CERO),
             sesion=SESION_UNICA,

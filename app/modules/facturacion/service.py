@@ -1829,6 +1829,7 @@ async def obtener_factura_detalle(db: AsyncSession, factura_id: int) -> dict:
             "porcentaje": r.porc,
             "honorarios": r.honorarios,
             "gastos": r.gastos,
+            "ayudante": r.ayudante,
             "coseguro": r.coseguro,
             "tipo_prestador": _derivar_tipo_prestador(h, ga, a, r.tpo_funcion),
             "subtotal": r.importe_total,

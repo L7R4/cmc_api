@@ -657,6 +657,9 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     ("GET", "/api/importaciones/swiss/periodos"): Scope.FACTURACION_CARGAR,
     ("POST", "/api/importaciones/swiss/previsualizar"): Scope.FACTURACION_CARGAR,
     ("POST", "/api/importaciones/swiss/confirmar"): Scope.FACTURACION_CARGAR,
+    ("GET", "/api/importaciones/unne/periodos"): Scope.FACTURACION_CARGAR,
+    ("POST", "/api/importaciones/unne/previsualizar"): Scope.FACTURACION_CARGAR,
+    ("POST", "/api/importaciones/unne/confirmar"): Scope.FACTURACION_CARGAR,
 
     ("GET", "/api/reportes_nm/boletin"): Scope.NOMENCLADOR_LEER,
     ("GET", "/api/reportes_nm/evolucion_precios"): Scope.NOMENCLADOR_LEER,

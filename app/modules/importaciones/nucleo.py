@@ -47,6 +47,8 @@ GRABABLE = "grabable"
 GRABADA = "grabada"
 DUPLICADA = "duplicada"
 OMITIDA = "omitida"
+# Sólo UNNE: la matrícula no tiene un único socio y hay que elegirlo a mano.
+ELEGIR_SOCIO = "elegir_socio"
 
 # La clave que identifica una práctica dentro de un período.
 Clave = tuple[str, str, Optional[datetime.date]]
@@ -104,6 +106,38 @@ async def indice_medicos(
     return por_matricula
 
 
+async def candidatos_por_matricula(
+    db: AsyncSession, matriculas: set[int]
+) -> dict[int, list[ListadoMedico]]:
+    """Todos los socios de cada matrícula, sin descartar las repetidas.
+
+    A diferencia de `indice_medicos`, acá una matrícula con dos socios devuelve los
+    dos: el importador que la usa (UNNE) deja elegir cuál en la previsualización.
+    """
+    if not matriculas:
+        return {}
+    filas = (
+        await db.execute(
+            select(ListadoMedico)
+            .where(ListadoMedico.MATRICULA_PROV.in_(matriculas))
+            .order_by(ListadoMedico.NRO_SOCIO)
+        )
+    ).scalars().all()
+    out: dict[int, list[ListadoMedico]] = {}
+    for m in filas:
+        out.setdefault(m.MATRICULA_PROV, []).append(m)
+    return out
+
+
+async def socios_por_nro(db: AsyncSession, nros: set[int]) -> dict[int, ListadoMedico]:
+    if not nros:
+        return {}
+    filas = (
+        await db.execute(select(ListadoMedico).where(ListadoMedico.NRO_SOCIO.in_(nros)))
+    ).scalars().all()
+    return {m.NRO_SOCIO: m for m in filas}
+
+
 async def ya_cargadas(
     db: AsyncSession, obra_social_nro: int, periodo: str
 ) -> Counter:
@@ -149,6 +183,8 @@ def resumir(filas: list[FilaResultado], periodo: str) -> ResumenImportacion:
             1 for f in grabables if f.estado_detalle == DETALLE_FUERA_DE_FACTURA
         ),
         importe_total=quantize_money(sum((f.importe_total for f in grabables), CERO)),
+        por_elegir=sum(1 for f in filas if f.resultado == ELEGIR_SOCIO),
+        con_aviso=sum(1 for f in grabables if f.aviso),
     )
 
 

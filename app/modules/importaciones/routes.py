@@ -8,9 +8,11 @@ from app.auth.deps import get_current_user
 from app.db.database import get_db
 from app.modules.importaciones.prevencion import servicio as prevencion
 from app.modules.importaciones.swiss import servicio as swiss
+from app.modules.importaciones.unne import servicio as unne
 from app.modules.importaciones.schemas import (
     ImportacionIn,
     ImportacionOut,
+    ImportacionUnneIn,
     PeriodosOut,
 )
 
@@ -152,5 +154,53 @@ async def confirmar_swiss(
         body.archivo,
         salida.resumen.duplicadas,
         salida.resumen.omitidas,
+    )
+    return salida
+
+
+# ── UNNE ──────────────────────────────────────────────────────────────────────
+
+
+@router.get("/unne/periodos", response_model=PeriodosOut)
+async def periodos_unne(
+    db: AsyncSession = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    """Períodos entre los que elegir, con el sugerido marcado."""
+    return await unne.periodos_disponibles(db)
+
+
+@router.post("/unne/previsualizar", response_model=ImportacionOut)
+async def previsualizar_unne(
+    body: ImportacionUnneIn,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    """Qué se grabaría del Excel de UNNE. **No escribe nada.**
+
+    Las filas cuya matrícula no cae en un único socio vuelven en `elegir_socio`
+    con los candidatos, para elegir antes de confirmar.
+    """
+    return await unne.procesar(
+        db, filas=body.filas, periodo=body.periodo, usuario_carga=_usuario(user), grabar=False,
+    )
+
+
+@router.post("/unne/confirmar", response_model=ImportacionOut)
+async def confirmar_unne(
+    body: ImportacionUnneIn,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    """Graba lo grabable en un solo commit. 422 si queda alguna fila sin socio."""
+    usuario = _usuario(user)
+    salida = await unne.procesar(
+        db, filas=body.filas, periodo=body.periodo, usuario_carga=usuario, grabar=True,
+    )
+    log.info(
+        "Import UNNE: %s de %s filas grabadas en el período %s por el usuario %s "
+        "(archivo %r, %s duplicadas, %s omitidas).",
+        salida.resumen.grabables, salida.resumen.total, salida.resumen.periodo, usuario,
+        body.archivo, salida.resumen.duplicadas, salida.resumen.omitidas,
     )
     return salida

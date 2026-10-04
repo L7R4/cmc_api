@@ -615,6 +615,9 @@ class PrestacionFacturaDetalleOut(BaseModel):
     porcentaje: Optional[int] = None                 # porc
     honorarios: Optional[Decimal] = None
     gastos: Optional[Decimal] = None
+    # Monto del ayudante (columna `ayudante`): en las filas de ayudante es lo que cobra,
+    # con honorarios/gastos en 0. El listado lo muestra en la columna Honorarios.
+    ayudante: Optional[Decimal] = None
     coseguro: Optional[Decimal] = None
     tipo_prestador: Optional[str] = None             # badge: Medico | Ayudante | Gastos
     subtotal: Optional[Decimal] = None               # importe_total

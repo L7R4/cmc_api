@@ -23,6 +23,9 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 COOKIE_REFRESH = "refresh_token"
 COOKIE_CSRF = "csrf_token"
 COOKIE_LOGGED  = "CMC_LOGGED"   # <- cookie visible para Caddy
+# Marca "este usuario es médico": Caddy la usa para sacarlo del legacy y mandarlo a
+# /panel/dashboard (ver el bloque @medico del Caddyfile de legacy.*).
+COOKIE_MEDICO  = "CMC_MEDICO"
 
 
 # Columnas legacy de especialidad del médico, en orden de prioridad (la principal NO
@@ -69,6 +72,22 @@ def _cookie_args(path: str, http_only: bool, max_age: int | None = None) -> dict
     if settings.COOKIE_DOMAIN:
         d["domain"] = settings.COOKIE_DOMAIN
     return d
+
+
+def es_medico_legacy(role: str | None, ingresar: str | None) -> bool:
+    """True si el usuario no debe navegar el legacy: rol RBAC `medico` **o**
+    `listado_medico.INGRESAR = 'D'`. Alcanza con una de las dos condiciones: la
+    primera es lo que ve el panel nuevo y la segunda es lo que usa el login viejo."""
+    return role == "medico" or (ingresar or "").strip().upper() == "D"
+
+
+def _marcar_medico(response: Response, role: str | None, medico, max_age: int) -> None:
+    """Pone o saca la cookie `CMC_MEDICO` según el usuario. Se llama en cada login
+    y refresh, así un cambio de rol o de INGRESAR se refleja sin esperar al logout."""
+    if es_medico_legacy(role, getattr(medico, "INGRESAR", None)):
+        response.set_cookie(COOKIE_MEDICO, "1", **_cookie_args("/", True, max_age))
+    else:
+        response.delete_cookie(COOKIE_MEDICO, **_cookie_args("/", True))
 
 @router.post("/login")
 async def login(
@@ -120,6 +139,7 @@ async def login(
 
     # Cookie visible para Caddy (marca "logueado"):
     res.set_cookie(COOKIE_LOGGED,  "1",     **_cookie_args("/",     False, max_age))
+    _marcar_medico(res, role, medico, max_age)
 
 
     return {
@@ -190,6 +210,7 @@ async def refresh_token(
         response.delete_cookie(COOKIE_REFRESH, **_cookie_args("/auth", True))
         response.delete_cookie(COOKIE_CSRF,    **_cookie_args("/",     False))
         response.delete_cookie(COOKIE_LOGGED,  **_cookie_args("/",     False))
+        response.delete_cookie(COOKIE_MEDICO,  **_cookie_args("/",     True))
         raise HTTPException(401, e.codigo)
 
     # 4) Access nuevo, con los scopes releídos de la base: es acá donde un cambio
@@ -205,6 +226,7 @@ async def refresh_token(
     response.set_cookie(COOKIE_CSRF,    new_csrf,    **_cookie_args("/",     False, max_age))
     # Refrescar "logueado"
     response.set_cookie(COOKIE_LOGGED,  "1",         **_cookie_args("/",     False, max_age))
+    _marcar_medico(response, role, medico, max_age)
 
     return {
         "access_token": access,
@@ -255,6 +277,7 @@ async def logout(
     response.delete_cookie(COOKIE_CSRF,    **_cookie_args("/",     False))
     # Borrar marca de logueado (visible)
     response.delete_cookie(COOKIE_LOGGED,  **_cookie_args("/",     False))
+    response.delete_cookie(COOKIE_MEDICO,  **_cookie_args("/",     True))
     return {"ok": True}
 
 
@@ -313,6 +336,7 @@ async def change_password(
     res.delete_cookie(COOKIE_REFRESH, **_cookie_args("/auth", True))
     res.delete_cookie(COOKIE_CSRF,    **_cookie_args("/",     False))
     res.delete_cookie(COOKIE_LOGGED,  **_cookie_args("/",     False))
+    res.delete_cookie(COOKIE_MEDICO,  **_cookie_args("/",     True))
 
     # `relogin` le dice al front que mande al login sin intentar /auth/refresh.
     return {"ok": True, "relogin": True}

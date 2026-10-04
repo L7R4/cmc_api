@@ -25,7 +25,7 @@ def test_nn_no_admite_especialidad():
 
 
 def test_nn_no_admite_por_presupuesto():
-    with pytest.raises(ValueError, match="por_presupuesto"):
+    with pytest.raises(ValueError, match="no admite precio por presupuesto"):
         validar_reglas_origen("NN", None, por_presupuesto=True, es_galeno=None)
 
 

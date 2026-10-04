@@ -151,9 +151,48 @@ async def _tiene_valor_activo(
     ).limit(1))).scalar_one_or_none() is not None
 
 
+class PreciosDependientesError(ValueError):
+    """Quitar una especialidad (o "sin restricción") dejaría sin con qué cotizar a
+    estos precios activos. La pantalla pregunta si cerrarlos y reintenta con
+    `cerrar_dependientes=True`."""
+
+    def __init__(self, mensaje: str, valores: list):
+        super().__init__(mensaje)
+        self.mensaje = mensaje
+        self.valores = valores
+
+
+async def cerrar_valores_desde_hoy(db: AsyncSession, valores: list) -> datetime.date:
+    """Baja con efecto inmediato, igual que el tacho de la fila: vigentes hasta ayer."""
+    ayer = datetime.date.today() - datetime.timedelta(days=1)
+    for v in valores:
+        v.estado = "cerrado"
+        v.vigencia_hasta = ayer
+        await cerrar_historial_de_valor(v.id, ayer, db)
+    await db.flush()
+    return ayer
+
+
+async def nombres_de_especialidades(db: AsyncSession, ids) -> dict[int, str]:
+    from app.db.models.catalogs import Especialidad
+
+    ids = [i for i in set(ids) if i is not None]
+    if not ids:
+        return {}
+    filas = (await db.execute(
+        select(Especialidad.ID_COLEGIO_ESPE, Especialidad.ESPECIALIDAD)
+        .where(Especialidad.ID_COLEGIO_ESPE.in_(ids))
+    )).all()
+    return {i: (n or "").strip() or f"Especialidad {i}" for i, n in filas}
+
+
+def _lista(nombres: list[str]) -> str:
+    return nombres[0] if len(nombres) == 1 else ", ".join(nombres[:-1]) + " y " + nombres[-1]
+
+
 async def fijar_sin_restriccion_par(
     db: AsyncSession, obra_social_nro: int, codigo: str, valor: bool,
-    *, excluir_id: Optional[int] = None,
+    *, excluir_id: Optional[int] = None, cerrar_dependientes: bool = False,
 ) -> None:
     """Deja `sin_restriccion_especialidad = valor` en TODAS las filas activas del par
     (es dato del par, ver `variantes_del_par`).
@@ -173,13 +212,16 @@ async def fijar_sin_restriccion_par(
         )
         if excluir_id is not None:
             stmt = stmt.where(Valor.id != excluir_id)
-        huerfana = (await db.execute(stmt.limit(1))).scalar_one_or_none()
-        if huerfana is not None:
-            raise ValueError(
-                f"No se puede quitar 'sin restricción de especialidad': el valor NE "
-                f"{huerfana} no tiene especialidad y sólo es válido mientras el código "
-                "sea sin restricción. Ciérrelo primero o cárguelo por especialidad."
-            )
+        ids = list((await db.execute(stmt)).scalars())
+        if ids:
+            huerfanas = list((await db.execute(select(Valor).where(Valor.id.in_(ids)))).scalars())
+            if not cerrar_dependientes:
+                raise PreciosDependientesError(
+                    "El código tiene un precio único para cualquier especialidad en esta "
+                    "obra social, que sólo vale mientras sea «sin restricción».",
+                    huerfanas,
+                )
+            await cerrar_valores_desde_hoy(db, huerfanas)
     for v in await variantes_del_par(db, obra_social_nro, codigo, excluir_id=excluir_id):
         v.sin_restriccion_especialidad = valor
     # El alta del código en la O.S. (etapa 3) es quien manda (ver par_sin_restriccion).
@@ -209,7 +251,7 @@ async def validar_especialidad_habilitada(
         )
     )).scalar_one_or_none()
     if existe is None:
-        raise ValueError(f"La especialidad {especialidad_id_colegio} no existe en el catálogo")
+        raise ValueError(f"La especialidad número {especialidad_id_colegio} no existe en el catálogo.")
 
     ya_existe = (await db.execute(
         select(ValorEspecialidad.id).where(
@@ -226,8 +268,17 @@ async def validar_especialidad_habilitada(
         await db.flush()
 
 
+def mensaje_especialidades_inexistentes(ids) -> str:
+    """No existen en el catálogo, así que no hay nombre que mostrar: va el número."""
+    ids = sorted(ids)
+    if len(ids) == 1:
+        return f"La especialidad número {ids[0]} no existe en el catálogo."
+    return f"Las especialidades número {', '.join(map(str, ids))} no existen en el catálogo."
+
+
 async def reemplazar_especialidades(
     db: AsyncSession, obra_social_nro: int, codigo: str, especialidad_ids: list[int],
+    *, cerrar_dependientes: bool = False,
 ) -> None:
     """Reemplaza POR COMPLETO las especialidades habilitadas de (obra_social_nro,
     codigo) por la lista dada (no se suma a lo existente). Es el único lugar del
@@ -248,22 +299,29 @@ async def reemplazar_especialidades(
         )).scalars())
         invalidas = set(especialidad_ids) - validas
         if invalidas:
-            raise ValueError(f"Especialidad(es) inexistente(s): {sorted(invalidas)}")
+            raise ValueError(mensaje_especialidades_inexistentes(invalidas))
 
-    activas_ne = set((await db.execute(
-        select(Valor.especialidad_id_colegio).where(
+    activas_ne = list((await db.execute(
+        select(Valor).where(
             Valor.obra_social_nro == obra_social_nro,
             Valor.codigo == codigo,
             Valor.origen == "NE",
             Valor.estado == "activo",
+            Valor.especialidad_id_colegio.is_not(None),
         )
     )).scalars())
-    faltantes = activas_ne - set(especialidad_ids)
-    if faltantes:
-        raise ValueError(
-            f"No se puede quitar la especialidad {sorted(faltantes)}: tiene un valor "
-            "NE activo que depende de ella. Ciérrelo primero."
-        )
+    dependientes = [v for v in activas_ne if v.especialidad_id_colegio not in set(especialidad_ids)]
+    if dependientes:
+        if not cerrar_dependientes:
+            nombres = await nombres_de_especialidades(db, [v.especialidad_id_colegio for v in dependientes])
+            lista = _lista(sorted(set(nombres.values())))
+            raise PreciosDependientesError(
+                f"{'Las especialidades' if len(set(nombres.values())) > 1 else 'La especialidad'} "
+                f"{lista} {'tienen' if len(set(nombres.values())) > 1 else 'tiene'} "
+                "un precio activo en esta obra social.",
+                dependientes,
+            )
+        await cerrar_valores_desde_hoy(db, dependientes)
 
     await db.execute(delete(ValorEspecialidad).where(
         ValorEspecialidad.obra_social_nro == obra_social_nro,

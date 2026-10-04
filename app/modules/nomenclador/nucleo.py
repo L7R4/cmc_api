@@ -74,6 +74,7 @@ async def _actualizar_nucleo(
         _actualizar_valor_core,
         _clonar_valor,
         _forzar_ayudantes_honorarios_individuales,
+        nivel_fijado_por_galeno,
     )
 
     nom = await db.get(NomencladorCMC, nom_id)
@@ -94,6 +95,9 @@ async def _actualizar_nucleo(
     }
     for v in ne:
         for k, val in meta.items():
+            # Con galeno nivelado el nivel es el del galeno (cambia con el galeno).
+            if k == "nivel" and await nivel_fijado_por_galeno(db, v.id) is not None:
+                continue
             setattr(v, k, val)
         v.cantidad_ayudantes = _forzar_ayudantes_honorarios_individuales(
             v.categoria, nom, v.cantidad_ayudantes
@@ -109,59 +113,60 @@ async def _actualizar_nucleo(
         await _actualizar_valor_core(db, ne[0].id, ecu)
         ne = await _ne_activas(db, os_nro, nom_id)
 
-    # 3) Especialidades.
-    base = ne[0]
-    hay_sin_especialidad = any(v.especialidad_id_colegio is None for v in ne)
-    deseadas = list(dict.fromkeys(body.especialidades))
+    # 3) Especialidades (salvo que el caller sólo rote precios).
+    if body.tocar_especialidades:
+        base = ne[0]
+        hay_sin_especialidad = any(v.especialidad_id_colegio is None for v in ne)
+        deseadas = list(dict.fromkeys(body.especialidades))
 
-    if body.sin_restriccion_especialidad:
-        if not hay_sin_especialidad:
-            await service.fijar_sin_restriccion_par(db, os_nro, nom.codigo, True)
-            for v in ne:
-                await _cerrar(db, v)
-            await db.flush()
-            await _clonar_valor(
-                db, base, base.vigencia_desde, motivo="valores_estructura",
-                como_ne_sin_especialidad=True, sin_restriccion=True,
-            )
-        await db.execute(delete(ValorEspecialidad).where(
-            ValorEspecialidad.obra_social_nro == os_nro,
-            ValorEspecialidad.codigo == nom.codigo,
-        ))
-    else:
-        if not deseadas:
-            raise HTTPException(
-                422, "Elegí al menos una especialidad o marcá 'Sin restricción por especialidad'."
-            )
-        if hay_sin_especialidad:
-            sin_esp = next(v for v in ne if v.especialidad_id_colegio is None)
-            for v in ne:
-                await _cerrar(db, v)
-            await db.flush()
-            await service.fijar_sin_restriccion_par(db, os_nro, nom.codigo, False)
-            for esp in deseadas:
-                await _validar_y_habilitar(db, nom.codigo, os_nro, esp)
+        if body.sin_restriccion_especialidad:
+            if not hay_sin_especialidad:
+                await service.fijar_sin_restriccion_par(db, os_nro, nom.codigo, True)
+                for v in ne:
+                    await _cerrar(db, v)
+                await db.flush()
                 await _clonar_valor(
-                    db, sin_esp, sin_esp.vigencia_desde, motivo="valores_estructura",
-                    como_ne_de_especialidad=esp, sin_restriccion=False,
+                    db, base, base.vigencia_desde, motivo="valores_estructura",
+                    como_ne_sin_especialidad=True, sin_restriccion=True,
                 )
+            await db.execute(delete(ValorEspecialidad).where(
+                ValorEspecialidad.obra_social_nro == os_nro,
+                ValorEspecialidad.codigo == nom.codigo,
+            ))
         else:
-            actuales = {v.especialidad_id_colegio for v in ne}
-            for esp in deseadas:
-                if esp not in actuales:
+            if not deseadas:
+                raise HTTPException(
+                    422, "Elegí al menos una especialidad o marcá 'Sin restricción por especialidad'."
+                )
+            if hay_sin_especialidad:
+                sin_esp = next(v for v in ne if v.especialidad_id_colegio is None)
+                for v in ne:
+                    await _cerrar(db, v)
+                await db.flush()
+                await service.fijar_sin_restriccion_par(db, os_nro, nom.codigo, False)
+                for esp in deseadas:
                     await _validar_y_habilitar(db, nom.codigo, os_nro, esp)
                     await _clonar_valor(
-                        db, base, base.vigencia_desde, motivo="valores_estructura",
-                        como_ne_de_especialidad=esp,
+                        db, sin_esp, sin_esp.vigencia_desde, motivo="valores_estructura",
+                        como_ne_de_especialidad=esp, sin_restriccion=False,
                     )
-            for v in ne:
-                if v.especialidad_id_colegio not in deseadas:
-                    await _cerrar(db, v)
-        await db.flush()
-        try:
-            await service.reemplazar_especialidades(db, os_nro, nom.codigo, deseadas)
-        except ValueError as e:
-            raise HTTPException(409, str(e))
+            else:
+                actuales = {v.especialidad_id_colegio for v in ne}
+                for esp in deseadas:
+                    if esp not in actuales:
+                        await _validar_y_habilitar(db, nom.codigo, os_nro, esp)
+                        await _clonar_valor(
+                            db, base, base.vigencia_desde, motivo="valores_estructura",
+                            como_ne_de_especialidad=esp,
+                        )
+                for v in ne:
+                    if v.especialidad_id_colegio not in deseadas:
+                        await _cerrar(db, v)
+            await db.flush()
+            try:
+                await service.reemplazar_especialidades(db, os_nro, nom.codigo, deseadas)
+            except ValueError as e:
+                raise HTTPException(409, str(e))
 
     await db.flush()
     return list((await db.execute(
@@ -189,26 +194,11 @@ async def _actualizar_nucleo_nn(
     datos del par (`nm_valor_especialidad` / `Valor.sin_restriccion_especialidad`)."""
     from app.modules.nomenclador.routes_valores import (
         _actualizar_valor_core,
-        _componentes_activos,
         _forzar_ayudantes_honorarios_individuales,
+        nivel_fijado_por_galeno,
     )
-    from app.db.models.nomenclador_cmc import Galeno
 
     os_nro, nom_id = nn[0].obra_social_nro, nom.id
-
-    if body.nivel is not None:
-        for v in nn:
-            if body.nivel == v.nivel:
-                continue
-            for comp in await _componentes_activos(db, v.id):
-                galeno = await db.get(Galeno, comp.galeno_id) if comp.galeno_id else None
-                if galeno and galeno.nivel is not None and galeno.nivel != body.nivel:
-                    raise HTTPException(
-                        422,
-                        f"No se puede cambiar a nivel {body.nivel}: el componente {comp.id} "
-                        f"usa el galeno '{galeno.codigo}' nivel {galeno.nivel}. "
-                        "Actualizá los valores con la nueva ecuación.",
-                    )
 
     meta = {
         k: getattr(body, k)
@@ -217,6 +207,9 @@ async def _actualizar_nucleo_nn(
     }
     for v in nn:
         for k, val in meta.items():
+            # Con galeno nivelado el nivel es el del galeno (cambia con el galeno).
+            if k == "nivel" and await nivel_fijado_por_galeno(db, v.id) is not None:
+                continue
             setattr(v, k, val)
         v.cantidad_ayudantes = _forzar_ayudantes_honorarios_individuales(
             v.categoria, nom, v.cantidad_ayudantes
@@ -229,7 +222,9 @@ async def _actualizar_nucleo_nn(
     if body.ecuacion is not None:
         await _actualizar_valor_core(db, nn[0].id, body.ecuacion)
 
-    if body.sin_restriccion_especialidad:
+    if not body.tocar_especialidades:
+        pass
+    elif body.sin_restriccion_especialidad:
         await service.fijar_sin_restriccion_par(db, os_nro, nom.codigo, True)
         await db.execute(delete(ValorEspecialidad).where(
             ValorEspecialidad.obra_social_nro == os_nro,

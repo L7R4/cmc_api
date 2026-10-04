@@ -56,7 +56,7 @@ async def reemplazar_plantilla(
         )).scalars())
         invalidas = set(ids) - validas
         if invalidas:
-            raise ValueError(f"Especialidad(es) inexistente(s): {sorted(invalidas)}")
+            raise ValueError(service.mensaje_especialidades_inexistentes(invalidas))
     await db.execute(delete(NomencladorPlantillaEspecialidad).where(
         NomencladorPlantillaEspecialidad.codigo == codigo
     ))
@@ -126,7 +126,7 @@ async def aplicar_a_obras_sociales(
             existentes = len(plantilla) - len(a_crear)
             invalida = next((esp for esp in a_crear if esp not in validas), None)
             if invalida is not None:
-                raise ValueError(f"La especialidad {invalida} no existe en el catálogo")
+                raise ValueError(service.mensaje_especialidades_inexistentes([invalida]))
             if a_crear:
                 await _crear_variantes_en_bloque(db, base, codigo, a_crear)
             creadas = len(a_crear)

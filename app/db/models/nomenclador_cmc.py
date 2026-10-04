@@ -294,6 +294,61 @@ class GalenoPlantilla(Base):
     )
 
 
+class NomencladorNivelado(Base):
+    """Nomenclador nivelado compartido por las obras sociales (Cirugía adulto 7 y 10
+    niveles, Cirugía infantil, FASGO, Urología…): a cada código le corresponde un
+    nivel (o N unidades fijas) igual en todas las O.S.; lo que cambia entre ellas es
+    el precio del galeno por nivel.
+
+    `galeno_grupo` es el `grupo` de `nm_galenos_plantilla` con el que se cotiza: de
+    ahí salen el galeno (slug) y sus niveles. Aplicarlo a una O.S. da de alta los
+    códigos y crea sus precios con el galeno del nivel (ver `nivelados.aplicar`).
+    """
+    __tablename__ = "nm_nomenclador_nivelado"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    slug: Mapped[str] = mapped_column(String(60), nullable=False, unique=True)
+    nombre: Mapped[str] = mapped_column(String(120), nullable=False)
+    galeno_grupo: Mapped[str] = mapped_column(String(100), nullable=False)
+    niveles: Mapped[int] = mapped_column(Integer, nullable=False)
+    activo: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="1")
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class NomencladorNiveladoCodigo(Base):
+    """Un código dentro de un nomenclador nivelado: su nivel, o `unidades` fijas
+    (FASGO "50 unidades": Honorarios = N × el galeno de nivel 1). Exactamente uno de
+    los dos — MySQL 5.7 no aplica CHECK, lo valida el schema."""
+    __tablename__ = "nm_nomenclador_nivelado_codigo"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    nomenclador_nivelado_id: Mapped[int] = mapped_column(
+        ForeignKey("nm_nomenclador_nivelado.id"), nullable=False
+    )
+    nomenclador_id: Mapped[int] = mapped_column(ForeignKey("nm_nomenclador.id"), nullable=False)
+    nivel: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    unidades: Mapped[Optional[Decimal]] = mapped_column(DECIMAL(10, 2), nullable=True)
+    observacion: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "nomenclador_nivelado_id", "nomenclador_id", name="uq_nm_nivelado_codigo"
+        ),
+        Index("ix_nm_nivelado_codigo_nomenclador", "nomenclador_id"),
+    )
+
+
 class Valor(Base):
     """
     Variante de precio para un código+OS+vigencia.

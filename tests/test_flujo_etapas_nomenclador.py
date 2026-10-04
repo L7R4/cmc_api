@@ -221,6 +221,36 @@ async def test_propagar_agregar_e_igualar_conserva_lo_que_tiene_precio(s):
     assert await service.especialidades_habilitadas_de(s, nom.codigo, OS) == {e1, e2, e3}
 
 
+@pytest.mark.asyncio
+async def test_lapiz_del_codigo_sin_tocar_especialidades_solo_rota(s):
+    """Quién factura tiene e1 y e2 pero sólo e1 tiene precio: rotar el núcleo con
+    `tocar_especialidades=False` no le crea precio a e2 ni cambia la lista."""
+    from app.modules.nomenclador.nucleo import actualizar_nucleo
+    from app.modules.nomenclador.schemas import ValorCerrarYCrearIn, ValorNucleoUpdate
+
+    await _os(s, OS)
+    e1, e2 = await _esps(s, 2)
+    await _alta(s, especialidades=[e1, e2], sin_restriccion_especialidad=False)
+    await _crear_valor_con_componentes(
+        db=s, obra_social_nro=OS, nomenclador_id=NOM_ID, origen="NE", vigencia_desde=HOY,
+        componentes_in=[ValorComponenteIn(concepto="Honorarios", valor_unitario=Decimal("10"))],
+        descripcion="DESC", nivel=None, complejidad=None, especialidad_id_colegio=e1, observacion=None,
+    )
+    await actualizar_nucleo(s, OS, NOM_ID, ValorNucleoUpdate(
+        descripcion="NUEVA", tocar_especialidades=False,
+        ecuacion=ValorCerrarYCrearIn(
+            vigencia_desde=HOY + datetime.timedelta(days=1),
+            componentes=[ValorComponenteIn(concepto="Honorarios", valor_unitario=Decimal("20"))],
+        ),
+    ))
+    activos = (await s.execute(select(Valor).where(
+        Valor.obra_social_nro == OS, Valor.nomenclador_id == NOM_ID, Valor.estado == "activo",
+    ))).scalars().all()
+    assert [(v.especialidad_id_colegio, v.descripcion) for v in activos] == [(e1, "NUEVA")]
+    assert activos[0].vigencia_desde == HOY + datetime.timedelta(days=1)
+    assert await service.especialidades_habilitadas_de(s, (await s.get(NomencladorCMC, NOM_ID)).codigo, OS) == {e1, e2}
+
+
 # ─── Facturación: carga sin precio + revalorizar ─────────────────────────────
 
 @pytest.mark.asyncio
@@ -266,3 +296,86 @@ def test_conceptos_sin_precio_por_defecto():
     assert fact.conceptos_sin_precio(N(**base, concepto_sin_precio=None)) == "HG"
     assert fact.conceptos_sin_precio(N(**{**base, "rol": "pediatra"}, concepto_sin_precio=None)) == "H"
     assert fact.conceptos_sin_precio(N(**base, concepto_sin_precio="A")) == "A"
+
+
+# ─── Mensajes de error que ahora resuelve el sistema ─────────────────────────
+
+async def _precio_esp(db, esp, desde=HOY):
+    return await _crear_valor_con_componentes(
+        db=db, obra_social_nro=OS, nomenclador_id=NOM_ID, origen="NE", vigencia_desde=desde,
+        componentes_in=[ValorComponenteIn(concepto="Honorarios", valor_unitario=Decimal("10"))],
+        descripcion="DESC", nivel=None, complejidad=None, especialidad_id_colegio=esp, observacion=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_quitar_especialidad_con_precio_pregunta_y_con_ok_lo_cierra(s):
+    await _os(s, OS)
+    e1, e2 = await _esps(s, 2)
+    await _alta(s, especialidades=[e1, e2], sin_restriccion_especialidad=False)
+    v2 = await _precio_esp(s, e2, desde=HOY - datetime.timedelta(days=30))
+
+    with pytest.raises(HTTPException) as exc:
+        await alta_os.actualizar_par(s, OS, NOM_ID, CodigoObraSocialUpdate(especialidades=[e1]))
+    assert exc.value.status_code == 409
+    det = exc.value.detail
+    assert det["tipo"] == "precios_dependientes" and [p["id"] for p in det["precios"]] == [v2.id]
+    assert "tiene un precio activo" in det["mensaje"]
+
+    await alta_os.actualizar_par(
+        s, OS, NOM_ID, CodigoObraSocialUpdate(especialidades=[e1], cerrar_precios=True),
+    )
+    await s.refresh(v2)
+    assert v2.estado == "cerrado" and v2.vigencia_hasta == HOY - datetime.timedelta(days=1)
+    nom = await s.get(NomencladorCMC, NOM_ID)
+    assert await service.especialidades_habilitadas_de(s, nom.codigo, OS) == {e1}
+
+
+@pytest.mark.asyncio
+async def test_quitar_sin_restriccion_con_precio_unico_pregunta_y_lo_cierra(s):
+    await _os(s, OS)
+    e1, _ = await _esps(s, 2)
+    await _alta(s, sin_restriccion_especialidad=True)
+    unico = await _precio_fijo(s)
+
+    with pytest.raises(HTTPException) as exc:
+        await alta_os.actualizar_par(s, OS, NOM_ID, CodigoObraSocialUpdate(
+            sin_restriccion_especialidad=False, especialidades=[e1],
+        ))
+    assert exc.value.detail["precios"][0]["especialidad"] == "Cualquier especialidad"
+
+    await alta_os.actualizar_par(s, OS, NOM_ID, CodigoObraSocialUpdate(
+        sin_restriccion_especialidad=False, especialidades=[e1], cerrar_precios=True,
+    ))
+    await s.refresh(unico)
+    assert unico.estado == "cerrado"
+
+
+@pytest.mark.asyncio
+async def test_rotar_con_vigencia_igual_o_anterior_da_422(s):
+    from app.modules.nomenclador.routes_valores import _actualizar_valor_core
+    from app.modules.nomenclador.schemas import ValorCerrarYCrearIn
+
+    await _os(s, OS)
+    e1, _ = await _esps(s, 2)
+    await _alta(s, especialidades=[e1], sin_restriccion_especialidad=False)
+    v = await _precio_esp(s, e1)
+    with pytest.raises(HTTPException) as exc:
+        await _actualizar_valor_core(s, v.id, ValorCerrarYCrearIn(
+            vigencia_desde=HOY,
+            componentes=[ValorComponenteIn(concepto="Honorarios", valor_unitario=Decimal("20"))],
+        ))
+    assert exc.value.status_code == 422 and "posterior" in exc.value.detail
+    await s.refresh(v)
+    assert v.estado == "activo"
+
+
+def test_el_nivel_lo_define_el_galeno_nivelado():
+    from types import SimpleNamespace as NS
+    from app.modules.nomenclador.routes_valores import _nivel_de_galenos
+
+    assert _nivel_de_galenos([NS(nivel=3), NS(nivel=None)], None) == 3
+    assert _nivel_de_galenos([NS(nivel=3)], 2) == 3  # pisa el nivel cargado a mano
+    assert _nivel_de_galenos([NS(nivel=None)], 2) == 2
+    with pytest.raises(HTTPException):
+        _nivel_de_galenos([NS(nivel=3), NS(nivel=2)], None)

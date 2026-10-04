@@ -610,6 +610,12 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     ("PATCH", "/api/codigos_os/{obra_social_nro}/{nomenclador_id}"): Scope.NOMENCLADOR_EDITAR,
     ("POST", "/api/codigos_os/{obra_social_nro}/{nomenclador_id}/suspender"): Scope.NOMENCLADOR_EDITAR,
     ("POST", "/api/codigos_os/{obra_social_nro}/{nomenclador_id}/reactivar"): Scope.NOMENCLADOR_EDITAR,
+    ("GET", "/api/nomencladores_nivelados/"): Scope.NOMENCLADOR_LEER,
+    ("GET", "/api/nomencladores_nivelados/{slug}/codigos"): Scope.NOMENCLADOR_LEER,
+    ("POST", "/api/nomencladores_nivelados/{slug}/codigos"): Scope.NOMENCLADOR_EDITAR,
+    ("PUT", "/api/nomencladores_nivelados/{slug}/codigos/{nomenclador_id}"): Scope.NOMENCLADOR_EDITAR,
+    ("DELETE", "/api/nomencladores_nivelados/{slug}/codigos/{nomenclador_id}"): Scope.NOMENCLADOR_EDITAR,
+    ("POST", "/api/nomencladores_nivelados/{slug}/aplicar"): Scope.NOMENCLADOR_EDITAR,
     # Etapa 2 — plantilla de especialidades + ficha del código
     ("GET", "/api/nomenclador/{id}/ficha"): Scope.NOMENCLADOR_LEER,
     ("PUT", "/api/nomenclador/{id}/especialidades"): Scope.NOMENCLADOR_EDITAR,

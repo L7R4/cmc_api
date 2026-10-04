@@ -2,7 +2,7 @@ from typing import List, Optional
 
 import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import and_, exists, func, or_, select
+from sqlalchemy import and_, case, exists, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -43,6 +43,13 @@ router = APIRouter()
 @router.get("/", response_model=List[NomencladorOut])
 async def list_nomenclador(
     q: Optional[str] = Query(None),
+    en_descripcion: bool = Query(
+        False,
+        description=(
+            "Con `q`: busca también en la descripción del catálogo. Primero los que "
+            "empiezan con `q` en el código, después el resto en orden de código."
+        ),
+    ),
     categoria: Optional[str] = Query(None),
     complejidad: Optional[str] = Query(None),
     obra_social_nro: Optional[int] = Query(
@@ -71,7 +78,13 @@ async def list_nomenclador(
     user, _scopes, role = dep
 
     stmt = select(NomencladorCMC)
-    if q:
+    if q and en_descripcion:
+        stmt = stmt.where(or_(
+            NomencladorCMC.codigo.contains(q), NomencladorCMC.descripcion.contains(q),
+        )).order_by(
+            case((NomencladorCMC.codigo.startswith(q), 0), else_=1), NomencladorCMC.codigo,
+        )
+    elif q:
         stmt = stmt.where(NomencladorCMC.codigo.contains(q))
     if categoria:
         stmt = stmt.where(NomencladorCMC.categoria == categoria)
@@ -241,8 +254,7 @@ async def create_nomenclador(body: NomencladorCreate, db: AsyncSession = Depends
     if ya_existe:
         raise HTTPException(
             409,
-            f"El código {body.codigo} ya existe (id {ya_existe.id}). "
-            "Usá otro número o editá el existente.",
+            f"El código {body.codigo} ya existe. Usá otro número o editá el existente.",
         )
 
     datos = body.model_dump(exclude={"especialidades"})

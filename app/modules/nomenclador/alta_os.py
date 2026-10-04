@@ -147,7 +147,7 @@ async def _validar_especialidades(db: AsyncSession, ids: Iterable[int]) -> None:
         select(Especialidad.ID_COLEGIO_ESPE).where(Especialidad.ID_COLEGIO_ESPE.in_(ids))
     )).scalars())
     if ids - validas:
-        raise ValueError(f"Especialidad(es) inexistente(s): {sorted(ids - validas)}")
+        raise ValueError(service.mensaje_especialidades_inexistentes(ids - validas))
 
 
 async def _dar_de_alta_uno(
@@ -282,7 +282,9 @@ def campos_de_valor(valor: Valor) -> dict:
 
 # ─── Edición del par ─────────────────────────────────────────────────────────
 
-async def sincronizar_valores(db: AsyncSession, par: CodigoObraSocial) -> None:
+async def sincronizar_valores(
+    db: AsyncSession, par: CodigoObraSocial, *, cerrar_dependientes: bool = False,
+) -> None:
     """Copia los datos del par a todas sus variantes activas (transición: mientras
     las variantes los sigan guardando). "Sin restricción" pasa por
     `fijar_sin_restriccion_par`, que valida que no quede una NE huérfana."""
@@ -290,7 +292,8 @@ async def sincronizar_valores(db: AsyncSession, par: CodigoObraSocial) -> None:
         for campo in _CAMPOS_SINCRONIZADOS:
             setattr(v, campo, getattr(par, campo))
     await service.fijar_sin_restriccion_par(
-        db, par.obra_social_nro, par.codigo, bool(par.sin_restriccion_especialidad)
+        db, par.obra_social_nro, par.codigo, bool(par.sin_restriccion_especialidad),
+        cerrar_dependientes=cerrar_dependientes,
     )
 
 
@@ -323,14 +326,38 @@ async def actualizar_par(
             setattr(par, campo, valor)
     if "sin_restriccion_especialidad" in datos:
         par.sin_restriccion_especialidad = bool(datos["sin_restriccion_especialidad"])
+    cerrar = cambios.cerrar_precios
     try:
         if "especialidades" in datos and datos["especialidades"] is not None:
             await _validar_especialidades(db, datos["especialidades"])
             await service.reemplazar_especialidades(
-                db, obra_social_nro, par.codigo, datos["especialidades"]
+                db, obra_social_nro, par.codigo, datos["especialidades"],
+                cerrar_dependientes=cerrar,
             )
         await db.flush()
-        await sincronizar_valores(db, par)
+        await sincronizar_valores(db, par, cerrar_dependientes=cerrar)
+    except service.PreciosDependientesError as e:
+        # La pantalla pregunta si cerrar esos precios y reintenta con cerrar_precios.
+        nombres = await service.nombres_de_especialidades(
+            db, [v.especialidad_id_colegio for v in e.valores]
+        )
+        ayer = datetime.date.today() - datetime.timedelta(days=1)
+        raise HTTPException(409, {
+            "tipo": "precios_dependientes",
+            "mensaje": e.mensaje,
+            "cierre": ayer.isoformat(),
+            "precios": [
+                {
+                    "id": v.id,
+                    "especialidad": (
+                        nombres.get(v.especialidad_id_colegio, f"Especialidad {v.especialidad_id_colegio}")
+                        if v.especialidad_id_colegio is not None else "Cualquier especialidad"
+                    ),
+                    "vigencia_desde": v.vigencia_desde.isoformat(),
+                }
+                for v in e.valores
+            ],
+        })
     except ValueError as e:
         raise HTTPException(422, str(e))
     await db.flush()

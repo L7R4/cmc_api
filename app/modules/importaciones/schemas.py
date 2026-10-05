@@ -29,6 +29,10 @@ class FilaReporte(BaseModel):
     cantidad: int = 1
     coseguro: Decimal = Decimal("0.00")
 
+    # Socio elegido a mano en la previsualización (matrícula repetida o sin
+    # socio). Sólo lo manda Prevención; Swiss sigue descartando esas filas.
+    nro_socio_elegido: Optional[int] = None
+
 
 class ImportacionIn(BaseModel):
     """Lo que manda el panel, tanto para previsualizar como para confirmar."""
@@ -37,6 +41,12 @@ class ImportacionIn(BaseModel):
     periodo: Optional[str] = Field(None, pattern=r"^\d{6}$")
     archivo: str = ""
     filas: List[FilaReporte]
+
+
+class ImportacionPrevencionIn(ImportacionIn):
+    # 103 (Prevención Salud) o 888, la obra social de prueba con el mismo
+    # nomenclador. El servicio rechaza cualquier otra.
+    obra_social: int = 103
 
 
 class FilaUnne(BaseModel):

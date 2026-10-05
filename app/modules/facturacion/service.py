@@ -1001,8 +1001,12 @@ async def resolver_precio(
     codigo: str,
     fecha: datetime.date,
     via: str = service_vias.VIA_TRADICIONAL,
+    *,
+    ignorar_ventana: bool = False,
 ) -> PrecioResponse:
     """Delega precio Y habilitación en el lookup del módulo nomenclador.
+
+    `ignorar_ventana`: sólo para recotizar lo ya cargado (ver `recotizar.py`).
 
     Errores de mapeo de identificadores → HTTPException (404/422).
     Falta de precio / habilitación / fecha / vía no aplicable → admitido=False + motivo.
@@ -1017,6 +1021,7 @@ async def resolver_precio(
     try:
         out = await service_nm.lookup_precio(
             nomenclador.id, obra_social_nro, fecha, medico.ID, db, via=via,
+            ignorar_ventana=ignorar_ventana,
         )
     except PrecioLookupError as e:
         # CARGA_SIN_PRECIO sólo perdona la falta de precio (e.sin_precio) — no
@@ -2356,6 +2361,24 @@ async def obtener_prestacion_ficha(
 
 
 # ── Edición ──────────────────────────────────────────────────────────────────
+def seleccion_prestador_de(
+    row: DetalleFacturacionCMC,
+) -> tuple[str, Optional[str], Optional[int]]:
+    """(cod_medico, cod_medico_ejecutor, cod_clinica) tal como los habría mandado el
+    front para esta fila guardada. El discriminador es `tipo`, NO `tipo_orden` (que
+    vale 'S' en los dos casos con clínica)."""
+    if row.cod_med_ejecutor:
+        # Fila legacy (2026-07-17→30): `cod_med` era la clínica-payee y el ejecutor iba
+        # aparte. Se reconstruye con esa semántica vieja y el resolver la reacomoda al
+        # layout nuevo — editar una de estas filas la migra sola.
+        return str(row.cod_med), str(row.cod_med_ejecutor), None
+    if row.tipo == TIPO_SANATORIO and row.cod_clinica:
+        # Caso 1: el prestador fue la clínica; el médico que cobra es el ejecutor.
+        return str(row.cod_clinica), str(row.cod_med), None
+    # Casos 2 y 3: el prestador fue el médico; la clínica (si hay) es el ámbito.
+    return str(row.cod_med), None, row.cod_clinica
+
+
 async def editar_prestacion(
     db: AsyncSession, prestacion_id: int, payload: PrestacionUpdate
 ) -> DetalleFacturacionCMC:
@@ -2464,19 +2487,8 @@ async def editar_prestacion(
         # reasigna cod_med / cod_clinica / tipo_orden / tipo en los tres casos.
         campos_prestador = {"cod_medico", "cod_medico_ejecutor", "cod_clinica"}
         cambio_prestador = bool(campos_prestador & data.keys())
-        # Selección persistida. El discriminador es `tipo`, NO `tipo_orden` (que vale 'S' en
-        # los dos casos con clínica).
-        if row.cod_med_ejecutor:
-            # Fila legacy (2026-07-17→30): `cod_med` era la clínica-payee y el ejecutor iba
-            # aparte. Se reconstruye con esa semántica vieja y el resolver la reacomoda al
-            # layout nuevo — editar una de estas filas la migra sola.
-            prev_cod, prev_ejecutor, prev_clinica = str(row.cod_med), str(row.cod_med_ejecutor), None
-        elif row.tipo == TIPO_SANATORIO and row.cod_clinica:
-            # Caso 1: el prestador fue la clínica; el médico que cobra es el ejecutor.
-            prev_cod, prev_ejecutor, prev_clinica = str(row.cod_clinica), str(row.cod_med), None
-        else:
-            # Casos 2 y 3: el prestador fue el médico; la clínica (si hay) es el ámbito.
-            prev_cod, prev_ejecutor, prev_clinica = str(row.cod_med), None, row.cod_clinica
+        # Selección persistida (ver `seleccion_prestador_de`).
+        prev_cod, prev_ejecutor, prev_clinica = seleccion_prestador_de(row)
 
         sel_cod = data.get("cod_medico", prev_cod)
         sel_ejecutor = data.get("cod_medico_ejecutor", prev_ejecutor)

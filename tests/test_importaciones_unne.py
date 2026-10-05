@@ -15,7 +15,8 @@ from sqlalchemy import func, select
 from app.db.models import DetalleFacturacionCMC, ListadoMedico
 from app.modules.importaciones.schemas import FilaUnne
 from app.modules.importaciones.unne import NRO_UNNE
-from app.modules.importaciones.unne.servicio import partir_importe, procesar, sugerir_socio
+from app.modules.importaciones.nucleo import sugerir_socio
+from app.modules.importaciones.unne.servicio import partir_importe, procesar
 
 D = Decimal
 PERIODO = "209912"  # sin cabecera: el gate de período cerrado no interviene

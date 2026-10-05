@@ -7,6 +7,7 @@ Si cualquier paso falla, el rollback se propaga al caller automáticamente.
 from __future__ import annotations
 
 import datetime
+import functools
 from decimal import Decimal
 from typing import List, Optional
 
@@ -67,6 +68,28 @@ def prioridad_origen(origen: str) -> int:
 # Colegio) viven ahora en `nm_valor_especialidad`, una fila por (obra_social_nro,
 # codigo, especialidad) sin ambigüedad que resolver.
 
+# ── Memoria por corrida (recálculo de precios) ───────────────────────────────
+# Un recálculo cotiza cientos de filas con los mismos códigos: lo que depende sólo
+# del código y la O.S. se consulta una vez por corrida. Se activa poniendo un dict
+# en `db.info[MEMO_COTIZACION]` (ver `facturacion/recotizar.py::memo_por_corrida`);
+# sin él, estas funciones consultan siempre, como antes. No guarda errores.
+MEMO_COTIZACION = "memo_cotizacion"
+
+
+def _memo_por_corrida(fn):
+    @functools.wraps(fn)
+    async def envoltura(db, *args, **kwargs):
+        memo = db.info.get(MEMO_COTIZACION)
+        if memo is None:
+            return await fn(db, *args, **kwargs)
+        clave = (fn.__name__, args, tuple(sorted(kwargs.items())))
+        if clave not in memo:
+            memo[clave] = await fn(db, *args, **kwargs)
+        return memo[clave]
+    return envoltura
+
+
+@_memo_por_corrida
 async def resolver_nomenclador(
     db: AsyncSession, codigo: str, obra_social_nro: Optional[int] = None
 ) -> Optional[NomencladorCMC]:
@@ -87,6 +110,7 @@ def filtro_pertenencia(obra_social_nro: Optional[int] = None):
     return true()
 
 
+@_memo_por_corrida
 async def especialidades_habilitadas_de(
     db: AsyncSession, codigo: str, obra_social_nro: int
 ) -> set[int]:
@@ -104,6 +128,7 @@ async def especialidades_habilitadas_de(
     return {row for row in (await db.execute(stmt)).scalars()}
 
 
+@_memo_por_corrida
 async def par_sin_restriccion(db: AsyncSession, codigo: str, obra_social_nro: int) -> bool:
     """¿El par (obra_social_nro, codigo) es "sin restricción de especialidad"?
 
@@ -127,6 +152,7 @@ async def par_sin_restriccion(db: AsyncSession, codigo: str, obra_social_nro: in
     )).scalar())
 
 
+@_memo_por_corrida
 async def _par_de(
     db: AsyncSession, obra_social_nro: Optional[int], nomenclador_id: int
 ) -> Optional[CodigoObraSocial]:
@@ -2141,6 +2167,7 @@ async def listar_codigos_habilitados(
     ]
 
 
+@_memo_por_corrida
 async def get_cantidad_ayudantes(
     db: AsyncSession, obra_social_nro: int, nomenclador_id: int, fecha: datetime.date,
 ) -> int:
@@ -2165,17 +2192,23 @@ async def lookup_precio(
     medico_id: int,
     db: AsyncSession,
     via: str = service_vias.VIA_TRADICIONAL,
+    *,
+    ignorar_ventana: bool = False,
 ) -> LookupPrecioOut:
     """
     Lookup directo en historial_precio_codigo + validación de habilitación del médico.
     Lanza LookupError con el motivo si alguna validación falla.
+
+    `ignorar_ventana` saltea el corte de 6 meses: ese gate frena la *carga* de
+    prácticas viejas, no la recotización de algo ya cargado (recálculo /
+    revalorizar). Ningún endpoint lo expone. La fecha futura sigue siendo error.
     """
     today = datetime.date.today()
 
     if fecha > today:
         raise LookupError("No se permiten prestaciones con fecha futura")
 
-    if fecha < today - datetime.timedelta(days=182):
+    if not ignorar_ventana and fecha < today - datetime.timedelta(days=182):
         raise LookupError("Prestación con más de 6 meses de atraso; use modo manual")
 
     medico = await db.get(ListadoMedico, medico_id)

@@ -5,8 +5,9 @@ Cuando un código está dado de alta en una O.S. pero todavía no tiene precio, 
 `detalle_facturacion.sin_valorizar` = los conceptos que hay que cotizar ("H", "G",
 "A"). Al cargar el precio (etapa 4 del nomenclador), esto recalcula las que
 siguen ABIERTAS (estado 'A'): mismo cálculo que la carga (`_insertar_prestaciones`)
-— precio del médico a la fecha de la práctica, concepto por concepto, porcentaje,
-gastos en 0 bajo sanatorio y coseguro sugerido.
+— precio del médico a la fecha de la práctica, concepto por concepto, porcentaje
+y coseguro sugerido. El cálculo por fila es el de `recotizar.py`, el mismo que usa
+el recálculo de factura.
 
 Las de períodos cerrados no se tocan. Con `dry_run` sólo informa antes/después.
 """
@@ -21,8 +22,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.cmc_facturacion import DetalleFacturacionCMC
-from app.modules.facturacion import service
-from app.modules.nomenclador import service_vias
+from app.modules.facturacion import recotizar
 
 
 class RevalorizarIn(BaseModel):
@@ -72,64 +72,45 @@ async def contar_pendientes(db: AsyncSession, cod_obra: str, codigo: str) -> int
     return len(await pendientes(db, cod_obra, codigo))
 
 
-async def _revalorizar_fila(db: AsyncSession, row: DetalleFacturacionCMC, aplicar: bool) -> RevalorizarItem:
-    conceptos = row.sin_valorizar or "HG"
+async def _revalorizar_fila(
+    db: AsyncSession, row: DetalleFacturacionCMC, aplicar: bool,
+    cache: Optional[recotizar.CacheCotizacion] = None,
+) -> RevalorizarItem:
+    """Mismo cálculo que el recálculo de factura (`recotizar.recotizar_fila`)."""
     base = dict(
         id=row.id_detalle_prestaciones, periodo=row.periodo, cod_med=row.cod_med,
-        fecha_practica=row.fecha_practica, conceptos=conceptos,
+        fecha_practica=row.fecha_practica, conceptos=row.sin_valorizar or "HG",
         importe_antes=row.importe_total or Decimal("0"),
     )
-    prestador = await service.resolver_prestador(
-        db, row.cod_med, None, row.cod_clinica, validar_clinica=False,
-    )
-    precio = await service.resolver_precio(
-        db, row.cod_obr, prestador.medico, row.cod_nom,
-        service.fecha_para_precio(row.fecha_practica),
-        via=row.via or service_vias.VIA_TRADICIONAL,
-    )
-    if not precio.admitido or precio.sin_precio:
-        return RevalorizarItem(**base, estado="sin_precio", motivo=precio.motivo or "Todavía sin precio")
-    if precio.por_presupuesto:
+    r = await recotizar.recotizar_fila(db, row, cache=cache)
+    if r.estado == "omitida":
         return RevalorizarItem(
-            **base, estado="error",
-            motivo="El código es por presupuesto: el monto se carga a mano en la prestación",
+            **base, estado="sin_precio" if r.sin_precio else "error",
+            motivo=r.motivo or "Todavía sin precio",
         )
-
-    hb = precio.honorarios if "H" in conceptos else Decimal("0")
-    gb = precio.gastos if "G" in conceptos else Decimal("0")
-    ab = precio.ayudante if "A" in conceptos else Decimal("0")
-    if await service._gasto_forzado_a_cero(db, row.cod_nom, prestador.es_sanatorio, "A", row.cod_obr):
-        gb = Decimal("0")
-    h, g, a = service._aplicar_porcentaje(hb, gb, ab, row.porc or 100)
-
-    es_pediatra = (row.tpo_funcion or "").upper() == service.TPO_FUNCION_PEDIATRA
-    # El coseguro es del acto: sólo lo lleva la fila del médico (no ayudante ni pediatra).
-    coseguro = Decimal("0") if (es_pediatra or "A" in conceptos) else (row.coseguro or precio.coseguro)
-    coseguro = min(coseguro, h + g + a)
-    total = service.calcular_importe_total(h, g, a, row.cantidad or 1, row.sesion or 1, coseguro=coseguro)
-
     if aplicar:
-        row.honorarios, row.gastos, row.ayudante = h, g, a
-        row.coseguro = coseguro
-        row.importe_total = total
-        row.calculo_snapshot = precio.snapshot
-        row.tpo_funcion = service.tpo_funcion_de(h, g, a, service.ROL_PEDIATRA if es_pediatra else None)
-        row.sin_valorizar = None
+        recotizar.aplicar(row, r)
     return RevalorizarItem(
-        **base, estado="revalorizada", honorarios=h, gastos=g, ayudante=a,
-        coseguro=coseguro, importe_despues=total,
+        **base, estado="revalorizada", honorarios=r.honorarios, gastos=r.gastos,
+        ayudante=r.ayudante, coseguro=r.coseguro, importe_despues=r.importe_total,
     )
 
 
 async def revalorizar(db: AsyncSession, body: RevalorizarIn) -> RevalorizarOut:
+    with recotizar.memo_por_corrida(db):
+        return await _revalorizar(db, body)
+
+
+async def _revalorizar(db: AsyncSession, body: RevalorizarIn) -> RevalorizarOut:
     filas = await pendientes(db, body.cod_obra, body.codigo)
     if body.ids is not None:
         pedidas = set(body.ids)
         filas = [f for f in filas if f.id_detalle_prestaciones in pedidas]
     items: list[RevalorizarItem] = []
+    cache = await recotizar.CacheCotizacion.para(db, body.cod_obra)
     for row in filas:
         try:
-            items.append(await _revalorizar_fila(db, row, aplicar=not body.dry_run))
+            items.append(await _revalorizar_fila(db, row, aplicar=not body.dry_run, cache=cache))
         except Exception as e:  # noqa: BLE001 — se informa por fila, no corta el resto
             items.append(RevalorizarItem(
                 id=row.id_detalle_prestaciones, periodo=row.periodo, cod_med=row.cod_med,

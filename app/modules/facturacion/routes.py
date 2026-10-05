@@ -11,7 +11,7 @@ from app.common.files import url_archivo
 from app.core.config import settings
 from app.db.database import get_db
 from app.db.models import ListadoMedico, NomencladorCMC, ObrasSociales
-from app.modules.facturacion import revalorizar as revalorizar_mod, service
+from app.modules.facturacion import recotizar as recotizar_mod, revalorizar as revalorizar_mod, service
 from app.modules.facturacion.schemas import (
     ActividadEventoOut,
     AfiliadoCreate,
@@ -534,6 +534,18 @@ async def revalorizar_prestaciones(
     por falta de precio, ahora que el código tiene precio. `dry_run` = vista previa
     (antes / después). Las de períodos cerrados no se tocan."""
     return await revalorizar_mod.revalorizar(db, body)
+
+
+@router.post("/recalcular-precios", response_model=recotizar_mod.RecalculoOut)
+async def recalcular_precios(
+    body: recotizar_mod.RecalculoIn, db: AsyncSession = Depends(get_db),
+):
+    """Recotiza con el precio vigente las prestaciones automáticas de una factura
+    ABIERTA (O.S. + período), o sólo las de un código. Fecha de la práctica (sin
+    fecha, hoy) y especialidad del médico, como la carga; las manuales y las que no
+    tienen precio quedan como están y se informan. `dry_run` = vista previa: no graba.
+    Cerrada o liquidada → 409."""
+    return await recotizar_mod.recalcular_precios(db, body)
 
 
 @router.post("/cierre", response_model=CierreResponse)

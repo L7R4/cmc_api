@@ -520,6 +520,9 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     ("POST", "/api/facturacion/periodo-medico/avanzar"): Scope.FACTURACION_PERIODO,
     ("POST", "/api/facturacion/periodo-medico/set"): Scope.FACTURACION_PERIODO,
     ("POST", "/api/facturacion/prestaciones/mover-periodo"): Scope.FACTURACION_PERIODO,
+    # Recotiza en bloque la factura abierta (o un código de ella): mismo criterio
+    # que mover de período o publicar, opera sobre la factura entera.
+    ("POST", "/api/facturacion/recalcular-precios"): Scope.FACTURACION_PERIODO,
     # Publica/despublica TODAS las filas de una OS+período: afecta a todos los
     # médicos con carga en ese período a la vez, mismo criterio que el resto de
     # las operaciones con FACTURACION_PERIODO.

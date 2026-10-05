@@ -34,12 +34,11 @@ from collections import Counter
 from decimal import Decimal
 from typing import Optional
 
-from fastapi import HTTPException
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.common.money import quantize_money
-from app.db.models import DetalleFacturacionCMC, ListadoMedico
+from app.db.models import DetalleFacturacionCMC
 from app.db.models.nomenclador_cmc import HistorialPrecioCodigo
 from app.modules.facturacion.service import (
     ORIGEN_COLEGIO,
@@ -55,7 +54,6 @@ from app.modules.importaciones.nucleo import (
     CERO,
     DETALLE_ACTIVO,
     DUPLICADA,
-    ELEGIR_SOCIO,
     GRABABLE,
     GRABADA,
     OMITIDA,
@@ -63,7 +61,6 @@ from app.modules.importaciones.nucleo import (
     VALIDACION_CARGADA,
 )
 from app.modules.importaciones.schemas import (
-    CandidatoSocio,
     FilaResultado,
     FilaUnne,
     ImportacionOut,
@@ -144,24 +141,6 @@ async def _divisiones_vigentes(
             for f in por_variante.values()]
 
 
-def sugerir_socio(candidatos: list[ListadoMedico], con_unne: set[int]) -> Optional[ListadoMedico]:
-    """Entre varios socios con la misma matrícula, el único activo que ya facturó UNNE."""
-    activos = [c for c in candidatos if (c.EXISTE or "").upper() == "S" and c.NRO_SOCIO in con_unne]
-    return activos[0] if len(activos) == 1 else None
-
-
-async def _socios_con_unne(db: AsyncSession, nros: set[int]) -> set[int]:
-    if not nros:
-        return set()
-    filas = (await db.execute(
-        select(DetalleFacturacionCMC.cod_med).where(
-            DetalleFacturacionCMC.cod_obr == str(NRO_UNNE),
-            DetalleFacturacionCMC.cod_med.in_([str(n) for n in nros]),
-        ).distinct()
-    )).scalars().all()
-    return {int(c) for c in filas if str(c).isdigit()}
-
-
 async def _ya_cargadas(db: AsyncSession, ordenes: set[str]) -> dict[tuple[str, str], list[tuple[int, str]]]:
     """(orden, código) → [(id, período)] de lo que ya está en la O.S. 81, sin anuladas."""
     if not ordenes:
@@ -181,10 +160,6 @@ async def _ya_cargadas(db: AsyncSession, ordenes: set[str]) -> dict[tuple[str, s
     return out
 
 
-def _candidatos(lista: list[ListadoMedico]) -> list[CandidatoSocio]:
-    return [CandidatoSocio(nro_socio=m.NRO_SOCIO, nombre=(m.NOMBRE or "").strip()) for m in lista]
-
-
 async def procesar(
     db: AsyncSession,
     *,
@@ -201,9 +176,10 @@ async def procesar(
     version_destino = cabecera.version if cabecera is not None else 1
 
     matriculas = {m for m in (nucleo.matricula_int(f.matricula) for f in filas) if m is not None}
-    candidatos = await nucleo.candidatos_por_matricula(db, matriculas)
-    elegidos = await nucleo.socios_por_nro(db, {f.nro_socio_elegido for f in filas if f.nro_socio_elegido})
-    con_unne = await _socios_con_unne(db, {m.NRO_SOCIO for lst in candidatos.values() if len(lst) > 1 for m in lst})
+    socios = await nucleo.indice_socios(
+        db, matriculas=matriculas, obra_social_nro=NRO_UNNE, etiqueta_os="UNNE",
+        elegidos={f.nro_socio_elegido for f in filas if f.nro_socio_elegido},
+    )
     existentes = await _ya_cargadas(db, {f.orden.strip() for f in filas if f.orden.strip()})
     # Cuántas veces está cargado cada (orden, código); se va descontando al recorrer.
     pendientes = Counter({k: len(v) for k, v in existentes.items()})
@@ -228,35 +204,9 @@ async def procesar(
             continue
 
         # ── Socio ──
-        mat = nucleo.matricula_int(f.matricula)
-        lista = candidatos.get(mat, []) if mat is not None else []
-        medico: Optional[ListadoMedico] = None
-        if f.nro_socio_elegido:
-            medico = elegidos.get(f.nro_socio_elegido)
-            if medico is None:
-                r.motivo = f"El socio elegido ({f.nro_socio_elegido}) no existe."
-                continue
-            if lista and medico.NRO_SOCIO not in {m.NRO_SOCIO for m in lista}:
-                r.motivo = f"El socio {medico.NRO_SOCIO} no tiene la matrícula {mat}."
-                continue
-        elif len(lista) == 1:
-            medico = lista[0]
-        elif len(lista) > 1:
-            medico = sugerir_socio(lista, con_unne)
-            if medico is not None:
-                r.aviso = f"La matrícula {mat} es de {len(lista)} socios: se usó el que ya factura UNNE."
+        medico = socios.resolver(r, f.matricula, f.nro_socio_elegido)
         if medico is None:
-            r.resultado = ELEGIR_SOCIO
-            r.candidatos = _candidatos(lista)
-            r.motivo = (
-                f"La matrícula {mat} es de {len(lista)} socios: elegí cuál."
-                if lista else f"Ningún socio tiene la matrícula {mat or f.matricula}: elegilo a mano."
-            )
             continue
-        r.nro_socio = medico.NRO_SOCIO
-        r.medico = (medico.NOMBRE or "").strip()
-        if len(lista) > 1:
-            r.candidatos = _candidatos(lista)
 
         if not f.codigo or f.fecha is None or not orden:
             r.motivo = "Falta el código, la fecha o el número de orden."
@@ -335,11 +285,7 @@ async def procesar(
         )))
 
     if grabar:
-        sin_socio = sum(1 for r in resultados if r.resultado == ELEGIR_SOCIO)
-        if sin_socio:
-            raise HTTPException(
-                422, f"Quedan {sin_socio} filas sin socio: elegilo o descartalas antes de confirmar.",
-            )
+        nucleo.falta_elegir(resultados)
         if a_grabar:
             for _, fila in a_grabar:
                 db.add(fila)

@@ -2,19 +2,26 @@
 
 ## El camino de una fila
 
-    matrícula del reporte → listado_medico          → sin médico, se omite
-    código del reporte    → nomenclador de la 103   → sin código, se omite
-    código + fecha        → resolver_precio         → sin precio, se omite
+    matrícula del reporte → listado_medico          → repetida o sin socio: elegir socio
+    código del reporte    → nomenclador de la O.S.  → sin código, se omite
+    código + fecha        → resolver_precio         → no admitido, se omite
     (autorización, código, fecha) ya cargada        → duplicada, se omite
     todo lo anterior OK                             → detalle_facturacion
+
+Se carga en la 103 o en la 888, la obra social de prueba (`OBRAS_SOCIALES`).
+
+Dos avisos que no impiden grabar: el código entra en $0 (no tiene precio a esa
+fecha), y el médico ya tiene ese código cargado a mano en el período — la
+carga manual va agrupada y sin autorización, así que el chequeo de duplicados
+no la reconoce.
 
 ## Por qué no reusa `grabar_prestacion`
 
 Es la misma tabla y los mismos valores fijos, pero `grabar_prestacion` está
 hecho para el panel del prestador: da por sentado que la prestación es del
 médico logueado, escribe `origen_carga='medico'` y hace un commit por fila.
-Acá el médico cambia en cada fila, la carga es del Colegio y las seiscientas
-filas tienen que entrar o no entrar juntas.
+Acá el médico cambia en cada fila, la carga es del Colegio y los cientos de
+filas tienen que entrar o no entrar juntos.
 
 Lo que sí se reusa es todo lo que decide montos —`resolver_precio`,
 `calcular_importe_total`, `derivar_tipo`, `tpo_funcion_derivado`— para que un
@@ -24,6 +31,7 @@ import logging
 import re
 from typing import Optional
 
+from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.common.money import quantize_money
@@ -54,7 +62,7 @@ from app.modules.importaciones.nucleo import (
     VALIDACION_CARGADA,
     VALIDACION_RECHAZADA,
 )
-from app.modules.importaciones.prevencion import NRO_PREVENCION
+from app.modules.importaciones.prevencion import NRO_PREVENCION, OBRAS_SOCIALES
 from app.modules.importaciones.schemas import (
     FilaReporte,
     FilaResultado,
@@ -72,6 +80,14 @@ def fue_rechazada(estado: str) -> bool:
     return bool(_RECHAZO.search(estado or ""))
 
 
+def _obra_social(nro: Optional[int]) -> int:
+    nro = nro or NRO_PREVENCION
+    if nro not in OBRAS_SOCIALES:
+        permitidas = ", ".join(str(n) for n in OBRAS_SOCIALES)
+        raise HTTPException(422, f"El reporte de Prevención sólo se carga en las O.S. {permitidas}.")
+    return nro
+
+
 async def procesar(
     db: AsyncSession,
     *,
@@ -79,6 +95,7 @@ async def procesar(
     periodo: Optional[str],
     usuario_carga: str,
     grabar: bool,
+    obra_social: Optional[int] = None,
 ) -> ImportacionOut:
     """Resuelve todas las filas y, si `grabar`, las asienta en un solo commit.
 
@@ -86,9 +103,11 @@ async def procesar(
     `periodo_medico_actual` de la obra social, que es el mismo que rige la
     carga manual.
     """
-    periodo_destino = periodo or await periodo_actual(db, NRO_PREVENCION)
+    nro = _obra_social(obra_social)
+    cod_obr = str(nro)
+    periodo_destino = periodo or await periodo_actual(db, nro)
 
-    cabecera = await _get_factura(db, str(NRO_PREVENCION), periodo_destino)
+    cabecera = await _get_factura(db, cod_obr, periodo_destino)
     # Actor `colegio`, no `medico`: importar es carga del Colegio, así que un
     # período con la fase médico cerrada sigue siendo válido. Lo que no se
     # puede es cargar en uno que el Colegio ya cerró o liquidó — ahí la factura
@@ -100,9 +119,16 @@ async def procesar(
         for m in (nucleo.matricula_int(f.matricula) for f in filas)
         if m is not None
     }
-    medicos = await nucleo.indice_medicos(db, matriculas)
+    socios = await nucleo.indice_socios(
+        db,
+        matriculas=matriculas,
+        elegidos={f.nro_socio_elegido for f in filas if f.nro_socio_elegido},
+        obra_social_nro=nro,
+        etiqueta_os=f"la O.S. {nro}",
+    )
     # Cuántas de cada clave ya están cargadas; se van descontando al recorrer.
-    pendientes = await nucleo.ya_cargadas(db, NRO_PREVENCION, periodo_destino)
+    pendientes = await nucleo.ya_cargadas(db, nro, periodo_destino)
+    a_mano = await nucleo.cargadas_a_mano(db, nro, periodo_destino)
 
     version_destino = cabecera.version if cabecera is not None else 1
 
@@ -122,29 +148,24 @@ async def procesar(
             estado_reporte=f.estado,
             matricula=f.matricula,
         )
+        resultados.append(r)
 
-        mat = nucleo.matricula_int(f.matricula)
-        medico = medicos.get(mat) if mat is not None else None
-        if medico is None:
-            r.motivo = (
-                "La matrícula no está informada en el reporte."
-                if mat is None
-                else f"Ninguna cuenta del Colegio tiene la matrícula {mat}."
-            )
-            resultados.append(r)
+        # Sin matrícula no se ofrece elegir: la elección vale para todas las
+        # filas de una matrícula, y "NO INFORMADO" mezcla médicos distintos.
+        if nucleo.matricula_int(f.matricula) is None:
+            r.motivo = "La matrícula no está informada en el reporte."
             continue
 
-        r.nro_socio = medico.NRO_SOCIO
-        r.medico = medico.NOMBRE or ""
+        medico = socios.resolver(r, f.matricula, f.nro_socio_elegido)
+        if medico is None:
+            continue
 
         if not f.codigo:
             r.motivo = "La práctica vino sin código en el reporte."
-            resultados.append(r)
             continue
 
         if f.fecha is None:
             r.motivo = "La fila no trae fecha de realización."
-            resultados.append(r)
             continue
 
         clave = (f.nro_autorizacion or "", f.codigo, f.fecha)
@@ -154,23 +175,18 @@ async def procesar(
             pendientes[clave] -= 1
             r.resultado = DUPLICADA
             r.motivo = f"Ya está cargada en el período {periodo_destino}."
-            resultados.append(r)
             continue
 
         try:
-            precio = await resolver_precio(
-                db, str(NRO_PREVENCION), medico, f.codigo, f.fecha
-            )
+            precio = await resolver_precio(db, cod_obr, medico, f.codigo, f.fecha)
         except Exception as e:  # noqa: BLE001 — el motivo va a la fila, no al log
-            r.motivo = f"No se pudo cotizar el código {f.codigo}: {e}"
-            resultados.append(r)
+            r.motivo = f"No se pudo cotizar el código {f.codigo}: {getattr(e, 'detail', e)}"
             continue
 
         rechazada = fue_rechazada(f.estado)
 
         if not rechazada and not precio.admitido:
             r.motivo = precio.motivo or f"El código {f.codigo} no está admitido."
-            resultados.append(r)
             continue
 
         # Lo que la obra social rechazó se registra, pero vale 0 y no entra a
@@ -178,6 +194,24 @@ async def procesar(
         honorarios = CERO if rechazada else quantize_money(precio.honorarios)
         gastos = CERO if rechazada else quantize_money(precio.gastos)
         total = calcular_importe_total(honorarios, gastos, CERO, 1, SESION_UNICA)
+
+        avisos = [r.aviso] if r.aviso else []
+        sin_precio = bool(precio.sin_precio) and not rechazada
+        if sin_precio:
+            avisos.append(
+                f"Entra en $0: el código no tiene precio en la O.S. {nro} a esa fecha. "
+                "Queda «sin valorizar» y se revaloriza al cargar el precio."
+            )
+        elif not rechazada and total <= 0:
+            avisos.append(f"Entra en $0: el precio cargado en la O.S. {nro} es $0.")
+        manual = a_mano.get((str(medico.NRO_SOCIO), f.codigo))
+        if manual:
+            n, cant = manual
+            avisos.append(
+                "El médico ya tiene este código cargado a mano en el período "
+                f"({n} {'fila' if n == 1 else 'filas'}, cantidad {cant}): revisá que no se duplique."
+            )
+        r.aviso = " ".join(avisos)
 
         r.honorarios = honorarios
         r.gastos = gastos
@@ -190,12 +224,12 @@ async def procesar(
 
         fila = DetalleFacturacionCMC(
             periodo=periodo_destino,
-            cod_obr=str(NRO_PREVENCION),
+            cod_obr=cod_obr,
             cod_med=str(medico.NRO_SOCIO),
             cod_nom=f.codigo,
             nro_orden="0",  # NOT NULL legacy; se iguala al PK después del flush
             tipo=await derivar_tipo(
-                db, f.codigo, TIPO_SANATORIO if medico.es_organizacion else None, str(NRO_PREVENCION)
+                db, f.codigo, TIPO_SANATORIO if medico.es_organizacion else None, cod_obr
             ),
             tpo_funcion=tpo_funcion_derivado(honorarios, gastos, CERO),
             sesion=SESION_UNICA,
@@ -207,7 +241,7 @@ async def procesar(
             coseguro=CERO,
             manual=CALCULO_AUTOMATICO,
             # El reporte da el nombre del afiliado, nunca su número: `dni_p`
-            # queda NULL, igual que en todo lo ya cargado de esta obra social.
+            # queda NULL.
             nom_ape_p=(f.afiliado or "")[:60] or None,
             fecha_practica=f.fecha,
             autorizacion=(f.nro_autorizacion or None),
@@ -217,13 +251,17 @@ async def procesar(
             usuario=usuario_carga[:15],
             version=version_destino,
             calculo_snapshot=precio.snapshot,
+            # Igual que la carga manual: lo que entra sin precio se marca para
+            # que «Revalorizar» lo cotice cuando el precio exista.
+            sin_valorizar="HG" if sin_precio else None,
             validacion_estado=VALIDACION_RECHAZADA if rechazada else VALIDACION_CARGADA,
             validacion_detalle=(f.estado or "")[:255],
         )
 
         a_grabar.append((r, fila))
-        resultados.append(r)
 
+    if grabar:
+        nucleo.falta_elegir(resultados)
     if grabar and a_grabar:
         for _, fila in a_grabar:
             db.add(fila)
@@ -233,9 +271,7 @@ async def procesar(
             r.id_detalle = fila.id_detalle_prestaciones
             r.resultado = GRABADA
         if hay_facturables:
-            await _ensure_factura_abierta(
-                db, str(NRO_PREVENCION), periodo_destino, usuario_carga[:15]
-            )
+            await _ensure_factura_abierta(db, cod_obr, periodo_destino, usuario_carga[:15])
         await db.commit()
 
     return ImportacionOut(
@@ -243,5 +279,5 @@ async def procesar(
     )
 
 
-async def periodos_disponibles(db: AsyncSession):
-    return await nucleo.periodos_disponibles(db, NRO_PREVENCION)
+async def periodos_disponibles(db: AsyncSession, obra_social: Optional[int] = None):
+    return await nucleo.periodos_disponibles(db, _obra_social(obra_social))

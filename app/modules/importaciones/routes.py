@@ -1,7 +1,8 @@
 """Endpoints de importación masiva. Ver el docstring del paquete."""
 import logging
+from typing import Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.deps import get_current_user
@@ -12,6 +13,7 @@ from app.modules.importaciones.unne import servicio as unne
 from app.modules.importaciones.schemas import (
     ImportacionIn,
     ImportacionOut,
+    ImportacionPrevencionIn,
     ImportacionUnneIn,
     PeriodosOut,
 )
@@ -28,6 +30,7 @@ def _usuario(user) -> str:
 
 @router.get("/prevencion/periodos", response_model=PeriodosOut)
 async def periodos_prevencion(
+    obra_social: Optional[int] = Query(None, description="103 (default) u 888, la de prueba"),
     db: AsyncSession = Depends(get_db),
     user=Depends(get_current_user),
 ):
@@ -37,12 +40,12 @@ async def periodos_prevencion(
     archivo ("21/07 al 20/08") cruza dos meses, así que derivarlo solo sería
     adivinar.
     """
-    return await prevencion.periodos_disponibles(db)
+    return await prevencion.periodos_disponibles(db, obra_social)
 
 
 @router.post("/prevencion/previsualizar", response_model=ImportacionOut)
 async def previsualizar_prevencion(
-    body: ImportacionIn,
+    body: ImportacionPrevencionIn,
     db: AsyncSession = Depends(get_db),
     user=Depends(get_current_user),
 ):
@@ -59,12 +62,13 @@ async def previsualizar_prevencion(
         periodo=body.periodo,
         usuario_carga=_usuario(user),
         grabar=False,
+        obra_social=body.obra_social,
     )
 
 
 @router.post("/prevencion/confirmar", response_model=ImportacionOut)
 async def confirmar_prevencion(
-    body: ImportacionIn,
+    body: ImportacionPrevencionIn,
     db: AsyncSession = Depends(get_db),
     user=Depends(get_current_user),
 ):
@@ -81,10 +85,12 @@ async def confirmar_prevencion(
         periodo=body.periodo,
         usuario_carga=usuario,
         grabar=True,
+        obra_social=body.obra_social,
     )
     log.info(
-        "Import Prevención: %s de %s filas grabadas en el período %s por el usuario %s "
+        "Import Prevención (O.S. %s): %s de %s filas grabadas en el período %s por el usuario %s "
         "(archivo %r, %s duplicadas, %s omitidas).",
+        body.obra_social,
         salida.resumen.grabables,
         salida.resumen.total,
         salida.resumen.periodo,

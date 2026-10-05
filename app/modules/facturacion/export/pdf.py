@@ -20,6 +20,7 @@ from app.modules.facturacion.export.armado import (
     ColumnaSpec,
     GrupoSocio,
     spec_columnas,
+    texto_subtotal_medico,
     valores_fila,
 )
 from app.modules.facturacion.export.encabezado import EncabezadoExport
@@ -298,9 +299,13 @@ def build_pdf_detalle(
             for linea in grupo.lineas:
                 if linea.subtitulo:
                     tabla.fila_texto_libre(linea.subtitulo, negrita=False)
+                if linea.subtitulo_clinica:
+                    tabla.fila_texto_libre(linea.subtitulo_clinica)
                 tabla.fila(valores_fila(cols, linea.fila))
                 for hijo in linea.hijos:
                     tabla.fila(valores_fila(cols, hijo, es_hijo=True))
+            if grupo.subtotal_medico:
+                tabla.fila_texto_libre(texto_subtotal_medico(grupo, moneda="$ "))
             if grupo.mostrar_resumen:
                 tabla.fila_texto_libre(_texto_resumen_socio(grupo))
                 hay_resumen_grupo = True

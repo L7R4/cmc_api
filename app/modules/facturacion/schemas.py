@@ -612,6 +612,7 @@ class PrestacionFacturaDetalleOut(BaseModel):
     periodo: str
     autorizacion: Optional[str] = None
     fecha_practica: Optional[datetime.date] = None   # fecha de la prestación (no de carga)
+    created: Optional[datetime.datetime] = None      # fecha/hora de CARGA (columna `created`)
     codigo: Optional[str] = None                     # cod_nom
     nro_afiliado: Optional[str] = None                # dni_p
     nombre_paciente: Optional[str] = None             # nom_ape_p
@@ -649,7 +650,7 @@ class PrestacionFacturaDetalleOut(BaseModel):
     def _num_to_str(cls, v):
         return str(v) if v is not None else v
 
-    @field_validator("fecha_practica", mode="before")
+    @field_validator("fecha_practica", "created", mode="before")
     @classmethod
     def _zero_date_to_none(cls, v):
         # MySQL puede devolver zero-dates ('0000-00-00') que no son fechas válidas.

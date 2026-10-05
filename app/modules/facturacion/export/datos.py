@@ -39,7 +39,7 @@ _COLUMNAS = (
     M.importe_total, M.coseguro, M.porc, M.dni_p, M.nom_ape_p,
     M.cod_clinica, M.fecha_practica, M.autorizacion, M.tipo, M.diag,
     M.grupo_equipo_id, M.id_especialidad, M.revisado, M.estado,
-    M.validacion_estado, M.tpo_funcion,
+    M.validacion_estado, M.tpo_funcion, M.created,
 )
 
 
@@ -72,6 +72,15 @@ class FilaExport:
     estado_validacion: Optional[str]
     revisado: bool
     grupo_equipo_id: Optional[int]
+    # Fecha/hora de CARGA (no de práctica).
+    created: Optional[datetime.datetime] = None
+    # Fila que los filtros dejaron afuera pero se trae igual porque es del equipo de una
+    # cabeza que sí está: el equipo va siempre completo bajo su cabeza. Si la cabeza no
+    # está en el documento, esta fila no se lista.
+    fuera_de_filtro: bool = False
+    # Clínica de la prestación (el ámbito, o el prestador en los Sanatorios).
+    cod_clinica: Optional[int] = None
+    clinica_nombre: Optional[str] = None
 
 
 async def _resolver_especialidades(db: AsyncSession, ids: set[int]) -> dict[int, str]:
@@ -164,6 +173,7 @@ async def obtener_filas_export(
     # equipo se ve agrupado siempre, no recortado por los filtros de fila.
     grupos_presentes = {r.grupo_equipo_id for r in filas_raw if r.grupo_equipo_id is not None}
     ids_presentes = {r.id_detalle_prestaciones for r in filas_raw}
+    ids_extra: set[int] = set()
     faltantes = grupos_presentes - ids_presentes
     if any(
         r.grupo_equipo_id is not None and r.grupo_equipo_id not in ids_presentes
@@ -176,11 +186,12 @@ async def obtener_filas_export(
             M.id_detalle_prestaciones.notin_(ids_presentes),
         )
         extra = (await db.execute(extra_stmt)).all()
+        ids_extra = {r.id_detalle_prestaciones for r in extra}
         filas_raw.extend(extra)
 
     if not filas_raw:
         return []
-    return await _materializar_filas(db, filas_raw, opciones)
+    return await _materializar_filas(db, filas_raw, opciones, ids_extra)
 
 
 async def obtener_filas_export_por_medico(
@@ -219,6 +230,7 @@ async def obtener_filas_export_por_medico(
 
 async def _materializar_filas(
     db: AsyncSession, filas_raw: list, opciones: ExportOpciones,
+    ids_extra: Optional[set[int]] = None,
 ) -> list[FilaExport]:
     """Convierte las filas crudas (Core) en `FilaExport`: resuelve el prestador
     (socio/matrícula/nombre), la especialidad y el tipo, y aplica el filtro de
@@ -229,6 +241,9 @@ async def _materializar_filas(
         v = _cod_medico_a_int(r.cod_med)
         if v:
             nros.add(v)
+        c = _cod_medico_a_int(r.cod_clinica)  # 0 = sentinel legacy "sin clínica"
+        if c:
+            nros.add(c)
     medicos: dict[str, ListadoMedico] = {}
     if nros:
         med_rows = (await db.execute(
@@ -257,6 +272,8 @@ async def _materializar_filas(
             r.tipo, r.cod_nom, r.cod_clinica,
             bool(medico.es_organizacion) if medico else False,
         )
+        cod_clinica = _cod_medico_a_int(r.cod_clinica) or None
+        clinica = medicos.get(str(cod_clinica)) if cod_clinica else None
         filas.append(FilaExport(
             id=r.id_detalle_prestaciones,
             cod_medico=cod_medico,
@@ -285,22 +302,20 @@ async def _materializar_filas(
             estado_validacion=r.validacion_estado,
             revisado=bool(r.revisado),
             grupo_equipo_id=r.grupo_equipo_id,
+            created=r.created,
+            fuera_de_filtro=bool(ids_extra) and r.id_detalle_prestaciones in ids_extra,
+            cod_clinica=cod_clinica,
+            clinica_nombre=clinica.NOMBRE if clinica else None,
         ))
 
     if opciones.tipos:
         tipos_set = set(opciones.tipos)
-        # El filtro de tipo respeta el equipo: si la cabeza matchea, sus hijos
-        # se conservan aunque su propio `tipo` derivado no matchee (no debería
-        # pasar en la práctica, pero es más seguro que partir un equipo a la mitad).
-        cabezas_ok = {
-            f.id for f in filas
-            if f.grupo_equipo_id == f.id and f.tipo in tipos_set
-        }
-        filas = [
-            f for f in filas
-            if f.tipo in tipos_set
-            or (f.grupo_equipo_id is not None and f.grupo_equipo_id in cabezas_ok)
-        ]
+        # Igual que la vista: el filtro de tipo se aplica fila por fila. Las que no matchean
+        # y son de un equipo se conservan marcadas, para poder mostrarlas bajo su cabeza.
+        for f in filas:
+            if f.tipo not in tipos_set:
+                f.fuera_de_filtro = True
+        filas = [f for f in filas if not f.fuera_de_filtro or f.grupo_equipo_id is not None]
 
     return filas
 

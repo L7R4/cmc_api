@@ -4,14 +4,18 @@ Separado de `facturacion/schemas.py` porque es un dominio propio (opciones de
 render, no de negocio) que además alimenta la tabla de presets.
 """
 import datetime
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 OrdenExport = Literal[
-    "nombre_socio", "nro_socio", "fecha_practica", "codigo",
-    "importe_desc", "nombre_afiliado", "especialidad",
+    "nombre_socio", "nro_socio", "fecha_practica", "fecha_carga", "codigo",
+    "importe", "importe_desc", "nombre_afiliado", "especialidad",
 ]
+
+# Sentido del criterio de orden (igual que la vista del listado). `importe_desc` es el
+# valor histórico (siempre de mayor a menor) y no depende de esto.
+DireccionExport = Literal["asc", "desc"]
 
 AgrupacionExport = Literal["todo_junto", "por_tipo", "por_socio", "plana"]
 
@@ -50,7 +54,12 @@ class ExportOpciones(BaseModel):
     o resueltas desde un preset guardado."""
 
     orden: OrdenExport = "nombre_socio"
+    direccion: DireccionExport = "asc"
     agrupacion: AgrupacionExport = "todo_junto"
+    # Como la opción "Agrupar equipo" de la vista: el equipo (ayudante/gastos/pediatra) va
+    # ÚNICAMENTE bajo la fila de su cirujano y cuenta en su grupo. Apagado, cada integrante
+    # es una línea común de su propio socio.
+    agrupar_equipo: bool = True
 
     columnas: list[ColumnaExport] = Field(default_factory=lambda: list(COLUMNAS_DEFAULT))
 
@@ -63,17 +72,37 @@ class ExportOpciones(BaseModel):
     tipos: Optional[list[TipoPrestacion]] = None
 
 
+# "vista": configuración de la VISTA del listado (agrupación, orden, filtros, columnas…).
+# El export sale como se ve, así que los presets se guardan por vista. "detalle" es el
+# formato anterior (opciones del panel de exportar) y se conserva sólo para lo ya guardado.
+TipoDocumentoPreset = Literal["detalle", "caratula", "vista"]
+
+# Claves que guarda un preset de vista (espejo de `VistaOpciones` del front).
+CLAVES_PRESET_VISTA = {
+    "orden", "direccion", "agrupacion", "agruparEquipo", "columnas",
+    "fecha_desde", "fecha_hasta", "id_especialidad", "cod_medicos", "revisado", "tipos",
+}
+
+
 class PresetIn(BaseModel):
     nombre: str = Field(min_length=1, max_length=120)
-    tipo_documento: Literal["detalle", "caratula"]
-    opciones: ExportOpciones
+    tipo_documento: TipoDocumentoPreset
+    opciones: dict[str, Any]
+
+    @model_validator(mode="after")
+    def _validar_opciones(self):
+        if self.tipo_documento == "detalle":
+            self.opciones = ExportOpciones(**self.opciones).model_dump(mode="json")
+        elif self.tipo_documento == "vista":
+            self.opciones = {k: v for k, v in self.opciones.items() if k in CLAVES_PRESET_VISTA}
+        return self
 
 
 class PresetOut(BaseModel):
     id: int
     nombre: str
-    tipo_documento: Literal["detalle", "caratula"]
-    opciones: ExportOpciones
+    tipo_documento: TipoDocumentoPreset
+    opciones: dict[str, Any]
     created_at: datetime.datetime
 
     class Config:

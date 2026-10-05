@@ -1242,6 +1242,24 @@ def _aplicar_porcentaje(
     )
 
 
+async def _tipo_de_la_cabeza(db: AsyncSession, row: DetalleFacturacionCMC) -> Optional[str]:
+    """`tipo` de la cabeza del equipo si `row` es un integrante (ayudante, pediatra…); None
+    si la fila no es de un equipo o es la propia cabeza."""
+    if row.grupo_equipo_id is None or row.grupo_equipo_id == row.id_detalle_prestaciones:
+        return None
+    cabeza = await db.get(DetalleFacturacionCMC, row.grupo_equipo_id)
+    return cabeza.tipo if cabeza is not None else None
+
+
+def es_solo_ayudante(h: Decimal, g: Decimal, a: Decimal, sin_valorizar: Optional[str] = None) -> bool:
+    """La fila factura ÚNICAMENTE el concepto ayudante (sin honorarios ni gastos). Una
+    fila cargada sin precio tiene los montos en 0 y el concepto lo dice `sin_valorizar`
+    (p. ej. "A"); si no, se mira qué monto quedó > 0."""
+    if sin_valorizar:
+        return set(sin_valorizar) == {"A"}
+    return a > 0 and h <= 0 and g <= 0
+
+
 def tpo_funcion_derivado(h: Decimal, g: Decimal, a: Decimal) -> str:
     """Deriva el `tpo_funcion` legacy (H/HG/G/A) de qué montos son > 0, solo para que
     liquidación y lotes (que aún leen esa columna) sigan funcionando durante la
@@ -1557,6 +1575,15 @@ async def _insertar_prestaciones(
         # en 0, pero el operador los puede corregir: acá se respeta lo que mandó (en
         # automático, gastos=0 ya deja el concepto afuera — ver `_montos_de_item`).
         h, g, a = _aplicar_porcentaje(h_base, g_base, a_base, item.porcentaje)
+        if item.grupo_equipo_id is not None:
+            # Se suma a un equipo ya guardado: lleva el mismo tipo que su cabeza.
+            cabeza_guardada = await db.get(DetalleFacturacionCMC, item.grupo_equipo_id)
+            if cabeza_guardada is not None and cabeza_guardada.tipo:
+                tipo = cabeza_guardada.tipo
+        elif es_solo_ayudante(h, g, a, sin_valorizar):
+            # Una fila que factura sólo el concepto ayudante, sin equipo, es Honorarios
+            # individuales (no importa la categoría del código ni si hay clínica de por medio).
+            tipo = CATEGORIA_HONORARIOS_INDIVIDUALES
         # El coseguro es del acto, no de cada prestador: sólo la fila del cirujano lo
         # lleva. El pediatra cotiza su propio código, que puede traer coseguro propio:
         # se descarta igual que en la fila de ayudante. No se escala por `porcentaje`.
@@ -1634,9 +1661,15 @@ async def _insertar_prestaciones(
     # fila del médico (cabeza). El médico también queda con grupo = su propio id, así
     # `WHERE grupo_equipo_id = <id>` trae todo el equipo.
     if len(items) > 1 and cabeza_id is not None:
+        cabeza_row = next(r for r in filas if r.id_detalle_prestaciones == cabeza_id)
         for row in filas:
             if row.grupo_equipo_id is None:
                 row.grupo_equipo_id = cabeza_id
+            # Cada integrante (ayudante, pediatra) se guarda con el MISMO tipo que la cabeza:
+            # sólo la fila de la cabeza sabe si la clínica fue el prestador (Sanatorio); el
+            # resto se carga como médico y por su cuenta saldría por el rango del código.
+            if row.grupo_equipo_id == cabeza_id and row.id_detalle_prestaciones != cabeza_id and cabeza_row.tipo:
+                row.tipo = cabeza_row.tipo
 
     # Cabecera de facturación abierta para la OS+período. Idempotente: para la carga
     # normal la crea si es la primera prestación del período; para la complementaria
@@ -1861,6 +1894,7 @@ async def obtener_factura_detalle(db: AsyncSession, factura_id: int) -> dict:
             "periodo": r.periodo,
             "autorizacion": r.autorizacion,
             "fecha_practica": r.fecha_practica,
+            "created": r.created,
             "codigo": r.cod_nom,
             "nro_afiliado": r.dni_p,
             "nombre_paciente": r.nom_ape_p,
@@ -2509,6 +2543,7 @@ async def editar_prestacion(
         row.tipo_orden = prestador.tipo_orden
         row.cod_med_ejecutor = None  # ya no se persiste (ver resolver_prestador)
 
+        tipo_antes = row.tipo
         # Recalcular `tipo` si cambió el prestador (clínica/ámbito), el código (su categoría)
         # o la OS (la categoría/override puede ser propio de cada obra social).
         if cambio_prestador or "cod_nomenclador" in data or "cod_obra_social" in data:
@@ -2586,6 +2621,27 @@ async def editar_prestacion(
         h_final = row.honorarios or Decimal("0")
         g_final = row.gastos or Decimal("0")
         a_final = row.ayudante or Decimal("0")
+        # Un integrante del equipo lleva siempre el tipo de su cabeza. Fuera de un equipo, la
+        # fila que factura sólo el ayudante es Honorarios individuales; si el PATCH cambió los
+        # montos y ya no lo es, vuelve a la categoría que le corresponde.
+        tipo_cabeza = await _tipo_de_la_cabeza(db, row)
+        if tipo_cabeza:
+            row.tipo = tipo_cabeza
+        elif es_solo_ayudante(h_final, g_final, a_final, row.sin_valorizar):
+            row.tipo = CATEGORIA_HONORARIOS_INDIVIDUALES
+        elif pricing_keys & data.keys():
+            row.tipo = await derivar_tipo(db, row.cod_nom, prestador.tipo, row.cod_obr)
+        # Si cambió el tipo de la cabeza (p. ej. pasó a Sanatorio), el equipo la sigue.
+        if row.grupo_equipo_id == row.id_detalle_prestaciones and row.tipo != tipo_antes:
+            integrantes = (await db.execute(
+                select(DetalleFacturacionCMC).where(
+                    DetalleFacturacionCMC.grupo_equipo_id == row.id_detalle_prestaciones,
+                    DetalleFacturacionCMC.id_detalle_prestaciones != row.id_detalle_prestaciones,
+                    DetalleFacturacionCMC.estado != "X",
+                )
+            )).scalars().all()
+            for integrante in integrantes:
+                integrante.tipo = row.tipo
         coseguro_final = row.coseguro or Decimal("0")
         if coseguro_final > h_final + g_final + a_final:
             raise HTTPException(422, "El coseguro no puede superar el valor de la prestación")

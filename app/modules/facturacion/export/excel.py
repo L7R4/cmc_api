@@ -20,6 +20,7 @@ from app.modules.facturacion.export.armado import (
     ColumnaSpec,
     GrupoSocio,
     spec_columnas,
+    texto_subtotal_medico,
     valores_fila,
 )
 from app.modules.facturacion.export.encabezado import EncabezadoExport
@@ -116,6 +117,10 @@ def _fila_resumen_socio(ws, grupo: GrupoSocio) -> None:
     ws.append([_celda(ws, texto, negrita=True)])
 
 
+def _fila_subtotal_medico(ws, grupo: GrupoSocio) -> None:
+    ws.append([_celda(ws, texto_subtotal_medico(grupo), negrita=True)])
+
+
 def _fila_subtotal_seccion(ws, titulo: Optional[str], total) -> None:
     etiqueta = f"SUBTOTAL {titulo}" if titulo else "SUBTOTAL"
     ws.append([_celda(ws, etiqueta, negrita=True), _celda(ws, total, negrita=True, numero=True, alineacion="R")])
@@ -170,9 +175,13 @@ def build_excel_detalle(armado: Armado, opciones: ExportOpciones, encabezado: En
             for linea in grupo.lineas:
                 if linea.subtitulo:
                     ws.append([_celda(ws, linea.subtitulo, cursiva=True)])
+                if linea.subtitulo_clinica:
+                    ws.append([_celda(ws, linea.subtitulo_clinica, negrita=True)])
                 _fila_dato(ws, cols, linea.fila)
                 for hijo in linea.hijos:
                     _fila_dato(ws, cols, hijo, es_hijo=True)
+            if grupo.subtotal_medico:
+                _fila_subtotal_medico(ws, grupo)
             if grupo.mostrar_resumen:
                 _fila_resumen_socio(ws, grupo)
                 hay_resumen_grupo = True

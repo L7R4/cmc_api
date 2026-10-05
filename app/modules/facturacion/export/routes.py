@@ -31,6 +31,7 @@ from app.modules.facturacion.export.schemas import (
     COLUMNAS_DEFAULT_POR_MEDICO,
     AgrupacionExport,
     ColumnaExport,
+    DireccionExport,
     ExportOpciones,
     OrdenExport,
     PresetIn,
@@ -45,6 +46,8 @@ logger = logging.getLogger(__name__)
 async def _resolver_opciones(
     preset_id: Optional[int] = Query(None, description="Ignora el resto de los parámetros si viene"),
     orden: OrdenExport = Query("nombre_socio"),
+    direccion: DireccionExport = Query("asc"),
+    agrupar_equipo: bool = Query(True),
     agrupacion: AgrupacionExport = Query("todo_junto"),
     columnas: Optional[list[ColumnaExport]] = Query(None),
     fecha_desde: Optional[datetime.date] = Query(None),
@@ -60,10 +63,12 @@ async def _resolver_opciones(
         preset = await db.get(ExportPreset, preset_id)
         if preset is None or preset.usuario != str(user["nro_socio"]):
             raise HTTPException(404, "Preset no encontrado")
+        if preset.tipo_documento != "detalle":
+            raise HTTPException(422, "Ese preset es de la vista del listado, no del exportable")
         return ExportOpciones(**preset.opciones)
 
     return ExportOpciones(
-        orden=orden, agrupacion=agrupacion, columnas=columnas or list(COLUMNAS_DEFAULT),
+        orden=orden, direccion=direccion, agrupar_equipo=agrupar_equipo, agrupacion=agrupacion, columnas=columnas or list(COLUMNAS_DEFAULT),
         fecha_desde=fecha_desde, fecha_hasta=fecha_hasta, id_especialidad=id_especialidad,
         cod_medicos=cod_medicos, revisado=revisado, tipos=tipos,
     )
@@ -72,6 +77,8 @@ async def _resolver_opciones(
 async def _resolver_opciones_medico(
     preset_id: Optional[int] = Query(None, description="Ignora el resto de los parámetros si viene"),
     orden: OrdenExport = Query("nombre_socio"),
+    direccion: DireccionExport = Query("asc"),
+    agrupar_equipo: bool = Query(True),
     agrupacion: AgrupacionExport = Query("todo_junto"),
     columnas: Optional[list[ColumnaExport]] = Query(None),
     fecha_desde: Optional[datetime.date] = Query(None),
@@ -92,10 +99,12 @@ async def _resolver_opciones_medico(
         preset = await db.get(ExportPreset, preset_id)
         if preset is None or preset.usuario != str(user["nro_socio"]):
             raise HTTPException(404, "Preset no encontrado")
+        if preset.tipo_documento != "detalle":
+            raise HTTPException(422, "Ese preset es de la vista del listado, no del exportable")
         return ExportOpciones(**preset.opciones)
 
     return ExportOpciones(
-        orden=orden, agrupacion=agrupacion, columnas=columnas or list(COLUMNAS_DEFAULT_POR_MEDICO),
+        orden=orden, direccion=direccion, agrupar_equipo=agrupar_equipo, agrupacion=agrupacion, columnas=columnas or list(COLUMNAS_DEFAULT_POR_MEDICO),
         fecha_desde=fecha_desde, fecha_hasta=fecha_hasta, id_especialidad=id_especialidad,
         cod_medicos=cod_medicos, revisado=revisado, tipos=tipos,
     )
@@ -260,7 +269,7 @@ async def crear_preset(
     preset = ExportPreset(
         usuario=str(user["nro_socio"]), nombre=payload.nombre,
         tipo_documento=payload.tipo_documento,
-        opciones=payload.opciones.model_dump(mode="json"),
+        opciones=payload.opciones,
     )
     db.add(preset)
     await db.commit()

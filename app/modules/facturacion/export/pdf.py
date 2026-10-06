@@ -5,8 +5,8 @@ del orden de 300.000 operaciones de trazo y llevan el documento a minutos. Acá
 el contenido se escribe con `cell(..., border=0)` (la librería resuelve la
 alineación, sin el costo del borde) y la grilla se dibuja aparte, en lote: una
 línea horizontal por FILA (no por celda) y las verticales una única vez por
-página. Sin colores de relleno ni fuentes embebidas — se imprime en blanco y
-negro.
+página. Sin fuentes embebidas y sin colores de relleno, salvo el celeste suave del
+subtítulo de cada paciente (son pocas filas) — se imprime bien en blanco y negro.
 """
 from decimal import Decimal
 from typing import Optional
@@ -21,6 +21,7 @@ from app.modules.facturacion.export.armado import (
     GrupoSocio,
     spec_columnas,
     texto_subtotal_medico,
+    texto_total_paciente,
     valores_fila,
 )
 from app.modules.facturacion.export.encabezado import EncabezadoExport
@@ -31,6 +32,7 @@ _SIZE_DATO = 6.5
 _SIZE_HEADER_COL = 6.5
 _ALTO_FILA = 4.4
 _MAP_ALIGN = {"L": "L", "C": "C", "R": "R"}
+_RELLENO_PACIENTE = (224, 242, 254)
 _ELLIPSIS = "..."  # no "…": fuera de Latin-1, rompe las fuentes core de fpdf2.
 
 
@@ -153,7 +155,7 @@ class _Tabla:
             pdf.ln(0.5)
             pdf.set_x(self.x0)
             pdf.set_font(_FONT, "B", 9)
-            pdf.cell(self.x1 - self.x0, 5, titulo_seccion, align="L", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+            pdf.cell(self.x1 - self.x0, 5, titulo_seccion, align="C", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
         pdf.ln(1)
 
         pdf.set_font(_FONT, "B", _SIZE_HEADER_COL)
@@ -221,7 +223,9 @@ class _Tabla:
         pdf.set_xy(self.x0, y_fin)
         self._limites_fila.append(y_fin)
 
-    def fila_texto_libre(self, texto: str, negrita: bool = True) -> None:
+    def fila_texto_libre(
+        self, texto: str, negrita: bool = True, centrado: bool = False, relleno: tuple | None = None,
+    ) -> None:
         self.asegurar_pagina()
         pdf = self.pdf
         # Cierra el tramo de columnas actual justo antes de esta fila combinada
@@ -230,7 +234,12 @@ class _Tabla:
         self._cerrar_segmento_columnas(pdf.get_y())
         pdf.set_font(_FONT, "B" if negrita else "I", _SIZE_DATO)
         pdf.set_xy(self.x0, pdf.get_y())
-        pdf.multi_cell(self.x1 - self.x0, _ALTO_FILA, texto, align="L", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        if relleno is not None:
+            pdf.set_fill_color(*relleno)
+        pdf.multi_cell(
+            self.x1 - self.x0, _ALTO_FILA, texto, align="C" if centrado else "L",
+            fill=relleno is not None, new_x=XPos.LMARGIN, new_y=YPos.NEXT,
+        )
         y_fin = pdf.get_y()
         pdf.set_xy(self.x0, y_fin)
         self._limites_fila.append(y_fin)
@@ -298,12 +307,16 @@ def build_pdf_detalle(
                 tabla.fila_texto_libre(grupo.titulo)
             for linea in grupo.lineas:
                 if linea.subtitulo:
-                    tabla.fila_texto_libre(linea.subtitulo, negrita=False)
+                    tabla.fila_texto_libre(linea.subtitulo, negrita=False, centrado=True)
                 if linea.subtitulo_clinica:
-                    tabla.fila_texto_libre(linea.subtitulo_clinica)
+                    tabla.fila_texto_libre(linea.subtitulo_clinica, centrado=True)
+                if linea.subtitulo_paciente:
+                    tabla.fila_texto_libre(linea.subtitulo_paciente, centrado=True, relleno=_RELLENO_PACIENTE)
                 tabla.fila(valores_fila(cols, linea.fila))
                 for hijo in linea.hijos:
                     tabla.fila(valores_fila(cols, hijo, es_hijo=True))
+                if linea.total_paciente:
+                    tabla.fila_texto_libre(texto_total_paciente(linea, moneda="$ "))
             if grupo.subtotal_medico:
                 tabla.fila_texto_libre(texto_subtotal_medico(grupo, moneda="$ "))
             if grupo.mostrar_resumen:

@@ -18,7 +18,7 @@ from decimal import Decimal
 from typing import Optional
 
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import (
@@ -29,6 +29,7 @@ from app.db.models import (
     ObrasSociales,
 )
 from app.modules.facturacion import service
+from app.modules.facturacion.equipo import CandidatoEquipo, clave_paciente, inferir_equipos
 from app.modules.facturacion.export.schemas import ExportOpciones
 
 M = DetalleFacturacionCMC
@@ -141,6 +142,53 @@ def _tipo_de(
     return service.tipo_por_codigo(cod_nom) or service.TIPO_CONSULTA
 
 
+async def _equipos_inferidos(db: AsyncSession, factura: FacturacionCMC) -> dict[int, int]:
+    """Ayudantes/pediatras cargados SIN grupo → su médico de cabecera (ver `equipo.py`).
+    Se calcula sobre TODA la factura, sin los filtros del usuario: la cabeza decide si el
+    equipo entra, así que hay que conocerla aunque el filtro la deje afuera. Sólo se
+    hace si hay algún integrante suelto, y con las columnas mínimas."""
+    base = [
+        M.cod_obr == factura.cod_obr, M.periodo == factura.periodo,
+        M.version == factura.version, M.estado != "X",
+    ]
+    hay_sueltos = (await db.execute(
+        select(M.id_detalle_prestaciones)
+        .where(*base, M.grupo_equipo_id.is_(None), or_(M.ayudante > 0, M.tpo_funcion == service.TPO_FUNCION_PEDIATRA))
+        .limit(1)
+    )).first()
+    if hay_sueltos is None:
+        return {}
+    filas = (await db.execute(select(
+        M.id_detalle_prestaciones, M.cod_med, M.cod_clinica, M.cod_nom, M.honorarios, M.gastos,
+        M.ayudante, M.tpo_funcion, M.dni_p, M.nom_ape_p, M.fecha_practica, M.grupo_equipo_id,
+    ).where(*base))).all()
+    return inferir_equipos([
+        CandidatoEquipo(
+            id=r.id_detalle_prestaciones, cod_medico=str(r.cod_med),
+            cod_clinica=_cod_medico_a_int(r.cod_clinica) or None,
+            codigo=str(r.cod_nom) if r.cod_nom is not None else None,
+            tipo_prestador=service._derivar_tipo_prestador(
+                service._dec(r.honorarios), service._dec(r.gastos), service._dec(r.ayudante), r.tpo_funcion,
+            ),
+            paciente=clave_paciente(r.dni_p, r.nom_ape_p), fecha_practica=r.fecha_practica,
+            grupo_equipo_id=r.grupo_equipo_id,
+        )
+        for r in filas
+    ])
+
+
+def _grupo_efectivo(
+    id_: int, grupo: Optional[int], virtual: dict[int, int], cabezas_virtuales: set[int],
+) -> Optional[int]:
+    """`grupo_equipo_id` real, o el inferido: el integrante suelto apunta a su cabeza y la
+    cabeza inferida a sí misma (igual que una cabeza real)."""
+    if grupo is not None:
+        return grupo
+    if id_ in virtual:
+        return virtual[id_]
+    return id_ if id_ in cabezas_virtuales else None
+
+
 async def obtener_filas_export(
     db: AsyncSession, factura: FacturacionCMC, opciones: ExportOpciones,
 ) -> list[FilaExport]:
@@ -171,18 +219,24 @@ async def obtener_filas_export(
     # Equipo quirúrgico: si un filtro (ej. cod_medicos) dejó afuera al ayudante
     # o a la cabeza, se completa el equipo entero — el usuario decidió que el
     # equipo se ve agrupado siempre, no recortado por los filtros de fila.
-    grupos_presentes = {r.grupo_equipo_id for r in filas_raw if r.grupo_equipo_id is not None}
+    virtual = await _equipos_inferidos(db, factura)
+    cabezas_virtuales = set(virtual.values())
+    grupos_presentes = {
+        g for r in filas_raw
+        if (g := _grupo_efectivo(r.id_detalle_prestaciones, r.grupo_equipo_id, virtual, cabezas_virtuales)) is not None
+    }
     ids_presentes = {r.id_detalle_prestaciones for r in filas_raw}
     ids_extra: set[int] = set()
-    faltantes = grupos_presentes - ids_presentes
-    if any(
-        r.grupo_equipo_id is not None and r.grupo_equipo_id not in ids_presentes
-        for r in filas_raw
-    ) or faltantes:
+    if grupos_presentes:
+        integrantes_virtuales = [m for m, cabeza in virtual.items() if cabeza in grupos_presentes]
         extra_stmt = select(*_COLUMNAS).where(
             M.cod_obr == factura.cod_obr, M.periodo == factura.periodo,
             M.version == factura.version, M.estado != "X",
-            M.grupo_equipo_id.in_(grupos_presentes),
+            or_(
+                M.grupo_equipo_id.in_(grupos_presentes),
+                M.id_detalle_prestaciones.in_(grupos_presentes),  # la cabeza inferida
+                M.id_detalle_prestaciones.in_(integrantes_virtuales or [0]),
+            ),
             M.id_detalle_prestaciones.notin_(ids_presentes),
         )
         extra = (await db.execute(extra_stmt)).all()
@@ -191,7 +245,7 @@ async def obtener_filas_export(
 
     if not filas_raw:
         return []
-    return await _materializar_filas(db, filas_raw, opciones, ids_extra)
+    return await _materializar_filas(db, filas_raw, opciones, ids_extra, virtual)
 
 
 async def obtener_filas_export_por_medico(
@@ -230,7 +284,7 @@ async def obtener_filas_export_por_medico(
 
 async def _materializar_filas(
     db: AsyncSession, filas_raw: list, opciones: ExportOpciones,
-    ids_extra: Optional[set[int]] = None,
+    ids_extra: Optional[set[int]] = None, virtual: Optional[dict[int, int]] = None,
 ) -> list[FilaExport]:
     """Convierte las filas crudas (Core) en `FilaExport`: resuelve el prestador
     (socio/matrícula/nombre), la especialidad y el tipo, y aplica el filtro de
@@ -258,6 +312,8 @@ async def _materializar_filas(
         db, {str(r.cod_obr) for r in filas_raw if r.cod_obr}
     )
 
+    virtual = virtual or {}
+    cabezas_virtuales = set(virtual.values())
     filas: list[FilaExport] = []
     for r in filas_raw:
         cod_medico = str(r.cod_med)
@@ -301,7 +357,7 @@ async def _materializar_filas(
             especialidad_nombre=especialidades.get(r.id_especialidad),
             estado_validacion=r.validacion_estado,
             revisado=bool(r.revisado),
-            grupo_equipo_id=r.grupo_equipo_id,
+            grupo_equipo_id=_grupo_efectivo(r.id_detalle_prestaciones, r.grupo_equipo_id, virtual, cabezas_virtuales),
             created=r.created,
             fuera_de_filtro=bool(ids_extra) and r.id_detalle_prestaciones in ids_extra,
             cod_clinica=cod_clinica,

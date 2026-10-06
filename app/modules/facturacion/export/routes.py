@@ -33,6 +33,7 @@ from app.modules.facturacion.export.schemas import (
     ColumnaExport,
     DireccionExport,
     ExportOpciones,
+    OrdenAlfabeticoExport,
     OrdenExport,
     PresetIn,
     PresetOut,
@@ -48,6 +49,8 @@ async def _resolver_opciones(
     orden: OrdenExport = Query("nombre_socio"),
     direccion: DireccionExport = Query("asc"),
     agrupar_equipo: bool = Query(True),
+    orden_honorarios: OrdenAlfabeticoExport = Query("medico"),
+    orden_sanatorio: OrdenAlfabeticoExport = Query("medico"),
     agrupacion: AgrupacionExport = Query("todo_junto"),
     columnas: Optional[list[ColumnaExport]] = Query(None),
     fecha_desde: Optional[datetime.date] = Query(None),
@@ -68,7 +71,8 @@ async def _resolver_opciones(
         return ExportOpciones(**preset.opciones)
 
     return ExportOpciones(
-        orden=orden, direccion=direccion, agrupar_equipo=agrupar_equipo, agrupacion=agrupacion, columnas=columnas or list(COLUMNAS_DEFAULT),
+        orden=orden, direccion=direccion, agrupar_equipo=agrupar_equipo,
+        orden_honorarios=orden_honorarios, orden_sanatorio=orden_sanatorio, agrupacion=agrupacion, columnas=columnas or list(COLUMNAS_DEFAULT),
         fecha_desde=fecha_desde, fecha_hasta=fecha_hasta, id_especialidad=id_especialidad,
         cod_medicos=cod_medicos, revisado=revisado, tipos=tipos,
     )
@@ -79,6 +83,8 @@ async def _resolver_opciones_medico(
     orden: OrdenExport = Query("nombre_socio"),
     direccion: DireccionExport = Query("asc"),
     agrupar_equipo: bool = Query(True),
+    orden_honorarios: OrdenAlfabeticoExport = Query("medico"),
+    orden_sanatorio: OrdenAlfabeticoExport = Query("medico"),
     agrupacion: AgrupacionExport = Query("todo_junto"),
     columnas: Optional[list[ColumnaExport]] = Query(None),
     fecha_desde: Optional[datetime.date] = Query(None),
@@ -104,7 +110,8 @@ async def _resolver_opciones_medico(
         return ExportOpciones(**preset.opciones)
 
     return ExportOpciones(
-        orden=orden, direccion=direccion, agrupar_equipo=agrupar_equipo, agrupacion=agrupacion, columnas=columnas or list(COLUMNAS_DEFAULT_POR_MEDICO),
+        orden=orden, direccion=direccion, agrupar_equipo=agrupar_equipo,
+        orden_honorarios=orden_honorarios, orden_sanatorio=orden_sanatorio, agrupacion=agrupacion, columnas=columnas or list(COLUMNAS_DEFAULT_POR_MEDICO),
         fecha_desde=fecha_desde, fecha_hasta=fecha_hasta, id_especialidad=id_especialidad,
         cod_medicos=cod_medicos, revisado=revisado, tipos=tipos,
     )

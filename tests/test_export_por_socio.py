@@ -89,21 +89,22 @@ def test_sanatorios_llevan_subtitulo_con_el_nombre_de_la_clinica():
     assert leiva.lineas[0].subtitulo == "SANATORIOS"
 
 
-def test_agrupar_equipo_apagado_el_ayudante_es_un_socio_mas():
+def test_agrupar_equipo_apagado_se_ignora_el_equipo_siempre_va_con_su_cabeza():
     a = _armado(agrupar_equipo=False)
     grupos = _grupos(a)
-    assert all(not l.hijos for g in a.secciones[0].grupos for l in g.lineas)
-    assert [l.fila.id for l in grupos["30"].lineas] == [11] and grupos["30"].total_general == Decimal("20.00")
-    assert grupos["10"].total_general == Decimal("600.00")
+    assert "30" not in grupos
+    assert [h.id for h in grupos["10"].lineas[2].hijos] == [11]
+    assert grupos["10"].total_general == Decimal("620.00")
 
 
-def test_ayudante_sin_su_cabeza_en_el_documento_es_una_linea_comun():
+def test_cabeza_fuera_de_filtro_se_lleva_a_todo_su_equipo():
     filas = _filas()
     filas[5] = dataclasses.replace(filas[5], fuera_de_filtro=True)  # la cabeza (id 6) quedó afuera de los filtros
     a = armar(filas, ExportOpciones(agrupacion="por_socio"))
     grupos = _grupos(a)
-    assert [l.fila.id for l in grupos["30"].lineas] == [11]  # no se pierde: figura como un socio más
+    assert "30" not in grupos  # el ayudante no queda suelto: sigue a su cabeza
     assert grupos["10"].total_general == Decimal("500.00")
+    assert a.total_prestaciones == 10
 
 
 def test_equipo_filtrado_igual_va_completo_bajo_la_cabeza():
@@ -176,3 +177,135 @@ def test_por_tipo_excel_y_pdf_llevan_el_subtotal_de_cada_medico():
     assert "SUBTOTAL SOCIO 10 ACOSTA, MARIA (2): 200.00" in textos
     assert "SUBTOTAL SOCIO 20 ZAPATA, JUAN (1): 100.00" in textos
     assert build_pdf_detalle(a, opciones, enc).startswith(b"%PDF")
+
+
+def test_por_tipo_orden_por_paciente_en_honorarios_y_sanatorios():
+    base = dict(orden="fecha_practica", direccion="asc")
+
+    # Por defecto ("medico"): el orden de siempre (acá, por fecha de práctica).
+    a = _armado("por_tipo", **base)
+    honorarios = {g.cod_medico: g for g in a.secciones[2].grupos}
+    assert [l.fila.id for l in honorarios["10"].lineas] == [4, 7]  # PEREYRA (12), DIAZ (22)
+    sanatorios = {g.cod_medico: g for g in a.secciones[3].grupos}
+    assert [l.fila.id for l in sanatorios["80"].lineas] == [12, 9, 10]  # DEL SUR · MODELO: por fecha
+
+    # "paciente": pacientes A-Z dentro de cada socio y, en Sanatorios, dentro de cada clínica,
+    # que siguen agrupadas A-Z (con su subtítulo una sola vez).
+    b = _armado("por_tipo", orden_honorarios="paciente", orden_sanatorio="paciente", **base)
+    honorarios = {g.cod_medico: g for g in b.secciones[2].grupos}
+    assert [l.fila.id for l in honorarios["10"].lineas] == [7, 4]  # DIAZ, PEREYRA
+    sanatorios = {g.cod_medico: g for g in b.secciones[3].grupos}
+    assert [l.fila.id for l in sanatorios["80"].lineas] == [12, 10, 9]  # DEL SUR: BRAVO · MODELO: CASTRO, LOPEZ
+    assert [l.subtitulo_clinica for l in sanatorios["80"].lineas] == ["CLINICA DEL SUR", "CLINICA MODELO", None]
+
+    # Cada selector es independiente y no toca las demás secciones.
+    c = _armado("por_tipo", orden_honorarios="paciente", **base)
+    assert [l.fila.id for l in {g.cod_medico: g for g in c.secciones[3].grupos}["80"].lineas] == [12, 9, 10]
+    assert [l.fila.id for l in c.secciones[0].grupos[0].lineas] == [3, 5]  # Consultas: sin cambios
+
+
+# ── Honorarios individuales / Sanatorios: pacientes, equipo que no suma, ayudantes sueltos ──
+
+
+def _filas_hi():
+    """Socio 10 con dos cirugías de Honorarios individuales (pacientes DIAZ y PEREYRA, la de
+    DIAZ con ayudante y pediatra de otros socios) y una consulta con ayudante."""
+    filas = [
+        _fila(1, "10", "ACOSTA, MARIA", "Honorarios individuales", 12, "PEREYRA", monto="1000"),
+        _fila(2, "10", "ACOSTA, MARIA", "Honorarios individuales", 22, "DIAZ", monto="500"),
+        _fila(3, "30", "BRAVO, LUIS", "Honorarios individuales", 22, "DIAZ", monto="100", equipo=2),
+        _fila(4, "40", "CORTES, ANA", "Honorarios individuales", 22, "DIAZ", monto="50", equipo=2),
+        _fila(5, "10", "ACOSTA, MARIA", "Consulta", 3, "RUIZ", monto="10"),
+        _fila(6, "30", "BRAVO, LUIS", "Consulta", 3, "RUIZ", monto="5", equipo=5),
+    ]
+    filas[1].grupo_equipo_id = 2
+    filas[4].grupo_equipo_id = 5
+    return filas
+
+
+def test_por_socio_pacientes_con_subtitulo_y_el_equipo_de_honorarios_no_suma():
+    a = armar(_filas_hi(), ExportOpciones(agrupacion="por_socio"))
+    g = {x.cod_medico: x for x in a.secciones[0].grupos}["10"]
+    hi = [l for l in g.lineas if l.fila.tipo == "Honorarios individuales"]
+    assert [l.fila.id for l in hi] == [2, 1]  # DIAZ, PEREYRA
+    assert [l.subtitulo_paciente for l in hi] == ["PACIENTE DIAZ", "PACIENTE PEREYRA"]
+    assert [h.id for h in hi[0].hijos] == [3, 4]  # el equipo se muestra bajo su cabeza...
+    # ...pero no suma: 500 + 1000 de honorarios, y 10 + 5 de la consulta (ahí el equipo sí suma).
+    assert g.stats_por_tipo["Honorarios individuales"].monto == Decimal("1500")
+    assert g.stats_por_tipo["Consulta"].monto == Decimal("15")
+    assert g.total_general == Decimal("1515.00")
+    # El resumen general cierra con todo lo facturado.
+    assert a.resumen.total_general == Decimal("1665.00")
+    assert all(l.total_paciente is None for l in g.lineas)
+
+
+def test_por_tipo_honorarios_por_medico_no_suma_el_equipo():
+    a = armar(_filas_hi(), ExportOpciones(agrupacion="por_tipo"))
+    hi = next(s for s in a.secciones if s.titulo == "HONORARIO").grupos[0]
+    assert hi.subtotal_medico and hi.total_general == Decimal("1500.00")
+    assert all(l.subtitulo_paciente is None and l.total_paciente is None for l in hi.lineas)
+
+
+def test_por_tipo_por_paciente_reemplaza_el_subtotal_por_el_total_de_cada_paciente():
+    a = armar(_filas_hi(), ExportOpciones(agrupacion="por_tipo", orden_honorarios="paciente"))
+    hi = next(s for s in a.secciones if s.titulo == "HONORARIO").grupos[0]
+    assert not hi.subtotal_medico
+    assert [l.subtitulo_paciente for l in hi.lineas] == ["PACIENTE DIAZ", "PACIENTE PEREYRA"]
+    # Total de cada paciente: con el equipo.
+    assert [l.total_paciente for l in hi.lineas] == [("DIAZ", Decimal("650.00")), ("PEREYRA", Decimal("1000.00"))]
+    assert hi.total_general == Decimal("1500.00")
+
+    enc = EncabezadoExport(lineas=["CMC", "OS 411"])
+    opciones = ExportOpciones(agrupacion="por_tipo", orden_honorarios="paciente")
+    wb = load_workbook(BytesIO(build_excel_detalle(a, opciones, enc)))
+    filas = list(wb["HONORARIO"].iter_rows())
+    textos = [r[0].value for r in filas if r and r[0].value]
+    assert "TOTAL PACIENTE DIAZ: 650.00" in textos and "PACIENTE PEREYRA" in textos
+    assert not any(str(t).startswith("SUBTOTAL SOCIO") for t in textos)
+    subtitulo = next(r[0] for r in filas if r[0].value == "PACIENTE DIAZ")
+    assert subtitulo.alignment.horizontal == "centerContinuous" and subtitulo.fill.start_color.rgb.endswith("E0F2FE")
+    assert build_pdf_detalle(a, opciones, enc).startswith(b"%PDF")
+
+
+def test_subtitulos_de_tipo_y_clinica_van_centrados_en_excel():
+    a = _armado()
+    enc = EncabezadoExport(lineas=["CMC", "OS 411"])
+    wb = load_workbook(BytesIO(build_excel_detalle(a, ExportOpciones(agrupacion="por_socio"), enc)))
+    celdas = {r[0].value: r[0] for r in wb["Detalle"].iter_rows() if r and r[0].value}
+    for texto in ("CONSULTAS", "SANATORIOS", "CLINICA MODELO"):
+        assert celdas[texto].alignment.horizontal == "centerContinuous"
+
+
+def test_ayudante_sin_grupo_se_pega_a_su_cabeza():
+    from app.modules.facturacion.equipo import CandidatoEquipo, inferir_equipos
+
+    d = datetime.date(2026, 9, 22)
+
+    def c(id_, med, tipo, *, grupo=None, codigo="126107", clinica=None, paciente="123", fecha=d):
+        return CandidatoEquipo(id=id_, cod_medico=med, cod_clinica=clinica, codigo=codigo, tipo_prestador=tipo,
+                               paciente=paciente, fecha_practica=fecha, grupo_equipo_id=grupo)
+
+    cands = [
+        c(1, "10", "Medico"),
+        c(2, "20", "Medico", codigo="999999"),                      # otra cirugía del mismo paciente y día
+        c(3, "30", "Ayudante"),                                      # mismo código que la 1 → va con la 1
+        c(4, "10", "Ayudante"),                                      # del mismo socio que la 1: no se asiste a sí mismo
+        c(5, "40", "Ayudante", paciente="999"),                      # otro paciente: queda suelto
+        c(6, "50", "Pediatra", codigo="110401", paciente="777"),
+        c(7, "60", "Medico", codigo="110401", paciente="777"),       # cesárea: la cabeza del pediatra
+        c(8, "70", "Ayudante", grupo=1),                             # ya tiene grupo: no se toca
+    ]
+    assert inferir_equipos(cands) == {3: 1, 4: 2, 6: 7}
+
+
+def test_el_total_de_la_factura_incluye_el_equipo_en_todas_las_agrupaciones():
+    """El equipo (ayudante/pediatra) suma SIEMPRE al total de la factura, aunque en Honorarios
+    individuales y Sanatorios no sume al socio: RESUMEN GENERAL = suma de todas las filas."""
+    filas = _filas_hi()
+    esperado = sum((f.subtotal for f in filas), Decimal("0"))
+    for agrupacion, extra in (("por_socio", {}), ("por_tipo", {}), ("por_tipo", {"orden_honorarios": "paciente"}),
+                              ("plana", {}), ("todo_junto", {})):
+        a = armar(filas, ExportOpciones(agrupacion=agrupacion, **extra))
+        assert a.resumen.total_general == esperado == Decimal("1665.00"), (agrupacion, extra)
+        assert dict(a.resumen.por_tipo)["Honorarios individuales"] == Decimal("1650.00")  # cabezas 1500 + equipo 150
+        assert a.total_prestaciones == len(filas)

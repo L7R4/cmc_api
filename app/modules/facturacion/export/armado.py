@@ -8,22 +8,25 @@ uno en su formato. Así los dos formatos quedan matemáticamente idénticos.
 
 El documento replica lo que muestra `FacturaDetalle` (front): cada prestación va en el
 socio que cobra (`cod_medico` es siempre el médico, nunca la clínica). Las prestaciones de
-tipo Sanatorio llevan además, por cada clínica, un subtítulo con su nombre. Con
-`agrupar_equipo`, el equipo de una cabeza (ayudante/gastos/pediatra) va ÚNICAMENTE bajo
-ella y cuenta en su grupo (ver "Equipo"); el resto va como un socio más.
+tipo Sanatorio llevan además, por cada clínica, un subtítulo con su nombre. El
+equipo de una cabeza (ayudante/gastos/pediatra) va ÚNICAMENTE bajo ella y cuenta en su
+grupo (ver "Equipo"); el resto va como un socio más.
 
 Las modalidades (`ExportOpciones.agrupacion`) comparten una sola estructura:
 `Armado.secciones: list[Seccion]`, cada `Seccion` con uno o más `GrupoSocio`.
 
 - **por_socio**: orden FIJO (ignora `orden`), una única `Seccion` sin título. Socios
   A-Z; dentro de cada uno, con subtítulo por tramo: consultas y prácticas por fecha
-  (más nueva primero), honorarios individuales y sanatorios por paciente A-Z.
+  (más nueva primero), honorarios individuales y sanatorios por paciente A-Z, cada
+  paciente con su subtítulo ("PACIENTE <nombre>").
   Cada grupo lleva su título y su "RESUMEN SOCIO"; en Excel va todo en una sola hoja
   (`Armado.una_hoja`).
 - **por_tipo**: una `Seccion` por tipo (Consulta/Practica/Honorarios
   individuales/Sanatorio) que tenga filas, cada una arranca en página/hoja nueva con
   su subtotal. Dentro, un grupo por socio (A-Z) con sus filas ordenadas por `orden` +
-  `direccion` y, al cerrarlo, el subtotal de ese socio antes de pasar al siguiente.
+  `direccion` y, al cerrarlo, el subtotal de ese socio antes de pasar al siguiente. En
+  Honorarios individuales y Sanatorios ordenados por paciente, cada paciente lleva su
+  subtítulo y cierra con "TOTAL PACIENTE <nombre>" (en lugar del subtotal del socio).
 - **plana**: una única `Seccion` sin título, un único pseudo-grupo sin RESUMEN, filas
   ordenadas directamente por `orden` + `direccion`. Ideal para pivotear en Excel.
 - **todo_junto** (histórico): una única `Seccion` sin título con un `GrupoSocio` por
@@ -36,12 +39,20 @@ TOTAL GENERAL FACTURACIÓN), igual que el legacy.
 ## Equipo quirúrgico
 
 El ayudante/gastos-de-equipo es una fila propia (`grupo_equipo_id` apunta al
-`id_detalle_prestaciones` de la cabeza). Con `agrupar_equipo` se anida SIEMPRE bajo la
-cabeza (`LineaPrestacion.hijos`) y su importe cuenta en el subtotal de la CABEZA: no
-figura además en su propio socio, así no aparece dos veces. Si la cabeza no está en el
-documento (otro filtro, o no tiene equipo), la fila es una línea común de su socio.
+`id_detalle_prestaciones` de la cabeza). Se anida SIEMPRE bajo la cabeza
+(`LineaPrestacion.hijos`) y su importe cuenta en el subtotal de la CABEZA: no figura además
+en su propio socio, así no aparece dos veces. Filtros y orden se aplican a la cabeza: si ella
+queda afuera de los filtros, el equipo entero también. Si la cabeza ya no existe en la
+factura (anulada), la fila es una línea común de su socio. Los ayudantes/pediatras cargados
+sin grupo se asignan a su cabeza por paciente + fecha (`equipo.py`, ver `datos.py`).
+
+En Honorarios individuales y Sanatorios el equipo se muestra pero NO suma a los totales del
+socio ni de la sección (`_suma_equipo`); el RESUMEN GENERAL sí lo incluye, para cerrar con
+el total de la factura. (`ExportOpciones.agrupar_equipo`
+se conserva por compatibilidad con la API, pero ya no se consulta.)
 """
 import datetime
+import re
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Callable, Optional
@@ -84,6 +95,10 @@ class LineaPrestacion:
     subtitulo: str | None = None
     # Sanatorios: nombre de la clínica cuando empieza una nueva ("CLINICA X").
     subtitulo_clinica: str | None = None
+    # Honorarios individuales / Sanatorios ordenados por paciente: arranca un paciente
+    # ("PACIENTE X"), y en la última línea de cada paciente, su total (con el equipo).
+    subtitulo_paciente: str | None = None
+    total_paciente: tuple[str, Decimal] | None = None
 
 
 @dataclass
@@ -246,14 +261,22 @@ def _lineas(
     return [LineaPrestacion(fila=f, hijos=equipo.get(f.id, [])) for f in filas_ordenadas]
 
 
-def _stats_de_lineas(lineas: list[LineaPrestacion]) -> tuple[
+def _suma_equipo(cabeza: FilaExport) -> bool:
+    """El equipo de una cirugía de Honorarios individuales o Sanatorio se muestra bajo su
+    cabeza pero NO suma al total del socio; en el resto sí."""
+    return cabeza.tipo not in ("Honorarios individuales", "Sanatorio")
+
+
+def _stats_de_lineas(lineas: list[LineaPrestacion], equipo_siempre: bool = False) -> tuple[
     dict[str, StatsTipo], Decimal, Decimal, Decimal, Decimal,
 ]:
-    """Totales de las líneas: la fila y su equipo anidado (`hijos`)."""
+    """Totales de las líneas: la fila y su equipo anidado (`hijos`), salvo el de las
+    cirugías de Honorarios individuales / Sanatorios (`equipo_siempre` lo incluye igual)."""
     stats: dict[str, StatsTipo] = {t: StatsTipo() for t in TIPOS_EN_ORDEN}
     total_hon = total_gas = total_cos = total_gral = Decimal("0")
     for linea in lineas:
-        for f in [linea.fila, *linea.hijos]:
+        hijos = linea.hijos if equipo_siempre or _suma_equipo(linea.fila) else []
+        for f in [linea.fila, *hijos]:
             s = stats.setdefault(f.tipo, StatsTipo())
             s.cantidad += (f.cantidad or 0) * (f.sesion or 1)
             s.monto += f.subtotal
@@ -307,9 +330,49 @@ def _clave_fecha_desc(f: FilaExport) -> tuple:
     return (-(f.fecha_practica or _FECHA_MIN).toordinal(), f.id)
 
 
+def _clave_natural(s: str | None) -> tuple:
+    """Orden "natural" de un texto con números (2 antes que 10)."""
+    return tuple((0, int(p), "") if p.isdigit() else (1, 0, p.casefold()) for p in re.findall(r"\d+|\D+", s or ""))
+
+
 def _clave_paciente(f: FilaExport) -> tuple:
-    """Paciente A-Z; dentro del mismo paciente, más nueva primero."""
-    return ((f.afiliado or "").casefold(), *_clave_fecha_desc(f))
+    """Paciente A-Z (nombre, después documento); dentro del mismo paciente, más nueva primero."""
+    return ((f.afiliado or "").casefold(), _clave_natural(f.nro_afiliado), *_clave_fecha_desc(f))
+
+
+def _normal(s: str | None) -> str:
+    return " ".join((s or "").split()).casefold()
+
+
+def _marcar_pacientes(lineas: list[LineaPrestacion], con_total: bool = False) -> None:
+    """Honorarios individuales / Sanatorios ordenados por paciente: pone el subtítulo
+    "PACIENTE X" en la primera línea de cada paciente (las líneas ya vienen con las de un
+    mismo paciente seguidas) y, con `con_total`, su total en la última — equipo incluido.
+    El paciente se identifica por documento/afiliado (o nombre) y, en Sanatorios, también
+    por clínica: el mismo paciente en otra clínica es otro bloque."""
+    previa: tuple | None = None
+    bloque: list[LineaPrestacion] = []
+
+    def cerrar() -> None:
+        if con_total and bloque:
+            total = sum((f.subtotal for l in bloque for f in (l.fila, *l.hijos)), Decimal("0"))
+            f0 = bloque[0].fila
+            bloque[-1].total_paciente = (f0.afiliado or f0.nro_afiliado or "", quantize_money(total))
+        bloque.clear()
+
+    for linea in lineas:
+        f = linea.fila
+        if f.tipo not in ("Honorarios individuales", "Sanatorio"):
+            cerrar()
+            previa = None
+            continue
+        clave = (_normal(f.nro_afiliado) or _normal(f.afiliado), f.cod_clinica if f.tipo == "Sanatorio" else None)
+        if clave != previa:
+            cerrar()
+            previa = clave
+            linea.subtitulo_paciente = f"PACIENTE {f.afiliado or f.nro_afiliado or ''}".strip()
+        bloque.append(linea)
+    cerrar()
 
 
 # Tramos dentro de cada socio en por_socio: (tipo, subtítulo, orden del tramo).
@@ -339,6 +402,7 @@ def _armar_por_socio(filas: list[FilaExport], equipo: dict[int, list[FilaExport]
                 fila=f, hijos=equipo.get(f.id, []), subtitulo="OTRAS" if i == 0 else None,
             ))
         _marcar_clinicas(lineas)
+        _marcar_pacientes(lineas)
         f0 = filas_socio[0]
         grupos.append(_armar_grupo(
             f0.cod_medico, f0.prestador_nombre, f0.matricula, lineas, True, titulo=_titulo_socio(f0),
@@ -348,8 +412,13 @@ def _armar_por_socio(filas: list[FilaExport], equipo: dict[int, list[FilaExport]
 
 
 def _armar_por_tipo(
-    filas: list[FilaExport], equipo: dict[int, list[FilaExport]], orden: str, direccion: str,
+    filas: list[FilaExport], equipo: dict[int, list[FilaExport]], opciones: ExportOpciones,
 ) -> list[Seccion]:
+    orden, direccion = opciones.orden, opciones.direccion
+    por_paciente = {
+        "Honorarios individuales": opciones.orden_honorarios == "paciente",
+        "Sanatorio": opciones.orden_sanatorio == "paciente",
+    }
     secciones = []
     for tipo in TIPOS_EN_ORDEN:
         filas_tipo = [f for f in filas if f.tipo == tipo]
@@ -358,13 +427,22 @@ def _armar_por_tipo(
         grupos = []
         for filas_socio in _por_socio(filas_tipo).values():
             f0 = filas_socio[0]
-            ordenadas = _ordenar(filas_socio, orden, direccion)
+            # Con "paciente" (sólo Honorarios individuales y Sanatorios) los pacientes van A-Z
+            # dentro de cada socio y, en Sanatorios, de cada clínica (que siguen agrupadas A-Z).
+            if por_paciente.get(tipo):
+                ordenadas = sorted(filas_socio, key=_clave_paciente)
+            else:
+                ordenadas = _ordenar(filas_socio, orden, direccion)
             if tipo == "Sanatorio":
                 ordenadas = sorted(ordenadas, key=_clave_clinica)  # estable: conserva el orden dentro de cada clínica
             lineas = _lineas(ordenadas, equipo)
             _marcar_clinicas(lineas)
+            # Por paciente: cada paciente cierra con su total, en lugar del subtotal del socio.
+            if por_paciente.get(tipo):
+                _marcar_pacientes(lineas, con_total=True)
             grupos.append(_armar_grupo(
-                f0.cod_medico, f0.prestador_nombre, f0.matricula, lineas, False, subtotal_medico=True,
+                f0.cod_medico, f0.prestador_nombre, f0.matricula, lineas, False,
+                subtotal_medico=not por_paciente.get(tipo),
             ))
         grupos.sort(key=lambda g: _nombre_clave(g.nombre, g.cod_medico))
         secciones.append(Seccion(titulo=ETIQUETA_TIPO[tipo], grupos=grupos))
@@ -372,10 +450,16 @@ def _armar_por_tipo(
 
 
 def armar(filas: list[FilaExport], opciones: ExportOpciones) -> Armado:
-    # Con `agrupar_equipo`, el equipo de cada cabeza presente va anidado bajo ella (completo,
-    # también las integrantes que el filtro dejó afuera) y NO como línea propia de su socio.
-    candidatas = [f for f in filas if not f.fuera_de_filtro]
-    cabezas = {f.id for f in candidatas if f.grupo_equipo_id == f.id} if opciones.agrupar_equipo else set()
+    # El equipo de cada cabeza va SIEMPRE anidado bajo ella (completo, también las integrantes
+    # que el filtro dejó afuera) y nunca como línea propia de su socio. Los filtros se aplican
+    # a la cabeza: si ella queda afuera, su equipo entero queda afuera.
+    ids_cabezas = {f.id for f in filas if f.grupo_equipo_id == f.id}
+    cabezas_afuera = {f.id for f in filas if f.grupo_equipo_id == f.id and f.fuera_de_filtro}
+    candidatas = [
+        f for f in filas
+        if not f.fuera_de_filtro and not (f.grupo_equipo_id in cabezas_afuera and f.grupo_equipo_id != f.id)
+    ]
+    cabezas = ids_cabezas - cabezas_afuera
     equipo = _equipo_por_cabeza(filas, cabezas)
     anidados = {h.id for hijos in equipo.values() for h in hijos}
     propias = [f for f in candidatas if f.id not in anidados]
@@ -389,7 +473,7 @@ def armar(filas: list[FilaExport], opciones: ExportOpciones) -> Armado:
         secciones = _armar_por_socio(propias, equipo)
 
     elif opciones.agrupacion == "por_tipo":
-        secciones = _armar_por_tipo(propias, equipo, orden, direccion)
+        secciones = _armar_por_tipo(propias, equipo, opciones)
 
     else:  # "plana"
         lineas = _lineas(_ordenar(propias, orden, direccion), equipo)
@@ -397,7 +481,7 @@ def armar(filas: list[FilaExport], opciones: ExportOpciones) -> Armado:
 
     # ── Resumen general: sobre todas las filas del documento, una vez cada una, sin
     # depender de cómo se partió el documento.
-    stats_global, _, _, total_coseguro, total_general = _stats_de_lineas(_lineas(propias, equipo))
+    stats_global, _, _, total_coseguro, total_general = _stats_de_lineas(_lineas(propias, equipo), equipo_siempre=True)
     por_tipo = [
         (tipo, quantize_money(stats_global[tipo].monto))
         for tipo in TIPOS_EN_ORDEN
@@ -427,6 +511,12 @@ def texto_subtotal_medico(grupo: GrupoSocio, moneda: str = "") -> str:
         f"SUBTOTAL SOCIO {grupo.cod_medico}{nombre} ({len(grupo.lineas)}): "
         f"{moneda}{grupo.total_general:,.2f}"
     )
+
+
+def texto_total_paciente(linea: LineaPrestacion, moneda: str = "") -> str:
+    """Línea de cierre de un paciente (por_tipo ordenado por paciente), igual en Excel y PDF."""
+    nombre, total = linea.total_paciente or ("", Decimal("0"))
+    return f"TOTAL PACIENTE {nombre}: {moneda}{total:,.2f}" if nombre else f"TOTAL PACIENTE: {moneda}{total:,.2f}"
 
 
 # ── Especificación de columnas (compartida por excel.py y pdf.py) ───────────

@@ -17,6 +17,10 @@ OrdenExport = Literal[
 # valor histórico (siempre de mayor a menor) y no depende de esto.
 DireccionExport = Literal["asc", "desc"]
 
+# "por_tipo", dentro de Honorarios individuales y de Sanatorios: "medico" deja el orden de
+# siempre (el de `orden`/`direccion`); "paciente" ordena los pacientes A-Z.
+OrdenAlfabeticoExport = Literal["medico", "paciente"]
+
 AgrupacionExport = Literal["todo_junto", "por_tipo", "por_socio", "plana"]
 
 # Columnas disponibles para el detalle. `socio`/`sub_total`/`tipo` son siempre
@@ -60,6 +64,8 @@ class ExportOpciones(BaseModel):
     # ÚNICAMENTE bajo la fila de su cirujano y cuenta en su grupo. Apagado, cada integrante
     # es una línea común de su propio socio.
     agrupar_equipo: bool = True
+    orden_honorarios: OrdenAlfabeticoExport = "medico"
+    orden_sanatorio: OrdenAlfabeticoExport = "medico"
 
     columnas: list[ColumnaExport] = Field(default_factory=lambda: list(COLUMNAS_DEFAULT))
 
@@ -79,7 +85,7 @@ TipoDocumentoPreset = Literal["detalle", "caratula", "vista"]
 
 # Claves que guarda un preset de vista (espejo de `VistaOpciones` del front).
 CLAVES_PRESET_VISTA = {
-    "orden", "direccion", "agrupacion", "agruparEquipo", "columnas",
+    "orden", "direccion", "agrupacion", "agruparEquipo", "ordenHonorarios", "ordenSanatorio", "columnas",
     "fecha_desde", "fecha_hasta", "id_especialidad", "cod_medicos", "revisado", "tipos",
 }
 

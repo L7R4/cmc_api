@@ -9,9 +9,11 @@ def test_preset_de_vista_guarda_solo_las_claves_de_la_vista():
     p = PresetIn(nombre="Por tipo", tipo_documento="vista", opciones={
         "orden": "fecha_carga", "direccion": "desc", "agrupacion": "por_tipo", "agruparEquipo": False,
         "columnas": ["fecha", "codigo"], "tipos": ["Consulta"], "basura": 1,
+        "ordenHonorarios": "paciente", "ordenSanatorio": "paciente",
     })
     assert p.opciones["agrupacion"] == "por_tipo" and p.opciones["agruparEquipo"] is False
     assert "basura" not in p.opciones
+    assert p.opciones["ordenHonorarios"] == "paciente" and p.opciones["ordenSanatorio"] == "paciente"
 
 
 def test_preset_de_detalle_historico_sigue_validandose():

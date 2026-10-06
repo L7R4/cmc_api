@@ -11,7 +11,7 @@ from typing import Optional
 
 from openpyxl import Workbook
 from openpyxl.cell import WriteOnlyCell
-from openpyxl.styles import Alignment, Font
+from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 from app.modules.facturacion.export.armado import (
@@ -21,6 +21,7 @@ from app.modules.facturacion.export.armado import (
     GrupoSocio,
     spec_columnas,
     texto_subtotal_medico,
+    texto_total_paciente,
     valores_fila,
 )
 from app.modules.facturacion.export.encabezado import EncabezadoExport
@@ -31,6 +32,8 @@ _ALINEACION = {"L": "left", "C": "center", "R": "right"}
 _FUENTE_HEADER = Font(bold=True)
 _FUENTE_NEGRITA = Font(bold=True)
 _FUENTE_CURSIVA = Font(italic=True)
+# Subtítulo de cada paciente (el mismo celeste que la vista).
+_RELLENO_PACIENTE = PatternFill(fill_type="solid", start_color="E0F2FE", end_color="E0F2FE")
 
 
 def _sanitizar_nombre_hoja(nombre: str, usados: set[str]) -> str:
@@ -54,6 +57,26 @@ def _celda(ws, valor, *, negrita: bool = False, cursiva: bool = False, numero: b
         c.number_format = FORMATO_MONEDA
     c.alignment = Alignment(horizontal=_ALINEACION.get(alineacion, "left"))
     return c
+
+
+def _fila_centrada(
+    ws, n_cols: int, texto: str, *, negrita: bool = False, cursiva: bool = False, relleno: PatternFill | None = None,
+) -> None:
+    """Subtítulo centrado en el ancho de la tabla: el texto va en la primera celda y el
+    resto de la fila hereda "centrar en la selección" (en `write_only` no se pueden combinar
+    celdas, pero esto se ve igual y no estorba al filtrar)."""
+    celdas = []
+    for i in range(max(n_cols, 1)):
+        c = WriteOnlyCell(ws, value=texto if i == 0 else None)
+        if negrita:
+            c.font = _FUENTE_NEGRITA
+        elif cursiva:
+            c.font = _FUENTE_CURSIVA
+        if relleno is not None:
+            c.fill = relleno
+        c.alignment = Alignment(horizontal="centerContinuous")
+        celdas.append(c)
+    ws.append(celdas)
 
 
 def _aplicar_pagina_a4(ws) -> None:
@@ -164,9 +187,10 @@ def build_excel_detalle(armado: Armado, opciones: ExportOpciones, encabezado: En
             _configurar_hoja(ws, cols, fila_encabezado_col)
             _fila_encabezado_institucional(ws, encabezado.lineas)
             _fila_encabezado(ws, cols)
-        if armado.una_hoja and seccion.titulo:
-            # En una sola hoja, el título de la sección es la fila de corte.
-            ws.append([_celda(ws, seccion.titulo, negrita=True)])
+        if seccion.titulo:
+            # En una sola hoja, el título de la sección es la fila de corte; con una hoja por
+            # sección, es el título de la hoja.
+            _fila_centrada(ws, len(cols), seccion.titulo, negrita=True)
 
         hay_resumen_grupo = False
         for grupo in seccion.grupos:
@@ -174,12 +198,16 @@ def build_excel_detalle(armado: Armado, opciones: ExportOpciones, encabezado: En
                 ws.append([_celda(ws, grupo.titulo, negrita=True)])
             for linea in grupo.lineas:
                 if linea.subtitulo:
-                    ws.append([_celda(ws, linea.subtitulo, cursiva=True)])
+                    _fila_centrada(ws, len(cols), linea.subtitulo, cursiva=True)
                 if linea.subtitulo_clinica:
-                    ws.append([_celda(ws, linea.subtitulo_clinica, negrita=True)])
+                    _fila_centrada(ws, len(cols), linea.subtitulo_clinica, negrita=True)
+                if linea.subtitulo_paciente:
+                    _fila_centrada(ws, len(cols), linea.subtitulo_paciente, negrita=True, relleno=_RELLENO_PACIENTE)
                 _fila_dato(ws, cols, linea.fila)
                 for hijo in linea.hijos:
                     _fila_dato(ws, cols, hijo, es_hijo=True)
+                if linea.total_paciente:
+                    ws.append([_celda(ws, texto_total_paciente(linea), negrita=True)])
             if grupo.subtotal_medico:
                 _fila_subtotal_medico(ws, grupo)
             if grupo.mostrar_resumen:

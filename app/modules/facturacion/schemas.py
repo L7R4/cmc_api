@@ -318,6 +318,11 @@ class PrecioResponse(BaseModel):
     # efectivamente usado (ver app/modules/nomenclador/service_vias.py).
     via: str = "T"
     nivel_cotizado: Optional[int] = None
+    # True → el código admite vía laparoscópica (galeno de cirugía adulto/infantil, fuera del
+    # nivel tope). El front decide con esto si ofrece elegir la vía, en vez de mirar la
+    # categoría del código (que está mal cargada en parte del catálogo). En las ramas
+    # "no admitido" viene False.
+    admite_laparoscopia: bool = False
     # Coseguro sugerido desde el Valor del código — el operador lo puede editar al
     # cargar la prestación (ver PrestacionItem.coseguro).
     coseguro: Decimal = Decimal("0")

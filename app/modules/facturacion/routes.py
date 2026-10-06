@@ -261,7 +261,7 @@ async def precio_nomenclador(
 ):
     medico = await service.check_medico_activo(db, cod_medico)
     fecha = service.fecha_para_precio(fecha)
-    return await service.resolver_precio(db, cod_obra, medico, codigo, fecha, via=via)
+    return await service.resolver_precio(db, cod_obra, medico, codigo, fecha, via=via, con_admision_via=True)
 
 
 # ── Facturas / períodos ──────────────────────────────────────────────────────

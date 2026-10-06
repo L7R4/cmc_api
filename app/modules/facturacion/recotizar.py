@@ -233,7 +233,13 @@ async def recotizar_fila(
     fecha = service.fecha_para_precio(row.fecha_practica)
     via = row.via or service_vias.VIA_TRADICIONAL
     cache = cache or CacheCotizacion()
-    prestador = await cache.prestador(db, service.seleccion_prestador_de(row))
+    es_pediatra = (row.tpo_funcion or "").upper() == service.TPO_FUNCION_PEDIATRA
+    # Un ayudante de equipo cotiza con el médico de cabecera (ver
+    # `service.medico_de_la_cabeza`).
+    cotiza = row
+    if con_a and not es_pediatra and row.grupo_equipo_id not in (None, row.id_detalle_prestaciones):
+        cotiza = await db.get(DetalleFacturacionCMC, row.grupo_equipo_id) or row
+    prestador = await cache.prestador(db, service.seleccion_prestador_de(cotiza))
     precio = await cache.precio(db, row, prestador.medico, fecha, via, ignorar_ventana)
     if not precio.admitido:
         return Recotizacion(estado="omitida", fecha=fecha, motivo=precio.motivo or "No admitido")
@@ -250,7 +256,6 @@ async def recotizar_fila(
     ab = precio.ayudante if con_a else CERO
     h, g, a = service._aplicar_porcentaje(hb, gb, ab, row.porc or 100)
 
-    es_pediatra = (row.tpo_funcion or "").upper() == service.TPO_FUNCION_PEDIATRA
     if es_pediatra or con_a:
         # El coseguro es del acto: lo lleva la fila del médico, nunca la del
         # pediatra ni la del ayudante.

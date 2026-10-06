@@ -1003,10 +1003,13 @@ async def resolver_precio(
     via: str = service_vias.VIA_TRADICIONAL,
     *,
     ignorar_ventana: bool = False,
+    con_admision_via: bool = False,
 ) -> PrecioResponse:
     """Delega precio Y habilitación en el lookup del módulo nomenclador.
 
     `ignorar_ventana`: sólo para recotizar lo ya cargado (ver `recotizar.py`).
+    `con_admision_via`: completa `admite_laparoscopia` (lo pide la pantalla de carga; los
+    procesos en bloque no lo necesitan y se ahorran las consultas).
 
     Errores de mapeo de identificadores → HTTPException (404/422).
     Falta de precio / habilitación / fecha / vía no aplicable → admitido=False + motivo.
@@ -1021,7 +1024,7 @@ async def resolver_precio(
     try:
         out = await service_nm.lookup_precio(
             nomenclador.id, obra_social_nro, fecha, medico.ID, db, via=via,
-            ignorar_ventana=ignorar_ventana,
+            ignorar_ventana=ignorar_ventana, con_admision_via=con_admision_via,
         )
     except PrecioLookupError as e:
         # CARGA_SIN_PRECIO sólo perdona la falta de precio (e.sin_precio) — no
@@ -1073,6 +1076,7 @@ async def resolver_precio(
         nivel_cotizado=out.nivel_cotizado,
         coseguro=out.coseguro,
         admite_pediatra=admite_pediatra,
+        admite_laparoscopia=out.admite_laparoscopia,
     )
 
 
@@ -1555,6 +1559,16 @@ async def _insertar_prestaciones(
             db, item.cod_medico, item.cod_medico_ejecutor, item.cod_clinica
         )
         medico_precio = prestador.medico
+        if i == 0:
+            medico_cabecera = prestador.medico
+        # Un ayudante del equipo cotiza con el médico de cabecera: la especialidad que
+        # exige el código es la del que hace la práctica. Si se suma a un equipo ya
+        # guardado, la cabecera es la de ese equipo; en el alta, el ítem 0 (el cirujano).
+        if (item.ayudante or 0) > 0 and not es_pediatra:
+            if item.grupo_equipo_id is not None:
+                medico_precio = await medico_de_la_cabeza(db, item.grupo_equipo_id) or medico_precio
+            elif i > 0:
+                medico_precio = medico_cabecera
         # Cotiza con la fecha informada o, si no vino (carga por cantidad), con HOY —
         # nunca se inventa una fecha de práctica para guardar (ver `fecha_para_precio`).
         fecha_precio = fecha_para_precio(item.fecha_practica)
@@ -2413,6 +2427,24 @@ def seleccion_prestador_de(
     return str(row.cod_med), None, row.cod_clinica
 
 
+async def medico_de_la_cabeza(
+    db: AsyncSession, grupo_equipo_id: Optional[int], propio_id: Optional[int] = None,
+) -> Optional[ListadoMedico]:
+    """Médico de cabecera (el cirujano) del equipo `grupo_equipo_id`, o None si la
+    fila no es de un equipo o es ella misma la cabeza.
+
+    Un ayudante cotiza con el médico de cabecera: la especialidad que exige el
+    código (habilitación y variante NE) es la del que hace la práctica, no la de
+    quien lo asiste."""
+    if grupo_equipo_id is None or grupo_equipo_id == propio_id:
+        return None
+    cabeza = await db.get(DetalleFacturacionCMC, grupo_equipo_id)
+    if cabeza is None:
+        return None
+    prestador = await resolver_prestador(db, *seleccion_prestador_de(cabeza), validar_clinica=False)
+    return prestador.medico
+
+
 async def editar_prestacion(
     db: AsyncSession, prestacion_id: int, payload: PrestacionUpdate
 ) -> DetalleFacturacionCMC:
@@ -2581,6 +2613,11 @@ async def editar_prestacion(
                 hi, gi, ai = (Decimal("1") if c in row.sin_valorizar else Decimal("0") for c in "HGA")
             if tipo_calculo == "A":
                 via = row.via or service_vias.VIA_TRADICIONAL
+                if ai > 0 and not es_pediatra:
+                    # Ayudante de un equipo: cotiza con el médico de cabecera.
+                    medico_precio = await medico_de_la_cabeza(
+                        db, row.grupo_equipo_id, prestacion_id,
+                    ) or medico_precio
                 precio = await resolver_precio(db, row.cod_obr, medico_precio, row.cod_nom, fecha, via=via)
                 if not precio.admitido:
                     raise HTTPException(422, precio.motivo)

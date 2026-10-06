@@ -12,7 +12,9 @@ quién factura y crea un precio NE por especialidad:
     Los de "N unidades": el galeno de nivel 1 con cantidad N.
   - Ayudante: el mismo galeno, con sus unidades de ayudante (los de unidades, 0).
   - Gastos: `gasto_quirurgico` de la O.S. con las unidades del código, si lo tiene.
-Lo que ya tiene precio NE en la O.S. se saltea (un NN no cuenta). Ver `seed_nomencladores_nivelados.py`
+Lo que ya tiene precio NE en la O.S. recibe la vigencia igual: si la fecha es
+posterior rota, si es la misma la reemplaza y si es anterior borra de la base las
+vigencias más nuevas (`service.liberar_vigencia`). Un NN no se toca. Ver `seed_nomencladores_nivelados.py`
 para la carga inicial.
 """
 from __future__ import annotations
@@ -286,13 +288,18 @@ async def aplicar(
 
     # 2. Estado de cada código en la O.S. Sólo cuenta el precio NE, que es el que
     # crea este nomenclador: un NN no lo reemplaza (el lookup prefiere NE) ni choca
-    # con él (la variante es otra), así que el código igual se cotiza.
+    # con él (la variante es otra). Con NE, la vigencia se carga igual.
     nom_ids = [nom.id for _, nom in codigos]
     cods = [nom.codigo for _, nom in codigos]
-    con_precio = set((await db.execute(select(Valor.nomenclador_id).where(
+    # Vigencias NE por variante (nomenclador_id, especialidad), de la más vieja a la
+    # más nueva.
+    ne: dict[tuple[int, Optional[int]], list[Valor]] = {}
+    for v in (await db.execute(select(Valor).where(
         Valor.obra_social_nro == obra_social_nro, Valor.nomenclador_id.in_(nom_ids),
-        Valor.estado == "activo", Valor.origen == "NE",
-    ))).scalars()) if nom_ids else set()
+        Valor.origen == "NE",
+    ).order_by(Valor.vigencia_desde))).scalars() if nom_ids else []:
+        ne.setdefault((v.nomenclador_id, v.especialidad_id_colegio), []).append(v)
+    con_precio = {nom_id for nom_id, _ in ne}
     pares = {
         p.nomenclador_id: p for p in (await db.execute(select(CodigoObraSocial).where(
             CodigoObraSocial.obra_social_nro == obra_social_nro,
@@ -303,8 +310,6 @@ async def aplicar(
     def _clasificar(c, nom) -> Optional[tuple[str, str]]:
         if not nom.activo:
             return "omitido", "El código está inactivo en el catálogo"
-        if nom.id in con_precio:
-            return "ya_tiene_precio", "Ya tiene precio NE en esta obra social"
         par = pares.get(nom.id)
         if par is not None and par.estado == "suspendido":
             return "suspendido", "El código está suspendido en esta obra social"
@@ -357,6 +362,7 @@ async def aplicar(
     filas_out: list[AplicarNiveladoFila] = []
     a_crear: list[tuple[dict, list[dict]]] = []
     a_habilitar: list[dict] = []
+    a_liberar: list[tuple[int, Optional[int]]] = []  # (nomenclador_id, especialidad)
     for c, nom in codigos:
         base = dict(
             nomenclador_id=nom.id, codigo=nom.codigo, descripcion=nom.descripcion,
@@ -396,8 +402,27 @@ async def aplicar(
                 "cantidad_ayudantes": _forzar_ayudantes_honorarios_individuales(
                     categoria, nom, par.cantidad_ayudantes if par else None,
                 ),
-                "coseguro": Decimal("0"), "vigencia_desde": vigencia_desde, "observacion": None,
+                # Si ya tenía precio, conserva el coseguro de la última vigencia.
+                "coseguro": ne[(nom.id, esp)][-1].coseguro if (nom.id, esp) in ne else Decimal("0"),
+                "vigencia_desde": vigencia_desde, "observacion": None,
             }, comps))
+        if nom.id in con_precio:
+            borradas = sum(
+                1 for esp in variantes for v in ne.get((nom.id, esp), [])
+                if v.vigencia_desde >= vigencia_desde
+            )
+            a_liberar.extend((nom.id, esp) for esp in variantes)
+            filas_out.append(AplicarNiveladoFila(
+                **base, estado="reemplazar" if dry_run else "reemplazado",
+                precios=len(variantes), precio=_precio(comps, galenos_por_id),
+                vigencias_borradas=borradas,
+                motivo=(
+                    f"Ya tenía precio NE: se borran {borradas} vigencia(s) desde el "
+                    f"{vigencia_desde.strftime('%d/%m/%Y')} en adelante" if borradas
+                    else "Ya tenía precio NE: se cierra y se abre la vigencia nueva"
+                ),
+            ))
+            continue
         filas_out.append(AplicarNiveladoFila(
             **base, estado="crear" if dry_run else "creado",
             precios=len(variantes), precio=_precio(comps, galenos_por_id),
@@ -405,6 +430,9 @@ async def aplicar(
 
     if a_habilitar and not dry_run:
         await db.execute(insert(ValorEspecialidad), a_habilitar)
+    if not dry_run:
+        for nom_id, esp in a_liberar:
+            await service.liberar_vigencia(db, obra_social_nro, nom_id, "NE", esp, vigencia_desde)
     if a_crear and not dry_run:
         await service.persistir_valores_en_bloque(db, a_crear, motivo="carga_inicial")
 
@@ -416,7 +444,9 @@ async def aplicar(
         galeno_nombre=g_nombre or g_codigo,
         resumen=AplicarNiveladoResumen(
             total=len(filas_out), crear=cuenta("crear") + cuenta("creado"),
-            ya_tiene_precio=cuenta("ya_tiene_precio"), sin_quien_factura=cuenta("sin_quien_factura"),
+            reemplazar=cuenta("reemplazar") + cuenta("reemplazado"),
+            vigencias_borradas=sum(f.vigencias_borradas for f in filas_out),
+            sin_quien_factura=cuenta("sin_quien_factura"),
             suspendido=cuenta("suspendido"), omitido=cuenta("omitido"),
             precios=len(a_crear), altas=len(altas),
         ),

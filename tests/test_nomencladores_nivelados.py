@@ -94,7 +94,7 @@ async def _comps(db, valor_id):
 @pytest.mark.asyncio
 async def test_aplicar_crea_alta_y_precio_por_especialidad_con_el_galeno_del_nivel(s):
     (a, b, c, d), (e1, e2) = await _preparar(s)
-    # d ya tiene precio: se saltea.
+    # d ya tiene precio NE (de hoy): se reemplaza.
     await _crear_valor_con_componentes(
         db=s, obra_social_nro=OS, nomenclador_id=d.id, origen="NE", vigencia_desde=HOY,
         componentes_in=[ValorComponenteIn(concepto="Honorarios", valor_unitario=Decimal("10"))],
@@ -104,12 +104,12 @@ async def test_aplicar_crea_alta_y_precio_por_especialidad_con_el_galeno_del_niv
     previa = await nivelados.aplicar(s, SLUG, OS, HOY, dry_run=True, usuario="t")
     estados = {f.codigo: f.estado for f in previa.filas}
     assert estados == {a.codigo: "crear", b.codigo: "crear", c.codigo: "sin_quien_factura",
-                       d.codigo: "ya_tiene_precio"}
+                       d.codigo: "reemplazar"}
     assert await _activos(s, a.id) == []  # la vista previa no escribe
     assert next(f for f in previa.filas if f.codigo == a.codigo).precio == Decimal("3750.00")
 
     out = await nivelados.aplicar(s, SLUG, OS, HOY, dry_run=False, usuario="t")
-    assert out.resumen.precios == 3
+    assert out.resumen.precios == 4 and out.resumen.reemplazar == 1
 
     va = await _activos(s, a.id)
     assert sorted(v.especialidad_id_colegio for v in va) == [e1, e2]
@@ -129,13 +129,15 @@ async def test_aplicar_crea_alta_y_precio_por_especialidad_con_el_galeno_del_niv
     ))).scalar_one()
     assert par_c.estado == "activo"
 
-    # El que ya tenía precio no se tocó.
-    [vd] = await _activos(s, d.id)
-    assert vd.descripcion == "X"
+    # El que ya tenía precio con la misma fecha: se reemplazó (una sola vigencia).
+    vd = list((await s.execute(select(Valor).where(
+        Valor.obra_social_nro == OS, Valor.nomenclador_id == d.id,
+    ))).scalars())
+    assert len(vd) == 1 and vd[0].estado == "activo" and vd[0].nivel == 5
 
-    # Reaplicar: todo lo que tiene precio sale como ya cargado.
+    # Reaplicar: todo lo que tiene precio se reemplaza.
     otra = await nivelados.aplicar(s, SLUG, OS, HOY, dry_run=True, usuario="t")
-    assert otra.resumen.crear == 0 and otra.resumen.ya_tiene_precio == 3
+    assert otra.resumen.crear == 0 and otra.resumen.reemplazar == 3
 
 
 @pytest.mark.asyncio
@@ -155,6 +157,56 @@ async def test_un_precio_nn_no_cuenta_como_ya_cargado(s):
     assert sorted((v.origen, v.especialidad_id_colegio or 0) for v in va) == [
         ("NE", e1), ("NE", e2), ("NN", 0),
     ]
+
+
+async def _variante(db, nom_id, esp):
+    """(vigencia_desde, vigencia_hasta, estado) de cada valor NE de la variante, y las
+    filas de historial, de la más vieja a la más nueva."""
+    from app.db.models.nomenclador_cmc import HistorialPrecioCodigo as H
+
+    valores = [(v.vigencia_desde, v.vigencia_hasta, v.estado) for v in (await db.execute(
+        select(Valor).where(Valor.obra_social_nro == OS, Valor.nomenclador_id == nom_id,
+                            Valor.origen == "NE", Valor.especialidad_id_colegio == esp)
+        .order_by(Valor.vigencia_desde)
+    )).scalars()]
+    hist = [(h.vigencia_desde, h.vigencia_hasta) for h in (await db.execute(
+        select(H).where(H.obra_social_nro == OS, H.nomenclador_id == nom_id,
+                        H.origen == "NE", H.especialidad_id_colegio == esp)
+        .order_by(H.vigencia_desde)
+    )).scalars()]
+    return valores, hist
+
+
+@pytest.mark.asyncio
+async def test_vigencia_anterior_borra_las_mas_nuevas_y_queda_como_ultima(s):
+    (_, b, *_), (e1, _) = await _preparar(s)
+    d1, d2, d3 = HOY - datetime.timedelta(days=60), HOY - datetime.timedelta(days=30), HOY
+    for f in (d1, d3):
+        await nivelados.aplicar(s, SLUG, OS, f, dry_run=False, usuario="t")
+    assert [v[0] for v in (await _variante(s, b.id, e1))[0]] == [d1, d3]
+
+    previa = await nivelados.aplicar(s, SLUG, OS, d2, dry_run=True, usuario="t")
+    fb = next(f for f in previa.filas if f.codigo == b.codigo)
+    assert fb.estado == "reemplazar" and fb.vigencias_borradas == 1
+
+    await nivelados.aplicar(s, SLUG, OS, d2, dry_run=False, usuario="t")
+    valores, hist = await _variante(s, b.id, e1)
+    corte = d2 - datetime.timedelta(days=1)
+    assert valores == [(d1, corte, "cerrado"), (d2, None, "activo")]
+    assert hist == [(d1, corte), (d2, None)]
+
+
+@pytest.mark.asyncio
+async def test_misma_vigencia_reemplaza_sin_rotar(s):
+    (_, b, *_), (e1, _) = await _preparar(s)
+    d1 = HOY - datetime.timedelta(days=30)
+    await nivelados.aplicar(s, SLUG, OS, d1, dry_run=False, usuario="t")
+    await nivelados.aplicar(s, SLUG, OS, HOY, dry_run=False, usuario="t")
+    await nivelados.aplicar(s, SLUG, OS, HOY, dry_run=False, usuario="t")
+    valores, hist = await _variante(s, b.id, e1)
+    corte = HOY - datetime.timedelta(days=1)
+    assert valores == [(d1, corte, "cerrado"), (HOY, None, "activo")]
+    assert hist == [(d1, corte), (HOY, None)]
 
 
 @pytest.mark.asyncio

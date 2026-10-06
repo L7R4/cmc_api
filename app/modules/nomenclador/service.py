@@ -555,6 +555,70 @@ def _cond_variante(origen: str, especialidad_id: Optional[int]):
     return and_(cond, HistorialPrecioCodigo.especialidad_id_colegio == especialidad_id)
 
 
+async def liberar_vigencia(
+    db: AsyncSession,
+    obra_social_nro: int,
+    nomenclador_id: int,
+    origen: str,
+    especialidad_id: Optional[int],
+    fecha: datetime.date,
+) -> int:
+    """Deja una variante lista para abrir una vigencia nueva desde `fecha`, sea
+    cual sea la fecha:
+
+    - Todo lo que arranca en `fecha` o después se BORRA de la base: los valores
+      (con sus componentes y su historial) y las filas de historial sueltas de la
+      variante (las que deja el arrastre de una rotación de galeno). La vigencia
+      que se carga pasa a ser la última, así que nada puede quedar después.
+      Misma fecha = se reemplaza (no se rota).
+    - Lo que cubría `fecha` se cierra el día anterior: el valor y su historial.
+
+    Devuelve cuántos valores borró. No hace commit."""
+    cond_valor = Valor.origen == origen
+    cond_valor &= (
+        Valor.especialidad_id_colegio.is_(None) if especialidad_id is None
+        else Valor.especialidad_id_colegio == especialidad_id
+    )
+    de_la_variante = and_(
+        Valor.obra_social_nro == obra_social_nro, Valor.nomenclador_id == nomenclador_id, cond_valor,
+    )
+    hist_de_la_variante = and_(
+        HistorialPrecioCodigo.obra_social_nro == obra_social_nro,
+        HistorialPrecioCodigo.nomenclador_id == nomenclador_id,
+        _cond_variante(origen, especialidad_id),
+    )
+
+    ids = list((await db.execute(
+        select(Valor.id).where(de_la_variante, Valor.vigencia_desde >= fecha)
+    )).scalars())
+    if ids:
+        await db.execute(delete(HistorialPrecioCodigo).where(HistorialPrecioCodigo.valores_id.in_(ids)))
+        await db.execute(delete(ValorComponente).where(ValorComponente.valor_id.in_(ids)))
+        await db.execute(delete(Valor).where(Valor.id.in_(ids)))
+    await db.execute(delete(HistorialPrecioCodigo).where(
+        hist_de_la_variante, HistorialPrecioCodigo.vigencia_desde >= fecha,
+    ))
+
+    corte = fecha - datetime.timedelta(days=1)
+    await db.execute(
+        update(Valor)
+        .where(de_la_variante, Valor.vigencia_desde < fecha,
+               or_(Valor.vigencia_hasta.is_(None), Valor.vigencia_hasta >= fecha))
+        .values(estado="cerrado", vigencia_hasta=corte)
+        .execution_options(synchronize_session="fetch")
+    )
+    await db.execute(
+        update(HistorialPrecioCodigo)
+        .where(hist_de_la_variante, HistorialPrecioCodigo.vigencia_desde < fecha,
+               or_(HistorialPrecioCodigo.vigencia_hasta.is_(None),
+                   HistorialPrecioCodigo.vigencia_hasta >= fecha))
+        .values(vigencia_hasta=corte)
+        .execution_options(synchronize_session="fetch")
+    )
+    await db.flush()
+    return len(ids)
+
+
 async def regenerar_historial_por_valores(
     nuevo_valor_id: int,
     fecha_corte: Optional[datetime.date],
@@ -2194,10 +2258,16 @@ async def lookup_precio(
     via: str = service_vias.VIA_TRADICIONAL,
     *,
     ignorar_ventana: bool = False,
+    con_admision_via: bool = False,
 ) -> LookupPrecioOut:
     """
     Lookup directo en historial_precio_codigo + validación de habilitación del médico.
     Lanza LookupError con el motivo si alguna validación falla.
+
+    `con_admision_via`: además de cotizar, informa en `admite_laparoscopia` si el código
+    se puede cotizar por vía laparoscópica (lo usa la pantalla de carga para decidir si
+    ofrece la vía). Cuesta alguna consulta extra, por eso es opcional y los procesos en
+    bloque (recotizar / revalorizar) no lo piden.
 
     `ignorar_ventana` saltea el corte de 6 meses: ese gate frena la *carga* de
     prácticas viejas, no la recotización de algo ya cargado (recálculo /
@@ -2348,6 +2418,19 @@ async def lookup_precio(
     except service_vias.ViaNoAplicableError as e:
         raise LookupError(e.message, e.status_code)
 
+    admite_laparoscopia = False
+    if con_admision_via:
+        if via == service_vias.VIA_LAPAROSCOPICA:
+            admite_laparoscopia = True   # recién se cotizó por esa vía: la admite
+        else:
+            try:
+                await service_vias.ajustar_componentes_por_via(
+                    db, obra_social_nro, componentes_out, service_vias.VIA_LAPAROSCOPICA,
+                )
+                admite_laparoscopia = True
+            except service_vias.ViaNoAplicableError:
+                admite_laparoscopia = False
+
     # Todos los componentes suman (ya no hay opcionales): precio_base == precio_total.
     precio_base = precio_total
 
@@ -2373,4 +2456,5 @@ async def lookup_precio(
         componentes=componentes_out,
         via=via,
         nivel_cotizado=nivel_cotizado,
+        admite_laparoscopia=admite_laparoscopia,
     )

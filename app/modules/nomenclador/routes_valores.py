@@ -1275,84 +1275,53 @@ async def _actualizar_valor_core(
         await service.variantes_hermanas(db, anterior) if body.aplicar_a_variantes else []
     )
 
-    # Rotar con una fecha igual o anterior dejaría la fila vieja "vigente hasta" antes
-    # de su "vigente desde".
-    ultima = max([anterior.vigencia_desde, *(h.vigencia_desde for h in hermanas)])
-    if body.vigencia_desde <= ultima:
-        raise HTTPException(
-            422,
-            f"La nueva vigencia tiene que ser posterior al {ultima.strftime('%d/%m/%Y')}, "
-            "desde cuando rige el precio actual.",
-        )
-
+    # Cualquier fecha vale (ver `service.liberar_vigencia`): posterior rota como
+    # siempre; igual a una vigencia existente la reemplaza (no rota); anterior borra
+    # de la base todas las vigencias más nuevas y la cargada pasa a ser la última.
     fecha_corte = body.vigencia_desde - datetime.timedelta(days=1)
-    _cerrar_valor(anterior, fecha_corte)
-    await db.flush()
 
-    nuevo = await _crear_valor_con_componentes(
-        db=db,
-        obra_social_nro=anterior.obra_social_nro,
-        nomenclador_id=anterior.nomenclador_id,
-        origen=anterior.origen,
-        vigencia_desde=body.vigencia_desde,
-        componentes_in=body.componentes,
-        descripcion=body.descripcion or anterior.descripcion,
-        nivel=body.nivel if body.nivel is not None else anterior.nivel,
-        complejidad=body.complejidad if body.complejidad is not None else anterior.complejidad,
-        especialidad_id_colegio=anterior.especialidad_id_colegio,
-        observacion=body.observacion or anterior.observacion,
-        por_presupuesto=body.por_presupuesto,
-        cantidad_ayudantes=(
-            body.cantidad_ayudantes if body.cantidad_ayudantes is not None
-            else anterior.cantidad_ayudantes
-        ),
-        categoria=body.categoria if body.categoria is not None else anterior.categoria,
-        requiere_autorizacion=(
-            body.requiere_autorizacion if body.requiere_autorizacion is not None
-            else anterior.requiere_autorizacion
-        ),
-        coseguro=body.coseguro if body.coseguro is not None else anterior.coseguro,
-        sin_restriccion_especialidad=anterior.sin_restriccion_especialidad,
-        motivo="valores_estructura",
-        fecha_corte=fecha_corte,
-    )
-
-    # Propaga la misma vigencia+componentes a las demás variantes NE del par (OS,
-    # código): cada una se cierra y recrea igual que `anterior`, conservando su propia
-    # especialidad_id_colegio. El front recarga la grilla completa después, así que acá
-    # alcanza con devolver el valor principal.
-    for hermana in hermanas:
-        _cerrar_valor(hermana, fecha_corte)
-        await db.flush()
-        nuevo_hermano = await _crear_valor_con_componentes(
-            db=db,
-            obra_social_nro=hermana.obra_social_nro,
-            nomenclador_id=hermana.nomenclador_id,
-            origen=hermana.origen,
-            vigencia_desde=body.vigencia_desde,
-            componentes_in=body.componentes,
-            descripcion=body.descripcion or hermana.descripcion,
-            nivel=body.nivel if body.nivel is not None else hermana.nivel,
-            complejidad=body.complejidad if body.complejidad is not None else hermana.complejidad,
-            especialidad_id_colegio=hermana.especialidad_id_colegio,
-            observacion=body.observacion or hermana.observacion,
-            por_presupuesto=body.por_presupuesto,
+    # Los datos de cada variante se toman ANTES de liberar: si la vigencia actual
+    # arranca en la fecha cargada o después, `liberar_vigencia` la borra.
+    def _datos(v: Valor) -> dict:
+        return dict(
+            obra_social_nro=v.obra_social_nro, nomenclador_id=v.nomenclador_id, origen=v.origen,
+            descripcion=body.descripcion or v.descripcion,
+            nivel=body.nivel if body.nivel is not None else v.nivel,
+            complejidad=body.complejidad if body.complejidad is not None else v.complejidad,
+            especialidad_id_colegio=v.especialidad_id_colegio,
+            observacion=body.observacion or v.observacion,
             cantidad_ayudantes=(
                 body.cantidad_ayudantes if body.cantidad_ayudantes is not None
-                else hermana.cantidad_ayudantes
+                else v.cantidad_ayudantes
             ),
-            categoria=body.categoria if body.categoria is not None else hermana.categoria,
+            categoria=body.categoria if body.categoria is not None else v.categoria,
             requiere_autorizacion=(
                 body.requiere_autorizacion if body.requiere_autorizacion is not None
-                else hermana.requiere_autorizacion
+                else v.requiere_autorizacion
             ),
-            coseguro=body.coseguro if body.coseguro is not None else hermana.coseguro,
-            sin_restriccion_especialidad=hermana.sin_restriccion_especialidad,
-            motivo="valores_estructura",
-            fecha_corte=fecha_corte,
+            coseguro=body.coseguro if body.coseguro is not None else v.coseguro,
+            sin_restriccion_especialidad=v.sin_restriccion_especialidad,
         )
 
-    return nuevo
+    # Las demás variantes NE del par (OS, código) toman la misma vigencia+componentes,
+    # cada una con su propia especialidad. El front recarga la grilla completa
+    # después, así que alcanza con devolver el valor principal.
+    variantes = [_datos(v) for v in (anterior, *hermanas)]
+    creados = []
+    for datos in variantes:
+        await service.liberar_vigencia(
+            db, datos["obra_social_nro"], datos["nomenclador_id"], datos["origen"],
+            datos["especialidad_id_colegio"], body.vigencia_desde,
+        )
+        creados.append(await _crear_valor_con_componentes(
+            db=db, **datos,
+            vigencia_desde=body.vigencia_desde,
+            componentes_in=body.componentes,
+            por_presupuesto=body.por_presupuesto,
+            motivo="valores_estructura",
+            fecha_corte=fecha_corte,
+        ))
+    return creados[0]
 
 
 @router.delete("/{id}", status_code=204)

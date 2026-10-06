@@ -352,22 +352,49 @@ async def test_quitar_sin_restriccion_con_precio_unico_pregunta_y_lo_cierra(s):
 
 
 @pytest.mark.asyncio
-async def test_rotar_con_vigencia_igual_o_anterior_da_422(s):
+async def test_rotar_con_vigencia_igual_reemplaza_y_anterior_borra_las_nuevas(s):
+    from app.db.models.nomenclador_cmc import HistorialPrecioCodigo as H
     from app.modules.nomenclador.routes_valores import _actualizar_valor_core
     from app.modules.nomenclador.schemas import ValorCerrarYCrearIn
 
     await _os(s, OS)
     e1, _ = await _esps(s, 2)
     await _alta(s, especialidades=[e1], sin_restriccion_especialidad=False)
-    v = await _precio_esp(s, e1)
-    with pytest.raises(HTTPException) as exc:
-        await _actualizar_valor_core(s, v.id, ValorCerrarYCrearIn(
-            vigencia_desde=HOY,
-            componentes=[ValorComponenteIn(concepto="Honorarios", valor_unitario=Decimal("20"))],
-        ))
-    assert exc.value.status_code == 422 and "posterior" in exc.value.detail
-    await s.refresh(v)
-    assert v.estado == "activo"
+    d1, d2, d3 = (HOY - datetime.timedelta(days=n) for n in (60, 30, 0))
+    v = await _precio_esp(s, e1, desde=d1)
+
+    def ecu(fecha, monto):
+        return ValorCerrarYCrearIn(
+            vigencia_desde=fecha,
+            componentes=[ValorComponenteIn(concepto="Honorarios", valor_unitario=Decimal(monto))],
+        )
+
+    async def estado():
+        valores = [(x.vigencia_desde, x.vigencia_hasta, x.estado) for x in (await s.execute(
+            select(Valor).where(Valor.obra_social_nro == OS, Valor.nomenclador_id == NOM_ID)
+            .order_by(Valor.vigencia_desde)
+        )).scalars()]
+        hist = [(h.vigencia_desde, h.vigencia_hasta, h.precio_total) for h in (await s.execute(
+            select(H).where(H.obra_social_nro == OS, H.nomenclador_id == NOM_ID)
+            .order_by(H.vigencia_desde)
+        )).scalars()]
+        return valores, hist
+
+    # Posterior: rota como siempre.
+    v3 = await _actualizar_valor_core(s, v.id, ecu(d3, "30"))
+    # Misma fecha que la vigente: la reemplaza, no rota.
+    v3 = await _actualizar_valor_core(s, v3.id, ecu(d3, "35"))
+    valores, hist = await estado()
+    corte1 = d3 - datetime.timedelta(days=1)
+    assert valores == [(d1, corte1, "cerrado"), (d3, None, "activo")]
+    assert [h[:2] for h in hist] == [(d1, corte1), (d3, None)] and hist[-1][2] == Decimal("35")
+
+    # Anterior a la vigente: borra la de d3 y la cargada queda como la última.
+    await _actualizar_valor_core(s, v3.id, ecu(d2, "20"))
+    valores, hist = await estado()
+    corte2 = d2 - datetime.timedelta(days=1)
+    assert valores == [(d1, corte2, "cerrado"), (d2, None, "activo")]
+    assert [h[:2] for h in hist] == [(d1, corte2), (d2, None)] and hist[-1][2] == Decimal("20")
 
 
 def test_el_nivel_lo_define_el_galeno_nivelado():

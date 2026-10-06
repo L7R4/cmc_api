@@ -1270,6 +1270,11 @@ class LookupPrecioOut(BaseModel):
     # nivel con recargo). Ver app/modules/nomenclador/service_vias.py.
     via: str = "T"
     nivel_cotizado: Optional[int] = None
+    # True → el código admite cotizarse por vía laparoscópica (la regla vive en
+    # service_vias: galeno de cirugía adulto/infantil, fuera del nivel tope). Sólo se
+    # calcula cuando el que llama lo pide (`lookup_precio(con_admision_via=True)`);
+    # si no, queda en False y no significa "no admite".
+    admite_laparoscopia: bool = False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1679,7 +1684,7 @@ class AplicarNiveladoIn(BaseModel):
 
 
 EstadoAplicarNivelado = Literal[
-    "crear", "creado", "ya_tiene_precio", "sin_quien_factura", "suspendido", "omitido",
+    "crear", "creado", "reemplazar", "reemplazado", "sin_quien_factura", "suspendido", "omitido",
 ]
 
 
@@ -1695,12 +1700,16 @@ class AplicarNiveladoFila(BaseModel):
     # Honorarios + ayudante + gastos con el galeno de la O.S. (orientativo).
     precio: Optional[Decimal] = None
     motivo: Optional[str] = None
+    # Vigencias NE desde la fecha cargada en adelante que se borran de la base.
+    vigencias_borradas: int = 0
 
 
 class AplicarNiveladoResumen(BaseModel):
     total: int
     crear: int
-    ya_tiene_precio: int
+    # Ya tenían precio NE: se les carga la vigencia igual (ver `liberar_vigencia`).
+    reemplazar: int
+    vigencias_borradas: int
     sin_quien_factura: int
     suspendido: int
     omitido: int

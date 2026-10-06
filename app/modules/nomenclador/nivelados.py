@@ -12,7 +12,7 @@ quién factura y crea un precio NE por especialidad:
     Los de "N unidades": el galeno de nivel 1 con cantidad N.
   - Ayudante: el mismo galeno, con sus unidades de ayudante (los de unidades, 0).
   - Gastos: `gasto_quirurgico` de la O.S. con las unidades del código, si lo tiene.
-Lo que ya tiene precio en la O.S. se saltea. Ver `seed_nomencladores_nivelados.py`
+Lo que ya tiene precio NE en la O.S. se saltea (un NN no cuenta). Ver `seed_nomencladores_nivelados.py`
 para la carga inicial.
 """
 from __future__ import annotations
@@ -22,7 +22,7 @@ from decimal import Decimal
 from typing import Optional
 
 from fastapi import HTTPException
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, insert, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -284,12 +284,14 @@ async def aplicar(
     if gasto is not None:
         galenos_por_id[gasto.id] = gasto
 
-    # 2. Estado de cada código en la O.S.
+    # 2. Estado de cada código en la O.S. Sólo cuenta el precio NE, que es el que
+    # crea este nomenclador: un NN no lo reemplaza (el lookup prefiere NE) ni choca
+    # con él (la variante es otra), así que el código igual se cotiza.
     nom_ids = [nom.id for _, nom in codigos]
     cods = [nom.codigo for _, nom in codigos]
     con_precio = set((await db.execute(select(Valor.nomenclador_id).where(
         Valor.obra_social_nro == obra_social_nro, Valor.nomenclador_id.in_(nom_ids),
-        Valor.estado == "activo",
+        Valor.estado == "activo", Valor.origen == "NE",
     ))).scalars()) if nom_ids else set()
     pares = {
         p.nomenclador_id: p for p in (await db.execute(select(CodigoObraSocial).where(
@@ -302,7 +304,7 @@ async def aplicar(
         if not nom.activo:
             return "omitido", "El código está inactivo en el catálogo"
         if nom.id in con_precio:
-            return "ya_tiene_precio", "Ya tiene precio en esta obra social"
+            return "ya_tiene_precio", "Ya tiene precio NE en esta obra social"
         par = pares.get(nom.id)
         if par is not None and par.estado == "suspendido":
             return "suspendido", "El código está suspendido en esta obra social"
@@ -340,18 +342,21 @@ async def aplicar(
     def _quien_factura(nom) -> tuple[bool, list[int]]:
         par = pares.get(nom.id)
         ya = sorted(habilitadas.get(nom.codigo, []))
-        if par is not None:
-            return bool(par.sin_restriccion_especialidad), ya
-        # Sin alta (sólo en la vista previa): lo que haría `dar_de_alta`.
+        if par is not None and par.sin_restriccion_especialidad:
+            return True, []
         if ya:
             return False, ya
-        if nom.sin_restriccion_especialidad:
+        # Sin alta (sólo en la vista previa) lo que haría `dar_de_alta`. Con alta pero
+        # sin nadie habilitado (p. ej. la que dejó un precio NN), la plantilla: se
+        # habilita al aplicar.
+        if par is None and nom.sin_restriccion_especialidad:
             return True, []
         return False, sorted(plantillas.get(nom.codigo, []))
 
     # 5. Precios.
     filas_out: list[AplicarNiveladoFila] = []
     a_crear: list[tuple[dict, list[dict]]] = []
+    a_habilitar: list[dict] = []
     for c, nom in codigos:
         base = dict(
             nomenclador_id=nom.id, codigo=nom.codigo, descripcion=nom.descripcion,
@@ -371,6 +376,11 @@ async def aplicar(
         galeno = galenos_os[c.nivel if c.nivel is not None else 1]
         comps = _componentes(nom, galeno, gasto, c.unidades)
         par = pares.get(nom.id)
+        if par is not None and not sin_restr and not habilitadas.get(nom.codigo):
+            a_habilitar.extend(
+                {"obra_social_nro": obra_social_nro, "codigo": nom.codigo, "especialidad_id_colegio": e}
+                for e in esps
+            )
         categoria = par.categoria if par else None
         variantes = [None] if sin_restr else esps
         for esp in variantes:
@@ -393,6 +403,8 @@ async def aplicar(
             precios=len(variantes), precio=_precio(comps, galenos_por_id),
         ))
 
+    if a_habilitar and not dry_run:
+        await db.execute(insert(ValorEspecialidad), a_habilitar)
     if a_crear and not dry_run:
         await service.persistir_valores_en_bloque(db, a_crear, motivo="carga_inicial")
 

@@ -18,7 +18,7 @@ Las modalidades (`ExportOpciones.agrupacion`) comparten una sola estructura:
 - **por_socio**: orden FIJO (ignora `orden`), una única `Seccion` sin título. Socios
   A-Z; dentro de cada uno, con subtítulo por tramo: consultas y prácticas por fecha
   (más nueva primero), honorarios individuales y sanatorios por paciente A-Z, cada
-  paciente con su subtítulo ("PACIENTE <nombre>").
+  paciente con su subtítulo ("PACIENTE <nombre>") y su "TOTAL PACIENTE <nombre>".
   Cada grupo lleva su título y su "RESUMEN SOCIO"; en Excel va todo en una sola hoja
   (`Armado.una_hoja`).
 - **por_tipo**: una `Seccion` por tipo (Consulta/Practica/Honorarios
@@ -402,7 +402,7 @@ def _armar_por_socio(filas: list[FilaExport], equipo: dict[int, list[FilaExport]
                 fila=f, hijos=equipo.get(f.id, []), subtitulo="OTRAS" if i == 0 else None,
             ))
         _marcar_clinicas(lineas)
-        _marcar_pacientes(lineas)
+        _marcar_pacientes(lineas, con_total=True)
         f0 = filas_socio[0]
         grupos.append(_armar_grupo(
             f0.cod_medico, f0.prestador_nombre, f0.matricula, lineas, True, titulo=_titulo_socio(f0),
@@ -562,7 +562,7 @@ _DEFINICIONES: dict[str, ColumnaSpec] = {
     "gastos": ColumnaSpec("gastos", "GASTOS", 22, 14, "R", True, lambda f: f.gastos),
     "coseguro": ColumnaSpec("coseguro", "COSEGURO", 22, 14, "R", True, lambda f: f.coseguro),
     "diagnostico": ColumnaSpec("diagnostico", "DIAGNOSTICO", 42, 28, "L", False, lambda f: f.diagnostico or ""),
-    "via": ColumnaSpec("via", "VIA", 16, 11, "C", False, lambda f: {"L": "Laparoscopica", "T": "Tradicional"}.get(f.via, f.via or "")),
+    "via": ColumnaSpec("via", "VIA", 9, 6, "C", False, lambda f: f.via or ""),  # "T" / "L"
     "especialidad": ColumnaSpec("especialidad", "ESPECIALIDAD", 30, 22, "L", False, lambda f: f.especialidad_nombre or ""),
     "estado_validacion": ColumnaSpec("estado_validacion", "VALIDACION", 20, 14, "C", False, lambda f: f.estado_validacion or ""),
 }

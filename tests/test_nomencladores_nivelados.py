@@ -139,6 +139,25 @@ async def test_aplicar_crea_alta_y_precio_por_especialidad_con_el_galeno_del_niv
 
 
 @pytest.mark.asyncio
+async def test_un_precio_nn_no_cuenta_como_ya_cargado(s):
+    (a, *_), (e1, e2) = await _preparar(s)
+    await _crear_valor_con_componentes(
+        db=s, obra_social_nro=OS, nomenclador_id=a.id, origen="NN", vigencia_desde=HOY,
+        componentes_in=[ValorComponenteIn(concepto="Honorarios", valor_unitario=Decimal("10"))],
+        descripcion="NN", nivel=None, complejidad=None, especialidad_id_colegio=None, observacion=None,
+    )
+
+    previa = await nivelados.aplicar(s, SLUG, OS, HOY, dry_run=True, usuario="t")
+    assert next(f for f in previa.filas if f.codigo == a.codigo).estado == "crear"
+
+    await nivelados.aplicar(s, SLUG, OS, HOY, dry_run=False, usuario="t")
+    va = await _activos(s, a.id)
+    assert sorted((v.origen, v.especialidad_id_colegio or 0) for v in va) == [
+        ("NE", e1), ("NE", e2), ("NN", 0),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_sin_los_galenos_del_nivel_da_409(s):
     await _preparar(s, con_galenos=False)
     with pytest.raises(HTTPException) as exc:

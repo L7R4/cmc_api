@@ -30,7 +30,7 @@ from app.modules.facturacion.export.schemas import ExportOpciones
 _FONT = "Helvetica"
 _SIZE_DATO = 6.5
 _SIZE_HEADER_COL = 6.5
-_ALTO_FILA = 4.4
+_ALTO_FILA = 5.2
 _MAP_ALIGN = {"L": "L", "C": "C", "R": "R"}
 _RELLENO_PACIENTE = (224, 242, 254)
 _ELLIPSIS = "..."  # no "…": fuera de Latin-1, rompe las fuentes core de fpdf2.
@@ -143,6 +143,7 @@ class _Tabla:
         self._anchos_texto = [max(w - 2 * pdf.c_margin, 1) for w in self.anchos]
 
         self._y_inicio_pagina: Optional[float] = None
+        self._titulo_seccion: Optional[str] = None
         self._limites_fila: list[float] = []
         self._segmentos_columnas: list[tuple[float, float]] = []
         self._segmento_actual_inicio: Optional[float] = None
@@ -203,9 +204,12 @@ class _Tabla:
         return self.pdf.h - self.pdf.b_margin - self.pdf.get_y()
 
     def asegurar_pagina(self, titulo_seccion: Optional[str] = None, forzar: bool = False) -> None:
+        if forzar:
+            self._titulo_seccion = titulo_seccion
         if forzar or self._y_inicio_pagina is None or self._espacio_libre() < _ALTO_FILA:
             self._cerrar_pagina()
-            self._abrir_pagina(titulo_seccion)
+            # Cada página lleva el título de su sección (CONSULTA, PRACTICA…), no sólo la primera.
+            self._abrir_pagina(titulo_seccion or self._titulo_seccion)
 
     def fila(self, valores: list, negrita: bool = False) -> None:
         self.asegurar_pagina()

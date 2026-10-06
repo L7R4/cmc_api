@@ -236,7 +236,9 @@ def test_por_socio_pacientes_con_subtitulo_y_el_equipo_de_honorarios_no_suma():
     assert g.total_general == Decimal("1515.00")
     # El resumen general cierra con todo lo facturado.
     assert a.resumen.total_general == Decimal("1665.00")
-    assert all(l.total_paciente is None for l in g.lineas)
+    # Cada paciente cierra con su total (con el equipo): DIAZ 500 + 100 + 50, PEREYRA 1000.
+    assert [l.total_paciente for l in hi] == [("DIAZ", Decimal("650.00")), ("PEREYRA", Decimal("1000.00"))]
+    assert all(l.total_paciente is None for l in g.lineas if l.fila.tipo == "Consulta")
 
 
 def test_por_tipo_honorarios_por_medico_no_suma_el_equipo():

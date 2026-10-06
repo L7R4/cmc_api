@@ -28,6 +28,7 @@ from app.modules.facturacion.export.encabezado import EncabezadoExport
 from app.modules.facturacion.export.schemas import ExportOpciones
 
 FORMATO_MONEDA = "#,##0.00"
+ALTO_FILA_EXCEL = 18
 _ALINEACION = {"L": "left", "C": "center", "R": "right"}
 _FUENTE_HEADER = Font(bold=True)
 _FUENTE_NEGRITA = Font(bold=True)
@@ -55,7 +56,7 @@ def _celda(ws, valor, *, negrita: bool = False, cursiva: bool = False, numero: b
         c.font = _FUENTE_CURSIVA
     if numero:
         c.number_format = FORMATO_MONEDA
-    c.alignment = Alignment(horizontal=_ALINEACION.get(alineacion, "left"))
+    c.alignment = Alignment(horizontal=_ALINEACION.get(alineacion, "left"), vertical="center")
     return c
 
 
@@ -74,7 +75,7 @@ def _fila_centrada(
             c.font = _FUENTE_CURSIVA
         if relleno is not None:
             c.fill = relleno
-        c.alignment = Alignment(horizontal="centerContinuous")
+        c.alignment = Alignment(horizontal="centerContinuous", vertical="center")
         celdas.append(c)
     ws.append(celdas)
 
@@ -93,6 +94,9 @@ def _aplicar_pagina_a4(ws) -> None:
 
 
 def _configurar_hoja(ws, cols: list[ColumnaSpec], fila_encabezado_col: int) -> None:
+    # Filas un poco más altas que las de Excel por defecto (15), con el texto centrado.
+    ws.sheet_format.defaultRowHeight = ALTO_FILA_EXCEL
+    ws.sheet_format.customHeight = True
     for i, c in enumerate(cols, start=1):
         ws.column_dimensions[get_column_letter(i)].width = max(c.ancho_excel, 6)
     # Congela todo lo de arriba (membrete + fila de encabezado de columnas):

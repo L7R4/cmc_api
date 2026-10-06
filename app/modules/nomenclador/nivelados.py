@@ -430,9 +430,8 @@ async def aplicar(
 
     if a_habilitar and not dry_run:
         await db.execute(insert(ValorEspecialidad), a_habilitar)
-    if not dry_run:
-        for nom_id, esp in a_liberar:
-            await service.liberar_vigencia(db, obra_social_nro, nom_id, "NE", esp, vigencia_desde)
+    if a_liberar and not dry_run:
+        await service.liberar_vigencias(db, obra_social_nro, "NE", a_liberar, vigencia_desde)
     if a_crear and not dry_run:
         await service.persistir_valores_en_bloque(db, a_crear, motivo="carga_inicial")
 

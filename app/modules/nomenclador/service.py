@@ -13,6 +13,7 @@ from typing import List, Optional
 
 from sqlalchemy import and_, delete, exists, func, insert, or_, select, true, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import set_committed_value
 
 from app.common.money import quantize_money
 from app.db.models.nomenclador_cmc import (
@@ -563,8 +564,21 @@ async def liberar_vigencia(
     especialidad_id: Optional[int],
     fecha: datetime.date,
 ) -> int:
-    """Deja una variante lista para abrir una vigencia nueva desde `fecha`, sea
-    cual sea la fecha:
+    """`liberar_vigencias` de una sola variante."""
+    return await liberar_vigencias(
+        db, obra_social_nro, origen, [(nomenclador_id, especialidad_id)], fecha,
+    )
+
+
+async def liberar_vigencias(
+    db: AsyncSession,
+    obra_social_nro: int,
+    origen: str,
+    variantes: list[tuple[int, Optional[int]]],
+    fecha: datetime.date,
+) -> int:
+    """Deja cada variante `(nomenclador_id, especialidad_id_colegio)` lista para abrir
+    una vigencia nueva desde `fecha`, sea cual sea la fecha:
 
     - Todo lo que arranca en `fecha` o después se BORRA de la base: los valores
       (con sus componentes y su historial) y las filas de historial sueltas de la
@@ -573,50 +587,91 @@ async def liberar_vigencia(
       Misma fecha = se reemplaza (no se rota).
     - Lo que cubría `fecha` se cierra el día anterior: el valor y su historial.
 
-    Devuelve cuántos valores borró. No hace commit."""
-    cond_valor = Valor.origen == origen
-    cond_valor &= (
-        Valor.especialidad_id_colegio.is_(None) if especialidad_id is None
-        else Valor.especialidad_id_colegio == especialidad_id
-    )
-    de_la_variante = and_(
-        Valor.obra_social_nro == obra_social_nro, Valor.nomenclador_id == nomenclador_id, cond_valor,
-    )
-    hist_de_la_variante = and_(
-        HistorialPrecioCodigo.obra_social_nro == obra_social_nro,
-        HistorialPrecioCodigo.nomenclador_id == nomenclador_id,
-        _cond_variante(origen, especialidad_id),
-    )
+    En bloque (un nomenclador nivelado son cientos de códigos): se leen las filas
+    de los códigos involucrados, se elige en Python qué toca a cada variante y se
+    escribe por ids. Devuelve cuántos valores borró. No hace commit."""
+    claves = set(variantes)
+    if not claves:
+        return 0
+    # Lo pendiente de la sesión, a la base antes de escribir por ids (abajo se expira).
+    await db.flush()
+    nom_ids = sorted({n for n, _ in claves})
 
-    ids = list((await db.execute(
-        select(Valor.id).where(de_la_variante, Valor.vigencia_desde >= fecha)
-    )).scalars())
-    if ids:
-        await db.execute(delete(HistorialPrecioCodigo).where(HistorialPrecioCodigo.valores_id.in_(ids)))
-        await db.execute(delete(ValorComponente).where(ValorComponente.valor_id.in_(ids)))
-        await db.execute(delete(Valor).where(Valor.id.in_(ids)))
-    await db.execute(delete(HistorialPrecioCodigo).where(
-        hist_de_la_variante, HistorialPrecioCodigo.vigencia_desde >= fecha,
-    ))
+    def cubre(desde, hasta) -> bool:
+        return desde < fecha and (hasta is None or hasta >= fecha)
+
+    valores = (await db.execute(
+        select(Valor.id, Valor.nomenclador_id, Valor.especialidad_id_colegio,
+               Valor.vigencia_desde, Valor.vigencia_hasta)
+        .where(Valor.obra_social_nro == obra_social_nro, Valor.origen == origen,
+               Valor.nomenclador_id.in_(nom_ids))
+    )).all()
+    v_borrar = [v.id for v in valores
+                if (v.nomenclador_id, v.especialidad_id_colegio) in claves and v.vigencia_desde >= fecha]
+    v_cerrar = [v.id for v in valores
+                if (v.nomenclador_id, v.especialidad_id_colegio) in claves
+                and cubre(v.vigencia_desde, v.vigencia_hasta)]
+    borrados = set(v_borrar)
+
+    historial = (await db.execute(
+        select(HistorialPrecioCodigo.id, HistorialPrecioCodigo.nomenclador_id,
+               HistorialPrecioCodigo.especialidad_id_colegio, HistorialPrecioCodigo.vigencia_desde,
+               HistorialPrecioCodigo.vigencia_hasta, HistorialPrecioCodigo.valores_id)
+        .where(HistorialPrecioCodigo.obra_social_nro == obra_social_nro,
+               HistorialPrecioCodigo.origen == origen,
+               HistorialPrecioCodigo.nomenclador_id.in_(nom_ids))
+    )).all()
+    h_borrar, h_cerrar = [], []
+    for h in historial:
+        if h.valores_id in borrados or (
+            (h.nomenclador_id, h.especialidad_id_colegio) in claves and h.vigencia_desde >= fecha
+        ):
+            h_borrar.append(h.id)
+        elif (h.nomenclador_id, h.especialidad_id_colegio) in claves and cubre(h.vigencia_desde, h.vigencia_hasta):
+            h_cerrar.append(h.id)
 
     corte = fecha - datetime.timedelta(days=1)
-    await db.execute(
-        update(Valor)
-        .where(de_la_variante, Valor.vigencia_desde < fecha,
-               or_(Valor.vigencia_hasta.is_(None), Valor.vigencia_hasta >= fecha))
-        .values(estado="cerrado", vigencia_hasta=corte)
-        .execution_options(synchronize_session="fetch")
-    )
-    await db.execute(
-        update(HistorialPrecioCodigo)
-        .where(hist_de_la_variante, HistorialPrecioCodigo.vigencia_desde < fecha,
-               or_(HistorialPrecioCodigo.vigencia_hasta.is_(None),
-                   HistorialPrecioCodigo.vigencia_hasta >= fecha))
-        .values(vigencia_hasta=corte)
-        .execution_options(synchronize_session="fetch")
-    )
-    await db.flush()
-    return len(ids)
+    for lote in _lotes(h_borrar):
+        await db.execute(delete(HistorialPrecioCodigo).where(HistorialPrecioCodigo.id.in_(lote))
+                         .execution_options(synchronize_session=False))
+    for lote in _lotes(v_borrar):
+        await db.execute(delete(ValorComponente).where(ValorComponente.valor_id.in_(lote))
+                         .execution_options(synchronize_session=False))
+        await db.execute(delete(Valor).where(Valor.id.in_(lote))
+                         .execution_options(synchronize_session=False))
+    for lote in _lotes(v_cerrar):
+        await db.execute(update(Valor).where(Valor.id.in_(lote))
+                         .values(estado="cerrado", vigencia_hasta=corte)
+                         .execution_options(synchronize_session=False))
+    for lote in _lotes(h_cerrar):
+        await db.execute(update(HistorialPrecioCodigo).where(HistorialPrecioCodigo.id.in_(lote))
+                         .values(vigencia_hasta=corte)
+                         .execution_options(synchronize_session=False))
+    # Lo que la sesión tenga cargado tiene que reflejar la base: lo borrado sale de
+    # la sesión y lo cerrado toma los valores nuevos (sin quedar "modificado").
+    h_borrados, v_cerrados, h_cerrados = set(h_borrar), set(v_cerrar), set(h_cerrar)
+    for obj in list(db.identity_map.values()):
+        if obj not in db:  # ya salió en cascada con su valor
+            continue
+        if isinstance(obj, Valor):
+            if obj.id in borrados:
+                db.expunge(obj)
+            elif obj.id in v_cerrados:
+                set_committed_value(obj, "estado", "cerrado")
+                set_committed_value(obj, "vigencia_hasta", corte)
+        elif isinstance(obj, ValorComponente) and obj.valor_id in borrados:
+            db.expunge(obj)
+        elif isinstance(obj, HistorialPrecioCodigo):
+            if obj.id in h_borrados:
+                db.expunge(obj)
+            elif obj.id in h_cerrados:
+                set_committed_value(obj, "vigencia_hasta", corte)
+    return len(v_borrar)
+
+
+def _lotes(ids: list[int], n: int = 1000):
+    for i in range(0, len(ids), n):
+        yield ids[i:i + n]
 
 
 async def regenerar_historial_por_valores(

@@ -1587,7 +1587,7 @@ class PlantillaEspecialidadesOut(BaseModel):
 class PropagarEspecialidadesIn(BaseModel):
     obra_social_nros: List[int] = Field(..., min_length=1)
     # agregar = sólo suma lo nuevo de la plantilla; igualar = además quita lo que
-    # la O.S. tenga de más (salvo especialidades con precio NE activo).
+    # la O.S. tenga de más, aunque tenga precio NE activo (ese precio se da de baja).
     modo: Literal["agregar", "igualar"] = "agregar"
     dry_run: bool = False
 
@@ -1599,8 +1599,8 @@ class PropagarEspecialidadesItem(BaseModel):
     motivo: Optional[str] = None
     agrega: List[int] = []
     quita: List[int] = []
-    # Se quitarían pero tienen precio NE activo: se quedan.
-    conserva_por_precio: List[int] = []
+    # Subconjunto de `quita` que tenía precio NE activo: se da de baja con la especialidad.
+    quita_con_precio: List[int] = []
 
 
 class PropagarEspecialidadesOut(BaseModel):

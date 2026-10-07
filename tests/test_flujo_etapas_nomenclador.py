@@ -196,7 +196,7 @@ async def test_sin_restriccion_lo_decide_el_alta(s):
 # ─── Etapa 2 → "Actualizar en obras sociales" ────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_propagar_agregar_e_igualar_conserva_lo_que_tiene_precio(s):
+async def test_propagar_agregar_e_igualar_quita_tambien_lo_que_tiene_precio(s):
     await _os(s, OS, OS_2)
     e1, e2, e3 = await _esps(s, 3)
     nom = await s.get(NomencladorCMC, NOM_ID)
@@ -204,21 +204,29 @@ async def test_propagar_agregar_e_igualar_conserva_lo_que_tiene_precio(s):
     await _alta(s, especialidades=[e1, e3], sin_restriccion_especialidad=False)
     await _alta(s, os_nro=OS_2, sin_restriccion_especialidad=True)
     # e3 tiene precio propio en OS.
-    await _crear_valor_con_componentes(
+    valor = await _crear_valor_con_componentes(
         db=s, obra_social_nro=OS, nomenclador_id=NOM_ID, origen="NE", vigencia_desde=HOY,
         componentes_in=[ValorComponenteIn(concepto="Honorarios", valor_unitario=Decimal("10"))],
         descripcion="DESC", nivel=None, complejidad=None, especialidad_id_colegio=e3, observacion=None,
     )
     await aplicar_plantilla.reemplazar_plantilla(s, nom.codigo, [e1, e2])
 
+    # Vista previa: e3 sobra aunque tenga precio; avisa que ese precio se da de baja.
     prev = await alta_os.propagar_plantilla(s, nom, [OS, OS_2], "igualar", dry_run=True)
     r_os = next(r for r in prev if r.obra_social_nro == OS)
-    assert r_os.agrega == [e2] and r_os.quita == [] and r_os.conserva_por_precio == [e3]
+    assert r_os.agrega == [e2] and r_os.quita == [e3] and r_os.quita_con_precio == [e3]
     assert next(r for r in prev if r.obra_social_nro == OS_2).estado == "salteada"
     assert await service.especialidades_habilitadas_de(s, nom.codigo, OS) == {e1, e3}  # dry run
 
+    # "Solo agregar" no le saca nada a nadie.
     await alta_os.propagar_plantilla(s, nom, [OS], "agregar", dry_run=False)
     assert await service.especialidades_habilitadas_de(s, nom.codigo, OS) == {e1, e2, e3}
+
+    # Igualar: e3 deja de poder facturar y su precio se da de baja.
+    await alta_os.propagar_plantilla(s, nom, [OS], "igualar", dry_run=False)
+    assert await service.especialidades_habilitadas_de(s, nom.codigo, OS) == {e1, e2}
+    await s.refresh(valor)
+    assert valor.estado == "cerrado"
 
 
 @pytest.mark.asyncio
@@ -249,6 +257,37 @@ async def test_lapiz_del_codigo_sin_tocar_especialidades_solo_rota(s):
     assert [(v.especialidad_id_colegio, v.descripcion) for v in activos] == [(e1, "NUEVA")]
     assert activos[0].vigencia_desde == HOY + datetime.timedelta(days=1)
     assert await service.especialidades_habilitadas_de(s, (await s.get(NomencladorCMC, NOM_ID)).codigo, OS) == {e1, e2}
+
+
+@pytest.mark.asyncio
+async def test_lapiz_del_codigo_solo_vigencia_rota_todas_las_especialidades(s):
+    """Nueva vigencia con el mismo precio (sólo cambió la fecha): TODAS las variantes
+    por especialidad abren la vigencia nueva, cada una con su precio."""
+    from app.modules.nomenclador.nucleo import actualizar_nucleo
+    from app.modules.nomenclador.schemas import ValorCerrarYCrearIn, ValorNucleoUpdate
+
+    await _os(s, OS)
+    e1, e2 = await _esps(s, 2)
+    await _alta(s, especialidades=[e1, e2], sin_restriccion_especialidad=False)
+    for esp, monto in ((e1, "10"), (e2, "30")):
+        await _crear_valor_con_componentes(
+            db=s, obra_social_nro=OS, nomenclador_id=NOM_ID, origen="NE", vigencia_desde=HOY,
+            componentes_in=[ValorComponenteIn(concepto="Honorarios", valor_unitario=Decimal(monto))],
+            descripcion="DESC", nivel=None, complejidad=None, especialidad_id_colegio=esp, observacion=None,
+        )
+    nueva = HOY + datetime.timedelta(days=5)
+    await actualizar_nucleo(s, OS, NOM_ID, ValorNucleoUpdate(
+        tocar_especialidades=False,
+        ecuacion=ValorCerrarYCrearIn(
+            vigencia_desde=nueva,
+            componentes=[ValorComponenteIn(concepto="Honorarios", valor_unitario=Decimal("10"))],
+        ),
+    ))
+    activos = (await s.execute(select(Valor).where(
+        Valor.obra_social_nro == OS, Valor.nomenclador_id == NOM_ID, Valor.estado == "activo",
+    ))).scalars().all()
+    assert sorted(v.especialidad_id_colegio for v in activos) == sorted([e1, e2])
+    assert all(v.vigencia_desde == nueva for v in activos)
 
 
 # ─── Facturación: carga sin precio + revalorizar ─────────────────────────────

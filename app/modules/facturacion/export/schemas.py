@@ -29,7 +29,7 @@ AgrupacionExport = Literal["todo_junto", "por_tipo", "por_socio", "plana"]
 ColumnaExport = Literal[
     "prestador", "obra_social", "matricula", "autorizacion", "fecha", "codigo",
     "nro_afiliado", "afiliado", "cantidad", "porcentaje",
-    "honorarios", "gastos", "coseguro", "diagnostico", "via", "especialidad",
+    "honorarios", "gastos", "coseguro", "valor_unitario", "diagnostico", "via", "especialidad",
     "estado_validacion",
 ]
 

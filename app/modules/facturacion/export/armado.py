@@ -551,6 +551,15 @@ class ColumnaSpec:
     valor: Callable[[FilaExport], object]
 
 
+def valor_unitario(f: FilaExport) -> Optional[Decimal]:
+    """Lo que vale la práctica por unidad: honorarios + gastos − coseguro, sin porcentaje
+    de cantidad/sesión (el SUB. TOTAL es esto × cantidad × sesión). Igual que la columna
+    "Valor unitario" de la vista; el ayudante cobra un monto aparte y no la lleva."""
+    if f.tipo_prestador == "Ayudante":
+        return None
+    return quantize_money(f.honorarios + f.gastos - f.coseguro)
+
+
 def _fmt_fecha(d: Optional[datetime.date]) -> str:
     # "-" y no un guión largo: los caracteres fuera de Latin-1 rompen fpdf2 con
     # las fuentes core (Helvetica) — ver el fix en pdf.py/caratula.py/routes.py.
@@ -575,6 +584,7 @@ _DEFINICIONES: dict[str, ColumnaSpec] = {
     "honorarios": ColumnaSpec("honorarios", "HONORARIOS", 22, 14, "R", True, lambda f: f.honorarios),
     "gastos": ColumnaSpec("gastos", "GASTOS", 22, 14, "R", True, lambda f: f.gastos),
     "coseguro": ColumnaSpec("coseguro", "COSEGURO", 22, 14, "R", True, lambda f: f.coseguro),
+    "valor_unitario": ColumnaSpec("valor_unitario", "VALOR UNIT.", 22, 14, "R", True, lambda f: valor_unitario(f)),
     "diagnostico": ColumnaSpec("diagnostico", "DIAGNOSTICO", 42, 28, "L", False, lambda f: f.diagnostico or ""),
     "via": ColumnaSpec("via", "VIA", 9, 6, "C", False, lambda f: f.via or ""),  # "T" / "L"
     "especialidad": ColumnaSpec("especialidad", "ESPECIALIDAD", 30, 22, "L", False, lambda f: f.especialidad_nombre or ""),

@@ -376,7 +376,8 @@ async def propagar_especialidades(
 ):
     """"Actualizar en obras sociales": lleva la plantilla a las O.S. que ya tienen el
     código dado de alta. `agregar` suma lo nuevo; `igualar` además quita lo que
-    sobra (salvo especialidades con precio propio). `dry_run` = vista previa."""
+    sobra, también las especialidades con precio propio (ese precio se da de baja
+    desde hoy). `dry_run` = vista previa."""
     nom = await db.get(NomencladorCMC, id)
     if not nom:
         raise HTTPException(404, "Código no encontrado")

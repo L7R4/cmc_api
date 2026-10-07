@@ -214,3 +214,47 @@ async def test_la_memoria_por_corrida_se_apaga_al_terminar(s):
     with recotizar.memo_por_corrida(s):
         assert service_nm.MEMO_COTIZACION in s.info
     assert service_nm.MEMO_COTIZACION not in s.info
+
+
+@pytest.mark.asyncio
+async def test_fila_en_cero_sin_marca_deduce_los_conceptos_del_tpo_funcion(s):
+    # Cargadas en $0 antes de que existiera la marca `sin_valorizar`.
+    med = await _medico(s)
+    await _factura(s)
+    medico = _fila(med, honorarios=D("0"), gastos=D("0"), importe_total=D("0"), tpo_funcion="H", cantidad=3)
+    ayudante = _fila(med, honorarios=D("0"), gastos=D("0"), importe_total=D("0"), tpo_funcion="A")
+    s.add_all([medico, ayudante])
+    await s.flush()
+    assert recotizar.conceptos_de(medico) == "HG" and recotizar.conceptos_de(ayudante) == "A"
+
+    await _correr(s)
+    p = await _precio(s, med)
+    # Médico: honorarios + gastos del precio, nunca el ayudante; total × cantidad.
+    assert (medico.honorarios, medico.gastos, medico.ayudante) == (p.honorarios, p.gastos, D("0"))
+    assert medico.importe_total == service.calcular_importe_total(
+        p.honorarios, p.gastos, D("0"), 3, 1, coseguro=medico.coseguro,
+    )
+    # Ayudante: sólo la columna de ayudante.
+    assert (ayudante.honorarios, ayudante.gastos, ayudante.ayudante) == (D("0"), D("0"), p.ayudante)
+
+
+@pytest.mark.asyncio
+async def test_revalorizar_toma_las_automaticas_sin_marca_y_cuenta_las_que_no_cambian(s):
+    from app.modules.facturacion import revalorizar
+
+    med = await _medico(s)
+    await _factura(s)
+    p = await _precio(s, med)
+    vieja = _fila(med)  # precio viejo (1 + 1), sin marca
+    al_dia = _fila(med, honorarios=p.honorarios, gastos=p.gastos, coseguro=min(p.coseguro, p.honorarios + p.gastos),
+                   importe_total=service.calcular_importe_total(
+                       p.honorarios, p.gastos, D("0"), 1, 1, coseguro=min(p.coseguro, p.honorarios + p.gastos)))
+    manual = _fila(med, manual="M")
+    s.add_all([vieja, al_dia, manual])
+    await s.flush()
+
+    out = await revalorizar.revalorizar(s, revalorizar.RevalorizarIn(cod_obra=OS, codigo=CODIGO, dry_run=True))
+    ids = {i.id for i in out.items if i.estado == "revalorizada"}
+    assert vieja.id_detalle_prestaciones in ids
+    assert al_dia.id_detalle_prestaciones not in ids and manual.id_detalle_prestaciones not in ids
+    assert out.sin_cambios >= 1

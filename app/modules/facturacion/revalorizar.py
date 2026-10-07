@@ -1,15 +1,15 @@
-"""Revalorizar prestaciones cargadas SIN PRECIO.
+"""Revalorizar: al cargar el precio de un código en una O.S., actualizar las
+prestaciones ya cargadas de ese código.
 
-Cuando un código está dado de alta en una O.S. pero todavía no tiene precio, y
-`CARGA_SIN_PRECIO` lo permite, la prestación se carga en $0 con
-`detalle_facturacion.sin_valorizar` = los conceptos que hay que cotizar ("H", "G",
-"A"). Al cargar el precio (etapa 4 del nomenclador), esto recalcula las que
-siguen ABIERTAS (estado 'A'): mismo cálculo que la carga (`_insertar_prestaciones`)
-— precio del médico a la fecha de la práctica, concepto por concepto, porcentaje
-y coseguro sugerido. El cálculo por fila es el de `recotizar.py`, el mismo que usa
-el recálculo de factura.
+Toma TODAS las automáticas (`manual = 'A'`) que siguen ABIERTAS (estado 'A'), no
+sólo las cargadas en $0 sin precio (`sin_valorizar`): también las que quedaron con
+un precio viejo o en $0 sin marca. El cálculo por fila es el de `recotizar.py`, el
+mismo que usa el recálculo de factura — precio del médico a la fecha de la
+práctica, concepto por concepto, porcentaje y coseguro sugerido.
 
-Las de períodos cerrados no se tocan. Con `dry_run` sólo informa antes/después.
+Sólo se listan las que cambian (y las que no se pueden cotizar, con el motivo);
+las que ya tienen ese precio se cuentan en `sin_cambios`. Las de períodos cerrados
+y las manuales no se tocan. Con `dry_run` sólo informa antes/después.
 """
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ class RevalorizarItem(BaseModel):
     cod_med: str
     fecha_practica: Optional[datetime.date] = None
     conceptos: str
-    estado: Literal["revalorizada", "sin_precio", "error"]
+    estado: Literal["revalorizada", "sin_precio", "omitida", "error"]
     motivo: Optional[str] = None
     importe_antes: Decimal = Decimal("0")
     honorarios: Decimal = Decimal("0")
@@ -55,6 +55,8 @@ class RevalorizarOut(BaseModel):
     codigo: str
     total: int
     revalorizadas: int
+    # Automáticas abiertas que ya tienen ese precio (no se listan).
+    sin_cambios: int = 0
     items: List[RevalorizarItem] = Field(default_factory=list)
 
 
@@ -62,8 +64,7 @@ async def pendientes(db: AsyncSession, cod_obra: str, codigo: str) -> list[Detal
     D = DetalleFacturacionCMC
     return list((await db.execute(
         select(D).where(
-            D.cod_obr == cod_obra, D.cod_nom == codigo, D.estado == "A",
-            D.sin_valorizar.is_not(None),
+            D.cod_obr == cod_obra, D.cod_nom == codigo, D.estado == "A", D.manual == "A",
         ).order_by(D.periodo, D.id_detalle_prestaciones)
     )).scalars())
 
@@ -75,19 +76,23 @@ async def contar_pendientes(db: AsyncSession, cod_obra: str, codigo: str) -> int
 async def _revalorizar_fila(
     db: AsyncSession, row: DetalleFacturacionCMC, aplicar: bool,
     cache: Optional[recotizar.CacheCotizacion] = None,
-) -> RevalorizarItem:
-    """Mismo cálculo que el recálculo de factura (`recotizar.recotizar_fila`)."""
+) -> Optional[RevalorizarItem]:
+    """Mismo cálculo que el recálculo de factura (`recotizar.recotizar_fila`).
+    None = ya tiene ese precio."""
     base = dict(
-        id=row.id_detalle_prestaciones, periodo=row.periodo, cod_med=row.cod_med,
-        fecha_practica=row.fecha_practica, conceptos=row.sin_valorizar or "HG",
+        id=row.id_detalle_prestaciones, periodo=row.periodo, cod_med=str(row.cod_med),
+        fecha_practica=row.fecha_practica, conceptos=recotizar.conceptos_de(row),
         importe_antes=row.importe_total or Decimal("0"),
     )
     r = await recotizar.recotizar_fila(db, row, cache=cache)
     if r.estado == "omitida":
         return RevalorizarItem(
-            **base, estado="sin_precio" if r.sin_precio else "error",
+            **base, estado="sin_precio" if r.sin_precio else "omitida",
             motivo=r.motivo or "Todavía sin precio",
         )
+    # Mismos montos: nada que cambiar, salvo sacarle la marca a una que la tenga.
+    if r.estado == "igual" and not row.sin_valorizar:
+        return None
     if aplicar:
         recotizar.aplicar(row, r)
     return RevalorizarItem(
@@ -107,14 +112,20 @@ async def _revalorizar(db: AsyncSession, body: RevalorizarIn) -> RevalorizarOut:
         pedidas = set(body.ids)
         filas = [f for f in filas if f.id_detalle_prestaciones in pedidas]
     items: list[RevalorizarItem] = []
+    sin_cambios = 0
     cache = await recotizar.CacheCotizacion.para(db, body.cod_obra)
     for row in filas:
         try:
-            items.append(await _revalorizar_fila(db, row, aplicar=not body.dry_run, cache=cache))
+            item = await _revalorizar_fila(db, row, aplicar=not body.dry_run, cache=cache)
+            if item is None:
+                sin_cambios += 1
+            else:
+                items.append(item)
         except Exception as e:  # noqa: BLE001 — se informa por fila, no corta el resto
             items.append(RevalorizarItem(
-                id=row.id_detalle_prestaciones, periodo=row.periodo, cod_med=row.cod_med,
+                id=row.id_detalle_prestaciones, periodo=row.periodo, cod_med=str(row.cod_med),
                 fecha_practica=row.fecha_practica, conceptos=row.sin_valorizar or "",
+                importe_antes=row.importe_total or Decimal("0"),
                 estado="error", motivo=str(getattr(e, "detail", e)),
             ))
     if body.dry_run:
@@ -123,5 +134,6 @@ async def _revalorizar(db: AsyncSession, body: RevalorizarIn) -> RevalorizarOut:
         await db.commit()
     return RevalorizarOut(
         dry_run=body.dry_run, cod_obra=body.cod_obra, codigo=body.codigo, total=len(items),
-        revalorizadas=sum(1 for i in items if i.estado == "revalorizada"), items=items,
+        revalorizadas=sum(1 for i in items if i.estado == "revalorizada"),
+        sin_cambios=sin_cambios, items=items,
     )

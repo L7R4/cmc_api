@@ -13,9 +13,11 @@ from app.db.database import get_db
 from app.db.models import ListadoMedico, NomencladorCMC, ObrasSociales
 from app.modules.facturacion import recotizar as recotizar_mod, revalorizar as revalorizar_mod, service
 from app.modules.facturacion.schemas import (
+    AutorizacionExistente,
     ActividadEventoOut,
     AfiliadoCreate,
     AfiliadoRead,
+    AfiliadoUpdate,
     AvanzarPeriodoMedicoPayload,
     AvanzarPeriodoMedicoResponse,
     CargaPorUsuarioOut,
@@ -27,6 +29,7 @@ from app.modules.facturacion.schemas import (
     CierreResponse,
     ClinicaBuscarOut,
     ClinicaCreate,
+    ClinicaUpdate,
     CodigoHabilitadoOut,
     ComplementoCreate,
     FacturaDetalleOut,
@@ -103,6 +106,14 @@ async def crear_clinica(
     """Alta rápida de clínica — solo el nombre; el resto queda en su default y
     `es_organizacion=1` fijo. Mismo patrón que `POST /afiliados`."""
     return await service.crear_clinica(db, payload)
+
+
+@router.patch("/clinicas/{cod}", response_model=ClinicaBuscarOut)
+async def actualizar_clinica(
+    cod: int, payload: ClinicaUpdate, db: AsyncSession = Depends(get_db),
+):
+    """Edición de la clínica (lápiz de la carga): el nombre."""
+    return await service.actualizar_clinica(db, cod, payload)
 
 
 @router.delete("/clinicas/{cod}", status_code=status.HTTP_204_NO_CONTENT)
@@ -236,6 +247,23 @@ async def eliminar_afiliado(
     """Borra un afiliado del padrón. 404 si no existe; 409 si tiene prestaciones
     no anuladas que lo referencian (hay que anularlas antes)."""
     await service.eliminar_afiliado(db, dni)
+
+
+# Por id y en otra ruta: un afiliado puede no tener número, y `/afiliados/{dni:path}`
+# se tragaría cualquier sufijo ("/afiliados/id/5").
+@router.patch("/afiliados-id/{afiliado_id}", response_model=AfiliadoRead)
+async def actualizar_afiliado(
+    afiliado_id: int, payload: AfiliadoUpdate, db: AsyncSession = Depends(get_db),
+):
+    """Edición del afiliado (lápiz de la carga). Corrige también sus prestaciones no
+    anuladas de facturas abiertas."""
+    return await service.actualizar_afiliado(db, afiliado_id, payload)
+
+
+@router.delete("/afiliados-id/{afiliado_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def eliminar_afiliado_por_id(afiliado_id: int, db: AsyncSession = Depends(get_db)):
+    """Baja por id. 409 si tiene prestaciones no anuladas."""
+    await service.eliminar_afiliado_por_id(db, afiliado_id)
 
 
 # ── Grupo B — Período y precio ───────────────────────────────────────────────
@@ -394,6 +422,17 @@ async def prestaciones_recientes(
     db: AsyncSession = Depends(get_db),
 ):
     return await service.prestaciones_recientes(db, cod_obra, usuario)
+
+
+@router.get("/autorizaciones/existentes", response_model=list[AutorizacionExistente])
+async def autorizaciones_existentes(
+    cod_obra: str = Query(...),
+    autorizacion: str = Query(..., min_length=1, max_length=30),
+    excluir_id: Optional[int] = Query(None, description="Prestación que se está editando"),
+    db: AsyncSession = Depends(get_db),
+):
+    """¿Ese Nº de autorización ya está cargado en la O.S.? En qué períodos."""
+    return await service.autorizacion_existente(db, cod_obra, autorizacion, excluir_id)
 
 
 @router.get("/prestaciones", response_model=list[PrestacionRead], response_model_by_alias=False)

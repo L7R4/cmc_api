@@ -25,6 +25,7 @@ from app.db.models import (
     Documento,
     Especialidad,
     FacturacionCMC,
+    Galeno,
     ListadoMedico,
     NomencladorCMC,
     ObrasSociales,
@@ -38,9 +39,11 @@ from app.modules.nomenclador.service import LookupError as PrecioLookupError
 
 from app.modules.facturacion.schemas import (
     AfiliadoCreate,
+    AfiliadoUpdate,
     AfiliadoRefOut,
     AuditoriaEventoOut,
     ClinicaCreate,
+    ClinicaUpdate,
     FacturaRead,
     GuardadoResponse,
     MoverPeriodoPayload,
@@ -53,6 +56,7 @@ from app.modules.facturacion.schemas import (
     PrestacionesCreate,
     PrestacionFichaOut,
     PrestacionItem,
+    AutorizacionExistente,
     PrestacionRead,
     PrestacionUpdate,
     SocioRefOut,
@@ -388,6 +392,32 @@ async def crear_clinica(db: AsyncSession, payload: ClinicaCreate) -> dict:
     }
 
 
+async def actualizar_clinica(db: AsyncSession, cod: int, payload: ClinicaUpdate) -> dict:
+    """Edición de una clínica (lápiz de la carga): el nombre. Las prestaciones la
+    referencian por `cod_clinica` (el número), así que no hay nada que propagar."""
+    clinica = (await db.execute(
+        select(ListadoMedico).where(
+            ListadoMedico.NRO_SOCIO == cod,
+            ListadoMedico.es_organizacion == True,  # noqa: E712
+        )
+    )).scalar_one_or_none()
+    if clinica is None:
+        raise HTTPException(404, f"Clínica '{cod}' no encontrada")
+    otra = await get_clinica_by_nombre(db, payload.nombre)
+    if otra is not None and otra.NRO_SOCIO != cod:
+        raise HTTPException(409, f"Ya existe una clínica con el nombre '{payload.nombre}'")
+    clinica.NOMBRE = payload.nombre
+    await db.commit()
+    await db.refresh(clinica)
+    return {
+        "cod": clinica.NRO_SOCIO,
+        "nombre": clinica.NOMBRE,
+        "documento": str(clinica.DOCUMENTO) if clinica.DOCUMENTO else None,
+        "cuit": str(clinica.CUIT) if clinica.CUIT else None,
+        "localidad": clinica.localidad or None,
+    }
+
+
 async def eliminar_clinica(db: AsyncSession, cod: int) -> None:
     """Baja de una clínica. Bloquea si tiene prestaciones vivas (no anuladas) que la
     referencian por `cod_clinica` — mismo criterio que `eliminar_afiliado`."""
@@ -639,13 +669,92 @@ async def buscar_afiliados(db: AsyncSession, q: str, limit: int) -> list[Afiliad
 
 
 async def crear_afiliado(db: AsyncSession, payload: AfiliadoCreate, usuario: str) -> Afiliado:
-    if await get_afiliado_by_dni(db, payload.dni):
+    if payload.dni and await get_afiliado_by_dni(db, payload.dni):
         raise HTTPException(409, f"Ya existe un afiliado con identificador {payload.dni}")
     af = Afiliado(dni=payload.dni, nombre=payload.nombre, usuario=usuario)
     db.add(af)
     await db.commit()
     await db.refresh(af)
     return af
+
+
+def _prestaciones_del_afiliado(af: Afiliado):
+    """Filtro de las prestaciones que tienen copiado a este afiliado. Con número, por
+    el número (`dni_p`); sin número, las que tienen el número vacío y su nombre."""
+    M = DetalleFacturacionCMC
+    if af.dni:
+        return M.dni_p == af.dni
+    return and_(or_(M.dni_p.is_(None), M.dni_p == ""), M.nom_ape_p == af.nombre)
+
+
+async def _afiliado_por_id(db: AsyncSession, afiliado_id: int) -> Afiliado:
+    af = await db.get(Afiliado, afiliado_id)
+    if af is None:
+        raise HTTPException(404, "Afiliado no encontrado")
+    return af
+
+
+async def actualizar_afiliado(db: AsyncSession, afiliado_id: int, payload: AfiliadoUpdate) -> Afiliado:
+    """Edición del afiliado (lápiz de la carga). Además del padrón, corrige el número y
+    el nombre copiados en sus prestaciones no anuladas de facturas ABIERTAS; las de
+    facturas cerradas quedan como se facturaron."""
+    af = await _afiliado_por_id(db, afiliado_id)
+    if payload.dni and payload.dni != af.dni:
+        otro = await get_afiliado_by_dni(db, payload.dni)
+        if otro is not None and otro.id != af.id:
+            raise HTTPException(409, f"Ya existe un afiliado con identificador {payload.dni}")
+
+    M, F = DetalleFacturacionCMC, FacturacionCMC
+    ids = list((await db.execute(
+        select(M.id_detalle_prestaciones)
+        .join(F, and_(F.cod_obr == M.cod_obr, F.periodo == M.periodo, F.version == M.version))
+        .where(_prestaciones_del_afiliado(af), M.estado != "X", F.estado == FACTURA_ESTADO_ABIERTA)
+    )).scalars())
+
+    af.dni, af.nombre = payload.dni, payload.nombre
+    if ids:
+        await db.execute(
+            update(M).where(M.id_detalle_prestaciones.in_(ids))
+            .values(dni_p=payload.dni, nom_ape_p=payload.nombre)
+            .execution_options(synchronize_session=False)
+        )
+    await db.commit()
+    await db.refresh(af)
+    return af
+
+
+async def eliminar_afiliado_por_id(db: AsyncSession, afiliado_id: int) -> None:
+    """Baja por id (sirve también para los cargados sin número). Mismo criterio que
+    `eliminar_afiliado`: 409 si tiene prestaciones no anuladas."""
+    af = await _afiliado_por_id(db, afiliado_id)
+    usos = (await db.execute(
+        select(func.count()).select_from(DetalleFacturacionCMC).where(
+            _prestaciones_del_afiliado(af), DetalleFacturacionCMC.estado != "X",
+        )
+    )).scalar_one()
+    if usos:
+        quien = af.nombre or af.dni
+        raise HTTPException(
+            409,
+            f"El afiliado '{quien}' tiene {usos} prestación/es cargada/s y no se puede "
+            "eliminar. Anulá esas prestaciones primero.",
+        )
+    await db.delete(af)
+    await db.commit()
+
+
+async def paciente_de(db: AsyncSession, item) -> tuple[Optional[str], Optional[str]]:
+    """(dni_p, nom_ape_p) de una prestación nueva: del afiliado elegido por id; si no,
+    por número contra el padrón; si no, el nombre suelto que haya venido."""
+    afiliado_id = getattr(item, "afiliado_id", None)
+    if afiliado_id:
+        af = await db.get(Afiliado, afiliado_id)
+        if af is None:
+            raise HTTPException(422, "El afiliado elegido ya no existe en el padrón.")
+        return af.dni, af.nombre
+    if item.dni_paciente:
+        return item.dni_paciente, await _nombre_desde_afiliado(db, item.dni_paciente)
+    return None, (getattr(item, "nombre_paciente", None) or None)
 
 
 async def eliminar_afiliado(db: AsyncSession, dni: str) -> None:
@@ -1060,7 +1169,18 @@ async def resolver_precio(
         db, obra_social_nro, nomenclador.id, fecha
     )
 
+    # Etiqueta del precio: cómo se calculan los honorarios (o el primer concepto).
+    hon = next((c for c in out.componentes if c.concepto == "Honorarios"), None) or (
+        out.componentes[0] if out.componentes else None
+    )
+    galeno = await db.get(Galeno, hon.galeno_id) if hon and hon.galeno_id else None
+
     return PrecioResponse(
+        origen=out.origen,
+        tipo_valor=hon.tipo if hon else None,
+        galeno_nombre=galeno.nombre if galeno else None,
+        galeno_nivel=(hon.galeno_nivel if hon and hon.galeno_nivel is not None
+                      else (galeno.nivel if galeno else None)),
         honorarios=_suma("Honorarios"),
         gastos=_suma("Gastos"),
         ayudante=_suma("Ayudante"),
@@ -1576,7 +1696,7 @@ async def _insertar_prestaciones(
         if item.cod_nomenclador in CODIGOS_NO_PERMITIDOS:
             raise HTTPException(422, "Código no permitido")
 
-        nombre_paciente = await _nombre_desde_afiliado(db, item.dni_paciente)
+        dni_paciente, nombre_paciente = await paciente_de(db, item)
 
         # El precio sale de la especialidad del médico ejecutor (= el propio médico si el
         # payee no es una clínica).
@@ -1639,7 +1759,7 @@ async def _insertar_prestaciones(
             importe_total=total,
             coseguro=coseguro,
             manual=item.tipo_calculo,
-            dni_p=item.dni_paciente,
+            dni_p=dni_paciente,
             nom_ape_p=nombre_paciente,
             # Derivados del prestador seleccionado: la clínica y su marca 'S'.
             cod_clinica=prestador.cod_clinica,
@@ -2500,7 +2620,13 @@ async def editar_prestacion(
         # el nombre de las filas importadas de CMC que traen `nom_ape_p` cargado con
         # `dni_p` vacío: el paciente no está en el padrón, no hay nada que releer, y
         # guardar una edición cualquiera (p. ej. corregir el código) lo dejaba en NULL.
-        if "dni_paciente" in data and (data["dni_paciente"] or "") != (row.dni_p or ""):
+        if data.get("afiliado_id"):
+            # Elegido del padrón por id (puede no tener número): número y nombre de ahí.
+            af = await db.get(Afiliado, data["afiliado_id"])
+            if af is None:
+                raise HTTPException(422, "El afiliado elegido ya no existe en el padrón.")
+            row.dni_p, row.nom_ape_p = af.dni, af.nombre
+        elif "dni_paciente" in data and (data["dni_paciente"] or "") != (row.dni_p or ""):
             row.dni_p = data["dni_paciente"]
             row.nom_ape_p = await _nombre_desde_afiliado(db, data["dni_paciente"])
 
@@ -2801,6 +2927,31 @@ async def _periodo_cerrado(db: AsyncSession, cod_obra: str, periodo: str) -> boo
 
 
 # ── Cabecera de facturación abierta (invariante: existe ⟺ hay ≥1 prestación 'A') ──
+async def autorizacion_existente(
+    db: AsyncSession, cod_obra: str, autorizacion: str, excluir_id: Optional[int] = None,
+) -> list[AutorizacionExistente]:
+    """Períodos de la O.S. donde ya se cargó ese Nº de autorización (coincidencia
+    exacta, sin anuladas), del más nuevo al más viejo. Lo usa la carga para avisar
+    —no bloquea— antes de guardar. `excluir_id`: la prestación que se está editando."""
+    aut = (autorizacion or "").strip()
+    if not aut:
+        return []
+    M, F = DetalleFacturacionCMC, FacturacionCMC
+    stmt = (
+        select(M.periodo, M.version, func.count(), F.estado)
+        .outerjoin(F, and_(F.cod_obr == M.cod_obr, F.periodo == M.periodo, F.version == M.version))
+        .where(M.cod_obr == cod_obra, M.autorizacion == aut, M.estado != "X")
+        .group_by(M.periodo, M.version, F.estado)
+        .order_by(M.periodo.desc(), M.version.desc())
+    )
+    if excluir_id is not None:
+        stmt = stmt.where(M.id_detalle_prestaciones != excluir_id)
+    return [
+        AutorizacionExistente(periodo=p, version=v or 1, cantidad=n, estado_factura=e)
+        for p, v, n, e in (await db.execute(stmt)).all()
+    ]
+
+
 async def _get_factura(
     db: AsyncSession, cod_obra: str, periodo: str
 ) -> Optional[FacturacionCMC]:

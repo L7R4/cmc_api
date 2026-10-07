@@ -238,8 +238,11 @@ class Afiliado(Base):
     # DNI **o** nro de afiliado de la obra social (alfanumérico, admite separadores:
     # "1231233/00"). Se mantiene el nombre `dni` por compatibilidad con la API.
     # Ancho alineado con `detalle_facturacion.dni_p` (varchar 20), que es donde se copia.
-    dni: Mapped[str] = mapped_column(String(20), nullable=False, unique=True, index=True)
-    nombre: Mapped[str] = mapped_column(String(100), nullable=False)
+    # Los dos son opcionales (al menos uno, lo exige la API): hay pacientes de los que
+    # sólo se conoce el nombre, o sólo el número. Sin número, la carga elige al
+    # afiliado por `id`. Ver scripts/prod_2026-10-06/01_afiliado_dni_nombre_opcionales.sql.
+    dni: Mapped[Optional[str]] = mapped_column(String(20), nullable=True, unique=True, index=True)
+    nombre: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     usuario: Mapped[str] = mapped_column(String(30), nullable=False)
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.now()

@@ -36,6 +36,16 @@ class ClinicaBuscarOut(BaseModel):
     localidad: Optional[str] = None
 
 
+class ClinicaUpdate(BaseModel):
+    """Edición (lápiz de la carga): por ahora sólo el nombre."""
+    nombre: str = Field(..., min_length=1, max_length=40)
+
+    @field_validator("nombre", mode="before")
+    @classmethod
+    def _normalizar(cls, v):
+        return v.strip().upper() if isinstance(v, str) else v
+
+
 class ClinicaCreate(BaseModel):
     """Alta rápida: solo el nombre. El resto de `listado_medico` queda en su
     server_default; `es_organizacion` se fuerza a True y `NRO_SOCIO` se genera en el
@@ -73,21 +83,36 @@ class AfiliadoCreate(BaseModel):
     # El campo se sigue llamando `dni` por compatibilidad, pero identifica al paciente
     # por DNI **o** por nro de afiliado de la obra social, que es alfanumérico y puede
     # llevar separadores (ej. "1231233/00"). Por eso no se valida como sólo dígitos.
-    dni: str = Field(..., min_length=4, max_length=20, pattern=r"^[A-Za-z0-9./\-]+$")
-    nombre: str = Field(..., min_length=1, max_length=100)
+    # Los dos son opcionales, pero tiene que venir al menos uno.
+    dni: Optional[str] = Field(None, min_length=4, max_length=20, pattern=r"^[A-Za-z0-9./\-]+$")
+    nombre: Optional[str] = Field(None, min_length=1, max_length=100)
 
-    @field_validator("dni", mode="before")
+    @field_validator("dni", "nombre", mode="before")
     @classmethod
     def _limpiar(cls, v):
         # Espacios accidentales del pegado/tipeo del operador; el resto se conserva tal
         # cual (no se normalizan separadores para no crear duplicados del mismo padrón).
-        return v.strip() if isinstance(v, str) else v
+        # Vacío = no informado.
+        if isinstance(v, str):
+            v = v.strip()
+            return v or None
+        return v
+
+    @model_validator(mode="after")
+    def _al_menos_uno(self):
+        if not self.dni and not self.nombre:
+            raise ValueError("Cargá el nombre o el número del afiliado.")
+        return self
+
+
+class AfiliadoUpdate(AfiliadoCreate):
+    """Edición (lápiz de la carga): mismos campos y reglas que el alta."""
 
 
 class AfiliadoRead(BaseModel):
     id: int
-    dni: str
-    nombre: str
+    dni: Optional[str] = None
+    nombre: Optional[str] = None
     usuario: str
     created_at: datetime.datetime
 
@@ -115,8 +140,13 @@ class PrestacionItem(BaseModel):
     # La columna `cod_med_ejecutor` NO se escribe: este campo es sólo la señal de entrada.
     cod_medico_ejecutor: Optional[str] = None
 
-    # Paciente — solo DNI; el nombre se resuelve contra el padrón afiliado
+    # Paciente. `afiliado_id` (el elegido del padrón) gana: de ahí salen número y
+    # nombre, y es la única forma de elegir uno cargado sin número. Si no viene, por
+    # `dni_paciente` contra el padrón, como siempre. `nombre_paciente` sólo se usa sin
+    # ninguno de los dos (ej. replicar una fila vieja que tenía sólo el nombre).
+    afiliado_id: Optional[int] = None
     dni_paciente: Optional[str] = None
+    nombre_paciente: Optional[str] = Field(None, max_length=100)
 
     # Servicio
     # Opcional: en cargas por `cantidad` (equipo/lote) el operador no puede asignarle
@@ -225,6 +255,8 @@ class PrestacionUpdate(BaseModel):
     cod_clinica: Optional[int] = None
     cod_obra_social: Optional[str] = None
     periodo: Optional[str] = Field(None, pattern=r"^\d{6}$")
+    # Ver `PrestacionItem.afiliado_id`: si viene, gana sobre `dni_paciente`.
+    afiliado_id: Optional[int] = None
     dni_paciente: Optional[str] = None
     fecha_practica: Optional[datetime.date] = None
     autorizacion: Optional[str] = Field(None, max_length=30)
@@ -330,6 +362,22 @@ class PrecioResponse(BaseModel):
     # `CARGA_SIN_PRECIO` deja cargarlo en $0: la prestación queda "sin valorizar"
     # hasta que se cargue el precio y se revalorice (ver revalorizar.py).
     sin_precio: bool = False
+    # De dónde sale el precio, para la etiqueta del cotizador: origen de la variante
+    # ('NN' | 'NE') y cómo se calculan los honorarios — 'fijo' o 'calculable' con
+    # su galeno (nombre y nivel, si es nivelado).
+    origen: Optional[str] = None
+    tipo_valor: Optional[Literal["fijo", "calculable"]] = None
+    galeno_nombre: Optional[str] = None
+    galeno_nivel: Optional[int] = None
+
+
+class AutorizacionExistente(BaseModel):
+    """Un período de la O.S. donde ya hay prestaciones con ese Nº de autorización."""
+    periodo: str
+    version: int
+    cantidad: int
+    # Estado de la cabecera de esa versión ('A' abierta); None si no hay cabecera.
+    estado_factura: Optional[str] = None
 
 
 class PrestacionRead(BaseModel):

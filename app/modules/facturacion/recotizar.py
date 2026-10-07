@@ -52,7 +52,6 @@ from app.modules.nomenclador import service as service_nm, service_vias
 CERO = Decimal("0")
 
 MOTIVO_MANUAL = "Cálculo manual: los montos los fijó el operador"
-MOTIVO_SIN_CONCEPTOS = "Sin conceptos para cotizar: todos los montos están en 0"
 MOTIVO_PRESUPUESTO = "Código por presupuesto: el monto lo carga el operador"
 MOTIVO_PRECIO_CERO = "El precio vigente está cargado en $0: se dejó el importe que tenía"
 MOTIVO_TOTAL_RARO = (
@@ -81,14 +80,33 @@ class Recotizacion:
 
 def _conceptos(row: DetalleFacturacionCMC) -> tuple[bool, bool, bool]:
     """Qué conceptos cobra la fila: los de la marca si quedó sin valorizar, si no
-    los que están en > 0."""
+    los que están en > 0.
+
+    Todo en 0 y sin marca (cargadas en $0 antes de que existiera la marca): se
+    deduce del `tpo_funcion` guardado. Ayudante ('A') cobra sólo la columna de
+    ayudante, esté o no en un equipo; sólo gastos ('G'), gastos; el resto (médico,
+    pediatra) honorarios + gastos del precio — nunca el ayudante, que no se suma en
+    la fila del médico."""
     if row.sin_valorizar:
         return tuple(c in row.sin_valorizar for c in "HGA")  # type: ignore[return-value]
-    return (
+    montos = (
         service._dec(row.honorarios or 0) > 0,
         service._dec(row.gastos or 0) > 0,
         service._dec(row.ayudante or 0) > 0,
     )
+    if any(montos):
+        return montos
+    tpo = (row.tpo_funcion or "").upper()
+    if tpo == "A":
+        return False, False, True
+    if tpo == "G":
+        return False, True, False
+    return True, True, False
+
+
+def conceptos_de(row: DetalleFacturacionCMC) -> str:
+    """`_conceptos` como texto ("HG", "A"…), para mostrar."""
+    return "".join(c for c, si in zip("HGA", _conceptos(row)) if si)
 
 
 # Dos fórmulas de total conviven en `detalle_facturacion`, y el recálculo tiene que
@@ -223,8 +241,6 @@ async def recotizar_fila(
         return Recotizacion(estado="omitida", motivo=MOTIVO_MANUAL)
 
     con_h, con_g, con_a = _conceptos(row)
-    if not (con_h or con_g or con_a):
-        return Recotizacion(estado="omitida", motivo=MOTIVO_SIN_CONCEPTOS)
 
     formula = formula_de(row)
     if formula is None:

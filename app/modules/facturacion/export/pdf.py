@@ -19,6 +19,7 @@ from app.modules.facturacion.export.armado import (
     Armado,
     ColumnaSpec,
     GrupoSocio,
+    con_columna_tipo,
     spec_columnas,
     texto_subtotal_medico,
     texto_total_paciente,
@@ -29,10 +30,13 @@ from app.modules.facturacion.export.schemas import ExportOpciones
 
 _FONT = "Helvetica"
 _SIZE_DATO = 6.5
-_SIZE_HEADER_COL = 6.5
+# Un punto más que los datos: el encabezado de columnas se destaca.
+_SIZE_HEADER_COL = 7.5
 _ALTO_FILA = 5.2
 _MAP_ALIGN = {"L": "L", "C": "C", "R": "R"}
 _RELLENO_PACIENTE = (224, 242, 254)
+# Subtotales y totales (paciente, socio, sección, total general): gris claro.
+_RELLENO_TOTAL = (235, 235, 235)
 _ELLIPSIS = "..."  # no "…": fuera de Latin-1, rompe las fuentes core de fpdf2.
 
 
@@ -276,24 +280,28 @@ def _pagina_resumen_general(pdf: FPDF, armado: Armado, encabezado: list[str]) ->
         pdf.cell(w2, 8, _fmt(monto), border=1, align="R", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
     pdf.set_font(_FONT, "B", 10)
+    pdf.set_fill_color(*_RELLENO_TOTAL)
     pdf.set_xy(x0, pdf.get_y())
-    pdf.cell(w1, 8, "TOTAL GENERAL FACTURACION", border=1, align="R")
-    pdf.cell(w2, 8, _fmt(armado.resumen.total_general), border=1, align="R", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    pdf.cell(w1, 8, "TOTAL GENERAL FACTURACION", border=1, align="R", fill=True)
+    pdf.cell(w2, 8, _fmt(armado.resumen.total_general), border=1, align="R", fill=True,
+             new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
     if armado.resumen.mostrar_coseguro:
         pdf.ln(5)
         pdf.set_font(_FONT, "B", 10)
         pdf.cell(0, 8, "RESUMEN DE COSEGUROS", align="C", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
         pdf.set_font(_FONT, "", 10)
+        pdf.set_fill_color(*_RELLENO_TOTAL)
         pdf.set_xy(x0, pdf.get_y())
-        pdf.cell(w1, 8, "TOTAL GENERAL COSEGUROS", border=1, align="R")
-        pdf.cell(w2, 8, _fmt(armado.resumen.total_coseguro), border=1, align="R", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        pdf.cell(w1, 8, "TOTAL GENERAL COSEGUROS", border=1, align="R", fill=True)
+        pdf.cell(w2, 8, _fmt(armado.resumen.total_coseguro), border=1, align="R", fill=True,
+                 new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
 
 def build_pdf_detalle(
     armado: Armado, opciones: ExportOpciones, encabezado: EncabezadoExport,
 ) -> bytes:
-    cols = spec_columnas(opciones.columnas)
+    cols = spec_columnas(opciones.columnas, con_tipo=con_columna_tipo(opciones))
     pdf = _FPDFConPie(orientation="L", unit="mm", format="A4")
     pdf.alias_nb_pages()
     # margen inferior de 10mm: deja lugar al pie "Página X de Y" sin que una
@@ -320,15 +328,15 @@ def build_pdf_detalle(
                 for hijo in linea.hijos:
                     tabla.fila(valores_fila(cols, hijo, es_hijo=True))
                 if linea.total_paciente:
-                    tabla.fila_texto_libre(texto_total_paciente(linea, moneda="$ "))
+                    tabla.fila_texto_libre(texto_total_paciente(linea, moneda="$ "), relleno=_RELLENO_TOTAL)
             if grupo.subtotal_medico:
-                tabla.fila_texto_libre(texto_subtotal_medico(grupo, moneda="$ "))
+                tabla.fila_texto_libre(texto_subtotal_medico(grupo, moneda="$ "), relleno=_RELLENO_TOTAL)
             if grupo.mostrar_resumen:
-                tabla.fila_texto_libre(_texto_resumen_socio(grupo))
+                tabla.fila_texto_libre(_texto_resumen_socio(grupo), relleno=_RELLENO_TOTAL)
                 hay_resumen_grupo = True
         if len(armado.secciones) > 1 and not hay_resumen_grupo:
             etiqueta = f"SUBTOTAL {seccion.titulo}" if seccion.titulo else "SUBTOTAL"
-            tabla.fila_texto_libre(f"{etiqueta}: $ {seccion.total:,.2f}")
+            tabla.fila_texto_libre(f"{etiqueta}: $ {seccion.total:,.2f}", relleno=_RELLENO_TOTAL)
     tabla.cerrar()
 
     _pagina_resumen_general(pdf, armado, encabezado.lineas)

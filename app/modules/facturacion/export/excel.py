@@ -19,6 +19,7 @@ from app.modules.facturacion.export.armado import (
     Armado,
     ColumnaSpec,
     GrupoSocio,
+    con_columna_tipo,
     spec_columnas,
     texto_subtotal_medico,
     texto_total_paciente,
@@ -30,11 +31,14 @@ from app.modules.facturacion.export.schemas import ExportOpciones
 FORMATO_MONEDA = "#,##0.00"
 ALTO_FILA_EXCEL = 18
 _ALINEACION = {"L": "left", "C": "center", "R": "right"}
-_FUENTE_HEADER = Font(bold=True)
+# Encabezado de columnas: un punto más grande que el resto (11) y en negrita.
+_FUENTE_HEADER = Font(bold=True, size=12)
 _FUENTE_NEGRITA = Font(bold=True)
 _FUENTE_CURSIVA = Font(italic=True)
 # Subtítulo de cada paciente (el mismo celeste que la vista).
 _RELLENO_PACIENTE = PatternFill(fill_type="solid", start_color="E0F2FE", end_color="E0F2FE")
+# Subtotales y totales (paciente, socio, sección, total general): gris claro.
+_RELLENO_TOTAL = PatternFill(fill_type="solid", start_color="EBEBEB", end_color="EBEBEB")
 
 
 def _sanitizar_nombre_hoja(nombre: str, usados: set[str]) -> str:
@@ -117,7 +121,26 @@ def _fila_encabezado_institucional(ws, encabezado: list[str]) -> None:
 
 
 def _fila_encabezado(ws, cols: list[ColumnaSpec]) -> None:
-    ws.append([_celda(ws, c.header, negrita=True, alineacion="C") for c in cols])
+    celdas = []
+    for c in cols:
+        celda = _celda(ws, c.header, alineacion="C")
+        celda.font = _FUENTE_HEADER
+        celdas.append(celda)
+    ws.append(celdas)
+
+
+def _fila_total(ws, n_cols: int, *valores, numero_en: int | None = None) -> None:
+    """Fila de subtotal/total: en negrita y con el fondo gris en todo el ancho de la
+    tabla. `valores` van en las primeras celdas; `numero_en` es la posición del monto
+    (formato moneda, alineado a la derecha)."""
+    celdas = []
+    for i in range(max(n_cols, len(valores), 1)):
+        v = valores[i] if i < len(valores) else None
+        es_numero = numero_en is not None and i == numero_en
+        c = _celda(ws, v, negrita=True, numero=es_numero, alineacion="R" if es_numero else "L")
+        c.fill = _RELLENO_TOTAL
+        celdas.append(c)
+    ws.append(celdas)
 
 
 def _fila_dato(ws, cols: list[ColumnaSpec], fila, *, es_hijo: bool = False) -> None:
@@ -128,7 +151,7 @@ def _fila_dato(ws, cols: list[ColumnaSpec], fila, *, es_hijo: bool = False) -> N
     ])
 
 
-def _fila_resumen_socio(ws, grupo: GrupoSocio) -> None:
+def _fila_resumen_socio(ws, grupo: GrupoSocio, n_cols: int) -> None:
     partes = [
         f"{ETIQUETA_TIPO.get(t, t)}: {s.cantidad} - {s.monto:,.2f}"
         for t, s in grupo.stats_por_tipo.items() if s.cantidad
@@ -141,16 +164,16 @@ def _fila_resumen_socio(ws, grupo: GrupoSocio) -> None:
     )
     if grupo.total_coseguro > 0:
         texto += f" | COSEGURO SOCIO: {grupo.total_coseguro:,.2f}"
-    ws.append([_celda(ws, texto, negrita=True)])
+    _fila_total(ws, n_cols, texto)
 
 
-def _fila_subtotal_medico(ws, grupo: GrupoSocio) -> None:
-    ws.append([_celda(ws, texto_subtotal_medico(grupo), negrita=True)])
+def _fila_subtotal_medico(ws, grupo: GrupoSocio, n_cols: int) -> None:
+    _fila_total(ws, n_cols, texto_subtotal_medico(grupo))
 
 
-def _fila_subtotal_seccion(ws, titulo: Optional[str], total) -> None:
+def _fila_subtotal_seccion(ws, titulo: Optional[str], total, n_cols: int) -> None:
     etiqueta = f"SUBTOTAL {titulo}" if titulo else "SUBTOTAL"
-    ws.append([_celda(ws, etiqueta, negrita=True), _celda(ws, total, negrita=True, numero=True, alineacion="R")])
+    _fila_total(ws, n_cols, etiqueta, total, numero_en=1)
 
 
 def _escribir_resumen_general(ws, armado: Armado) -> None:
@@ -161,23 +184,17 @@ def _escribir_resumen_general(ws, armado: Armado) -> None:
             _celda(ws, f"TOTAL {ETIQUETA_TIPO.get(tipo, tipo)}"),
             _celda(ws, monto, numero=True, alineacion="R"),
         ])
-    ws.append([
-        _celda(ws, "TOTAL GENERAL FACTURACIÓN", negrita=True),
-        _celda(ws, armado.resumen.total_general, negrita=True, numero=True, alineacion="R"),
-    ])
+    _fila_total(ws, 2, "TOTAL GENERAL FACTURACIÓN", armado.resumen.total_general, numero_en=1)
     if armado.resumen.mostrar_coseguro:
         ws.append([])
         ws.append([_celda(ws, "RESUMEN DE COSEGUROS", negrita=True)])
-        ws.append([
-            _celda(ws, "TOTAL GENERAL COSEGUROS"),
-            _celda(ws, armado.resumen.total_coseguro, numero=True, alineacion="R"),
-        ])
+        _fila_total(ws, 2, "TOTAL GENERAL COSEGUROS", armado.resumen.total_coseguro, numero_en=1)
 
 
 def build_excel_detalle(armado: Armado, opciones: ExportOpciones, encabezado: EncabezadoExport) -> bytes:
     from io import BytesIO
 
-    cols = spec_columnas(opciones.columnas)
+    cols = spec_columnas(opciones.columnas, con_tipo=con_columna_tipo(opciones))
     fila_encabezado_col = len(encabezado.lineas) + 2  # + fila en blanco + la propia fila
     wb = Workbook(write_only=True)
     usados: set[str] = set()
@@ -211,15 +228,15 @@ def build_excel_detalle(armado: Armado, opciones: ExportOpciones, encabezado: En
                 for hijo in linea.hijos:
                     _fila_dato(ws, cols, hijo, es_hijo=True)
                 if linea.total_paciente:
-                    ws.append([_celda(ws, texto_total_paciente(linea), negrita=True)])
+                    _fila_total(ws, len(cols), texto_total_paciente(linea))
             if grupo.subtotal_medico:
-                _fila_subtotal_medico(ws, grupo)
+                _fila_subtotal_medico(ws, grupo, len(cols))
             if grupo.mostrar_resumen:
-                _fila_resumen_socio(ws, grupo)
+                _fila_resumen_socio(ws, grupo, len(cols))
                 hay_resumen_grupo = True
 
         if multi_hoja and not hay_resumen_grupo:
-            _fila_subtotal_seccion(ws, seccion.titulo, seccion.total)
+            _fila_subtotal_seccion(ws, seccion.titulo, seccion.total, len(cols))
 
         ultima_ws = ws
 

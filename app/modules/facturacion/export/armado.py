@@ -431,6 +431,12 @@ def _armar_por_tipo(
             # dentro de cada socio y, en Sanatorios, de cada clínica (que siguen agrupadas A-Z).
             if por_paciente.get(tipo):
                 ordenadas = sorted(filas_socio, key=_clave_paciente)
+            elif tipo in por_paciente:
+                # "Médico": rige el orden elegido, y lo que ese orden no distingue (con
+                # "nombre del socio", todas las filas del socio empatan) queda por
+                # paciente A-Z en vez de en el orden de carga. `sorted` es estable,
+                # también con `reverse`.
+                ordenadas = _ordenar(sorted(filas_socio, key=_clave_paciente), orden, direccion)
             else:
                 ordenadas = _ordenar(filas_socio, orden, direccion)
             if tipo == "Sanatorio":
@@ -578,9 +584,15 @@ _COL_SUBTOTAL = ColumnaSpec("sub_total", "SUB. TOTAL", 22, 14, "R", True, lambda
 _COL_TIPO = ColumnaSpec("tipo", "TIPO", 10, 7, "C", False, lambda f: LETRA_TIPO.get(f.tipo, f.tipo or ""))
 
 
-def spec_columnas(columnas_habilitadas: list[str]) -> list[ColumnaSpec]:
+def spec_columnas(columnas_habilitadas: list[str], con_tipo: bool = True) -> list[ColumnaSpec]:
+    """`con_tipo=False` saca la columna TIPO: agrupado por tipo, cada hoja/sección ya es
+    de un solo tipo y la columna repetiría lo mismo en todas las filas."""
     seleccion = [_DEFINICIONES[k] for k in _DEFINICIONES if k in columnas_habilitadas]
-    return [_COL_ID, _COL_SOCIO, *seleccion, _COL_SUBTOTAL, _COL_TIPO]
+    return [_COL_ID, _COL_SOCIO, *seleccion, _COL_SUBTOTAL, *([_COL_TIPO] if con_tipo else [])]
+
+
+def con_columna_tipo(opciones: ExportOpciones) -> bool:
+    return opciones.agrupacion != "por_tipo"
 
 
 def etiqueta_tipo_rol(fila: FilaExport, es_hijo: bool) -> str:

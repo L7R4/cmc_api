@@ -189,14 +189,16 @@ def test_por_tipo_orden_por_paciente_en_honorarios_y_sanatorios():
     sanatorios = {g.cod_medico: g for g in a.secciones[3].grupos}
     assert [l.fila.id for l in sanatorios["80"].lineas] == [12, 9, 10]  # DEL SUR · MODELO: por fecha
 
-    # "paciente": pacientes A-Z dentro de cada socio y, en Sanatorios, dentro de cada clínica,
-    # que siguen agrupadas A-Z (con su subtítulo una sola vez).
+    # "paciente": la sección entera por paciente A-Z, sin partir por socio; en Sanatorios,
+    # dentro de cada clínica, que siguen agrupadas A-Z (con su subtítulo una sola vez).
     b = _armado("por_tipo", orden_honorarios="paciente", orden_sanatorio="paciente", **base)
-    honorarios = {g.cod_medico: g for g in b.secciones[2].grupos}
-    assert [l.fila.id for l in honorarios["10"].lineas] == [7, 4]  # DIAZ, PEREYRA
-    sanatorios = {g.cod_medico: g for g in b.secciones[3].grupos}
-    assert [l.fila.id for l in sanatorios["80"].lineas] == [12, 10, 9]  # DEL SUR: BRAVO · MODELO: CASTRO, LOPEZ
-    assert [l.subtitulo_clinica for l in sanatorios["80"].lineas] == ["CLINICA DEL SUR", "CLINICA MODELO", None]
+    [honorarios] = b.secciones[2].grupos
+    assert [l.fila.id for l in honorarios.lineas] == [7, 4]  # DIAZ, PEREYRA
+    [sanatorios] = b.secciones[3].grupos
+    # DEL SUR: ARCE (socio 90), BRAVO (socio 80) · MODELO: CASTRO, LOPEZ
+    assert [l.fila.id for l in sanatorios.lineas] == [8, 12, 10, 9]
+    assert [l.subtitulo_clinica for l in sanatorios.lineas] == ["CLINICA DEL SUR", None, "CLINICA MODELO", None]
+    assert not sanatorios.subtotal_medico
 
     # Cada selector es independiente y no toca las demás secciones.
     c = _armado("por_tipo", orden_honorarios="paciente", **base)

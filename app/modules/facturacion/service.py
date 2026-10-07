@@ -110,17 +110,16 @@ TIPO_SANATORIO = "Sanatorio"
 CATEGORIA_HONORARIOS_INDIVIDUALES = "Honorarios individuales"
 TIPO_PRACTICA = "Practica"
 TIPO_CONSULTA = "Consulta"
-# Sin clínica: 0-419999 = Practica, >=420000 = Consulta (decisión usuario 2026-08-28,
-# reemplaza a la `categoria` del nomenclador como driver de `tipo` en ese caso).
-COD_MAX_PRACTICA = 419999
+# Categorías del código que pasan tal cual a `tipo`. Sin categoría (o con una que no es
+# ninguna de éstas) la prestación es Practica (decisión usuario 2026-10-07, reemplaza a la
+# regla por rango de código del 2026-08-28: ≤419999 Practica, resto Consulta).
+_TIPOS_DE_CATEGORIA = {TIPO_CONSULTA, TIPO_PRACTICA, CATEGORIA_HONORARIOS_INDIVIDUALES, TIPO_SANATORIO}
 
 
-def tipo_por_codigo(codigo: Optional[str]) -> Optional[str]:
-    """`tipo` derivado del rango del código cuando no hay clínica de por medio.
-    None si el código no es puramente numérico (se cae al fallback de `_get_categoria`)."""
-    if codigo is None or not codigo.isdigit():
-        return None
-    return TIPO_PRACTICA if int(codigo) <= COD_MAX_PRACTICA else TIPO_CONSULTA
+def tipo_de_categoria(categoria: Optional[str]) -> str:
+    """`tipo` para la categoría del código en la obra social; Practica si no tiene."""
+    c = (categoria or "").strip()
+    return c if c in _TIPOS_DE_CATEGORIA else TIPO_PRACTICA
 
 # Ventana por defecto cuando la OS no define `dia_corte` (20 = del 20 al 20).
 DIA_CORTE_DEFAULT = 20
@@ -1314,23 +1313,33 @@ async def derivar_tipo(
     cod_obra: Optional[str] = None,
 ) -> Optional[str]:
     """`tipo` único de la prestación. Lo decide el prestador
-    (`resolver_prestador`) y, si éste no fuerza nada, el rango del código
-    (0-419999 → Practica, ≥420000 → Consulta; decisión usuario 2026-08-28); si el
-    código no es numérico, cae a la `categoria` del catálogo como último fallback.
+    (`resolver_prestador`) y, si éste no fuerza nada, la categoría del código para la
+    obra social (`_get_categoria`: override de la OS > alta del código > catálogo);
+    sin categoría, Practica (decisión usuario 2026-10-07; ver `tipo_de_categoria`).
 
     Los dos casos que fuerzan `tipo` (ver `resolver_prestador`): la clínica como
     prestador → 'Sanatorio'; el médico con clínica como ámbito → 'Honorarios
     individuales'.
 
-    `cod_obra` desambigua el código y habilita el override de categoría por obra
-    social, usado solo en el fallback de código no numérico.
+    `cod_obra` desambigua el código y habilita el override de categoría por obra social.
 
     Nota (2026-07-31): antes el driver era `payee.es_organizacion`. Hoy el payee
     (`cod_med`) es siempre un médico y la clínica vive en `cod_clinica`.
     """
     if tipo_forzado:
         return tipo_forzado
-    return tipo_por_codigo(cod_nomenclador) or await _get_categoria(db, cod_nomenclador, cod_obra)
+    return tipo_de_categoria(await _get_categoria(db, cod_nomenclador, cod_obra))
+
+
+async def tipos_sin_clinica(
+    db: AsyncSession, pares: set[tuple[Optional[str], Optional[str]]],
+) -> dict[tuple[Optional[str], Optional[str]], str]:
+    """`derivar_tipo` sin prestador que fuerce nada, para cada (código, OS) — fallback de
+    las filas legacy con `tipo` NULL al mostrarlas. Son pocas: una consulta por par."""
+    return {
+        (cod, obra): (await derivar_tipo(db, cod, None, obra) if cod else TIPO_PRACTICA)
+        for cod, obra in pares
+    }
 
 
 
@@ -1801,7 +1810,7 @@ async def _insertar_prestaciones(
                 row.grupo_equipo_id = cabeza_id
             # Cada integrante (ayudante, pediatra) se guarda con el MISMO tipo que la cabeza:
             # sólo la fila de la cabeza sabe si la clínica fue el prestador (Sanatorio); el
-            # resto se carga como médico y por su cuenta saldría por el rango del código.
+            # resto se carga como médico y por su cuenta saldría por la categoría del código.
             if row.grupo_equipo_id == cabeza_id and row.id_detalle_prestaciones != cabeza_id and cabeza_row.tipo:
                 row.tipo = cabeza_row.tipo
 
@@ -1979,6 +1988,10 @@ async def obtener_factura_detalle(db: AsyncSession, factura_id: int) -> dict:
     # Fallback para filas legacy con `tipo` NULL (la columna se puebla recién al cargar
     # por el módulo nuevo; el histórico de CMC nunca la tuvo). Se deriva on-the-fly con
     # la misma regla que `derivar_tipo`/`resolver_prestador`, sin tocar la fila persistida.
+    tipos_legacy = await tipos_sin_clinica(
+        db, {(r.cod_nom, str(r.cod_obr) if r.cod_obr is not None else None) for r in rows if r.tipo is None},
+    )
+
     def _tipo_de(r: DetalleFacturacionCMC) -> Optional[str]:
         if r.tipo is not None:
             return r.tipo
@@ -1987,7 +2000,7 @@ async def obtener_factura_detalle(db: AsyncSession, factura_id: int) -> dict:
             return TIPO_SANATORIO
         if r.cod_clinica:  # 0 = sentinel legacy "sin clínica"
             return CATEGORIA_HONORARIOS_INDIVIDUALES
-        return tipo_por_codigo(r.cod_nom)
+        return tipos_legacy[(r.cod_nom, str(r.cod_obr) if r.cod_obr is not None else None)]
 
     # Agrupar por cod_med preservando el orden de aparición (ya viene ordenado por fecha).
     # cod_med puede volver como int en filas legacy (columna declarada String pero

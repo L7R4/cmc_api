@@ -337,7 +337,7 @@ def _clave_natural(s: str | None) -> tuple:
 
 def _clave_paciente(f: FilaExport) -> tuple:
     """Paciente A-Z (nombre, después documento); dentro del mismo paciente, más nueva primero."""
-    return ((f.afiliado or "").casefold(), _clave_natural(f.nro_afiliado), *_clave_fecha_desc(f))
+    return (_normal(f.afiliado), _clave_natural(_normal(f.nro_afiliado)), *_clave_fecha_desc(f))
 
 
 def _normal(s: str | None) -> str:
@@ -348,7 +348,7 @@ def _marcar_pacientes(lineas: list[LineaPrestacion], con_total: bool = False) ->
     """Honorarios individuales / Sanatorios ordenados por paciente: pone el subtítulo
     "PACIENTE X" en la primera línea de cada paciente (las líneas ya vienen con las de un
     mismo paciente seguidas) y, con `con_total`, su total en la última — equipo incluido.
-    El paciente se identifica por documento/afiliado (o nombre) y, en Sanatorios, también
+    El paciente se identifica por nombre y documento/afiliado y, en Sanatorios, también
     por clínica: el mismo paciente en otra clínica es otro bloque."""
     previa: tuple | None = None
     bloque: list[LineaPrestacion] = []
@@ -366,7 +366,9 @@ def _marcar_pacientes(lineas: list[LineaPrestacion], con_total: bool = False) ->
             cerrar()
             previa = None
             continue
-        clave = (_normal(f.nro_afiliado) or _normal(f.afiliado), f.cod_clinica if f.tipo == "Sanatorio" else None)
+        # La misma clave que ordena (`_clave_paciente`: nombre y número), así un bloque
+        # nunca se parte por tener las filas del paciente separadas.
+        clave = (_normal(f.afiliado), _normal(f.nro_afiliado), f.cod_clinica if f.tipo == "Sanatorio" else None)
         if clave != previa:
             cerrar()
             previa = clave
@@ -424,14 +426,20 @@ def _armar_por_tipo(
         filas_tipo = [f for f in filas if f.tipo == tipo]
         if not filas_tipo:
             continue
+        # Con "paciente" (sólo Honorarios individuales y Sanatorios) la sección entera va por
+        # paciente A-Z, sin partir por socio (el socio está en su columna); en Sanatorios,
+        # dentro de cada clínica (A-Z). Cada paciente cierra con su total, sin subtotal de socio.
+        if por_paciente.get(tipo):
+            clave = (lambda f: (_clave_clinica(f), *_clave_paciente(f))) if tipo == "Sanatorio" else _clave_paciente
+            lineas = _lineas(sorted(filas_tipo, key=clave), equipo)
+            _marcar_clinicas(lineas)
+            _marcar_pacientes(lineas, con_total=True)
+            secciones.append(Seccion(titulo=ETIQUETA_TIPO[tipo], grupos=[_armar_grupo(None, None, None, lineas, False)]))
+            continue
         grupos = []
         for filas_socio in _por_socio(filas_tipo).values():
             f0 = filas_socio[0]
-            # Con "paciente" (sólo Honorarios individuales y Sanatorios) los pacientes van A-Z
-            # dentro de cada socio y, en Sanatorios, de cada clínica (que siguen agrupadas A-Z).
-            if por_paciente.get(tipo):
-                ordenadas = sorted(filas_socio, key=_clave_paciente)
-            elif tipo in por_paciente:
+            if tipo in por_paciente:
                 # "Médico": rige el orden elegido, y lo que ese orden no distingue (con
                 # "nombre del socio", todas las filas del socio empatan) queda por
                 # paciente A-Z en vez de en el orden de carga. `sorted` es estable,
@@ -443,12 +451,8 @@ def _armar_por_tipo(
                 ordenadas = sorted(ordenadas, key=_clave_clinica)  # estable: conserva el orden dentro de cada clínica
             lineas = _lineas(ordenadas, equipo)
             _marcar_clinicas(lineas)
-            # Por paciente: cada paciente cierra con su total, en lugar del subtotal del socio.
-            if por_paciente.get(tipo):
-                _marcar_pacientes(lineas, con_total=True)
             grupos.append(_armar_grupo(
-                f0.cod_medico, f0.prestador_nombre, f0.matricula, lineas, False,
-                subtotal_medico=not por_paciente.get(tipo),
+                f0.cod_medico, f0.prestador_nombre, f0.matricula, lineas, False, subtotal_medico=True,
             ))
         grupos.sort(key=lambda g: _nombre_clave(g.nombre, g.cod_medico))
         secciones.append(Seccion(titulo=ETIQUETA_TIPO[tipo], grupos=grupos))

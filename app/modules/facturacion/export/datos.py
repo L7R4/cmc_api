@@ -126,20 +126,19 @@ async def _resolver_obras_sociales(db: AsyncSession, cods: set[str]) -> dict[str
 
 
 def _tipo_de(
-    tipo_col: Optional[str], cod_nom: Optional[str],
-    cod_clinica, es_organizacion: bool,
+    tipo_col: Optional[str], cod_clinica, es_organizacion: bool, tipo_sin_clinica: Optional[str],
 ) -> str:
     """Misma regla que el closure `_tipo_de` de `service.obtener_factura_detalle`
-    (service.py:1570) — reproducida acá porque ahí vive como closure, no
-    exportable. Sanatorio si el médico es organización → Honorarios individuales
-    si hay clínica → si no, por rango de código."""
+    — reproducida acá porque ahí vive como closure, no exportable. Sanatorio si el
+    médico es organización → Honorarios individuales si hay clínica → si no, la
+    categoría del código en la OS (`service.tipos_sin_clinica`)."""
     if tipo_col is not None:
         return tipo_col
     if es_organizacion:
         return service.TIPO_SANATORIO
     if cod_clinica:
         return service.CATEGORIA_HONORARIOS_INDIVIDUALES
-    return service.tipo_por_codigo(cod_nom) or service.TIPO_CONSULTA
+    return tipo_sin_clinica or service.TIPO_PRACTICA
 
 
 async def _equipos_inferidos(db: AsyncSession, factura: FacturacionCMC) -> dict[int, int]:
@@ -312,6 +311,10 @@ async def _materializar_filas(
         db, {str(r.cod_obr) for r in filas_raw if r.cod_obr}
     )
 
+    tipos_legacy = await service.tipos_sin_clinica(
+        db, {(r.cod_nom, str(r.cod_obr) if r.cod_obr is not None else None) for r in filas_raw if r.tipo is None},
+    )
+
     virtual = virtual or {}
     cabezas_virtuales = set(virtual.values())
     filas: list[FilaExport] = []
@@ -325,8 +328,8 @@ async def _materializar_filas(
         medico = medicos.get(cod_medico)
         h, g, a = service._dec(r.honorarios), service._dec(r.gastos), service._dec(r.ayudante)
         tipo = _tipo_de(
-            r.tipo, r.cod_nom, r.cod_clinica,
-            bool(medico.es_organizacion) if medico else False,
+            r.tipo, r.cod_clinica, bool(medico.es_organizacion) if medico else False,
+            tipos_legacy.get((r.cod_nom, cod_obr)),
         )
         cod_clinica = _cod_medico_a_int(r.cod_clinica) or None
         clinica = medicos.get(str(cod_clinica)) if cod_clinica else None

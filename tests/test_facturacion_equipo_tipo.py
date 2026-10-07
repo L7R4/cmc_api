@@ -1,7 +1,7 @@
 """`tipo` de los integrantes de un equipo quirúrgico.
 
 Sólo la fila de la cabeza sabe si la clínica fue el prestador (`tipo='Sanatorio'`): el ayudante
-se carga como médico, sin clínica, y por su cuenta su `tipo` saldría por el rango del código
+se carga como médico, sin clínica, y por su cuenta su `tipo` saldría por la categoría del código
 (Práctica/Consulta). Todo integrante tiene que guardarse con el MISMO tipo que su cabeza. Un
 ayudante cargado SIN equipo es Honorarios individuales.
 

@@ -32,7 +32,6 @@ truncaba nombres reales en silencio (ver auditoría P-07) — así que el nombre
 recorta a `MAX_NOMBRE` sólo para dejar lugar al prefijo `planillas/`.
 """
 import datetime
-import re
 from pathlib import Path
 from typing import List, Optional
 from urllib.parse import quote
@@ -46,17 +45,9 @@ from app.core.config import settings
 from app.db.database import get_db
 from app.db.models import Avisos
 from app.modules.planillas.schemas import PlanillaOut
+from app.modules.planillas.service import SECCION, archivo_de, destino_de, guardar_pdf
 
 router = APIRouter()  # El scope lo declara app/auth/authz.py::SCOPES_POR_RUTA (fuente unica de autorizacion).
-
-#: Subdirectorio de `uploads/` y, a la vez, el prefijo que marca en `ARCHIVO`
-#: que el PDF es nuestro y no del legacy.
-SECCION = "planillas"
-PLANILLAS_DIR = Path("uploads") / SECCION
-PLANILLAS_DIR.mkdir(parents=True, exist_ok=True)
-
-#: `avisos.ARCHIVO` es varchar(255) y hay que dejar lugar para `planillas/`.
-MAX_NOMBRE = 255 - len(SECCION) - 1
 
 #: Sólo PDF: es lo único que el Colegio publica acá y lo único que el visor del
 #: front sabe abrir embebido.
@@ -82,42 +73,6 @@ def _to_out(row: Avisos) -> PlanillaOut:
         fecha=row.FECHA or "",
         url=_url(archivo),
     )
-
-
-def _sanear(nombre: str) -> str:
-    """Nombre de archivo seguro y corto, derivado del que subió el usuario.
-
-    Se conserva el nombre original (recortado) en vez de un uuid porque acá es
-    contenido público que el médico identifica por cómo se llama —«Planilla
-    IOSCOR»—, no un adjunto personal que haya que volver inadivinable.
-    """
-    base = Path(nombre or "").name
-    tallo = base[: -len(".pdf")] if base.lower().endswith(".pdf") else base
-    # Todo lo que no sea alfanumérico ASCII, espacio, guión o punto se cae:
-    # así no hay separadores de ruta, ni acentos que rompan la URL, ni NUL.
-    tallo = re.sub(r"[^A-Za-z0-9 ._-]", "_", tallo).strip(" ._-")
-    tallo = re.sub(r"_{2,}", "_", tallo) or "planilla"
-    return f"{tallo[: MAX_NOMBRE - len('.pdf')]}.pdf"
-
-
-def _destino_libre(nombre: str) -> Path:
-    """Ruta en disco que todavía no existe, agregando `-2`, `-3`… si hace falta.
-
-    Sin esto, subir dos veces «Planilla IOSCOR.pdf» pisaría el PDF de la fila
-    anterior, que sigue publicada y apuntando al mismo nombre.
-    """
-    destino = PLANILLAS_DIR / nombre
-    if not destino.exists():
-        return destino
-
-    tallo = nombre[: -len(".pdf")]
-    for n in range(2, 1000):
-        sufijo = f"-{n}"
-        recortado = tallo[: MAX_NOMBRE - len(".pdf") - len(sufijo)]
-        candidato = PLANILLAS_DIR / f"{recortado}{sufijo}.pdf"
-        if not candidato.exists():
-            return candidato
-    raise HTTPException(409, "Demasiadas planillas con ese nombre; renombrá el archivo.")
 
 
 @router.get("/", response_model=List[PlanillaOut])
@@ -164,12 +119,11 @@ async def crear_planilla(
     # El tipo sale de los magic bytes: `.pdf` en el nombre no prueba nada.
     info = await validate_upload(archivo, EXTENSIONES)
 
-    destino = _destino_libre(_sanear(info.original_name))
-    destino.write_bytes(info.data)
+    destino = guardar_pdf(info.data, info.original_name)
 
     fila = Avisos(
         AVISO=(descripcion or "").strip() or destino.name,
-        ARCHIVO=f"{SECCION}/{destino.name}",
+        ARCHIVO=archivo_de(destino),
         FECHA=(fecha or "").strip() or datetime.date.today().isoformat(),
         EXISTE="S",
         AVISO_PLANILLA="P",
@@ -215,15 +169,13 @@ async def editar_planilla(
 
     if archivo is not None:
         info = await validate_upload(archivo, EXTENSIONES)
-        nuevo_destino = _destino_libre(_sanear(info.original_name))
-        nuevo_destino.write_bytes(info.data)
+        nuevo_destino = guardar_pdf(info.data, info.original_name)
 
         # Si la fila ya apuntaba a un PDF nuestro, ese archivo queda huérfano:
         # se borra recién si el commit sale bien.
-        if fila.ARCHIVO.startswith(f"{SECCION}/"):
-            viejo_destino = PLANILLAS_DIR / fila.ARCHIVO[len(SECCION) + 1:]
+        viejo_destino = destino_de(fila.ARCHIVO)
 
-        fila.ARCHIVO = f"{SECCION}/{nuevo_destino.name}"
+        fila.ARCHIVO = archivo_de(nuevo_destino)
 
     if descripcion is not None:
         fila.AVISO = descripcion.strip() or fila.ARCHIVO.rsplit("/", 1)[-1]

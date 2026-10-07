@@ -693,10 +693,13 @@ async def _afiliado_por_id(db: AsyncSession, afiliado_id: int) -> Afiliado:
     return af
 
 
-async def actualizar_afiliado(db: AsyncSession, afiliado_id: int, payload: AfiliadoUpdate) -> Afiliado:
+async def actualizar_afiliado(
+    db: AsyncSession, afiliado_id: int, payload: AfiliadoUpdate,
+) -> tuple[Afiliado, int]:
     """Edición del afiliado (lápiz de la carga). Además del padrón, corrige el número y
-    el nombre copiados en sus prestaciones no anuladas de facturas ABIERTAS; las de
-    facturas cerradas quedan como se facturaron."""
+    el nombre copiados en sus prestaciones no anuladas de facturas ABIERTAS (de cualquier
+    obra social y período); las de facturas cerradas quedan como se facturaron.
+    Devuelve el afiliado y cuántas prestaciones se corrigieron."""
     af = await _afiliado_por_id(db, afiliado_id)
     if payload.dni and payload.dni != af.dni:
         otro = await get_afiliado_by_dni(db, payload.dni)
@@ -719,7 +722,7 @@ async def actualizar_afiliado(db: AsyncSession, afiliado_id: int, payload: Afili
         )
     await db.commit()
     await db.refresh(af)
-    return af
+    return af, len(ids)
 
 
 async def eliminar_afiliado_por_id(db: AsyncSession, afiliado_id: int) -> None:

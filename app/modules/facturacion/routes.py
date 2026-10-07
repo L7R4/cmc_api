@@ -17,6 +17,7 @@ from app.modules.facturacion.schemas import (
     ActividadEventoOut,
     AfiliadoCreate,
     AfiliadoRead,
+    AfiliadoEditado,
     AfiliadoUpdate,
     AvanzarPeriodoMedicoPayload,
     AvanzarPeriodoMedicoResponse,
@@ -251,13 +252,14 @@ async def eliminar_afiliado(
 
 # Por id y en otra ruta: un afiliado puede no tener número, y `/afiliados/{dni:path}`
 # se tragaría cualquier sufijo ("/afiliados/id/5").
-@router.patch("/afiliados-id/{afiliado_id}", response_model=AfiliadoRead)
+@router.patch("/afiliados-id/{afiliado_id}", response_model=AfiliadoEditado)
 async def actualizar_afiliado(
     afiliado_id: int, payload: AfiliadoUpdate, db: AsyncSession = Depends(get_db),
 ):
     """Edición del afiliado (lápiz de la carga). Corrige también sus prestaciones no
-    anuladas de facturas abiertas."""
-    return await service.actualizar_afiliado(db, afiliado_id, payload)
+    anuladas de facturas abiertas y devuelve cuántas."""
+    af, n = await service.actualizar_afiliado(db, afiliado_id, payload)
+    return AfiliadoEditado.model_validate(af).model_copy(update={"prestaciones_actualizadas": n})
 
 
 @router.delete("/afiliados-id/{afiliado_id}", status_code=status.HTTP_204_NO_CONTENT)

@@ -120,6 +120,12 @@ class AfiliadoRead(BaseModel):
         from_attributes = True
 
 
+class AfiliadoEditado(AfiliadoRead):
+    """Respuesta de la edición: el afiliado y cuántas prestaciones de facturas abiertas
+    se corrigieron con él."""
+    prestaciones_actualizadas: int = 0
+
+
 # ── Prestaciones — request ───────────────────────────────────────────────────
 class PrestacionItem(BaseModel):
     """Un prestador individual (cirujano o ayudante).

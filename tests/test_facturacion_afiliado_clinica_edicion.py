@@ -71,7 +71,8 @@ async def test_editar_afiliado_corrige_las_prestaciones_de_facturas_abiertas(s):
     s.add_all([abierta, cerrada])
     await s.flush()
 
-    await service.actualizar_afiliado(s, af.id, AfiliadoUpdate(dni="T-9990002", nombre="NUEVO"))
+    _, corregidas = await service.actualizar_afiliado(s, af.id, AfiliadoUpdate(dni="T-9990002", nombre="NUEVO"))
+    assert corregidas == 1  # sólo la de la factura abierta
     await s.refresh(abierta)
     await s.refresh(cerrada)
     assert (abierta.dni_p, abierta.nom_ape_p) == ("T-9990002", "NUEVO")

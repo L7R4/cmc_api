@@ -132,7 +132,11 @@ class Seccion:
 
     @property
     def total(self) -> Decimal:
-        return sum((g.total_general for g in self.grupos), Decimal("0"))
+        """Lo que se factura en la sección: con el equipo de TODAS las cirugías, también
+        las de Honorarios individuales / Sanatorios (que no suman al subtotal de su socio).
+        Así la suma de las secciones da el total general."""
+        lineas = [l for g in self.grupos for l in g.lineas]
+        return quantize_money(_stats_de_lineas(lineas, equipo_siempre=True)[4])
 
 
 @dataclass

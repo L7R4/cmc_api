@@ -313,3 +313,13 @@ def test_el_total_de_la_factura_incluye_el_equipo_en_todas_las_agrupaciones():
         assert a.resumen.total_general == esperado == Decimal("1665.00"), (agrupacion, extra)
         assert dict(a.resumen.por_tipo)["Honorarios individuales"] == Decimal("1650.00")  # cabezas 1500 + equipo 150
         assert a.total_prestaciones == len(filas)
+
+
+def test_por_tipo_las_secciones_suman_el_total_general():
+    """El subtotal del socio deja afuera al equipo de Honorarios individuales, pero la
+    sección lo suma: la suma de las secciones tiene que dar el total general."""
+    a = armar(_filas_hi(), ExportOpciones(agrupacion="por_tipo"))
+    hi = next(s for s in a.secciones if s.titulo == "HONORARIO")
+    assert hi.grupos[0].total_general == Decimal("1500.00")  # socio 10, sin su equipo
+    assert hi.total == Decimal("1650.00")  # + ayudante 100 + pediatra 50
+    assert sum(s.total for s in a.secciones) == a.resumen.total_general

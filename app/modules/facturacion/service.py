@@ -1934,6 +1934,75 @@ async def calcular_publicado(
 
 
 # ── Detalle de factura agrupado por prestador ────────────────────────────────
+def _fecha_o_none(v):
+    """El legacy guardó `0000-00-00` en las fechas sin dato: el driver lo devuelve como texto
+    y rompe la respuesta. Sólo se informan las fechas reales."""
+    return v if isinstance(v, datetime.date) else None
+
+
+async def _datos_cabecera_factura(db: AsyncSession, factura: FacturacionCMC) -> dict:
+    """Datos de la cabecera para el encabezado del listado: nombre de la obra social, números
+    de factura, fechas, quién la creó/cerró, comprobante y complementos del mismo período."""
+    nombre_os = None
+    try:
+        nro_os = int(factura.cod_obr) if factura.cod_obr is not None else None
+    except (TypeError, ValueError):
+        nro_os = None
+    if nro_os is not None:
+        nombre_os = (await db.execute(
+            select(ObrasSociales.OBRA_SOCIAL).where(ObrasSociales.NRO_OBRASOCIAL == nro_os)
+        )).scalars().first()
+
+    nros_factura = [
+        " ".join(p for p in (str(t or "").strip(), str(n or "").strip()) if p)
+        for t, n in (
+            (factura.tipo_factura, factura.nro_factura),
+            (factura.tipo_factura_2, factura.nro_factura_2),
+            (factura.tipo_factura_3, factura.nro_factura_3),
+        ) if (n or "").strip()
+    ]
+
+    # `usuario` y `fecha` se pisan en el cierre (ver FacturacionCMC): sólo son "cerrada por"
+    # y "fecha de cierre" cuando la fase del Colegio ya está cerrada.
+    cerrada = (factura.estado or "").upper() in FACTURA_ESTADOS_CERRADOS
+
+    socios: set[int] = set()
+    for cod in (factura.usuario, factura.creado_por):
+        try:
+            if cod is not None:
+                socios.add(int(cod))
+        except (TypeError, ValueError):
+            continue
+    nombres: dict[str, str] = {}
+    if socios:
+        nombres = {
+            str(n): nom for n, nom in (await db.execute(
+                select(ListadoMedico.NRO_SOCIO, ListadoMedico.NOMBRE).where(ListadoMedico.NRO_SOCIO.in_(socios))
+            )).all()
+        }
+
+    otras = (await db.execute(
+        select(FacturacionCMC.id_prestaciones, FacturacionCMC.version).where(
+            FacturacionCMC.cod_obr == factura.cod_obr, FacturacionCMC.periodo == factura.periodo,
+            FacturacionCMC.id_prestaciones != factura.id_prestaciones,
+        ).order_by(FacturacionCMC.version)
+    )).all()
+
+    return {
+        "nombre_obra_social": nombre_os,
+        "numeros_factura": nros_factura,
+        "fecha_cierre": _fecha_o_none(factura.fecha) if cerrada else None,
+        "fecha_envio": _fecha_o_none(factura.fecha_envio),
+        "fecha_recepcion": _fecha_o_none(factura.fecha_recep),
+        "cerrada_por": (nombres.get(str(factura.usuario)) or str(factura.usuario)) if cerrada and factura.usuario else None,
+        "creada_por": (nombres.get(str(factura.creado_por)) or str(factura.creado_por)) if factura.creado_por else None,
+        "creada_en": factura.creado_en if isinstance(factura.creado_en, datetime.datetime) else None,
+        "documento_url": url_archivo(factura.documento_url),
+        "afip": factura.afip,
+        "otras_versiones": [{"id_factura": i, "version": v} for i, v in otras],
+    }
+
+
 async def obtener_factura_detalle(db: AsyncSession, factura_id: int) -> dict:
     """Detalle de una factura (cabecera `facturacion`): sus prestaciones
     (`detalle_facturacion` de la misma OS+período **y versión**, excluyendo anuladas)
@@ -2078,6 +2147,8 @@ async def obtener_factura_detalle(db: AsyncSession, factura_id: int) -> dict:
     orden_grupos.sort(key=lambda c: (grupos[c]["nombre"] or "", c))
     prestadores = [grupos[c] for c in orden_grupos]
 
+    cabecera = await _datos_cabecera_factura(db, factura)
+
     return {
         "id_factura": factura.id_prestaciones,
         "periodo": factura.periodo,
@@ -2087,6 +2158,7 @@ async def obtener_factura_detalle(db: AsyncSession, factura_id: int) -> dict:
         "estado_doctor": factura.estado_doctor,
         "version": factura.version,
         "es_complemento": factura.version > 1,
+        **cabecera,
         # Unidades facturadas, no filas: una prestación con cantidad=2 y sesion=3 cuenta 6
         # (mismo criterio que el importe: cantidad * sesion).
         "total_prestaciones": sum((r.cantidad or 1) * (r.sesion or 1) for r in rows),

@@ -751,6 +751,18 @@ class FacturaDetalleOut(BaseModel):
     estado_doctor: Optional[str] = None
     version: int = 1                # 1 = original; 2+ = factura complementaria
     es_complemento: bool = False
+    # Datos de la cabecera para el encabezado del listado (ver `_datos_cabecera_factura`).
+    nombre_obra_social: Optional[str] = None
+    numeros_factura: list[str] = []
+    fecha_cierre: Optional[datetime.date] = None
+    fecha_envio: Optional[datetime.date] = None
+    fecha_recepcion: Optional[datetime.date] = None
+    cerrada_por: Optional[str] = None
+    creada_por: Optional[str] = None
+    creada_en: Optional[datetime.datetime] = None
+    documento_url: Optional[str] = None
+    afip: Optional[str] = None
+    otras_versiones: list[dict] = []   # [{id_factura, version}] del mismo período y OS
     total_prestaciones: int
     total_importe: Decimal
     prestadores: list[PrestadorFacturaGrupoOut]

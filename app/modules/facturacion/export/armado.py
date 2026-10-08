@@ -560,6 +560,13 @@ def valor_unitario(f: FilaExport) -> Optional[Decimal]:
     return quantize_money(f.honorarios + f.gastos - f.coseguro)
 
 
+def honorarios_de_fila(f: FilaExport) -> Decimal:
+    """Lo que muestra la columna HONORARIOS. El ayudante guarda lo que cobra en `ayudante`
+    (con `honorarios` en 0), así que su fila mostraría 0 mientras el SUB. TOTAL sí lo
+    cuenta; igual que la columna "Honorarios" de la vista, se muestra ese monto."""
+    return f.ayudante if f.tipo_prestador == "Ayudante" else f.honorarios
+
+
 def _fmt_fecha(d: Optional[datetime.date]) -> str:
     # "-" y no un guión largo: los caracteres fuera de Latin-1 rompen fpdf2 con
     # las fuentes core (Helvetica) — ver el fix en pdf.py/caratula.py/routes.py.
@@ -581,7 +588,7 @@ _DEFINICIONES: dict[str, ColumnaSpec] = {
     "afiliado": ColumnaSpec("afiliado", "AFILIADO", 40, 26, "L", False, lambda f: f.afiliado or ""),
     "cantidad": ColumnaSpec("cantidad", "CANT.", 12, 8, "C", False, lambda f: f"{f.cantidad}-{f.sesion}"),
     "porcentaje": ColumnaSpec("porcentaje", "%", 9, 6, "R", True, lambda f: f.porcentaje or 0),
-    "honorarios": ColumnaSpec("honorarios", "HONORARIOS", 22, 14, "R", True, lambda f: f.honorarios),
+    "honorarios": ColumnaSpec("honorarios", "HONORARIOS", 22, 14, "R", True, lambda f: honorarios_de_fila(f)),
     "gastos": ColumnaSpec("gastos", "GASTOS", 22, 14, "R", True, lambda f: f.gastos),
     "coseguro": ColumnaSpec("coseguro", "COSEGURO", 22, 14, "R", True, lambda f: f.coseguro),
     "valor_unitario": ColumnaSpec("valor_unitario", "VALOR UNIT.", 22, 14, "R", True, lambda f: valor_unitario(f)),

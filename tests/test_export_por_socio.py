@@ -61,11 +61,13 @@ def _grupos(a):
 
 def test_por_socio_orden_fijo_y_equipo_solo_bajo_su_cabeza():
     a = _armado(orden="importe_desc")
-    assert [s.titulo for s in a.secciones] == [None]  # una sola sección, sin cortes
+    # Los médicos y, al final, el bloque único de sanatorios.
+    assert [s.titulo for s in a.secciones] == [None, "SANATORIOS"]
     grupos = a.secciones[0].grupos
 
-    # Socios A-Z (ignora `orden`). El ayudante (30) no tiene grupo propio: va bajo su cabeza.
-    assert [g.cod_medico for g in grupos] == ["10", "80", "90", "20"]
+    # Socios A-Z (ignora `orden`); los que solo tienen sanatorios (80, 90) no llevan grupo.
+    # El ayudante (30) no tiene grupo propio: va bajo su cabeza.
+    assert [g.cod_medico for g in grupos] == ["10", "20"]
     acosta = grupos[0]
     assert acosta.titulo == "10 - ACOSTA, MARIA"
     # Consultas y prácticas: más nueva primero; honorarios: paciente A-Z.
@@ -78,15 +80,34 @@ def test_por_socio_orden_fijo_y_equipo_solo_bajo_su_cabeza():
 
     assert a.una_hoja
     assert a.total_prestaciones == 12
-    assert sum(g.total_general for g in grupos) == a.resumen.total_general == Decimal("1120.00")
+    assert a.resumen.total_general == Decimal("1120.00")
+    assert sum(g.total_general for s in a.secciones for g in s.grupos) == a.resumen.total_general
 
 
-def test_sanatorios_llevan_subtitulo_con_el_nombre_de_la_clinica():
-    leiva = _grupos(_armado())["80"]
-    # Tramo de Sanatorios: una clínica detrás de otra (A-Z) y, dentro, por paciente.
-    assert [l.fila.id for l in leiva.lineas] == [12, 10, 9]  # DEL SUR: BRAVO · MODELO: CASTRO, LOPEZ
-    assert [l.subtitulo_clinica for l in leiva.lineas] == ["CLINICA DEL SUR", "CLINICA MODELO", None]
-    assert leiva.lineas[0].subtitulo == "SANATORIOS"
+def test_sanatorios_van_en_un_bloque_clinica_paciente_socio():
+    [sanatorios] = _armado().secciones[1].grupos
+    # DEL SUR: ARCE (socio 90), BRAVO (socio 80) · MODELO: CASTRO, LOPEZ — de cualquier socio.
+    assert [l.fila.id for l in sanatorios.lineas] == [8, 12, 10, 9]
+    assert [l.subtitulo_clinica for l in sanatorios.lineas] == ["CLINICA DEL SUR", None, "CLINICA MODELO", None]
+    assert [l.subtitulo_paciente for l in sanatorios.lineas] == [
+        "PACIENTE ARCE", "PACIENTE BRAVO", "PACIENTE CASTRO", "PACIENTE LOPEZ",
+    ]
+    assert not sanatorios.mostrar_resumen
+
+
+def test_sanatorios_mismo_paciente_en_la_clinica_va_por_socio_a_z():
+    filas = [
+        _fila(1, "30", "ZAPATA, JUAN", "Sanatorio", 2, "RUIZ", clinica=501, clinica_nombre="DEL SUR"),
+        _fila(2, "10", "ACOSTA, MARIA", "Sanatorio", 9, "RUIZ", clinica=501, clinica_nombre="DEL SUR"),
+        _fila(3, "20", "MORENO, ANA", "Sanatorio", 5, "RUIZ", clinica=501, clinica_nombre="DEL SUR"),
+        _fila(4, "10", "ACOSTA, MARIA", "Sanatorio", 1, "AGUIRRE", clinica=501, clinica_nombre="DEL SUR"),
+        _fila(5, "10", "ACOSTA, MARIA", "Sanatorio", 1, "AGUIRRE", clinica=502, clinica_nombre="ARCOIRIS"),
+    ]
+    for agrupacion in ("por_socio", "por_tipo"):
+        a = armar(filas, ExportOpciones(agrupacion=agrupacion, orden_sanatorio="paciente"))
+        [sanatorios] = a.secciones[-1].grupos
+        # ARCOIRIS primero (clínica A-Z); luego DEL SUR: AGUIRRE y RUIZ, este por socio ACOSTA, MORENO, ZAPATA.
+        assert [l.fila.id for l in sanatorios.lineas] == [5, 4, 2, 3, 1], agrupacion
 
 
 def test_agrupar_equipo_apagado_se_ignora_el_equipo_siempre_va_con_su_cabeza():
@@ -160,10 +181,11 @@ def test_excel_en_una_sola_hoja_y_pdf_se_generan():
     wb = load_workbook(BytesIO(build_excel_detalle(a, opciones, enc)))
     assert wb.sheetnames == ["Detalle"]
     textos = [r[0] for r in wb["Detalle"].iter_rows(values_only=True) if r and r[0]]
-    for esperado in ("10 - ACOSTA, MARIA", "CONSULTAS", "SANATORIOS", "80 - LEIVA, PABLO",
+    for esperado in ("10 - ACOSTA, MARIA", "CONSULTAS", "SANATORIOS",
                      "CLINICA MODELO", "CLINICA DEL SUR"):
         assert esperado in textos
     assert not any("CLINICAS / SANATORIOS" == t for t in textos)
+    assert any(str(t).startswith("SUBTOTAL SANATORIOS") for t in textos)  # cierra el bloque único
     assert build_pdf_detalle(a, opciones, enc).startswith(b"%PDF")
 
 
@@ -323,3 +345,21 @@ def test_por_tipo_las_secciones_suman_el_total_general():
     assert hi.grupos[0].total_general == Decimal("1500.00")  # socio 10, sin su equipo
     assert hi.total == Decimal("1650.00")  # + ayudante 100 + pediatra 50
     assert sum(s.total for s in a.secciones) == a.resumen.total_general
+
+
+def test_ayudante_va_con_su_cabeza_aunque_ella_no_se_apunte_a_si_misma():
+    """Hay cirugías cargadas sin `grupo_equipo_id` propio y sus ayudantes apuntan a ellas: la
+    vista las agrupa, y el export las dejaba separadas (el ayudante como línea de su socio)."""
+    cirujano = _fila(1, "10", "ACOSTA, MARIA", "Practica", 5, "RUIZ", monto="1000")        # sin grupo
+    ayudante = _fila(2, "30", "BRAVO, LUIS", "Practica", 5, "RUIZ", equipo=1, monto="200")
+    ayudante.honorarios, ayudante.ayudante, ayudante.tipo_prestador = Decimal("0"), Decimal("200"), "Ayudante"
+    for agrupacion in ("por_socio", "por_tipo", "plana", "todo_junto"):
+        a = armar([cirujano, ayudante], ExportOpciones(agrupacion=agrupacion))
+        lineas = [l for s in a.secciones for g in s.grupos for l in g.lineas]
+        assert [(l.fila.id, [h.id for h in l.hijos]) for l in lineas] == [(1, [2])], agrupacion
+        assert a.total_prestaciones == 2
+
+    # Si la cabeza queda afuera del filtro, su equipo también.
+    afuera = dataclasses.replace(cirujano, fuera_de_filtro=True)
+    a = armar([afuera, ayudante], ExportOpciones(agrupacion="por_socio"))
+    assert a.secciones == []

@@ -235,7 +235,7 @@ def build_excel_detalle(armado: Armado, opciones: ExportOpciones, encabezado: En
                 _fila_resumen_socio(ws, grupo, len(cols))
                 hay_resumen_grupo = True
 
-        if multi_hoja and not hay_resumen_grupo:
+        if (multi_hoja or (armado.una_hoja and len(armado.secciones) > 1)) and not hay_resumen_grupo:
             _fila_subtotal_seccion(ws, seccion.titulo, seccion.total, len(cols))
 
         ultima_ws = ws

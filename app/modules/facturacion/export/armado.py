@@ -17,10 +17,12 @@ Las modalidades (`ExportOpciones.agrupacion`) comparten una sola estructura:
 
 - **por_socio**: orden FIJO (ignora `orden`), una única `Seccion` sin título. Socios
   A-Z; dentro de cada uno, con subtítulo por tramo: consultas y prácticas por fecha
-  (más nueva primero), honorarios individuales y sanatorios por paciente A-Z, cada
-  paciente con su subtítulo ("PACIENTE <nombre>") y su "TOTAL PACIENTE <nombre>".
-  Cada grupo lleva su título y su "RESUMEN SOCIO"; en Excel va todo en una sola hoja
-  (`Armado.una_hoja`).
+  (más nueva primero) y honorarios individuales por paciente A-Z, cada paciente con su
+  subtítulo ("PACIENTE <nombre>") y su "TOTAL PACIENTE <nombre>". Cada grupo lleva su título
+  y su "RESUMEN SOCIO"; en Excel va todo en una sola hoja (`Armado.una_hoja`). Los
+  sanatorios NO van en el grupo del socio: forman al final un bloque único "SANATORIOS",
+  clínica A-Z → paciente A-Z → socio A-Z (por eso no entran en el RESUMEN SOCIO, sí en el
+  RESUMEN GENERAL).
 - **por_tipo**: una `Seccion` por tipo (Consulta/Practica/Honorarios
   individuales/Sanatorio) que tenga filas, cada una arranca en página/hoja nueva con
   su subtotal. Dentro, un grupo por socio (A-Z) con sus filas ordenadas por `orden` +
@@ -348,6 +350,15 @@ def _normal(s: str | None) -> str:
     return " ".join((s or "").split()).casefold()
 
 
+def _clave_sanatorio(f: FilaExport) -> tuple:
+    """Sanatorios: clínica A-Z; dentro de la clínica, paciente A-Z (nombre, después
+    documento); dentro del paciente, socio A-Z; después la fecha, más nueva primero."""
+    return (
+        _clave_clinica(f), _normal(f.afiliado), _clave_natural(_normal(f.nro_afiliado)),
+        _nombre_clave(f.prestador_nombre, f.cod_medico), *_clave_fecha_desc(f),
+    )
+
+
 def _marcar_pacientes(lineas: list[LineaPrestacion], con_total: bool = False) -> None:
     """Honorarios individuales / Sanatorios ordenados por paciente: pone el subtítulo
     "PACIENTE X" en la primera línea de cada paciente (las líneas ya vienen con las de un
@@ -386,14 +397,16 @@ _TRAMOS_MEDICO: list[tuple[str, str, Callable[[FilaExport], tuple]]] = [
     ("Consulta", "CONSULTAS", _clave_fecha_desc),
     ("Practica", "PRACTICAS", _clave_fecha_desc),
     ("Honorarios individuales", "HONORARIOS INDIVIDUALES", _clave_paciente),
-    ("Sanatorio", "SANATORIOS", lambda f: (_clave_clinica(f), *_clave_paciente(f))),
 ]
 
 
 def _armar_por_socio(filas: list[FilaExport], equipo: dict[int, list[FilaExport]]) -> list[Seccion]:
+    """Los médicos A-Z con sus consultas, prácticas y honorarios individuales, y al final un
+    bloque único de SANATORIOS: no van dentro de cada médico porque se ordenan por clínica,
+    paciente y recién después socio, algo que un grupo de un solo socio no puede expresar."""
     grupos: list[GrupoSocio] = []
     tipos_tramo = {t for t, _, _ in _TRAMOS_MEDICO}
-    for filas_socio in _por_socio(filas).values():
+    for filas_socio in _por_socio([f for f in filas if f.tipo != "Sanatorio"]).values():
         lineas: list[LineaPrestacion] = []
         for tipo, subtitulo, clave in _TRAMOS_MEDICO:
             tramo = sorted((f for f in filas_socio if f.tipo == tipo), key=clave)
@@ -407,14 +420,23 @@ def _armar_por_socio(filas: list[FilaExport], equipo: dict[int, list[FilaExport]
             lineas.append(LineaPrestacion(
                 fila=f, hijos=equipo.get(f.id, []), subtitulo="OTRAS" if i == 0 else None,
             ))
-        _marcar_clinicas(lineas)
         _marcar_pacientes(lineas, con_total=True)
         f0 = filas_socio[0]
         grupos.append(_armar_grupo(
             f0.cod_medico, f0.prestador_nombre, f0.matricula, lineas, True, titulo=_titulo_socio(f0),
         ))
     grupos.sort(key=lambda g: _nombre_clave(g.nombre, g.cod_medico))
-    return [Seccion(titulo=None, grupos=grupos)] if grupos else []
+    secciones = [Seccion(titulo=None, grupos=grupos)] if grupos else []
+
+    sanatorios = sorted((f for f in filas if f.tipo == "Sanatorio"), key=_clave_sanatorio)
+    if sanatorios:
+        lineas = _lineas(sanatorios, equipo)
+        _marcar_clinicas(lineas)
+        _marcar_pacientes(lineas, con_total=True)
+        secciones.append(Seccion(
+            titulo="SANATORIOS", grupos=[_armar_grupo(None, None, None, lineas, False)],
+        ))
+    return secciones
 
 
 def _armar_por_tipo(
@@ -434,7 +456,7 @@ def _armar_por_tipo(
         # paciente A-Z, sin partir por socio (el socio está en su columna); en Sanatorios,
         # dentro de cada clínica (A-Z). Cada paciente cierra con su total, sin subtotal de socio.
         if por_paciente.get(tipo):
-            clave = (lambda f: (_clave_clinica(f), *_clave_paciente(f))) if tipo == "Sanatorio" else _clave_paciente
+            clave = _clave_sanatorio if tipo == "Sanatorio" else _clave_paciente
             lineas = _lineas(sorted(filas_tipo, key=clave), equipo)
             _marcar_clinicas(lineas)
             _marcar_pacientes(lineas, con_total=True)
@@ -467,8 +489,15 @@ def armar(filas: list[FilaExport], opciones: ExportOpciones) -> Armado:
     # El equipo de cada cabeza va SIEMPRE anidado bajo ella (completo, también las integrantes
     # que el filtro dejó afuera) y nunca como línea propia de su socio. Los filtros se aplican
     # a la cabeza: si ella queda afuera, su equipo entero queda afuera.
-    ids_cabezas = {f.id for f in filas if f.grupo_equipo_id == f.id}
-    cabezas_afuera = {f.id for f in filas if f.grupo_equipo_id == f.id and f.fuera_de_filtro}
+    # Cabeza = quien se apunta a sí mismo O a quien apunta algún integrante presente (hay
+    # cirugías cargadas sin el autoapuntado: sus ayudantes igual van con ellas, como en la vista).
+    ids_filas = {f.id: f for f in filas}
+    ids_cabezas = {f.id for f in filas if f.grupo_equipo_id == f.id} | {
+        f.grupo_equipo_id for f in filas
+        if f.grupo_equipo_id is not None and f.grupo_equipo_id != f.id
+        and f.grupo_equipo_id in ids_filas and ids_filas[f.grupo_equipo_id].grupo_equipo_id is None
+    }
+    cabezas_afuera = {i for i in ids_cabezas if ids_filas[i].fuera_de_filtro}
     candidatas = [
         f for f in filas
         if not f.fuera_de_filtro and not (f.grupo_equipo_id in cabezas_afuera and f.grupo_equipo_id != f.id)

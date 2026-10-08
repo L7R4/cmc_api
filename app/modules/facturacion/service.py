@@ -1153,6 +1153,7 @@ async def resolver_precio(
                 admite_pediatra=admite_pediatra,
                 requiere_autorizacion=bool(par and par.requiere_autorizacion),
                 cantidad_ayudantes=(par.cantidad_ayudantes if par else None),
+                tipo_codigo=tipo_de_categoria(await _get_categoria(db, codigo, cod_obra)),
             )
         return PrecioResponse(
             admitido=False, motivo=e.message,
@@ -1199,6 +1200,7 @@ async def resolver_precio(
         coseguro=out.coseguro,
         admite_pediatra=admite_pediatra,
         admite_laparoscopia=out.admite_laparoscopia,
+        tipo_codigo=tipo_de_categoria(await _get_categoria(db, codigo, cod_obra)),
     )
 
 

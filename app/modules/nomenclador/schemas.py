@@ -1035,6 +1035,9 @@ class ValorOut(BaseModel):
     nivel: Optional[int]
     complejidad: Optional[str]
     categoria: Optional[str] = None
+    # La que vale para esta OS: la del valor > la del alta del código en la OS > la del
+    # catálogo. Para mostrar y filtrar por tipo; ver routes_valores._valores_out.
+    categoria_efectiva: Optional[str] = None
     requiere_autorizacion: Optional[bool] = None
     especialidad_id_colegio: Optional[int]
     por_presupuesto: bool = False
@@ -1351,6 +1354,46 @@ class ResumenVigenciaOut(BaseModel):
     #: código (mismo nomenclador_id + origen + especialidad). `None` cuando
     #: ningún código de esta vigencia tenía una versión previa — primera carga.
     avg_pct: Optional[float] = None
+
+
+class HistorialVersionOut(BaseModel):
+    """Una versión del precio de una variante (una fila de `nm_historial_precio_codigo`)."""
+    vigencia_desde: datetime.date
+    vigencia_hasta: Optional[datetime.date] = None
+    honorarios: Decimal
+    ayudante: Decimal
+    gastos: Decimal
+    total: Decimal
+    #: Contra la versión anterior de la misma variante; `None` en la primera.
+    variacion_pct: Optional[float] = None
+    motivo_cambio: str
+
+
+class HistorialVarianteOut(BaseModel):
+    """Una variante del precio del código: NN, o NE base / de una especialidad."""
+    origen: str
+    especialidad_id_colegio: Optional[int] = None
+    especialidad: Optional[str] = None
+    #: De la más nueva a la más vieja.
+    versiones: List[HistorialVersionOut]
+
+
+class HistorialCodigoOut(BaseModel):
+    nomenclador_id: int
+    codigo: str
+    descripcion: str
+    #: Categoría efectiva en la OS; el front la muestra como tipo.
+    categoria: Optional[str] = None
+    #: NN primero, después NE (base y luego por especialidad).
+    variantes: List[HistorialVarianteOut]
+
+
+class HistorialPorCodigoOut(BaseModel):
+    obra_social_nro: int
+    total: int
+    page: int
+    size: int
+    items: List[HistorialCodigoOut]
 
 
 # ─────────────────────────────────────────────────────────────────────────────

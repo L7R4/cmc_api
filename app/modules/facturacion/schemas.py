@@ -373,6 +373,10 @@ class PrecioResponse(BaseModel):
     # su galeno (nombre y nivel, si es nivelado).
     origen: Optional[str] = None
     tipo_valor: Optional[Literal["fijo", "calculable"]] = None
+    # `tipo` que le da al código su categoría en la OS (ver `tipo_de_categoria`), sin
+    # contar el que fuerza la clínica. El front habilita ayudantes siempre que sea
+    # 'Honorarios individuales' o 'Sanatorio'. En las ramas "no admitido" viene None.
+    tipo_codigo: Optional[str] = None
     galeno_nombre: Optional[str] = None
     galeno_nivel: Optional[int] = None
 

@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -51,6 +51,13 @@ async def list_nomenclador(
         ),
     ),
     categoria: Optional[str] = Query(None),
+    tipo: Optional[Literal[service.TIPOS_FILTRO]] = Query(
+        None,
+        description=(
+            "Consulta / Practica / Honorarios individuales, por la categoría del catálogo. "
+            "Sin categoría cuenta como Practica (ver `service.condicion_tipo`)."
+        ),
+    ),
     complejidad: Optional[str] = Query(None),
     obra_social_nro: Optional[int] = Query(
         None,
@@ -94,6 +101,8 @@ async def list_nomenclador(
         stmt = stmt.where(NomencladorCMC.codigo.contains(q))
     if categoria:
         stmt = stmt.where(NomencladorCMC.categoria == categoria)
+    if tipo:
+        stmt = stmt.where(service.condicion_tipo(NomencladorCMC.categoria, tipo))
     if complejidad:
         stmt = stmt.where(NomencladorCMC.complejidad == complejidad)
     if activo is not None:

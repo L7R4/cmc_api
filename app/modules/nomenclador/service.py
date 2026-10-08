@@ -13,6 +13,7 @@ from typing import List, Optional
 
 from sqlalchemy import and_, delete, exists, func, insert, or_, select, true, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 from sqlalchemy.orm.attributes import set_committed_value
 
 from app.common.money import quantize_money
@@ -456,6 +457,54 @@ def categoria_efectiva(
     if valor is not None and valor.categoria and valor.categoria.strip():
         return valor.categoria
     return nomenclador.categoria if nomenclador is not None else None
+
+
+# ── Filtro por tipo (Consulta / Práctica / Honorarios individuales) ──────────
+# Mismo criterio que el `tipo` de la prestación (facturacion.service.tipo_de_categoria):
+# sin categoría, o con una que no es de las conocidas, cuenta como Práctica. Sanatorio
+# queda afuera del filtro a pedido del usuario (2026-10-08): no es "Práctica" ni se
+# ofrece como opción.
+TIPO_CONSULTA = "Consulta"
+TIPO_PRACTICA = "Practica"
+TIPO_HONORARIOS_INDIVIDUALES = "Honorarios individuales"
+TIPOS_FILTRO = (TIPO_CONSULTA, TIPO_PRACTICA, TIPO_HONORARIOS_INDIVIDUALES)
+_CATEGORIAS_NO_PRACTICA = (TIPO_CONSULTA, TIPO_HONORARIOS_INDIVIDUALES, "Sanatorio")
+
+
+def condicion_tipo(categoria, tipo: str):
+    """Condición SQL «la categoría `categoria` (columna o expresión) es del `tipo`»."""
+    if tipo == TIPO_PRACTICA:
+        return or_(categoria.is_(None), categoria.not_in(_CATEGORIAS_NO_PRACTICA))
+    return categoria == tipo
+
+
+def _no_vacia(col):
+    return func.nullif(func.trim(col), "")
+
+
+def categoria_os_sql(obra_social_nro: int, nomenclador_id, categoria_catalogo):
+    """Expresión SQL con la categoría efectiva de un código en una OS, correlacionada
+    por `nomenclador_id`. Misma precedencia que `facturacion.service._get_categoria`:
+    la de un precio activo de la OS > la del alta del código en la OS > la del catálogo.
+    """
+    # Alias propios: quien la usa suele tener ya `Valor` o `CodigoObraSocial` en su
+    # FROM, y sin alias la subconsulta se correlacionaría con esas tablas.
+    V, P = aliased(Valor), aliased(CodigoObraSocial)
+    del_valor = (
+        select(func.max(_no_vacia(V.categoria)))
+        .where(
+            V.obra_social_nro == obra_social_nro,
+            V.nomenclador_id == nomenclador_id,
+            V.estado == "activo",
+        )
+        .scalar_subquery()
+    )
+    del_par = (
+        select(func.max(_no_vacia(P.categoria)))
+        .where(P.obra_social_nro == obra_social_nro, P.nomenclador_id == nomenclador_id)
+        .scalar_subquery()
+    )
+    return func.coalesce(del_valor, del_par, _no_vacia(categoria_catalogo))
 
 
 def requiere_autorizacion_efectiva(valor: Optional[Valor]) -> bool:

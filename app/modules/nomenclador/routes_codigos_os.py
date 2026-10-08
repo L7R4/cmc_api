@@ -3,14 +3,14 @@ una O.S. (sin precio), editar sus datos y quién lo factura, suspenderlo.
 
 Ver `alta_os.py` para el flujo completo de 4 etapas.
 """
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.deps import get_current_user
 from app.db.database import get_db
-from app.modules.nomenclador import alta_os
+from app.modules.nomenclador import alta_os, service
 from app.modules.nomenclador.schemas import (
     AltaCodigosIn,
     AltaCodigosOut,
@@ -28,13 +28,18 @@ async def listar_codigos_por_os(
     obra_social_nro: int = Query(...),
     estado: Optional[EstadoCodigoOS] = Query(None),
     q: Optional[str] = Query(None),
+    tipo: Optional[Literal[service.TIPOS_FILTRO]] = Query(
+        None, description="Consulta / Practica / Honorarios individuales, por la categoría del código en la O.S.",
+    ),
     page: int = Query(1, ge=1),
     size: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
 ):
     """Todos los códigos activos del catálogo con su estado en la O.S.: sin alta /
     sin precio / con precio / suspendido, más los conteos por estado."""
-    return await alta_os.listar_por_os(db, obra_social_nro, estado=estado, q=q, page=page, size=size)
+    return await alta_os.listar_por_os(
+        db, obra_social_nro, estado=estado, q=q, tipo=tipo, page=page, size=size,
+    )
 
 
 @router.post("/alta", response_model=AltaCodigosOut)

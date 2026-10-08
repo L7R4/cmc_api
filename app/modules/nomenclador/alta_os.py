@@ -379,7 +379,7 @@ async def cambiar_estado(
 
 async def listar_por_os(
     db: AsyncSession, obra_social_nro: int, *, estado: Optional[str] = None,
-    q: Optional[str] = None, page: int = 1, size: int = 50,
+    q: Optional[str] = None, tipo: Optional[str] = None, page: int = 1, size: int = 50,
 ) -> CodigosPorOSOut:
     N, P = NomencladorCMC, CodigoObraSocial
     con_precio = (
@@ -419,6 +419,11 @@ async def listar_por_os(
     if q and q.strip():
         like = f"%{q.strip()}%"
         base = base.where(or_(N.codigo.like(f"{q.strip()}%"), N.descripcion.like(like), P.descripcion.like(like)))
+    if tipo:
+        # Como `q`, acota también los conteos por estado: muestran lo que hay de ese tipo.
+        base = base.where(service.condicion_tipo(
+            service.categoria_os_sql(obra_social_nro, N.id, N.categoria), tipo,
+        ))
 
     sub = base.subquery()
     conteos = {e: 0 for e in ESTADOS}

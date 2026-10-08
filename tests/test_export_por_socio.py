@@ -89,8 +89,11 @@ def test_sanatorios_van_en_un_bloque_clinica_paciente_socio():
     # DEL SUR: ARCE (socio 90), BRAVO (socio 80) · MODELO: CASTRO, LOPEZ — de cualquier socio.
     assert [l.fila.id for l in sanatorios.lineas] == [8, 12, 10, 9]
     assert [l.subtitulo_clinica for l in sanatorios.lineas] == ["CLINICA DEL SUR", None, "CLINICA MODELO", None]
-    # Paciente y socio solo ordenan: sin subtítulo ni total por paciente.
-    assert all(l.subtitulo_paciente is None and l.total_paciente is None for l in sanatorios.lineas)
+    # Cada paciente lleva su subtítulo y su total; el socio solo ordena.
+    assert [l.subtitulo_paciente for l in sanatorios.lineas] == [
+        "PACIENTE ARCE", "PACIENTE BRAVO", "PACIENTE CASTRO", "PACIENTE LOPEZ",
+    ]
+    assert [l.total_paciente[0] for l in sanatorios.lineas] == ["ARCE", "BRAVO", "CASTRO", "LOPEZ"]
     assert not sanatorios.mostrar_resumen
 
 

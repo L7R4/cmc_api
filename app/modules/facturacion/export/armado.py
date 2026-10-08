@@ -21,8 +21,8 @@ Las modalidades (`ExportOpciones.agrupacion`) comparten una sola estructura:
   subtítulo ("PACIENTE <nombre>") y su "TOTAL PACIENTE <nombre>". Cada grupo lleva su título
   y su "RESUMEN SOCIO"; en Excel va todo en una sola hoja (`Armado.una_hoja`). Los
   sanatorios NO van en el grupo del socio: forman al final un bloque único "SANATORIOS" con el
-  subtítulo de cada clínica A-Z y, debajo, las prestaciones ordenadas por paciente A-Z y luego
-  por socio A-Z (sin subtítulo ni total por paciente). No entran en el RESUMEN SOCIO, sí en el
+  subtítulo de cada clínica A-Z, dentro el de cada paciente A-Z con su total y, debajo,
+  las prestaciones ordenadas por socio A-Z. No entran en el RESUMEN SOCIO, sí en el
   RESUMEN GENERAL.
 - **por_tipo**: una `Seccion` por tipo (Consulta/Practica/Honorarios
   individuales/Sanatorio) que tenga filas, cada una arranca en página/hoja nueva con
@@ -431,9 +431,10 @@ def _armar_por_socio(filas: list[FilaExport], equipo: dict[int, list[FilaExport]
 
     sanatorios = sorted((f for f in filas if f.tipo == "Sanatorio"), key=_clave_sanatorio)
     if sanatorios:
-        # Dos subtítulos (SANATORIOS y cada clínica); paciente y socio solo ordenan, sin cortes.
+        # Subtítulos: SANATORIOS, cada clínica y cada paciente (con su total); el socio solo ordena.
         lineas = _lineas(sanatorios, equipo)
         _marcar_clinicas(lineas)
+        _marcar_pacientes(lineas, con_total=True)
         secciones.append(Seccion(
             titulo="SANATORIOS", grupos=[_armar_grupo(None, None, None, lineas, False)],
         ))

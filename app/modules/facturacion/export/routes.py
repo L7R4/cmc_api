@@ -26,6 +26,7 @@ from app.modules.facturacion.export import datos as datos_mod
 from app.modules.facturacion.export import encabezado as encabezado_mod
 from app.modules.facturacion.export import excel as excel_mod
 from app.modules.facturacion.export import pdf as pdf_mod
+from app.modules.facturacion.export import boreal_xlsx as boreal_xlsx_mod
 from app.modules.facturacion.export import unne_txt as unne_txt_mod
 from app.modules.facturacion.export.schemas import (
     COLUMNAS_DEFAULT,
@@ -156,6 +157,22 @@ async def export_detalle_xlsx(
         content=contenido,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f'attachment; filename="detalle_factura_{id}.xlsx"'},
+    )
+
+
+@router.get("/facturas/{id}/export/boreal.xlsx")
+async def export_boreal_xlsx(id: int, db: AsyncSession = Depends(get_db)):
+    """Plano de Boreal (O.S. 285) en Excel — ver `boreal_xlsx`."""
+    t0 = time.perf_counter()
+    factura = await datos_mod.obtener_factura(db, id)
+    plano = await boreal_xlsx_mod.generar(db, factura)
+    logger.info(
+        "export boreal.xlsx factura=%s filas=%s tiempo=%.2fs", id, plano.filas, time.perf_counter() - t0,
+    )
+    return Response(
+        content=plano.contenido,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{plano.nombre_archivo}"'},
     )
 
 

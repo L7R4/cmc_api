@@ -1767,3 +1767,142 @@ class AplicarNiveladoOut(BaseModel):
     galeno_nombre: str
     resumen: AplicarNiveladoResumen
     filas: List[AplicarNiveladoFila]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Importar valores fijos NE desde Excel (CODIGO | DESCRIPCION | VALOR)
+# ─────────────────────────────────────────────────────────────────────────────
+
+EstadoFilaFija = Literal[
+    "error", "duplicado", "sin_catalogo", "suspendido", "sin_alta",
+    "sin_quien_factura", "vigente_posterior", "misma_vigencia", "rotar", "nuevo",
+]
+AccionFija = Literal[
+    "omitir", "cargar", "rotar", "sobrescribir", "reemplazar",
+    "alta_y_cargar", "reactivar_y_cargar", "crear_y_cargar",
+]
+
+
+class ImportarFijosFilaIn(BaseModel):
+    """Una fila del Excel tal como la leyó el front. `valor` llega crudo (número o
+    texto: "$ 1.234.567", "PRESUPUESTO") y lo interpreta el back."""
+    fila: int
+    codigo: Optional[str] = None
+    descripcion: Optional[str] = None
+    valor: Optional[str | float | int] = None
+
+
+class ImportarFijosIn(BaseModel):
+    obra_social_nro: int
+    vigencia_desde: datetime.date
+    # Fila 1 del Excel: se valida contra CODIGO | DESCRIPCION | VALOR.
+    encabezado: List[Optional[str]]
+    filas: List[ImportarFijosFilaIn] = Field(..., min_length=1, max_length=5000)
+
+
+class DecisionFijaIn(BaseModel):
+    fila: int
+    # Estado que el usuario vio en la previsualización: si cambió, se pide previsualizar de nuevo.
+    estado_visto: EstadoFilaFija
+    accion: AccionFija
+    # Quién factura, cuando la fila lo pide (alta sin plantilla, sin quién factura,
+    # código nuevo). Lista = esas especialidades; `sin_restriccion` = cualquier médico.
+    especialidades: Optional[List[int]] = None
+    sin_restriccion: Optional[bool] = None
+    # Sólo para `crear_y_cargar`: categoría del código nuevo en el catálogo.
+    categoria: Optional[str] = Field(None, max_length=100)
+
+
+class ImportarFijosAplicarIn(ImportarFijosIn):
+    decisiones: List[DecisionFijaIn]
+    # Otras O.S. de la familia (ver `replicar_familia.familia_de`) donde cargar lo mismo.
+    replicar_en: List[int] = Field(default_factory=list)
+
+
+class VarianteActualOut(BaseModel):
+    """Precio NE que ya tiene una de las variantes destino de la fila."""
+    especialidad_id_colegio: Optional[int] = None
+    especialidad: Optional[str] = None
+    precio_actual: Optional[Decimal] = None
+    vigencia_desde: Optional[datetime.date] = None
+    vigencia_hasta: Optional[datetime.date] = None
+    variacion_pct: Optional[float] = None
+    # Vigencias de esta variante desde la fecha nueva en adelante (se borran al reemplazar).
+    posteriores: int = 0
+
+
+class ReplicaFilaOut(BaseModel):
+    """Qué pasaría con la fila en una O.S. de la familia si se carga en la principal.
+    `accion` None = ahí no se replica (`motivo` dice por qué)."""
+    obra_social_nro: int
+    estado: EstadoFilaFija
+    accion: Optional[AccionFija] = None
+    motivo: Optional[str] = None
+
+
+class FilaPreviaOut(BaseModel):
+    fila: int
+    codigo: str
+    codigo_excel: Optional[str] = None
+    descripcion_excel: Optional[str] = None
+    descripcion_os: Optional[str] = None
+    nomenclador_id: Optional[int] = None
+    categoria: Optional[str] = None
+    valor: Optional[Decimal] = None
+    por_presupuesto: bool = False
+    estado: EstadoFilaFija
+    # Estado de la fila sin contar que el código está repetido en el archivo.
+    estado_base: Optional[EstadoFilaFija] = None
+    motivo: Optional[str] = None
+    acciones: List[AccionFija]
+    # None = la fila requiere una decisión del usuario.
+    accion_sugerida: Optional[AccionFija] = None
+    # La acción (salvo omitir) necesita que se elija quién factura.
+    requiere_quien_factura: bool = False
+    # Quién factura hoy o, sin alta, la plantilla del Colegio (sugerencia).
+    especialidades: List[int] = Field(default_factory=list)
+    sin_restriccion: bool = False
+    variantes: List[VarianteActualOut] = Field(default_factory=list)
+    sin_cambio: bool = False
+    avisos: List[str] = Field(default_factory=list)
+    replicas: List[ReplicaFilaOut] = Field(default_factory=list)
+
+
+class ImportarFijosPreviewOut(BaseModel):
+    obra_social_nro: int
+    vigencia_desde: datetime.date
+    # Otras O.S. de la familia: vacío = no se ofrece replicar.
+    familia: List[ObraSocialFamiliaItem] = Field(default_factory=list)
+    total: int
+    por_estado: dict[str, int]
+    filas: List[FilaPreviaOut]
+
+
+class ReplicaOmitidaOut(BaseModel):
+    fila: int
+    codigo: str
+    motivo: str
+
+
+class ReplicaOSOut(BaseModel):
+    obra_social_nro: int
+    nombre: str
+    estado: Literal["ok", "error"]
+    motivo: Optional[str] = None
+    precios_creados: int = 0
+    filas_cargadas: int = 0
+    altas: int = 0
+    omitidas: List[ReplicaOmitidaOut] = Field(default_factory=list)
+
+
+class ImportarFijosAplicarOut(BaseModel):
+    obra_social_nro: int
+    vigencia_desde: datetime.date
+    precios_creados: int
+    filas_cargadas: int
+    filas_rotadas: int
+    altas: int
+    codigos_creados: int
+    vigencias_borradas: int
+    omitidas: int
+    replicas: List[ReplicaOSOut] = Field(default_factory=list)

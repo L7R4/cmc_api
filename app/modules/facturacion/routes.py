@@ -339,6 +339,22 @@ async def listar_facturas(
         )).all()
         nombres = {str(nro_socio): nombre for nro_socio, nombre in med_rows}
 
+    # Nombre de cada obra social, también en batch (la lista lo muestra junto al número).
+    nros_os: set[int] = set()
+    for row in rows:
+        try:
+            nros_os.add(int(row.cod_obr))
+        except (TypeError, ValueError):
+            continue
+    nombres_os: dict[int, str] = {}
+    if nros_os:
+        os_rows = (await db.execute(
+            select(ObrasSociales.NRO_OBRASOCIAL, ObrasSociales.OBRA_SOCIAL).where(
+                ObrasSociales.NRO_OBRASOCIAL.in_(nros_os)
+            )
+        )).all()
+        nombres_os = {int(nro): (nombre or "").strip() for nro, nombre in os_rows if nombre}
+
     # Importe en vivo para las cabeceras abiertas (normales o complementos): el
     # `importe` persistido solo se escribe al cerrar, mientras está abierto vale 0.
     importes_abiertos = await service.calcular_importes_abiertos(db, rows)
@@ -359,6 +375,10 @@ async def listar_facturas(
         if factura.id_prestaciones in importes_abiertos:
             factura.importe = importes_abiertos[factura.id_prestaciones]
         factura.publicado = publicado_por_id.get(factura.id_prestaciones, False)
+        try:
+            factura.nombre_obra_social = nombres_os.get(int(factura.cod_obr)) or None
+        except (TypeError, ValueError):
+            pass
         out.append(factura)
     response.headers["X-Total-Count"] = str(total)
     response.headers["Content-Range"] = f"facturas {offset}-{offset + len(rows)}/{total}"

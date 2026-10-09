@@ -669,6 +669,8 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     ("POST", "/api/valores_nm/completar_base_nn"): Scope.NOMENCLADOR_MASIVO,
     ("POST", "/api/valores_nm/alta_ne_cero"): Scope.NOMENCLADOR_MASIVO,
     ("POST", "/api/valores_nm/importar_csv"): Scope.NOMENCLADOR_MASIVO,
+    ("POST", "/api/valores_nm/importar_fijos/previsualizar"): Scope.NOMENCLADOR_MASIVO,
+    ("POST", "/api/valores_nm/importar_fijos/aplicar"): Scope.NOMENCLADOR_MASIVO,
     ("POST", "/api/valores_nm/replicar_a_obras_sociales"): Scope.NOMENCLADOR_MASIVO,
     ("POST", "/api/valores_nm/replicar_estructura"): Scope.NOMENCLADOR_MASIVO,
     ("POST", "/api/valores_nm/revertir_ultima_actualizacion"): Scope.NOMENCLADOR_MASIVO,

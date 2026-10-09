@@ -302,26 +302,11 @@ async def create_nomenclador(body: NomencladorCreate, db: AsyncSession = Depends
     a la base de datos", que no le dice al operador lo único que necesita saber: que
     ese número ya está tomado y por qué práctica.
     """
-    ya_existe = (
-        await db.execute(
-            select(NomencladorCMC).where(NomencladorCMC.codigo == body.codigo)
-        )
-    ).scalar_one_or_none()
-    if ya_existe:
-        raise HTTPException(
-            409,
-            f"El código {body.codigo} ya existe. Usá otro número o editá el existente.",
-        )
-
-    datos = body.model_dump(exclude={"especialidades"})
-    datos["descripcion"] = (datos.get("descripcion") or "").strip() or None
-    obj = NomencladorCMC(**datos)
-    db.add(obj)
     try:
-        await db.flush()
-        if not body.sin_restriccion_especialidad:
-            await aplicar_plantilla.reemplazar_plantilla(db, obj.codigo, body.especialidades)
+        obj = await aplicar_plantilla.crear_codigo(db, body)
         await db.commit()
+    except aplicar_plantilla.CodigoExistente as e:
+        raise HTTPException(409, str(e))
     except ValueError as e:
         await db.rollback()
         raise HTTPException(422, str(e))

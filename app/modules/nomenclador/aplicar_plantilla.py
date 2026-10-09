@@ -32,11 +32,18 @@ from app.modules.nomenclador.schemas import (
     AplicarEspecialidadesAplicadaOut,
     AplicarEspecialidadesOmitidaOut,
     AplicarEspecialidadesOut,
+    NomencladorCreate,
 )
 
 log = logging.getLogger(__name__)
 
 MOTIVO_SIN_CODIGO = "No existe código"
+
+
+class CodigoExistente(Exception):
+    def __init__(self, codigo: str):
+        super().__init__(f"El código {codigo} ya existe. Usá otro número o editá el existente.")
+        self.codigo = codigo
 
 
 async def leer_plantilla(db: AsyncSession, codigo: str) -> list[int]:
@@ -67,6 +74,26 @@ async def reemplazar_plantilla(
     for eid in ids:
         db.add(NomencladorPlantillaEspecialidad(codigo=codigo, especialidad_id_colegio=eid))
     await db.flush()
+
+
+async def crear_codigo(db: AsyncSession, body: NomencladorCreate) -> NomencladorCMC:
+    """Alta de un código en el catálogo (etapa 1) con su plantilla (etapa 2).
+
+    `CodigoExistente` si el número ya está tomado; `ValueError` si alguna especialidad
+    de la plantilla no existe. No hace commit."""
+    ya_existe = (await db.execute(
+        select(NomencladorCMC).where(NomencladorCMC.codigo == body.codigo)
+    )).scalar_one_or_none()
+    if ya_existe:
+        raise CodigoExistente(body.codigo)
+    datos = body.model_dump(exclude={"especialidades"})
+    datos["descripcion"] = (datos.get("descripcion") or "").strip() or None
+    obj = NomencladorCMC(**datos)
+    db.add(obj)
+    await db.flush()
+    if not body.sin_restriccion_especialidad:
+        await reemplazar_plantilla(db, obj.codigo, body.especialidades)
+    return obj
 
 
 async def aplicar_a_obras_sociales(

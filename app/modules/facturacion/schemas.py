@@ -564,6 +564,7 @@ class FacturaRead(BaseModel):
     creado_por: Optional[str] = None
     creado_en: Optional[datetime.datetime] = None
     creado_por_nombre: Optional[str] = None  # NOMBRE resuelto contra ListadoMedico (batch, no persistido)
+    nombre_obra_social: Optional[str] = None  # resuelto contra obras_sociales (batch, no persistido)
     # Visibilidad para el médico: true si hay al menos una fila de
     # detalle_facturacion publicada para este cod_obr+periodo (cualquier
     # versión). No es una columna de `facturacion` — se estampa después de

@@ -9,6 +9,7 @@ from typing import NamedTuple, Optional, Sequence
 from fastapi import HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import String, and_, case, cast, func, or_, select, tuple_, update
+from sqlalchemy.orm import load_only
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -210,8 +211,19 @@ async def listar_medicos_todos(db: AsyncSession) -> list[dict]:
     incompleto era invisible (ningún texto/número lo matchea por accidente);
     acá, sin filtro de texto, entraba siempre y tiraba 500 en cada carga."""
     M = ListadoMedico
+    # Solo las columnas que usa `_medicos_con_especialidades`: el registro completo
+    # (domicilios, adjuntos, credenciales…) multiplicaba lo que se lee y se arma para
+    # ~3.700 filas en cada apertura del formulario.
     rows = list(
-        (await db.execute(select(M).where(M.NOMBRE.isnot(None)).order_by(M.NOMBRE)))
+        (await db.execute(
+            select(M)
+            .options(load_only(
+                M.ID, M.NRO_SOCIO, M.NOMBRE, M.MATRICULA_PROV, M.CATEGORIA,
+                M.condicion_impositiva, M.es_organizacion, M.conceps_espec,
+            ))
+            .where(M.NOMBRE.isnot(None))
+            .order_by(M.NOMBRE)
+        ))
         .scalars()
         .all()
     )

@@ -9,6 +9,7 @@ from app.modules.nomenclador.routes_galenos import router as galenos_router
 from app.modules.nomenclador.routes_codigos_os import router as codigos_os_router
 from app.modules.nomenclador.routes_nivelados import router as nivelados_router
 from app.modules.nomenclador.routes_valores import router as valores_nm_router
+from app.modules.nomenclador.routes_importar_fijos import router as importar_fijos_router
 from app.modules.nomenclador.routes_valores_documentos import (
     router as valores_nm_documentos_router,
 )
@@ -130,6 +131,7 @@ api_router.include_router(nivelados_router,    prefix="/nomencladores_nivelados"
 # Antes que `valores_nm_router`: comparten prefijo y ese router tiene `/{id}`,
 # que le ganaría el match a `/documentos` (y respondería 422, no 404).
 api_router.include_router(valores_nm_documentos_router, prefix="/valores_nm", tags=["Valores"])
+api_router.include_router(importar_fijos_router, prefix="/valores_nm", tags=["Valores"])
 api_router.include_router(valores_nm_router,   prefix="/valores_nm",      tags=["Valores"])
 api_router.include_router(reportes_nm_router,  prefix="/reportes_nm",     tags=["Reportes Valores"])
 

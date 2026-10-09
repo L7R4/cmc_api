@@ -5,6 +5,7 @@ Reemplaza al `archivo_plano_2_xls.php` del legacy, con las mismas cuatro columna
 
     NRO. VALIDACIÓN | FECHA REALIZACION PRACTICA | MATRICULA PROVINCIAL | VALOR FACTURADO
 
+- NRO. VALIDACIÓN = `autorizacion` (si falta, `nro_orden`).
 - Una fila por prestación del período (`estado <> 'X'`, misma versión de la factura). Los
   ayudantes ya son filas propias del detalle, con su matrícula y su valor.
 - Valor facturado = `importe_total`, que ya viene neto de coseguro (el legacy restaba el coseguro
@@ -63,9 +64,10 @@ class PlanoBoreal:
 
 
 def _validacion(fila) -> str:
-    nro = str(fila["nro_orden"] or "").strip()
+    # Las cargas viejas (migradas del legacy) no traen `autorizacion` y guardan el nº en `nro_orden`.
+    nro = str(fila["autorizacion"] or "").strip()
     if nro in ("", "0"):
-        nro = (fila["autorizacion"] or "").strip()
+        nro = str(fila["nro_orden"] or "").strip()
     return nro
 
 

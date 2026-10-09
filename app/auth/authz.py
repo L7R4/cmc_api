@@ -494,6 +494,7 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     # export ya existente de deducciones/cobranzas (`TODOS(..., EXPORT_GENERAR)`).
     ("GET", "/api/facturacion/facturas/{id}/export/detalle.pdf"): TODOS(Scope.FACTURACION_LEER, Scope.EXPORT_GENERAR),
     ("GET", "/api/facturacion/facturas/{id}/export/detalle.xlsx"): TODOS(Scope.FACTURACION_LEER, Scope.EXPORT_GENERAR),
+    ("GET", "/api/facturacion/facturas/{id}/export/unne.txt"): TODOS(Scope.FACTURACION_LEER, Scope.EXPORT_GENERAR),
     ("GET", "/api/facturacion/facturas/{id}/export/caratula.pdf"): TODOS(Scope.FACTURACION_LEER, Scope.EXPORT_GENERAR),
     ("GET", "/api/facturacion/facturas/{id}/export/caratula.xlsx"): TODOS(Scope.FACTURACION_LEER, Scope.EXPORT_GENERAR),
     ("GET", "/api/facturacion/export-presets"): Scope.FACTURACION_LEER,

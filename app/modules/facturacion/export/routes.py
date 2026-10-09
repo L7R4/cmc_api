@@ -26,6 +26,7 @@ from app.modules.facturacion.export import datos as datos_mod
 from app.modules.facturacion.export import encabezado as encabezado_mod
 from app.modules.facturacion.export import excel as excel_mod
 from app.modules.facturacion.export import pdf as pdf_mod
+from app.modules.facturacion.export import unne_txt as unne_txt_mod
 from app.modules.facturacion.export.schemas import (
     COLUMNAS_DEFAULT,
     COLUMNAS_DEFAULT_POR_MEDICO,
@@ -155,6 +156,26 @@ async def export_detalle_xlsx(
         content=contenido,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f'attachment; filename="detalle_factura_{id}.xlsx"'},
+    )
+
+
+@router.get("/facturas/{id}/export/unne.txt")
+async def export_unne_txt(
+    id: int,
+    tipo: Optional[str] = Query(None, description="Tipo de factura; si falta se usa el de la cabecera"),
+    nro_factura: Optional[str] = Query(None, description="Nº de factura; si falta se usa el de la cabecera"),
+    db: AsyncSession = Depends(get_db),
+):
+    """TXT de facturación de UNNE (O.S. 81) — ver `unne_txt`."""
+    t0 = time.perf_counter()
+    factura = await datos_mod.obtener_factura(db, id)
+    txt = await unne_txt_mod.generar(db, factura, tipo, nro_factura)
+    logger.info(
+        "export unne.txt factura=%s lineas=%s tiempo=%.2fs", id, txt.lineas, time.perf_counter() - t0,
+    )
+    return Response(
+        content=txt.contenido, media_type="text/plain; charset=iso-8859-1",
+        headers={"Content-Disposition": f'attachment; filename="{txt.nombre_archivo}"'},
     )
 
 

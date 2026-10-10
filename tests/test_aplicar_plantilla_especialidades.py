@@ -161,7 +161,7 @@ async def test_guardar_y_aplicar_sin_plantilla_da_de_alta_sin_quien_factura(sin_
     from app.modules.nomenclador.schemas import AplicarAltaIn
 
     db = sin_commit
-    db.add(ObrasSociales(NRO_OBRASOCIAL=OS_SIN_CODIGO, OBRA_SOCIAL="PRUEBA SIN CODIGO", MARCA="S", cuit="0"))
+    db.add(ObrasSociales(NRO_OBRASOCIAL=OS_SIN_CODIGO, OBRA_SOCIAL="PRUEBA SIN CODIGO", cuit="0"))
     await db.flush()
     nom = await db.get(NomencladorCMC, NOMENCLADOR_ID)
     nom.sin_restriccion_especialidad = None

@@ -59,7 +59,7 @@ async def familia_de(db: AsyncSession, nro_os: int) -> list[ObraSocialFamiliaIte
         return []
     filas = (await db.execute(
         select(ObrasSociales).where(
-            ObrasSociales.NRO_OBRASOCIAL.in_(nros), ObrasSociales.MARCA != "N"
+            ObrasSociales.NRO_OBRASOCIAL.in_(nros), ObrasSociales.activo.is_(True)
         ).order_by(ObrasSociales.OBRA_SOCIAL)
     )).scalars().all()
     return [

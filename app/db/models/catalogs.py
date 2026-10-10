@@ -2,7 +2,7 @@ import datetime
 import decimal
 from typing import Any, List, Optional
 
-from sqlalchemy import DECIMAL, Date, Enum, ForeignKey, Index, Integer, JSON, String, TIMESTAMP, UniqueConstraint, text
+from sqlalchemy import DECIMAL, Boolean, Date, Enum, ForeignKey, Index, Integer, JSON, String, TIMESTAMP, UniqueConstraint, text
 from sqlalchemy.dialects.mysql import INTEGER
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
@@ -25,7 +25,7 @@ class Especialidad(Base):
 class ObrasSociales(Base):
     __tablename__ = 'obras_sociales'
     __table_args__ = (
-        Index('MARCA', 'MARCA'),
+        Index('ix_obras_sociales_activo', 'activo'),
         # UNIQUE y no solo un índice: antes de esto la unicidad de NRO_OBRASOCIAL
         # la garantizaba únicamente el SELECT previo en create_obra_social(), con
         # una ventana de carrera entre el SELECT y el INSERT. Ver auditoría O-06.
@@ -38,8 +38,9 @@ class ObrasSociales(Base):
     # Ampliado de 45 a 255: con 45 el nombre se truncaba en silencio (ver
     # auditoría O-10) — varios ya quedaron cortados en la carga legacy.
     OBRA_SOCIAL: Mapped[str] = mapped_column(String(255, 'utf8_spanish2_ci'), nullable=False, server_default=text("'a'"))
-    MARCA: Mapped[str] = mapped_column(String(1, 'utf8_spanish2_ci'), nullable=False, server_default=text("'N'"))
-    VER_VALOR: Mapped[str] = mapped_column(String(1, 'utf8_spanish2_ci'), nullable=False, server_default=text("'N'"))
+    # Reemplaza a MARCA ('S'/'N'): False = obra social dada de baja (baja lógica). Toda obra
+    # social nueva nace activa.
+    activo: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=text("1"))
 
     # Extended fields
     cuit: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)

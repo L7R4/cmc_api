@@ -42,7 +42,7 @@ def s(db, monkeypatch):
 
 
 async def _preparar(db, *, con_galenos=True):
-    db.add(ObrasSociales(NRO_OBRASOCIAL=OS, OBRA_SOCIAL="PRUEBA NIVELADOS", MARCA="S", cuit="0"))
+    db.add(ObrasSociales(NRO_OBRASOCIAL=OS, OBRA_SOCIAL="PRUEBA NIVELADOS", cuit="0"))
     if con_galenos:
         for nivel in range(1, 8):
             db.add(Galeno(

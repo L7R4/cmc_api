@@ -38,11 +38,11 @@ def s(db, monkeypatch):
 
 
 async def _familia(db):
-    p = ObrasSociales(NRO_OBRASOCIAL=P, OBRA_SOCIAL="FAMILIA PRINCIPAL", MARCA="S", cuit="0")
+    p = ObrasSociales(NRO_OBRASOCIAL=P, OBRA_SOCIAL="FAMILIA PRINCIPAL", cuit="0")
     db.add(p)
     await db.flush()
     for nro in (A1, A2):
-        db.add(ObrasSociales(NRO_OBRASOCIAL=nro, OBRA_SOCIAL=f"FAMILIA PLAN {nro}", MARCA="S",
+        db.add(ObrasSociales(NRO_OBRASOCIAL=nro, OBRA_SOCIAL=f"FAMILIA PLAN {nro}",
                              cuit="0", obra_social_principal_id=p.ID))
     await db.flush()
 

@@ -30,7 +30,7 @@ log = logging.getLogger(__name__)
 # NRO_OBRASOCIAL de `MEDICUS,CORPORATE,FAMILY -MC-`.
 #
 # Ojo que en `obras_sociales` hay una segunda Medicus: la 372 (MEDICUS FUERZAS
-# DE SEGURIDAD, planes MS1/MS2 desde el 01/06/2026), hoy con MARCA='N'. Si el
+# DE SEGURIDAD, planes MS1/MS2 desde el 01/06/2026), hoy inactiva. Si el
 # Colegio la activa va como otro validador con su propio `nro`, no como un plan
 # de este: el catálogo del panel y el despacho de `obras.POR_NRO` son por
 # NRO_OBRASOCIAL.

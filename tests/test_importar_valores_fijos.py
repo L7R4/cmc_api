@@ -84,7 +84,7 @@ def test_encabezado_sin_importar_mayusculas_ni_tildes():
 # ─── Clasificación y aplicación ───────────────────────────────────────────────
 
 async def _preparar(db):
-    db.add(ObrasSociales(NRO_OBRASOCIAL=OS, OBRA_SOCIAL="PRUEBA VALORES FIJOS", MARCA="S", cuit="0"))
+    db.add(ObrasSociales(NRO_OBRASOCIAL=OS, OBRA_SOCIAL="PRUEBA VALORES FIJOS", cuit="0"))
     assert (await db.execute(select(NomencladorCMC).where(NomencladorCMC.codigo == NUEVO))).first() is None
     codigos = list((await db.execute(
         select(NomencladorCMC).where(NomencladorCMC.activo == True).order_by(NomencladorCMC.id).limit(5)
@@ -340,7 +340,7 @@ def test_accion_en_destino(estado, accion_origen, sin_cambio, esperado):
 
 async def _con_adicional(db, a, e1):
     principal = (await db.execute(select(ObrasSociales).where(ObrasSociales.NRO_OBRASOCIAL == OS))).scalar_one()
-    db.add(ObrasSociales(NRO_OBRASOCIAL=ADICIONAL, OBRA_SOCIAL="PRUEBA ADICIONAL", MARCA="S", cuit="0",
+    db.add(ObrasSociales(NRO_OBRASOCIAL=ADICIONAL, OBRA_SOCIAL="PRUEBA ADICIONAL", cuit="0",
                          obra_social_principal_id=principal.ID))
     await db.flush()
     # En la adicional, `a` ya tiene una vigencia posterior a la que se carga: no se pisa.

@@ -1649,7 +1649,7 @@ async def replicar_a_obras_sociales(
     if body.modo == "todas":
         habilitadas = (
             await db.execute(
-                select(ObrasSociales.NRO_OBRASOCIAL).where(ObrasSociales.MARCA == "S")
+                select(ObrasSociales.NRO_OBRASOCIAL).where(ObrasSociales.activo.is_(True))
             )
         ).scalars().all()
         exclusiones = set(body.obras_sociales) | {origen.obra_social_nro}

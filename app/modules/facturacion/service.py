@@ -1533,16 +1533,16 @@ def conceptos_sin_precio(item) -> str:
 
 # ── Guardado ─────────────────────────────────────────────────────────────────
 async def exigir_obra_social_activa(db: AsyncSession, cod_obra: str) -> None:
-    """422 si la obra social está dada de baja (`MARCA='N'`): no se le cargan
+    """422 si la obra social está dada de baja (`activo=False`): no se le cargan
     prestaciones nuevas ni se le mueven prestaciones. Lo ya cargado sigue visible."""
     try:
         nro = int(cod_obra)
     except (TypeError, ValueError):
         return
-    marca = (await db.execute(
-        select(ObrasSociales.MARCA).where(ObrasSociales.NRO_OBRASOCIAL == nro).limit(1)
+    activo = (await db.execute(
+        select(ObrasSociales.activo).where(ObrasSociales.NRO_OBRASOCIAL == nro).limit(1)
     )).scalar_one_or_none()
-    if marca == "N":
+    if activo is not None and not activo:
         raise HTTPException(
             422, f"La obra social {nro} está desactivada: no se le pueden cargar prestaciones."
         )

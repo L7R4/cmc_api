@@ -461,7 +461,7 @@ async def ficha(db: AsyncSession, nomenclador_id: int) -> FichaCodigoOut:
 
     obras = (await db.execute(
         select(ObrasSociales.NRO_OBRASOCIAL, ObrasSociales.OBRA_SOCIAL)
-        .where(ObrasSociales.MARCA != "N")
+        .where(ObrasSociales.activo.is_(True))
         .order_by(ObrasSociales.OBRA_SOCIAL)
     )).all()
     pares = {

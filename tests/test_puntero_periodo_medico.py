@@ -35,7 +35,7 @@ async def _global(db) -> PeriodoMedicoActual:
 @pytest.mark.asyncio
 async def test_os_con_corte_propio_no_avanza_el_global(s, monkeypatch):
     s.add(ObrasSociales(NRO_OBRASOCIAL=OS_SIN_PUNTERO, OBRA_SOCIAL="PRUEBA PUNTERO",
-                        MARCA="S", cuit="0", dia_corte=5))
+                        cuit="0", dia_corte=5))
     await s.flush()
     g = await _global(s)
     g.periodo = "202609"

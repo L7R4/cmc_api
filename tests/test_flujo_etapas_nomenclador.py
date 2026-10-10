@@ -52,7 +52,7 @@ def s(db, monkeypatch):
 
 async def _os(db, *nros):
     for nro in nros:
-        db.add(ObrasSociales(NRO_OBRASOCIAL=nro, OBRA_SOCIAL=f"PRUEBA ETAPAS {nro}", MARCA="S", cuit="0"))
+        db.add(ObrasSociales(NRO_OBRASOCIAL=nro, OBRA_SOCIAL=f"PRUEBA ETAPAS {nro}", cuit="0"))
     await db.flush()
 
 

@@ -1198,7 +1198,7 @@ class ReplicarObrasSocialesIn(BaseModel):
 
     `modo`:
       - "subset" → `obras_sociales` son los destinos.
-      - "todas"  → todas las OS habilitadas (MARCA="S") MENOS `obras_sociales` (exclusiones).
+      - "todas"  → todas las OS activas MENOS `obras_sociales` (exclusiones).
     """
     origen_valor_id: int
     modo: Literal["subset", "todas"] = "subset"

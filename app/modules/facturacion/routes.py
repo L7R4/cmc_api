@@ -134,7 +134,7 @@ async def buscar_obras_sociales(
     limit: int = Query(20, ge=1, le=20),
     solo_activas: bool = Query(
         True,
-        description="Excluye las dadas de baja (MARCA='N'). false solo para resolver el "
+        description="Excluye las dadas de baja (activo=false). false solo para resolver el "
                     "nombre de prestaciones ya cargadas, nunca para elegir una OS.",
     ),
     db: AsyncSession = Depends(get_db),
@@ -145,7 +145,7 @@ async def buscar_obras_sociales(
         cond = or_(O.NRO_OBRASOCIAL == int(q), cond)
     stmt = select(O).where(cond)
     if solo_activas:
-        stmt = stmt.where(O.MARCA != "N")
+        stmt = stmt.where(O.activo.is_(True))
     rows = (
         await db.execute(stmt.limit(limit))
     ).scalars().all()
@@ -161,7 +161,7 @@ async def listar_obras_sociales_todas(db: AsyncSession = Depends(get_db)):
     `/medicos/todos`."""
     O = ObrasSociales
     rows = (
-        await db.execute(select(O).where(O.MARCA != "N").order_by(O.OBRA_SOCIAL))
+        await db.execute(select(O).where(O.activo.is_(True)).order_by(O.OBRA_SOCIAL))
     ).scalars().all()
     return [
         {"id": o.ID, "nro_obra_social": o.NRO_OBRASOCIAL, "nombre": o.OBRA_SOCIAL}

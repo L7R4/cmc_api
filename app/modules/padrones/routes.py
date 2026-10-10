@@ -61,7 +61,7 @@ async def _listado_defaults(db: AsyncSession, nro_socio: int):
 # endregion
 
 
-# 1) Catálogo: listar obras sociales con MARCA = "S"
+# 1) Catálogo: listar obras sociales activas
 #
 # Sólo cabezas de familia (`obra_social_principal_id IS NULL`): una empresa
 # con varios planes (Swiss Medical, Medife, Sancor...) tiene que aparecer
@@ -69,7 +69,7 @@ async def _listado_defaults(db: AsyncSession, nro_socio: int):
 # facturación/valores, sólo se ocultan de este selector de padrón.
 @router.get("/catalogo", response_model=List[ObraSocialOut])
 async def catalogo_obras_sociales(
-    marca: str = Query("S", description='Filtrar por MARCA; por defecto "S"'),
+    activo: bool = Query(True, description="Filtrar por activo; por defecto solo las activas"),
     db: AsyncSession = Depends(get_db),
 ):
     nro_col = _os_number_col()
@@ -79,7 +79,7 @@ async def catalogo_obras_sociales(
 
     stmt = (
         select(nro_col.label("nro"), nombre_col.label("nombre"))
-        .where(ObrasSociales.MARCA == marca, ObrasSociales.obra_social_principal_id.is_(None))
+        .where(ObrasSociales.activo.is_(activo), ObrasSociales.obra_social_principal_id.is_(None))
         .order_by(nombre_col.asc())
     )
     rows = (await db.execute(stmt)).all()
@@ -131,13 +131,13 @@ async def _upsert_una_fila(
     """Upsert de una sola fila `(nro_socio, nro_os)`.
 
     Devuelve `(fila, creada)`. `fila=None` si `nro_os` no tiene catálogo
-    `MARCA='S'` activo — el llamador decide si eso es un error (código
+    activa (`activo`) — el llamador decide si eso es un error (código
     pedido explícitamente) o se omite (otro miembro de la familia).
     """
     nro_col = _os_number_col()
     os_row = (
         await db.execute(
-            select(ObrasSociales).where(and_(nro_col == nro_os, ObrasSociales.MARCA == "S"))
+            select(ObrasSociales).where(and_(nro_col == nro_os, ObrasSociales.activo.is_(True)))
         )
     ).scalar_one_or_none()
     if not os_row:

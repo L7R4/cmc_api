@@ -1,6 +1,6 @@
 from datetime import date, datetime
 from decimal import Decimal
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 
 from pydantic import BaseModel, Field, field_serializer, field_validator
@@ -135,17 +135,54 @@ class ObraSocialSimpleOut(BaseModel):
     denominacion: str
 
 
+class ReplicarAltaIn(BaseModel):
+    """Qué se copia de la obra social cabecera a la derivada que se está creando.
+
+    Se copia SOLO lo vigente hoy de la cabecera (no el historial). Ver
+    `nomenclador/replicar_cabecera.py`."""
+    galenos: bool = False
+    # Códigos dados de alta en la cabecera (con quién factura, sin precio) + los
+    # nomencladores nivelados que la cabecera tiene aplicados.
+    nomencladores: bool = False
+    # Los precios (NN/NE…) vigentes de la cabecera.
+    valores: bool = False
+
+    @property
+    def alguno(self) -> bool:
+        return self.galenos or self.nomencladores or self.valores
+
+
+class ReplicacionPasoOut(BaseModel):
+    paso: Literal["galenos", "codigos", "nivelados", "valores"]
+    estado: Literal["ok", "parcial", "omitido", "error"]
+    creados: int = 0
+    # Lo que la obra social nueva ya tenía (p. ej. los NN que sembró el alta): no se pisa.
+    ya_existian: int = 0
+    # Lo que no se pudo copiar (ver `detalle`).
+    omitidos: int = 0
+    # Hasta 10 motivos (por qué se omitió algo o qué falló), para mostrarlos tal cual.
+    detalle: List[str] = Field(default_factory=list)
+
+
+class ReplicacionAltaOut(BaseModel):
+    cabecera_nro: int
+    cabecera_nombre: str
+    pasos: List[ReplicacionPasoOut]
+
+
 class ObraSocialCreate(BaseModel):
     nro_obra_social: int = Field(..., description="Número identificador de la obra social")
     nombre: str = Field(..., max_length=255, description="Nombre de la obra social")
-    marca: str = Field("N", max_length=1)
-    ver_valor: str = Field("N", max_length=1)
     cuit: Optional[str] = Field(None, max_length=20)
     direccion_real: Optional[str] = Field(None, max_length=200)
     condicion_iva: Optional[str] = Field(None, pattern="^(responsable_inscripto|exento)$")
     plazo_vencimiento: Optional[int] = None
     fecha_alta_convenio: Optional[date] = None
+    # Obra social cabecera (ver `ObrasSociales.obra_social_principal_id`): solo se completa si la
+    # que se crea es una derivada.
     obra_social_principal_id: Optional[int] = None
+    # Solo con cabecera: qué copiar de ella. Sin cabecera se rechaza.
+    replicar: Optional[ReplicarAltaIn] = None
     # Ventana del período: 1 = mes completo, 20 = del 20 al 20. El front envía 1 cuando
     # el check "A mes completo" está marcado; default 20.
     dia_corte: int = Field(20, ge=1, le=28)
@@ -156,8 +193,7 @@ class ObraSocialCreate(BaseModel):
 class ObraSocialUpdate(BaseModel):
     nro_obra_social: Optional[int] = None
     nombre: Optional[str] = Field(None, max_length=255)
-    marca: Optional[str] = Field(None, max_length=1)
-    ver_valor: Optional[str] = Field(None, max_length=1)
+    activo: Optional[bool] = None
     cuit: Optional[str] = Field(None, max_length=20)
     direccion_real: Optional[str] = Field(None, max_length=200)
     condicion_iva: Optional[str] = Field(None, pattern="^(responsable_inscripto|exento)$")
@@ -175,8 +211,7 @@ class ObraSocialOut(BaseModel):
     nro_obra_social: int
     nombre: str
     denominacion: str
-    marca: str
-    ver_valor: str
+    activo: bool
     cuit: Optional[str] = None
     direccion_real: Optional[str] = None
     condicion_iva: Optional[str] = None
@@ -192,6 +227,11 @@ class ObraSocialOut(BaseModel):
     documentos: List[DocumentoOut] = Field(default_factory=list)
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+
+
+class ObraSocialCreadaOut(ObraSocialOut):
+    """Respuesta del alta: la obra social y, si se pidió replicar, qué se copió."""
+    replicacion: Optional[ReplicacionAltaOut] = None
 
 
 # ── Valores Boletín ──────────────────────────────────────────────

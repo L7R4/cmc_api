@@ -23,7 +23,7 @@ def test_valor_unitario_resta_el_coseguro_y_el_ayudante_no_lo_lleva():
 def test_export_con_la_columna_valor_unitario():
     f = _fila(1, "10", "ACOSTA, MARIA", "Practica", 5, "RUIZ", monto="100")
     f.honorarios, f.gastos, f.coseguro = Decimal("1000"), Decimal("200"), Decimal("150")
-    op = ExportOpciones(agrupacion="plana", columnas=["codigo", "honorarios", "coseguro", "valor_unitario"])
+    op = ExportOpciones(agrupacion="plana", columnas=["nro_registro", "codigo", "honorarios", "coseguro", "valor_unitario"])
     a = armar([f], op)
     enc = EncabezadoExport(lineas=["CMC", "OS 411"])
     wb = load_workbook(BytesIO(build_excel_detalle(a, op, enc)))
@@ -42,7 +42,7 @@ def test_la_fila_del_ayudante_muestra_lo_que_cobra_en_la_columna_honorarios():
     ayudante = _fila(2, "30", "BRAVO, LUIS", "Honorarios individuales", 5, "RUIZ", equipo=1, monto="200")
     ayudante.honorarios, ayudante.ayudante, ayudante.tipo_prestador = Decimal("0"), Decimal("200"), "Ayudante"
     cirujano.grupo_equipo_id = 1
-    op = ExportOpciones(agrupacion="plana", columnas=["codigo", "honorarios"])
+    op = ExportOpciones(agrupacion="plana", columnas=["nro_registro", "codigo", "honorarios"])
     wb = load_workbook(BytesIO(build_excel_detalle(
         armar([cirujano, ayudante], op), op, EncabezadoExport(lineas=["CMC", "OS 411"]))))
     filas = [[c.value for c in r] for r in wb.active.iter_rows()]

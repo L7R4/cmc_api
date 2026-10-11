@@ -341,7 +341,8 @@ async def _materializar_filas(
             obra_social_nombre=obras_sociales.get(cod_obr) if cod_obr else None,
             matricula=medico.MATRICULA_PROV if medico else None,
             autorizacion=r.autorizacion,
-            fecha_practica=r.fecha_practica,
+            # Datos legacy con fecha '0000-00-00' llegan como texto: se muestran como "-" y no rompen el orden.
+            fecha_practica=r.fecha_practica if isinstance(r.fecha_practica, datetime.date) else None,
             codigo=r.cod_nom,
             nro_afiliado=r.dni_p,
             afiliado=r.nom_ape_p,

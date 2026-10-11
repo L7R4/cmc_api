@@ -1,5 +1,10 @@
 """Excel del detalle de facturación — openpyxl en modo `write_only`.
 
+Misma estructura y textos que el PDF (`armado.py` los comparte): sin fila de título por socio ni
+subtítulos «CONSULTAS / PRACTICAS», «<clínica> - Paciente: <nombre>» en honorarios individuales,
+totales alineados a la derecha (terminan en la columna SUB. TOTAL) con fondo gris clarito en el socio y
+en el paciente de sanatorio / «Por tipo», y con una línea fina en el resto. Sin colores.
+
 En `write_only` no hay forma de volver atrás a leer/editar una celda ya escrita
 (por eso el helper `_autosize` de `app/modules/exports/service.py` NO sirve
 acá: itera `ws.columns`, que no existe en este modo). Los anchos se fijan de
@@ -11,18 +16,22 @@ from typing import Optional
 
 from openpyxl import Workbook
 from openpyxl.cell import WriteOnlyCell
-from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 from app.modules.facturacion.export.armado import (
     ETIQUETA_TIPO,
+    TRAMOS_OCULTOS,
     Armado,
     ColumnaSpec,
-    GrupoSocio,
     con_columna_tipo,
+    rotulo_paciente,
     spec_columnas,
-    texto_subtotal_medico,
+    texto_resumen_socio,
+    texto_subtotal_socio,
     texto_total_paciente,
+    titulo_seccion,
+    total_paciente_con_fondo,
     valores_fila,
 )
 from app.modules.facturacion.export.encabezado import EncabezadoExport
@@ -35,10 +44,10 @@ _ALINEACION = {"L": "left", "C": "center", "R": "right"}
 _FUENTE_HEADER = Font(bold=True, size=12)
 _FUENTE_NEGRITA = Font(bold=True)
 _FUENTE_CURSIVA = Font(italic=True)
-# Subtítulo de cada paciente (el mismo celeste que la vista).
-_RELLENO_PACIENTE = PatternFill(fill_type="solid", start_color="E0F2FE", end_color="E0F2FE")
-# Subtotales y totales (paciente, socio, sección, total general): gris claro.
+# Totales de socio y de paciente (sanatorio / «Por tipo»): gris claro.
 _RELLENO_TOTAL = PatternFill(fill_type="solid", start_color="EBEBEB", end_color="EBEBEB")
+# Totales con línea fina debajo (en vez de fondo).
+_LINEA_ABAJO = Border(bottom=Side(style="thin", color="000000"))
 
 
 def _sanitizar_nombre_hoja(nombre: str, usados: set[str]) -> str:
@@ -64,9 +73,7 @@ def _celda(ws, valor, *, negrita: bool = False, cursiva: bool = False, numero: b
     return c
 
 
-def _fila_centrada(
-    ws, n_cols: int, texto: str, *, negrita: bool = False, cursiva: bool = False, relleno: PatternFill | None = None,
-) -> None:
+def _fila_centrada(ws, n_cols: int, texto: str, *, negrita: bool = False, cursiva: bool = False) -> None:
     """Subtítulo centrado en el ancho de la tabla: el texto va en la primera celda y el
     resto de la fila hereda "centrar en la selección" (en `write_only` no se pueden combinar
     celdas, pero esto se ve igual y no estorba al filtrar)."""
@@ -77,8 +84,6 @@ def _fila_centrada(
             c.font = _FUENTE_NEGRITA
         elif cursiva:
             c.font = _FUENTE_CURSIVA
-        if relleno is not None:
-            c.fill = relleno
         c.alignment = Alignment(horizontal="centerContinuous", vertical="center")
         celdas.append(c)
     ws.append(celdas)
@@ -111,12 +116,29 @@ def _configurar_hoja(ws, cols: list[ColumnaSpec], fila_encabezado_col: int) -> N
     _aplicar_pagina_a4(ws)
 
 
-def _fila_encabezado_institucional(ws, encabezado: list[str]) -> None:
+def _membrete(enc: EncabezadoExport) -> list[tuple[str, str]]:
+    """Líneas del membrete como (texto izquierdo, texto derecho). Con período y obra social cargados son
+    3 líneas (el período y la obra social van al costado, a la altura del nombre del Colegio y de la
+    dirección); si no, las líneas tal cual."""
+    lineas = enc.lineas
+    if enc.periodo or enc.obra_social:
+        return [
+            (lineas[0], enc.periodo),
+            (lineas[1] if len(lineas) > 1 else "", enc.obra_social),
+            (lineas[2] if len(lineas) > 2 else "", ""),
+        ]
+    return [(linea, "") for linea in lineas]
+
+
+def _fila_encabezado_institucional(ws, enc: EncabezadoExport, n_cols: int) -> None:
     """El membrete va una única vez, en las primeras filas de la hoja — no es
     una fila "repetible" de impresión como la numeración de página del PDF."""
-    ws.append([_celda(ws, encabezado[0], negrita=True)])
-    for linea in encabezado[1:]:
-        ws.append([_celda(ws, linea)])
+    for i, (izq, der) in enumerate(_membrete(enc)):
+        celdas = [_celda(ws, izq, negrita=i == 0)]
+        if der and n_cols > 1:
+            celdas += [None] * (n_cols - 2)
+            celdas.append(_celda(ws, der, negrita=i == 0, alineacion="R"))
+        ws.append(celdas)
     ws.append([])
 
 
@@ -130,16 +152,32 @@ def _fila_encabezado(ws, cols: list[ColumnaSpec]) -> None:
 
 
 def _fila_total(ws, n_cols: int, *valores, numero_en: int | None = None) -> None:
-    """Fila de subtotal/total: en negrita y con el fondo gris en todo el ancho de la
-    tabla. `valores` van en las primeras celdas; `numero_en` es la posición del monto
-    (formato moneda, alineado a la derecha)."""
+    """Fila del resumen general: en negrita. `valores` van en las primeras celdas; `numero_en` es la
+    posición del monto (formato moneda, alineado a la derecha)."""
     celdas = []
     for i in range(max(n_cols, len(valores), 1)):
         v = valores[i] if i < len(valores) else None
         es_numero = numero_en is not None and i == numero_en
-        c = _celda(ws, v, negrita=True, numero=es_numero, alineacion="R" if es_numero else "L")
-        c.fill = _RELLENO_TOTAL
-        celdas.append(c)
+        celdas.append(_celda(ws, v, negrita=True, numero=es_numero, alineacion="R" if es_numero else "L"))
+    ws.append(celdas)
+
+
+def _fila_cierre(ws, cols: list[ColumnaSpec], texto: str, *, con_fondo: bool, monto=None) -> None:
+    """Fila de total de un bloque (paciente, socio, sección), en negrita y alineada a la derecha: el texto
+    termina en la columna SUB. TOTAL (el texto alineado a la derecha se desborda hacia la izquierda sobre
+    las celdas vacías). Con `monto`, el texto va en la celda anterior y el importe numérico en SUB. TOTAL.
+    `con_fondo`: gris clarito en todo el ancho; si no, una línea fina debajo."""
+    i_total = next((i for i, c in enumerate(cols) if c.key == "sub_total"), len(cols) - 1)
+    i_texto = i_total - 1 if monto is not None and i_total > 0 else i_total
+    celdas = []
+    for i in range(len(cols)):
+        valor = texto if i == i_texto else (monto if monto is not None and i == i_total else None)
+        celda = _celda(ws, valor, negrita=True, numero=monto is not None and i == i_total, alineacion="R")
+        if con_fondo:
+            celda.fill = _RELLENO_TOTAL
+        else:
+            celda.border = _LINEA_ABAJO
+        celdas.append(celda)
     ws.append(celdas)
 
 
@@ -149,31 +187,6 @@ def _fila_dato(ws, cols: list[ColumnaSpec], fila, *, es_hijo: bool = False) -> N
         _celda(ws, v, numero=c.es_numero, alineacion=c.alineacion)
         for c, v in zip(cols, valores)
     ])
-
-
-def _fila_resumen_socio(ws, grupo: GrupoSocio, n_cols: int) -> None:
-    partes = [
-        f"{ETIQUETA_TIPO.get(t, t)}: {s.cantidad} - {s.monto:,.2f}"
-        for t, s in grupo.stats_por_tipo.items() if s.cantidad
-    ]
-    texto = f"RESUMEN SOCIO {grupo.cod_medico}: " + " | ".join(partes)
-    texto += (
-        f" | TOTAL SOCIO: {grupo.total_general:,.2f}"
-        f" | HONORARIOS SOCIO: {grupo.total_honorarios:,.2f}"
-        f" | GASTOS SOCIO: {grupo.total_gastos:,.2f}"
-    )
-    if grupo.total_coseguro > 0:
-        texto += f" | COSEGURO SOCIO: {grupo.total_coseguro:,.2f}"
-    _fila_total(ws, n_cols, texto)
-
-
-def _fila_subtotal_medico(ws, grupo: GrupoSocio, n_cols: int) -> None:
-    _fila_total(ws, n_cols, texto_subtotal_medico(grupo))
-
-
-def _fila_subtotal_seccion(ws, titulo: Optional[str], total, n_cols: int) -> None:
-    etiqueta = f"SUBTOTAL {titulo}" if titulo else "SUBTOTAL"
-    _fila_total(ws, n_cols, etiqueta, total, numero_en=1)
 
 
 def _escribir_resumen_general(ws, armado: Armado) -> None:
@@ -195,7 +208,7 @@ def build_excel_detalle(armado: Armado, opciones: ExportOpciones, encabezado: En
     from io import BytesIO
 
     cols = spec_columnas(opciones.columnas, con_tipo=con_columna_tipo(opciones))
-    fila_encabezado_col = len(encabezado.lineas) + 2  # + fila en blanco + la propia fila
+    fila_encabezado_col = len(_membrete(encabezado)) + 2  # + fila en blanco + la propia fila
     wb = Workbook(write_only=True)
     usados: set[str] = set()
     multi_hoja = len(armado.secciones) > 1 and not armado.una_hoja
@@ -203,47 +216,47 @@ def build_excel_detalle(armado: Armado, opciones: ExportOpciones, encabezado: En
     ultima_ws = None
     for seccion in armado.secciones:
         if multi_hoja or ultima_ws is None:
-            nombre = _sanitizar_nombre_hoja(seccion.titulo or "Detalle", usados) if multi_hoja else "Detalle"
+            nombre = _sanitizar_nombre_hoja(titulo_seccion(seccion.titulo) or "Detalle", usados) if multi_hoja else "Detalle"
             ws = wb.create_sheet(nombre)
             _configurar_hoja(ws, cols, fila_encabezado_col)
-            _fila_encabezado_institucional(ws, encabezado.lineas)
+            _fila_encabezado_institucional(ws, encabezado, len(cols))
             _fila_encabezado(ws, cols)
         if seccion.titulo:
             # En una sola hoja, el título de la sección es la fila de corte; con una hoja por
             # sección, es el título de la hoja.
-            _fila_centrada(ws, len(cols), seccion.titulo, negrita=True)
+            _fila_centrada(ws, len(cols), titulo_seccion(seccion.titulo), negrita=True)
 
         hay_resumen_grupo = False
         for grupo in seccion.grupos:
-            if grupo.titulo:
-                ws.append([_celda(ws, grupo.titulo, negrita=True)])
             for linea in grupo.lineas:
-                if linea.subtitulo:
+                if linea.subtitulo and linea.subtitulo not in TRAMOS_OCULTOS:
                     _fila_centrada(ws, len(cols), linea.subtitulo, cursiva=True)
                 if linea.subtitulo_clinica:
                     _fila_centrada(ws, len(cols), linea.subtitulo_clinica, negrita=True)
                 if linea.subtitulo_paciente:
-                    _fila_centrada(ws, len(cols), linea.subtitulo_paciente, negrita=True, relleno=_RELLENO_PACIENTE)
+                    _fila_centrada(ws, len(cols), rotulo_paciente(linea), negrita=True)
                 _fila_dato(ws, cols, linea.fila)
                 for hijo in linea.hijos:
                     _fila_dato(ws, cols, hijo, es_hijo=True)
                 if linea.total_paciente:
-                    _fila_total(ws, len(cols), texto_total_paciente(linea))
+                    _fila_cierre(ws, cols, texto_total_paciente(linea),
+                                 con_fondo=total_paciente_con_fondo(linea, opciones))
             if grupo.subtotal_medico:
-                _fila_subtotal_medico(ws, grupo, len(cols))
+                _fila_cierre(ws, cols, texto_subtotal_socio(grupo), con_fondo=True)
             if grupo.mostrar_resumen:
-                _fila_resumen_socio(ws, grupo, len(cols))
+                _fila_cierre(ws, cols, texto_resumen_socio(grupo), con_fondo=True)
                 hay_resumen_grupo = True
 
         if (multi_hoja or (armado.una_hoja and len(armado.secciones) > 1)) and not hay_resumen_grupo:
-            _fila_subtotal_seccion(ws, seccion.titulo, seccion.total, len(cols))
+            etiqueta = f"SUBTOTAL {titulo_seccion(seccion.titulo)}" if seccion.titulo else "SUBTOTAL"
+            _fila_cierre(ws, cols, etiqueta, con_fondo=False, monto=seccion.total)
 
         ultima_ws = ws
 
     if multi_hoja:
         ws_resumen = wb.create_sheet(_sanitizar_nombre_hoja("Resumen general", usados))
         _aplicar_pagina_a4(ws_resumen)
-        _fila_encabezado_institucional(ws_resumen, encabezado.lineas)
+        _fila_encabezado_institucional(ws_resumen, encabezado, len(cols))
         _escribir_resumen_general(ws_resumen, armado)
     else:
         _escribir_resumen_general(ultima_ws, armado)

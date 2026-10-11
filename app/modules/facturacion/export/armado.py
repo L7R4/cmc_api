@@ -278,13 +278,17 @@ def _stats_de_lineas(lineas: list[LineaPrestacion], equipo_siempre: bool = False
     dict[str, StatsTipo], Decimal, Decimal, Decimal, Decimal,
 ]:
     """Totales de las líneas: la fila y su equipo anidado (`hijos`), salvo el de las
-    cirugías de Honorarios individuales / Sanatorios (`equipo_siempre` lo incluye igual)."""
+    cirugías de Honorarios individuales / Sanatorios (`equipo_siempre` lo incluye igual).
+
+    Por tipo, el equipo cuenta con el tipo de su CABEZA (el ayudante de una cirugía de Sanatorio suma
+    en Sanatorio aunque su propia fila diga Práctica): es como se lista en el documento, así el
+    subtotal de cada sección, el resumen de cada socio, el resumen general y la carátula coinciden."""
     stats: dict[str, StatsTipo] = {t: StatsTipo() for t in TIPOS_EN_ORDEN}
     total_hon = total_gas = total_cos = total_gral = Decimal("0")
     for linea in lineas:
         hijos = linea.hijos if equipo_siempre or _suma_equipo(linea.fila) else []
         for f in [linea.fila, *hijos]:
-            s = stats.setdefault(f.tipo, StatsTipo())
+            s = stats.setdefault(linea.fila.tipo, StatsTipo())
             s.cantidad += (f.cantidad or 0) * (f.sesion or 1)
             s.monto += f.subtotal
             total_hon += f.honorarios
@@ -549,19 +553,58 @@ def anidados_filas(equipo: dict[int, list[FilaExport]]) -> list[FilaExport]:
     return [h for hijos in equipo.values() for h in hijos]
 
 
-def texto_subtotal_medico(grupo: GrupoSocio, moneda: str = "") -> str:
-    """Línea de cierre de un socio en por_tipo (la misma para Excel y PDF)."""
-    nombre = f" {grupo.nombre}" if grupo.nombre else ""
-    return (
-        f"SUBTOTAL SOCIO {grupo.cod_medico}{nombre} ({len(grupo.lineas)}): "
-        f"{moneda}{grupo.total_general:,.2f}"
-    )
+# ── Textos de los documentos (los mismos para PDF y Excel) ─────────────────
+# Título de sección: en los documentos va con el nombre completo.
+_TITULO_SECCION = {"HONORARIO": "HONORARIOS INDIVIDUALES", "SANATORIO": "SANATORIOS"}
+# Subtítulos de tramo que NO se imprimen: la columna TIPO (C / P) ya lo dice.
+TRAMOS_OCULTOS = {"CONSULTAS", "PRACTICAS"}
 
 
-def texto_total_paciente(linea: LineaPrestacion, moneda: str = "") -> str:
-    """Línea de cierre de un paciente (por_tipo ordenado por paciente), igual en Excel y PDF."""
+def titulo_seccion(titulo: str | None) -> str | None:
+    return _TITULO_SECCION.get(titulo, titulo) if titulo else titulo
+
+
+def texto_resumen_socio(grupo: GrupoSocio) -> str:
+    """«Consulta: 5 - $142,500.00, Practica: 1 - $86,881.82, Total: $229,381.82». El coseguro, si el
+    socio lo tiene, va antes del total."""
+    partes = [
+        f"{ETIQUETA_TIPO.get(t, t).capitalize()}: {s.cantidad} - ${s.monto:,.2f}"
+        for t, s in grupo.stats_por_tipo.items() if s.cantidad
+    ]
+    if grupo.total_coseguro > 0:
+        partes.append(f"Coseguro: ${grupo.total_coseguro:,.2f}")
+    partes.append(f"Total: ${grupo.total_general:,.2f}")
+    return ", ".join(partes)
+
+
+def texto_subtotal_socio(grupo: GrupoSocio) -> str:
+    """Cierre del socio en «Por tipo»: solo el total, sin su código ni su nombre (las filas ya lo llevan)."""
+    return f"Total: ${grupo.total_general:,.2f}"
+
+
+def texto_total_paciente(linea: LineaPrestacion) -> str:
+    """Cierre del paciente, con el mismo estilo que el del socio (mayúsculas solo al inicio, «$» pegado
+    al monto): en mayúsculas sostenidas parecía más grande que el total del socio."""
     nombre, total = linea.total_paciente or ("", Decimal("0"))
-    return f"TOTAL PACIENTE {nombre}: {moneda}{total:,.2f}" if nombre else f"TOTAL PACIENTE: {moneda}{total:,.2f}"
+    return f"Total paciente {nombre}: ${total:,.2f}" if nombre else f"Total paciente: ${total:,.2f}"
+
+
+def rotulo_paciente(linea: LineaPrestacion) -> str:
+    """Honorarios individuales: «<clínica> - Paciente: <nombre>» (sin clínica, solo «Paciente: ...»).
+    Sanatorios: la clínica va en su propia línea, así que acá solo «Paciente: <nombre>»."""
+    nombre = (linea.subtitulo_paciente or "").removeprefix("PACIENTE").strip()
+    f = linea.fila
+    if f.tipo == "Honorarios individuales":
+        clinica = f.clinica_nombre or (str(f.cod_clinica) if f.cod_clinica else "")
+        if clinica:
+            return f"{clinica} - Paciente: {nombre}"
+    return f"Paciente: {nombre}"
+
+
+def total_paciente_con_fondo(linea: LineaPrestacion, opciones: ExportOpciones) -> bool:
+    """El total del paciente va con fondo gris clarito en sanatorios y en todo «Por tipo»; en honorarios
+    de «Por socio», con una línea fina."""
+    return linea.fila.tipo == "Sanatorio" or opciones.agrupacion == "por_tipo"
 
 
 # ── Especificación de columnas (compartida por excel.py y pdf.py) ───────────
@@ -644,7 +687,9 @@ def spec_columnas(columnas_habilitadas: list[str], con_tipo: bool = True) -> lis
     """`con_tipo=False` saca la columna TIPO: agrupado por tipo, cada hoja/sección ya es
     de un solo tipo y la columna repetiría lo mismo en todas las filas."""
     seleccion = [_DEFINICIONES[k] for k in _DEFINICIONES if k in columnas_habilitadas]
-    return [_COL_ID, _COL_SOCIO, *seleccion, _COL_SUBTOTAL, *([_COL_TIPO] if con_tipo else [])]
+    # "Nro. REG." (id_detalle_prestaciones) es una columna más del panel: se puede sacar.
+    id_reg = [_COL_ID] if "nro_registro" in columnas_habilitadas else []
+    return [*id_reg, _COL_SOCIO, *seleccion, _COL_SUBTOTAL, *([_COL_TIPO] if con_tipo else [])]
 
 
 def con_columna_tipo(opciones: ExportOpciones) -> bool:

@@ -176,18 +176,25 @@ def test_plana_ordena_por_fecha_de_carga_en_ambos_sentidos():
     assert ids("desc") == [1, 4, 3, 2]
 
 
+def _celdas(ws):
+    """Valores de todas las celdas con contenido (los totales van alineados a la derecha, en SUB. TOTAL)."""
+    return [c for r in ws.iter_rows(values_only=True) for c in r if c]
+
+
 def test_excel_en_una_sola_hoja_y_pdf_se_generan():
     a = _armado()
     opciones = ExportOpciones(agrupacion="por_socio")
     enc = EncabezadoExport(lineas=["CMC", "OS 411"])
     wb = load_workbook(BytesIO(build_excel_detalle(a, opciones, enc)))
     assert wb.sheetnames == ["Detalle"]
-    textos = [r[0] for r in wb["Detalle"].iter_rows(values_only=True) if r and r[0]]
-    for esperado in ("10 - ACOSTA, MARIA", "CONSULTAS", "SANATORIOS",
-                     "CLINICA MODELO", "CLINICA DEL SUR"):
+    textos = _celdas(wb["Detalle"])
+    for esperado in ("SANATORIOS", "HONORARIOS INDIVIDUALES", "CLINICA MODELO", "CLINICA DEL SUR"):
         assert esperado in textos
+    # Sin fila de título por socio ni subtítulos «CONSULTAS / PRACTICAS» (la columna TIPO ya lo dice).
+    assert not any(t in textos for t in ("10 - ACOSTA, MARIA", "CONSULTAS", "PRACTICAS"))
     assert not any("CLINICAS / SANATORIOS" == t for t in textos)
     assert any(str(t).startswith("SUBTOTAL SANATORIOS") for t in textos)  # cierra el bloque único
+    assert any(str(t).startswith("Consulta: ") and str(t).endswith("Total: $620.00") for t in textos)  # resumen del socio
     assert build_pdf_detalle(a, opciones, enc).startswith(b"%PDF")
 
 
@@ -197,9 +204,9 @@ def test_por_tipo_excel_y_pdf_llevan_el_subtotal_de_cada_medico():
     enc = EncabezadoExport(lineas=["CMC", "OS 411"])
     wb = load_workbook(BytesIO(build_excel_detalle(a, opciones, enc)))
     assert wb.sheetnames[:2] == ["CONSULTA", "PRACTICA"]
-    textos = [r[0] for r in wb["CONSULTA"].iter_rows(values_only=True) if r and r[0]]
-    assert "SUBTOTAL SOCIO 10 ACOSTA, MARIA (2): 200.00" in textos
-    assert "SUBTOTAL SOCIO 20 ZAPATA, JUAN (1): 100.00" in textos
+    textos = _celdas(wb["CONSULTA"])
+    assert "Total: $200.00" in textos
+    assert "Total: $100.00" in textos
     assert build_pdf_detalle(a, opciones, enc).startswith(b"%PDF")
 
 
@@ -286,12 +293,12 @@ def test_por_tipo_por_paciente_reemplaza_el_subtotal_por_el_total_de_cada_pacien
     enc = EncabezadoExport(lineas=["CMC", "OS 411"])
     opciones = ExportOpciones(agrupacion="por_tipo", orden_honorarios="paciente")
     wb = load_workbook(BytesIO(build_excel_detalle(a, opciones, enc)))
-    filas = list(wb["HONORARIO"].iter_rows())
-    textos = [r[0].value for r in filas if r and r[0].value]
-    assert "TOTAL PACIENTE DIAZ: 650.00" in textos and "PACIENTE PEREYRA" in textos
+    filas = list(wb["HONORARIOS INDIVIDUALES"].iter_rows())
+    textos = _celdas(wb["HONORARIOS INDIVIDUALES"])
+    assert "Total paciente DIAZ: $650.00" in textos and "Paciente: PEREYRA" in textos
     assert not any(str(t).startswith("SUBTOTAL SOCIO") for t in textos)
-    subtitulo = next(r[0] for r in filas if r[0].value == "PACIENTE DIAZ")
-    assert subtitulo.alignment.horizontal == "centerContinuous" and subtitulo.fill.start_color.rgb.endswith("E0F2FE")
+    subtitulo = next(c for r in filas for c in r if c.value == "Paciente: DIAZ")
+    assert subtitulo.alignment.horizontal == "centerContinuous" and subtitulo.fill.fill_type is None  # sin color
     assert build_pdf_detalle(a, opciones, enc).startswith(b"%PDF")
 
 
@@ -299,9 +306,10 @@ def test_subtitulos_de_tipo_y_clinica_van_centrados_en_excel():
     a = _armado()
     enc = EncabezadoExport(lineas=["CMC", "OS 411"])
     wb = load_workbook(BytesIO(build_excel_detalle(a, ExportOpciones(agrupacion="por_socio"), enc)))
-    celdas = {r[0].value: r[0] for r in wb["Detalle"].iter_rows() if r and r[0].value}
-    for texto in ("CONSULTAS", "SANATORIOS", "CLINICA MODELO"):
+    celdas = {c.value: c for r in wb["Detalle"].iter_rows() for c in r if c.value}
+    for texto in ("HONORARIOS INDIVIDUALES", "SANATORIOS", "CLINICA MODELO"):
         assert celdas[texto].alignment.horizontal == "centerContinuous"
+    assert "CONSULTAS" not in celdas
 
 
 def test_ayudante_sin_grupo_se_pega_a_su_cabeza():

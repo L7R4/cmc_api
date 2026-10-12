@@ -7,7 +7,10 @@ galeno por nivel, que pacta cada una. El nomenclador va ligado a un grupo de
 `nm_galenos_plantilla` (de ahí sale el galeno nivelado con el que se cotiza).
 
 Aplicarlo a una obra social (`aplicar`) da de alta cada código con su plantilla de
-quién factura y crea un precio NE por especialidad:
+quién factura y crea un precio NE por especialidad. El nomenclador puede acotar las
+especialidades (`especialidades`, vacío = todas): sólo se carga precio en las que están en
+su lista y habilitadas para el código en la O.S.; el precio de las demás no se toca. Un código
+"sin restricción de especialidad" se cotiza igual, con un único precio sin especialidad:
   - Honorarios: el galeno del nivel del código, con las unidades del galeno.
     Los de "N unidades": el galeno de nivel 1 con cantidad N.
   - Ayudante: el mismo galeno, con sus unidades de ayudante (los de unidades, 0).
@@ -28,7 +31,7 @@ from sqlalchemy import func, insert, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.db.models.catalogs import ObrasSociales
+from app.db.models.catalogs import Especialidad, ObrasSociales
 from app.db.models.nomenclador_cmc import (
     CodigoObraSocial,
     Galeno,
@@ -95,6 +98,7 @@ async def listar(db: AsyncSession) -> list[NomencladorNiveladoOut]:
         out.append(NomencladorNiveladoOut(
             id=n.id, slug=n.slug, nombre=n.nombre, galeno_grupo=n.galeno_grupo,
             galeno_codigo=g_codigo, galeno_nombre=g_nombre, niveles=n.niveles,
+            especialidades=sorted(n.especialidades or []),
             total_codigos=sum(por_nivel.values()) + con_unidades,
             por_nivel=por_nivel, con_unidades=con_unidades,
         ))
@@ -139,6 +143,22 @@ def _codigo_out(c: NomencladorNiveladoCodigo, nom: NomencladorCMC) -> NiveladoCo
 
 
 # ─── Edición ─────────────────────────────────────────────────────────────────
+
+async def actualizar_especialidades(db: AsyncSession, slug: str, especialidades: list[int]) -> list[int]:
+    """Define a qué especialidades se aplica el nomenclador. Vacío = todas las del código."""
+    n = await _get(db, slug)
+    ids = sorted(set(especialidades))
+    if ids:
+        existentes = set((await db.execute(
+            select(Especialidad.ID_COLEGIO_ESPE).where(Especialidad.ID_COLEGIO_ESPE.in_(ids))
+        )).scalars())
+        faltan = [i for i in ids if i not in existentes]
+        if faltan:
+            raise HTTPException(422, f"Especialidades inexistentes: {', '.join(map(str, faltan))}.")
+    n.especialidades = ids or None
+    await db.flush()
+    return ids
+
 
 def _validar_nivel(n: NomencladorNivelado, nivel: Optional[int]) -> None:
     if nivel is not None and nivel > n.niveles:
@@ -248,6 +268,9 @@ async def aplicar(
         raise HTTPException(404, "Obra social no encontrada")
     os_nombre = (fila_os.OBRA_SOCIAL or "").strip() or f"La obra social {obra_social_nro}"
 
+    # Especialidades a las que se aplica el nomenclador (vacío = todas las del código).
+    del_nomenclador = set(n.especialidades or [])
+
     codigos = list((await db.execute(
         select(NomencladorNiveladoCodigo, NomencladorCMC)
         .join(NomencladorCMC, NomencladorCMC.id == NomencladorNiveladoCodigo.nomenclador_id)
@@ -299,7 +322,6 @@ async def aplicar(
         Valor.origen == "NE",
     ).order_by(Valor.vigencia_desde))).scalars() if nom_ids else []:
         ne.setdefault((v.nomenclador_id, v.especialidad_id_colegio), []).append(v)
-    con_precio = {nom_id for nom_id, _ in ne}
     pares = {
         p.nomenclador_id: p for p in (await db.execute(select(CodigoObraSocial).where(
             CodigoObraSocial.obra_social_nro == obra_social_nro,
@@ -379,6 +401,20 @@ async def aplicar(
                 motivo="Se da de alta sin precio: no tiene especialidades que lo facturen",
             ))
             continue
+        # Quién factura es lo configurado en la O.S. (`esps`); el nomenclador sólo acota en cuáles
+        # de ellas se carga precio. Las demás no se tocan, tengan o no precio.
+        aplican = esps if sin_restr or not del_nomenclador else [e for e in esps if e in del_nomenclador]
+        if not sin_restr and not aplican:
+            nombres = dict((await db.execute(
+                select(Especialidad.ID_COLEGIO_ESPE, Especialidad.ESPECIALIDAD)
+                .where(Especialidad.ID_COLEGIO_ESPE.in_(esps))
+            )).all())
+            filas_out.append(AplicarNiveladoFila(
+                **base, estado="fuera_de_especialidad",
+                motivo="Ninguna de sus especialidades en esta obra social es de este nomenclador: "
+                       + ", ".join(str(nombres.get(e) or e).strip() for e in esps),
+            ))
+            continue
         galeno = galenos_os[c.nivel if c.nivel is not None else 1]
         comps = _componentes(nom, galeno, gasto, c.unidades)
         par = pares.get(nom.id)
@@ -388,7 +424,7 @@ async def aplicar(
                 for e in esps
             )
         categoria = par.categoria if par else None
-        variantes = [None] if sin_restr else esps
+        variantes = [None] if sin_restr else aplican
         for esp in variantes:
             a_crear.append(({
                 "obra_social_nro": obra_social_nro, "nomenclador_id": nom.id, "origen": "NE",
@@ -406,7 +442,7 @@ async def aplicar(
                 "coseguro": ne[(nom.id, esp)][-1].coseguro if (nom.id, esp) in ne else Decimal("0"),
                 "vigencia_desde": vigencia_desde, "observacion": None,
             }, comps))
-        if nom.id in con_precio:
+        if any((nom.id, esp) in ne for esp in variantes):
             borradas = sum(
                 1 for esp in variantes for v in ne.get((nom.id, esp), [])
                 if v.vigencia_desde >= vigencia_desde
@@ -446,6 +482,7 @@ async def aplicar(
             reemplazar=cuenta("reemplazar") + cuenta("reemplazado"),
             vigencias_borradas=sum(f.vigencias_borradas for f in filas_out),
             sin_quien_factura=cuenta("sin_quien_factura"),
+            fuera_de_especialidad=cuenta("fuera_de_especialidad"),
             suspendido=cuenta("suspendido"), omitido=cuenta("omitido"),
             precios=len(a_crear), altas=len(altas),
         ),

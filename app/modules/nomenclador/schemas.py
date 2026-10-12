@@ -1681,9 +1681,15 @@ class NomencladorNiveladoOut(BaseModel):
     galeno_codigo: Optional[str] = None
     galeno_nombre: Optional[str] = None
     niveles: int
+    # ID_COLEGIO_ESPE a las que se aplica; vacío = todas las del código.
+    especialidades: List[int] = []
     total_codigos: int
     por_nivel: dict[int, int]
     con_unidades: int
+
+
+class NiveladoEspecialidadesIn(BaseModel):
+    especialidades: List[int] = Field(default_factory=list)
 
 
 class NiveladoCodigoOut(BaseModel):
@@ -1727,7 +1733,8 @@ class AplicarNiveladoIn(BaseModel):
 
 
 EstadoAplicarNivelado = Literal[
-    "crear", "creado", "reemplazar", "reemplazado", "sin_quien_factura", "suspendido", "omitido",
+    "crear", "creado", "reemplazar", "reemplazado", "sin_quien_factura", "fuera_de_especialidad",
+    "suspendido", "omitido",
 ]
 
 
@@ -1754,6 +1761,8 @@ class AplicarNiveladoResumen(BaseModel):
     reemplazar: int
     vigencias_borradas: int
     sin_quien_factura: int
+    # El código no tiene ninguna de las especialidades del nomenclador: no se le carga precio.
+    fuera_de_especialidad: int = 0
     suspendido: int
     omitido: int
     precios: int

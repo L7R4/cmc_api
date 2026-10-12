@@ -231,3 +231,69 @@ async def test_editar_y_agregar_codigo_validan_el_nivel(s):
     assert exc.value.status_code == 409
     with pytest.raises(ValueError):
         NiveladoCodigoIn(nivel=2, unidades=Decimal("5"))
+
+
+@pytest.mark.asyncio
+async def test_la_lista_de_especialidades_acota_donde_se_carga_precio(s):
+    (a, b, c, d), (e1, e2) = await _preparar(s)
+    nom = (await s.execute(select(NomencladorNivelado).where(NomencladorNivelado.slug == SLUG))).scalar_one()
+    # e2 ya tenía un precio de `a` fuera del nomenclador: no se toca.
+    await _crear_valor_con_componentes(
+        db=s, obra_social_nro=OS, nomenclador_id=a.id, origen="NE", vigencia_desde=HOY,
+        componentes_in=[ValorComponenteIn(concepto="Honorarios", valor_unitario=Decimal("10"))],
+        descripcion="X", nivel=None, complejidad=None, especialidad_id_colegio=e2, observacion=None,
+    )
+    assert await nivelados.actualizar_especialidades(s, SLUG, [e1, e1]) == [e1]
+    assert nom.especialidades == [e1]
+
+    previa = await nivelados.aplicar(s, SLUG, OS, HOY, dry_run=True, usuario="t")
+    estados = {f.codigo: f.estado for f in previa.filas}
+    assert estados[a.codigo] == "crear" and estados[b.codigo] == "crear"
+    assert next(f for f in previa.filas if f.codigo == a.codigo).precios == 1  # sólo e1
+
+    await nivelados.aplicar(s, SLUG, OS, HOY, dry_run=False, usuario="t")
+    va = {v.especialidad_id_colegio: v for v in await _activos(s, a.id)}
+    assert sorted(va) == [e1, e2]
+    assert va[e1].nivel == 3  # nuevo, del nomenclador
+    assert va[e2].nivel is None and (await _comps(s, va[e2].id))["Honorarios"].valor_unitario == Decimal("10")
+
+
+@pytest.mark.asyncio
+async def test_codigo_sin_ninguna_especialidad_del_nomenclador_queda_fuera(s):
+    (a, b, c, d), (e1, e2) = await _preparar(s)
+    await nivelados.actualizar_especialidades(s, SLUG, [e2])  # b y d solo se facturan por e1
+
+    out = await nivelados.aplicar(s, SLUG, OS, HOY, dry_run=False, usuario="t")
+    estados = {f.codigo: f.estado for f in out.filas}
+    assert estados[a.codigo] == "creado"
+    assert estados[b.codigo] == estados[d.codigo] == "fuera_de_especialidad"
+    assert estados[c.codigo] == "sin_quien_factura"
+    assert out.resumen.fuera_de_especialidad == 2
+    assert [v.especialidad_id_colegio for v in await _activos(s, a.id)] == [e2]
+    assert await _activos(s, b.id) == [] and await _activos(s, d.id) == []
+
+
+@pytest.mark.asyncio
+async def test_sin_restriccion_se_cotiza_aunque_el_nomenclador_tenga_lista(s):
+    (a, b, c, d), (e1, e2) = await _preparar(s)
+    b.sin_restriccion_especialidad = True  # catálogo: sin restricción → el alta lo hereda
+    await s.flush()
+    await nivelados.actualizar_especialidades(s, SLUG, [e2])
+
+    out = await nivelados.aplicar(s, SLUG, OS, HOY, dry_run=False, usuario="t")
+    assert next(f for f in out.filas if f.codigo == b.codigo).estado == "creado"
+    [vb] = await _activos(s, b.id)
+    assert vb.especialidad_id_colegio is None and vb.nivel == 1
+
+
+@pytest.mark.asyncio
+async def test_actualizar_especialidades_valida_y_vacio_es_todas(s):
+    (_, _, _, _), (e1, e2) = await _preparar(s)
+    with pytest.raises(HTTPException) as exc:
+        await nivelados.actualizar_especialidades(s, SLUG, [e1, 999_999])
+    assert exc.value.status_code == 422
+    await nivelados.actualizar_especialidades(s, SLUG, [e1])
+    assert [n.especialidades for n in await nivelados.listar(s) if n.slug == SLUG] == [[e1]]
+    assert await nivelados.actualizar_especialidades(s, SLUG, []) == []
+    nom = (await s.execute(select(NomencladorNivelado).where(NomencladorNivelado.slug == SLUG))).scalar_one()
+    assert nom.especialidades is None

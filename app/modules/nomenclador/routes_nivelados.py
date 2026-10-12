@@ -16,6 +16,7 @@ from app.modules.nomenclador.schemas import (
     NiveladoCodigoIn,
     NiveladoCodigoOut,
     NiveladoCodigosOut,
+    NiveladoEspecialidadesIn,
     NomencladorNiveladoOut,
 )
 
@@ -27,6 +28,16 @@ async def listar_nivelados(db: AsyncSession = Depends(get_db)):
     """Los nomencladores con su galeno, los códigos por nivel y las obras sociales
     que tienen ese galeno vigente."""
     return await nivelados.listar(db)
+
+
+@router.put("/{slug}/especialidades", response_model=NiveladoEspecialidadesIn)
+async def actualizar_especialidades_nivelado(
+    slug: str, body: NiveladoEspecialidadesIn, db: AsyncSession = Depends(get_db),
+):
+    """A qué especialidades se aplica el nomenclador (vacío = todas las del código)."""
+    ids = await nivelados.actualizar_especialidades(db, slug, body.especialidades)
+    await db.commit()
+    return NiveladoEspecialidadesIn(especialidades=ids)
 
 
 @router.get("/{slug}/codigos", response_model=NiveladoCodigosOut)

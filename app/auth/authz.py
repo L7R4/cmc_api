@@ -621,6 +621,7 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     ("POST", "/api/codigos_os/{obra_social_nro}/{nomenclador_id}/reactivar"): Scope.NOMENCLADOR_EDITAR,
     ("GET", "/api/nomencladores_nivelados/"): Scope.NOMENCLADOR_LEER,
     ("GET", "/api/nomencladores_nivelados/{slug}/codigos"): Scope.NOMENCLADOR_LEER,
+    ("PUT", "/api/nomencladores_nivelados/{slug}/especialidades"): Scope.NOMENCLADOR_EDITAR,
     ("POST", "/api/nomencladores_nivelados/{slug}/codigos"): Scope.NOMENCLADOR_EDITAR,
     ("PUT", "/api/nomencladores_nivelados/{slug}/codigos/{nomenclador_id}"): Scope.NOMENCLADOR_EDITAR,
     ("DELETE", "/api/nomencladores_nivelados/{slug}/codigos/{nomenclador_id}"): Scope.NOMENCLADOR_EDITAR,

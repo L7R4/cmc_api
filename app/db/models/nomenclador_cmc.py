@@ -311,6 +311,10 @@ class NomencladorNivelado(Base):
     nombre: Mapped[str] = mapped_column(String(120), nullable=False)
     galeno_grupo: Mapped[str] = mapped_column(String(100), nullable=False)
     niveles: Mapped[int] = mapped_column(Integer, nullable=False)
+    # ID_COLEGIO_ESPE de las especialidades a las que se aplica el nomenclador ([7, 30, ...]).
+    # NULL o [] = todas las del código. Al aplicarlo a una O.S. sólo se carga precio en las que
+    # están en la lista Y habilitadas para el código en esa O.S.
+    especialidades: Mapped[Optional[list[int]]] = mapped_column(JSON, nullable=True)
     activo: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="1")
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.now()

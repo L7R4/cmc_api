@@ -545,6 +545,19 @@ async def list_valores(
     vigencia_desde: Optional[datetime.date] = Query(
         None, description="Filtra por la vigencia exacta (no 'vigente a', la fecha exacta que abrió esa versión)."
     ),
+    q: Optional[str] = Query(None, description="Contiene en el código o en la descripción."),
+    tipo: Optional[Literal[service.TIPOS_FILTRO]] = Query(
+        None,
+        description="Consulta / Practica / Honorarios individuales, por la categoría del código en la O.S. "
+                    "(requiere obra_social_nro).",
+    ),
+    por_presupuesto: Optional[bool] = Query(None, description="True: solo los precios por presupuesto."),
+    especialidad_habilitada: Optional[int] = Query(
+        None,
+        description="ID_COLEGIO_ESPE: solo los códigos que la obra social tiene habilitados para esa "
+                    "especialidad (nm_valor_especialidad). No es lo mismo que `especialidad_id_colegio`, "
+                    "que filtra la variante NE del precio. Requiere obra_social_nro.",
+    ),
     page: int = Query(1, ge=1),
     size: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
@@ -552,6 +565,23 @@ async def list_valores(
     stmt = select(Valor)
     if obra_social_nro:
         stmt = stmt.where(Valor.obra_social_nro == obra_social_nro)
+    if q and q.strip():
+        t = q.strip()
+        stmt = stmt.where(Valor.codigo.contains(t, autoescape=True) | Valor.descripcion.contains(t, autoescape=True))
+    if tipo and obra_social_nro:
+        catalogo = select(NomencladorCMC.categoria).where(NomencladorCMC.id == Valor.nomenclador_id).scalar_subquery()
+        stmt = stmt.where(service.condicion_tipo(
+            service.categoria_os_sql(obra_social_nro, Valor.nomenclador_id, catalogo), tipo,
+        ))
+    if por_presupuesto is not None:
+        stmt = stmt.where(Valor.por_presupuesto == por_presupuesto)
+    if especialidad_habilitada is not None and obra_social_nro:
+        stmt = stmt.where(Valor.codigo.in_(
+            select(ValorEspecialidad.codigo).where(
+                ValorEspecialidad.obra_social_nro == obra_social_nro,
+                ValorEspecialidad.especialidad_id_colegio == especialidad_habilitada,
+            )
+        ))
     if codigo:
         stmt = stmt.where(Valor.codigo == codigo)
     if nivel is not None:

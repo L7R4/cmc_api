@@ -449,19 +449,15 @@ def _armar_por_tipo(
     filas: list[FilaExport], equipo: dict[int, list[FilaExport]], opciones: ExportOpciones,
 ) -> list[Seccion]:
     orden, direccion = opciones.orden, opciones.direccion
-    por_paciente = {
-        "Honorarios individuales": opciones.orden_honorarios == "paciente",
-        "Sanatorio": opciones.orden_sanatorio == "paciente",
-    }
     secciones = []
     for tipo in TIPOS_EN_ORDEN:
         filas_tipo = [f for f in filas if f.tipo == tipo]
         if not filas_tipo:
             continue
-        # Con "paciente" (sólo Honorarios individuales y Sanatorios) la sección entera va por
-        # paciente A-Z, sin partir por socio (el socio está en su columna); en Sanatorios,
-        # dentro de cada clínica (A-Z). Cada paciente cierra con su total, sin subtotal de socio.
-        if por_paciente.get(tipo):
+        # Honorarios individuales y Sanatorios van SIEMPRE por paciente (igual que en «Por socio»): la
+        # sección entera por paciente A-Z (en Sanatorios, dentro de cada clínica), con el subtítulo y el
+        # total de cada paciente y sin partir por socio (el socio está en su columna).
+        if tipo in ("Honorarios individuales", "Sanatorio"):
             clave = _clave_sanatorio if tipo == "Sanatorio" else _clave_paciente
             lineas = _lineas(sorted(filas_tipo, key=clave), equipo)
             _marcar_clinicas(lineas)
@@ -471,18 +467,7 @@ def _armar_por_tipo(
         grupos = []
         for filas_socio in _por_socio(filas_tipo).values():
             f0 = filas_socio[0]
-            if tipo in por_paciente:
-                # "Médico": rige el orden elegido, y lo que ese orden no distingue (con
-                # "nombre del socio", todas las filas del socio empatan) queda por
-                # paciente A-Z en vez de en el orden de carga. `sorted` es estable,
-                # también con `reverse`.
-                ordenadas = _ordenar(sorted(filas_socio, key=_clave_paciente), orden, direccion)
-            else:
-                ordenadas = _ordenar(filas_socio, orden, direccion)
-            if tipo == "Sanatorio":
-                ordenadas = sorted(ordenadas, key=_clave_clinica)  # estable: conserva el orden dentro de cada clínica
-            lineas = _lineas(ordenadas, equipo)
-            _marcar_clinicas(lineas)
+            lineas = _lineas(_ordenar(filas_socio, orden, direccion), equipo)
             grupos.append(_armar_grupo(
                 f0.cod_medico, f0.prestador_nombre, f0.matricula, lineas, False, subtotal_medico=True,
             ))
@@ -595,7 +580,7 @@ def rotulo_paciente(linea: LineaPrestacion) -> str:
     nombre = (linea.subtitulo_paciente or "").removeprefix("PACIENTE").strip()
     f = linea.fila
     if f.tipo == "Honorarios individuales":
-        clinica = f.clinica_nombre or (str(f.cod_clinica) if f.cod_clinica else "")
+        clinica = " ".join((f.clinica_nombre or (str(f.cod_clinica) if f.cod_clinica else "")).split())
         if clinica:
             return f"{clinica} - Paciente: {nombre}"
     return f"Paciente: {nombre}"

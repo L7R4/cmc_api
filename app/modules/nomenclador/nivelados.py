@@ -373,10 +373,11 @@ async def aplicar(
             return True, []
         if ya:
             return False, ya
-        # Sin alta (sólo en la vista previa) lo que haría `dar_de_alta`. Con alta pero
-        # sin nadie habilitado (p. ej. la que dejó un precio NN), la plantilla: se
-        # habilita al aplicar.
-        if par is None and nom.sin_restriccion_especialidad:
+        # Sin alta (sólo en la vista previa) lo que haría `dar_de_alta`. Con alta pero sin nada
+        # configurado (p. ej. la que dejó un precio NN, o una alta anterior sin precio), se hereda
+        # del catálogo igual que en el alta: "sin restricción" si el código lo es (se marca en el
+        # par al aplicar) y, si no, la plantilla (se habilita al aplicar).
+        if nom.sin_restriccion_especialidad:
             return True, []
         return False, sorted(plantillas.get(nom.codigo, []))
 
@@ -384,6 +385,7 @@ async def aplicar(
     filas_out: list[AplicarNiveladoFila] = []
     a_crear: list[tuple[dict, list[dict]]] = []
     a_habilitar: list[dict] = []
+    a_sin_restriccion: list[str] = []  # pares con alta que heredan "sin restricción" del catálogo
     a_liberar: list[tuple[int, Optional[int]]] = []  # (nomenclador_id, especialidad)
     for c, nom in codigos:
         base = dict(
@@ -423,6 +425,8 @@ async def aplicar(
                 {"obra_social_nro": obra_social_nro, "codigo": nom.codigo, "especialidad_id_colegio": e}
                 for e in esps
             )
+        if par is not None and sin_restr and not par.sin_restriccion_especialidad:
+            a_sin_restriccion.append(nom.codigo)
         categoria = par.categoria if par else None
         variantes = [None] if sin_restr else aplican
         for esp in variantes:
@@ -466,6 +470,9 @@ async def aplicar(
 
     if a_habilitar and not dry_run:
         await db.execute(insert(ValorEspecialidad), a_habilitar)
+    if not dry_run:
+        for codigo in a_sin_restriccion:
+            await service.fijar_sin_restriccion_par(db, obra_social_nro, codigo, True)
     if a_liberar and not dry_run:
         await service.liberar_vigencias(db, obra_social_nro, "NE", a_liberar, vigencia_desde)
     if a_crear and not dry_run:

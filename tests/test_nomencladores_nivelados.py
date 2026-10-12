@@ -297,3 +297,29 @@ async def test_actualizar_especialidades_valida_y_vacio_es_todas(s):
     assert await nivelados.actualizar_especialidades(s, SLUG, []) == []
     nom = (await s.execute(select(NomencladorNivelado).where(NomencladorNivelado.slug == SLUG))).scalar_one()
     assert nom.especialidades is None
+
+
+@pytest.mark.asyncio
+async def test_alta_previa_sin_config_hereda_sin_restriccion_del_catalogo(s):
+    """Un código ya dado de alta en la O.S. sin nada configurado (p. ej. una aplicación anterior que
+    lo dejó "sin quién factura") y marcado "sin restricción" en el catálogo se cotiza: un único
+    precio sin especialidad, y el par queda "sin restricción"."""
+    from app.modules.nomenclador import alta_os
+    from app.modules.nomenclador.schemas import AltaCodigoItem, AltaCodigosIn
+
+    (a, b, c, d), (e1, e2) = await _preparar(s)  # c: plantilla vacía
+    await alta_os.dar_de_alta(s, AltaCodigosIn(items=[
+        AltaCodigoItem(obra_social_nro=OS, nomenclador_id=c.id, especialidades=[]),
+    ]), "t")
+    assert (await alta_os.get_par(s, OS, c.id)).sin_restriccion_especialidad is False
+    c.sin_restriccion_especialidad = True  # se marca en el catálogo después del alta
+    await s.flush()
+    await nivelados.actualizar_especialidades(s, SLUG, [e2])  # y el nomenclador tiene lista: no importa
+
+    previa = await nivelados.aplicar(s, SLUG, OS, HOY, dry_run=True, usuario="t")
+    assert next(f for f in previa.filas if f.codigo == c.codigo).estado == "crear"
+
+    await nivelados.aplicar(s, SLUG, OS, HOY, dry_run=False, usuario="t")
+    [vc] = await _activos(s, c.id)
+    assert vc.especialidad_id_colegio is None and vc.sin_restriccion_especialidad is True
+    assert (await alta_os.get_par(s, OS, c.id)).sin_restriccion_especialidad is True

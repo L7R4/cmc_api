@@ -10,7 +10,8 @@ Aplicarlo a una obra social (`aplicar`) da de alta cada código con su plantilla
 quién factura y crea un precio NE por especialidad. El nomenclador puede acotar las
 especialidades (`especialidades`, vacío = todas): sólo se carga precio en las que están en
 su lista y habilitadas para el código en la O.S.; el precio de las demás no se toca. Un código
-"sin restricción de especialidad" se cotiza igual, con un único precio sin especialidad:
+"sin restricción de especialidad" pasa a cotizarse (y habilitarse) en las del nomenclador, un precio
+por cada una; si el nomenclador no tiene lista, se cotiza con un único precio sin especialidad:
   - Honorarios: el galeno del nivel del código, con las unidades del galeno.
     Los de "N unidades": el galeno de nivel 1 con cantidad N.
   - Ayudante: el mismo galeno, con sus unidades de ayudante (los de unidades, 0).
@@ -386,6 +387,7 @@ async def aplicar(
     a_crear: list[tuple[dict, list[dict]]] = []
     a_habilitar: list[dict] = []
     a_sin_restriccion: list[str] = []  # pares con alta que heredan "sin restricción" del catálogo
+    a_quitar_restriccion: list[str] = []  # pares "sin restricción" que pasan a las del nomenclador
     a_liberar: list[tuple[int, Optional[int]]] = []  # (nomenclador_id, especialidad)
     for c, nom in codigos:
         base = dict(
@@ -397,6 +399,12 @@ async def aplicar(
             filas_out.append(AplicarNiveladoFila(**base, estado=clasif[0], motivo=clasif[1]))
             continue
         sin_restr, esps = _quien_factura(nom)
+        # "Sin restricción" + nomenclador con lista de especialidades: el nomenclador existe por
+        # especialidad, así que el código queda habilitado y cotizado en las del nomenclador (un
+        # precio por cada una) en vez de un único precio sin especialidad.
+        restringe = sin_restr and bool(del_nomenclador)
+        if restringe:
+            sin_restr, esps = False, sorted(del_nomenclador)
         if not sin_restr and not esps:
             filas_out.append(AplicarNiveladoFila(
                 **base, estado="sin_quien_factura",
@@ -420,7 +428,14 @@ async def aplicar(
         galeno = galenos_os[c.nivel if c.nivel is not None else 1]
         comps = _componentes(nom, galeno, gasto, c.unidades)
         par = pares.get(nom.id)
-        if par is not None and not sin_restr and not habilitadas.get(nom.codigo):
+        if restringe:
+            a_habilitar.extend(
+                {"obra_social_nro": obra_social_nro, "codigo": nom.codigo, "especialidad_id_colegio": e}
+                for e in esps if e not in habilitadas.get(nom.codigo, [])
+            )
+            if par is not None and par.sin_restriccion_especialidad:
+                a_quitar_restriccion.append(nom.codigo)
+        elif par is not None and not sin_restr and not habilitadas.get(nom.codigo):
             a_habilitar.extend(
                 {"obra_social_nro": obra_social_nro, "codigo": nom.codigo, "especialidad_id_colegio": e}
                 for e in esps
@@ -446,12 +461,15 @@ async def aplicar(
                 "coseguro": ne[(nom.id, esp)][-1].coseguro if (nom.id, esp) in ne else Decimal("0"),
                 "vigencia_desde": vigencia_desde, "observacion": None,
             }, comps))
-        if any((nom.id, esp) in ne for esp in variantes):
+        # El único precio sin especialidad que tenía el par "sin restricción" se reemplaza por los
+        # de las especialidades del nomenclador.
+        previas = [None, *variantes] if restringe and (nom.id, None) in ne else list(variantes)
+        if any((nom.id, esp) in ne for esp in previas):
             borradas = sum(
-                1 for esp in variantes for v in ne.get((nom.id, esp), [])
+                1 for esp in previas for v in ne.get((nom.id, esp), [])
                 if v.vigencia_desde >= vigencia_desde
             )
-            a_liberar.extend((nom.id, esp) for esp in variantes)
+            a_liberar.extend((nom.id, esp) for esp in previas)
             filas_out.append(AplicarNiveladoFila(
                 **base, estado="reemplazar" if dry_run else "reemplazado",
                 precios=len(variantes), precio=_precio(comps, galenos_por_id),
@@ -468,13 +486,18 @@ async def aplicar(
             precios=len(variantes), precio=_precio(comps, galenos_por_id),
         ))
 
+    # Primero se libera (cierra el precio sin especialidad), después el par deja de ser "sin
+    # restricción" (si no, quedaría una NE huérfana) y recién ahí se habilitan las especialidades.
+    if a_liberar and not dry_run:
+        await service.liberar_vigencias(db, obra_social_nro, "NE", a_liberar, vigencia_desde)
+    if not dry_run:
+        for codigo in a_quitar_restriccion:
+            await service.fijar_sin_restriccion_par(db, obra_social_nro, codigo, False)
     if a_habilitar and not dry_run:
         await db.execute(insert(ValorEspecialidad), a_habilitar)
     if not dry_run:
         for codigo in a_sin_restriccion:
             await service.fijar_sin_restriccion_par(db, obra_social_nro, codigo, True)
-    if a_liberar and not dry_run:
-        await service.liberar_vigencias(db, obra_social_nro, "NE", a_liberar, vigencia_desde)
     if a_crear and not dry_run:
         await service.persistir_valores_en_bloque(db, a_crear, motivo="carga_inicial")
 

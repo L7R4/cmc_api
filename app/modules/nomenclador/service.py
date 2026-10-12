@@ -1143,6 +1143,163 @@ async def regenerar_historial_por_galeno(
     return len(valor_ids_afectados)
 
 
+async def regenerar_historial_por_galenos(
+    pares: list[tuple[int, int]],
+    vigencia_desde: datetime.date,
+    db: AsyncSession,
+) -> int:
+    """
+    Regla A para VARIOS galenos a la vez: `pares` son `(galeno_anterior_id, galeno_nuevo_id)`.
+
+    Un valor calculable suele usar más de un galeno (honorarios + gastos). Rotarlos de a uno
+    con `regenerar_historial_por_galeno` recalcula ese valor una vez por galeno y deja filas
+    intermedias en el historial; acá se repunta todo primero y cada valor afectado se
+    recalcula UNA sola vez, ya con todos los precios nuevos. Retorna cuántos valores.
+    """
+    anteriores = {ant: nuevo for ant, nuevo in pares}
+    if not anteriores:
+        return 0
+    filas = (await db.execute(
+        select(ValorComponente.valor_id, ValorComponente.galeno_id)
+        .join(Valor, Valor.id == ValorComponente.valor_id)
+        .where(
+            ValorComponente.galeno_id.in_(list(anteriores)),
+            ValorComponente.activo == True,
+            Valor.estado == "activo",
+        )
+    )).all()
+    if not filas:
+        return 0
+
+    # A cada valor se le anota el galeno nuevo (el primero, si usa varios) como referencia.
+    referencia: dict[int, int] = {}
+    for valor_id, galeno_id in filas:
+        referencia.setdefault(valor_id, anteriores[galeno_id])
+
+    for ant, nuevo in anteriores.items():
+        if ant == nuevo:  # misma fila (cambio de precio con la vigencia vigente)
+            continue
+        await db.execute(
+            update(ValorComponente)
+            .where(ValorComponente.galeno_id == ant, ValorComponente.activo == True)
+            .values(galeno_id=nuevo)
+        )
+
+    await _regenerar_historial_en_bloque(referencia, vigencia_desde, db)
+    return len(referencia)
+
+
+async def _regenerar_historial_en_bloque(
+    referencia: dict[int, int],
+    vigencia_desde: datetime.date,
+    db: AsyncSession,
+) -> None:
+    """Misma regla que `regenerar_historial_por_valores` (motivo `galeno_actualizado`) para
+    muchos valores, con una cantidad de consultas que depende de los lotes y no de los
+    valores. `referencia`: `{valor_id: galeno_nuevo_id}`.
+
+    Por cada valor: si ya hay una fila de historial de su variante con esa `vigencia_desde`
+    la actualiza; si no, cierra la vigente de la variante y abre una nueva. Antes eran ~7
+    consultas por valor (2.200 valores = 30 s contra la base local, mucho más en prod).
+
+    Las filas de historial se tocan con UPDATE/INSERT directos: lo que la sesión tenga
+    cargado de `nm_historial_precio_codigo` queda desactualizado.
+    """
+    fecha_corte = vigencia_desde - datetime.timedelta(days=1)
+    valor_ids = list(referencia)
+
+    valores: dict[int, tuple] = {}
+    comps_por_valor: dict[int, list[ValorComponente]] = {}
+    for lote in _lotes(valor_ids):
+        for fila in (await db.execute(
+            select(Valor.id, Valor.nomenclador_id, Valor.obra_social_nro, Valor.origen,
+                   Valor.especialidad_id_colegio).where(Valor.id.in_(lote))
+        )).all():
+            valores[fila.id] = (fila.obra_social_nro, fila.nomenclador_id, fila.origen,
+                                fila.especialidad_id_colegio)
+        for c in (await db.execute(
+            select(ValorComponente)
+            .where(ValorComponente.valor_id.in_(lote), ValorComponente.activo == True)
+            .order_by(ValorComponente.valor_id, ValorComponente.orden)
+        )).scalars():
+            comps_por_valor.setdefault(c.valor_id, []).append(c)
+
+    galeno_ids = {c.galeno_id for cs in comps_por_valor.values() for c in cs if c.galeno_id}
+    galenos: dict[int, Galeno] = {}
+    for lote in _lotes(list(galeno_ids)):
+        galenos.update({g.id: g for g in (await db.execute(
+            select(Galeno).where(Galeno.id.in_(lote))
+        )).scalars()})
+
+    # Un plan por variante: si dos valores comparten variante gana el último, igual que
+    # cuando se procesaban de a uno (el segundo encontraba la fila del primero).
+    plan: dict[tuple, tuple[int, Decimal, list]] = {}
+    for valor_id in valor_ids:
+        clave = valores.get(valor_id)
+        if clave is None:
+            continue
+        precio, snapshot = precio_y_snapshot(comps_por_valor.get(valor_id, []), galenos)
+        plan[clave] = (valor_id, precio, snapshot)
+
+    os_nros = {k[0] for k in plan}
+    nom_ids = list({k[1] for k in plan})
+    existentes: dict[tuple, HistorialPrecioCodigo] = {}
+    abiertas: dict[tuple, list[int]] = {}
+    for lote in _lotes(nom_ids):
+        for h in (await db.execute(
+            select(HistorialPrecioCodigo).where(
+                HistorialPrecioCodigo.obra_social_nro.in_(os_nros),
+                HistorialPrecioCodigo.nomenclador_id.in_(lote),
+                or_(
+                    HistorialPrecioCodigo.vigencia_desde == vigencia_desde,
+                    HistorialPrecioCodigo.vigencia_hasta.is_(None),
+                ),
+            )
+        )).scalars():
+            clave = (h.obra_social_nro, h.nomenclador_id, h.origen, h.especialidad_id_colegio)
+            if clave not in plan:
+                continue
+            if h.vigencia_desde == vigencia_desde:
+                existentes[clave] = h
+            elif h.vigencia_hasta is None:
+                abiertas.setdefault(clave, []).append(h.id)
+
+    ahora = datetime.datetime.utcnow()
+    a_cerrar: list[int] = []
+    nuevas: list[dict] = []
+    for clave, (valor_id, precio, snapshot) in plan.items():
+        galeno_nuevo_id = referencia[valor_id]
+        previa = existentes.get(clave)
+        if previa is not None:
+            previa.precio_total = precio
+            previa.componentes_snapshot = snapshot
+            previa.motivo_cambio = "galeno_actualizado"
+            previa.vigencia_hasta = None
+            previa.valores_id = valor_id
+            previa.referencia_cambio_id = galeno_nuevo_id
+            previa.fecha_cambio = ahora
+            continue
+        a_cerrar.extend(abiertas.get(clave, []))
+        nuevas.append({
+            "nomenclador_id": clave[1], "obra_social_nro": clave[0], "origen": clave[2],
+            "especialidad_id_colegio": clave[3], "vigencia_desde": vigencia_desde,
+            "vigencia_hasta": None, "precio_total": precio, "valores_id": valor_id,
+            "componentes_snapshot": snapshot, "motivo_cambio": "galeno_actualizado",
+            "referencia_cambio_id": galeno_nuevo_id, "fecha_cambio": ahora,
+        })
+
+    for lote in _lotes(a_cerrar):
+        await db.execute(
+            update(HistorialPrecioCodigo)
+            .where(HistorialPrecioCodigo.id.in_(lote))
+            .values(vigencia_hasta=fecha_corte)
+            .execution_options(synchronize_session=False)
+        )
+    for lote in _lotes(nuevas):
+        await db.execute(insert(HistorialPrecioCodigo), lote)
+    await db.flush()
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Regla A para unidades-plantilla del galeno + import de galenos entre OS
 # ─────────────────────────────────────────────────────────────────────────────

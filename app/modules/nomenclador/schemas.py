@@ -366,6 +366,26 @@ class GalenoActualizarPrecioMasivoIn(BaseModel):
         return self
 
 
+class GalenoPrecioLoteItem(BaseModel):
+    codigo: str
+    # Un solo valor unitario para todos los niveles vigentes del galeno (cada nivel
+    # conserva sus unidades).
+    nuevo_valor_unitario: Decimal = Field(ge=0)
+
+
+class GalenosPrecioLoteIn(BaseModel):
+    """Cambio de precio de varios galenos de una obra social: todo o nada."""
+    obra_social_nro: int
+    vigencia_desde: datetime.date
+    items: List[GalenoPrecioLoteItem] = Field(min_length=1, max_length=500)
+
+
+class GalenosPrecioLoteOut(BaseModel):
+    galenos: int
+    filas: int  # galenos x niveles rotados
+    valores_recalculados: int
+
+
 class GalenoOut(BaseModel):
     id: int
     obra_social_nro: int
@@ -1779,7 +1799,7 @@ class AplicarNiveladoOut(BaseModel):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Importar valores fijos NE desde Excel (CODIGO | DESCRIPCION | VALOR)
+# Importar valores fijos NE desde Excel (CODIGO | DESCRIPCION | HONORARIOS | GASTOS | AYUDANTE)
 # ─────────────────────────────────────────────────────────────────────────────
 
 EstadoFilaFija = Literal[
@@ -1793,18 +1813,20 @@ AccionFija = Literal[
 
 
 class ImportarFijosFilaIn(BaseModel):
-    """Una fila del Excel tal como la leyó el front. `valor` llega crudo (número o
-    texto: "$ 1.234.567", "PRESUPUESTO") y lo interpreta el back."""
+    """Una fila del Excel tal como la leyó el front. Los importes llegan crudos (número o
+    texto: "$ 1.234.567"; HONORARIOS admite además "PRESUPUESTO") y los interpreta el back."""
     fila: int
     codigo: Optional[str] = None
     descripcion: Optional[str] = None
-    valor: Optional[str | float | int] = None
+    honorarios: Optional[str | float | int] = None
+    gastos: Optional[str | float | int] = None
+    ayudante: Optional[str | float | int] = None
 
 
 class ImportarFijosIn(BaseModel):
     obra_social_nro: int
     vigencia_desde: datetime.date
-    # Fila 1 del Excel: se valida contra CODIGO | DESCRIPCION | VALOR.
+    # Fila 1 del Excel: se valida contra CODIGO | DESCRIPCION | HONORARIOS | GASTOS | AYUDANTE.
     encabezado: List[Optional[str]]
     filas: List[ImportarFijosFilaIn] = Field(..., min_length=1, max_length=5000)
 
@@ -1857,7 +1879,11 @@ class FilaPreviaOut(BaseModel):
     descripcion_os: Optional[str] = None
     nomenclador_id: Optional[int] = None
     categoria: Optional[str] = None
-    valor: Optional[Decimal] = None
+    # Importes que se cargan (None si la fila no se pudo interpretar o es por presupuesto).
+    honorarios: Optional[Decimal] = None
+    gastos: Optional[Decimal] = None
+    ayudante: Optional[Decimal] = None
+    total: Optional[Decimal] = None
     por_presupuesto: bool = False
     estado: EstadoFilaFija
     # Estado de la fila sin contar que el código está repetido en el archivo.

@@ -31,7 +31,7 @@ from app.modules.nomenclador.schemas import (
 
 OS = 990_096
 VIG = datetime.date(2026, 10, 1)
-ENC = ["Codigo", "Descripción", "valor"]
+ENC = ["Codigo", "Descripción", "honorarios", " Gastos ", "AYUDANTE"]
 NUEVO = "ZZ9001"
 
 
@@ -56,26 +56,60 @@ def s(db, monkeypatch):
     ("1.234,50", Decimal("1234.50")),
     ("1234,5", Decimal("1234.50")),
     ("61826", Decimal("61826.00")),
+    (None, Decimal("0.00")),   # celda vacía = 0
+    ("", Decimal("0.00")),
+    (0, Decimal("0.00")),
 ])
-def test_parsear_valor_numeros(raw, esperado):
-    assert importar_fijos.parsear_valor(raw) == (esperado, False, None)
+def test_parsear_importe(raw, esperado):
+    assert importar_fijos._parsear_importe(raw, "X") == (esperado, False, None)
 
 
 @pytest.mark.parametrize("raw", ["PRESUPUESTO", "presupuesto", " Presupuesto "])
-def test_parsear_valor_presupuesto(raw):
-    assert importar_fijos.parsear_valor(raw) == (None, True, None)
+def test_parsear_importe_presupuesto(raw):
+    assert importar_fijos._parsear_importe(raw, "X") == (None, True, None)
 
 
-@pytest.mark.parametrize("raw", [None, "", "abc", "$ 12.34.5", 0, -5, "0"])
-def test_parsear_valor_invalido(raw):
-    importe, presupuesto, error = importar_fijos.parsear_valor(raw)
-    assert importe is None and not presupuesto and error
+@pytest.mark.parametrize("raw", ["abc", "$ 12.34.5", -5, "-1"])
+def test_parsear_importe_invalido(raw):
+    importe, presupuesto, error = importar_fijos._parsear_importe(raw, "GASTOS")
+    assert importe is None and not presupuesto and "GASTOS" in error
+
+
+def test_parsear_importes_de_la_fila():
+    cero = Decimal("0.00")
+    assert importar_fijos.parsear_importes("$ 1.000", 50, "25,5") == (
+        Decimal("1000.00"), Decimal("50.00"), Decimal("25.50"), False, None)
+    # Sólo gastos o sólo ayudante también vale: alcanza con que el total sea > 0.
+    assert importar_fijos.parsear_importes(None, "300", None) == (cero, Decimal("300.00"), cero, False, None)
+    assert importar_fijos.parsear_importes("PRESUPUESTO", None, "") == (cero, cero, cero, True, None)
+    # Las tres vacías = por presupuesto.
+    for vacias in ((None, None, None), ("", " ", None)):
+        assert importar_fijos.parsear_importes(*vacias) == (cero, cero, cero, True, None)
+
+
+@pytest.mark.parametrize("h, g, a, texto", [
+    (0, "", 0, "mayor a 0"),     # ceros explícitos no son «vacío»: no es por presupuesto
+    (0, 0, 0, "mayor a 0"),
+    ("abc", 10, 10, "HONORARIOS"),
+    (10, "x", 10, "GASTOS"),
+    (10, 10, -1, "AYUDANTE"),
+    (10, "PRESUPUESTO", None, "sólo se admite en HONORARIOS"),
+    ("PRESUPUESTO", 100, None, "tienen que estar vacíos"),
+    ("PRESUPUESTO", None, 5, "tienen que estar vacíos"),
+])
+def test_parsear_importes_con_error(h, g, a, texto):
+    *montos, presupuesto, error = importar_fijos.parsear_importes(h, g, a)
+    assert texto in error and not presupuesto and montos == [Decimal("0.00")] * 3
 
 
 def test_encabezado_sin_importar_mayusculas_ni_tildes():
-    importar_fijos.validar_encabezado(["codigo", "DESCRIPCIÓN", " Valor ", None, ""])
-    for malo in (["CODIGO", "VALOR", "DESCRIPCION"], ["CODIGO", "DESCRIPCION"],
-                 ["CODIGO", "DESCRIPCION", "VALOR", "OTRA"]):
+    importar_fijos.validar_encabezado(["codigo", "DESCRIPCIÓN", " Honorarios ", "gastos", "Ayudante", None, ""])
+    for malo in (
+        ["CODIGO", "DESCRIPCION", "VALOR"],                                   # estructura vieja
+        ["CODIGO", "DESCRIPCION", "HONORARIOS", "GASTOS"],                    # falta una
+        ["CODIGO", "DESCRIPCION", "GASTOS", "HONORARIOS", "AYUDANTE"],        # otro orden
+        ["CODIGO", "DESCRIPCION", "HONORARIOS", "GASTOS", "AYUDANTE", "VALOR"],  # sobra una
+    ):
         with pytest.raises(HTTPException) as e:
             importar_fijos.validar_encabezado(malo)
         assert e.value.status_code == 422
@@ -125,14 +159,15 @@ async def _preparar(db):
 
 def _filas(a, b, c, d, e):
     return [
-        {"fila": 2, "codigo": a.codigo, "descripcion": "A", "valor": "$ 1.100"},
-        {"fila": 3, "codigo": b.codigo, "descripcion": "B excel", "valor": "PRESUPUESTO"},
-        {"fila": 4, "codigo": c.codigo, "descripcion": "C", "valor": 500},
-        {"fila": 5, "codigo": d.codigo, "descripcion": "D", "valor": "250"},
-        {"fila": 6, "codigo": e.codigo, "descripcion": "E", "valor": "400"},
-        {"fila": 7, "codigo": NUEVO, "descripcion": "Código nuevo", "valor": "$ 7.000"},
-        {"fila": 8, "codigo": "", "descripcion": "sin código", "valor": "1"},
-        {"fila": 9, "codigo": a.codigo, "descripcion": "valor roto", "valor": "abc"},
+        {"fila": 2, "codigo": a.codigo, "descripcion": "A", "honorarios": "$ 1.100", "gastos": 50,
+         "ayudante": "25"},
+        {"fila": 3, "codigo": b.codigo, "descripcion": "B excel"},   # las tres vacías = presupuesto
+        {"fila": 4, "codigo": c.codigo, "descripcion": "C", "honorarios": 500},
+        {"fila": 5, "codigo": d.codigo, "descripcion": "D", "honorarios": "250"},
+        {"fila": 6, "codigo": e.codigo, "descripcion": "E", "honorarios": "400"},
+        {"fila": 7, "codigo": NUEVO, "descripcion": "Código nuevo", "honorarios": "$ 7.000", "ayudante": 700},
+        {"fila": 8, "codigo": "", "descripcion": "sin código", "honorarios": "1"},
+        {"fila": 9, "codigo": a.codigo, "descripcion": "valor roto", "honorarios": "abc"},
     ]
 
 
@@ -165,9 +200,11 @@ async def test_previsualizar_clasifica_cada_estado_y_no_escribe(s):
         8: ("error", "omitir"),
         9: ("error", "omitir"),
     }
-    assert por_fila[2].valor == Decimal("1100.00")
+    assert (por_fila[2].honorarios, por_fila[2].gastos, por_fila[2].ayudante, por_fila[2].total) == (
+        Decimal("1100.00"), Decimal("50.00"), Decimal("25.00"), Decimal("1175.00"))
     assert por_fila[2].variantes[0].precio_actual == Decimal("100.00")
-    assert por_fila[2].variantes[0].variacion_pct == 1000.0
+    assert por_fila[2].variantes[0].variacion_pct == 1075.0
+    assert por_fila[3].total is None and por_fila[9].total is None and "HONORARIOS" in por_fila[9].motivo
     assert por_fila[3].por_presupuesto and por_fila[3].especialidades == [e1, e2]
     assert por_fila[4].requiere_quien_factura and por_fila[7].requiere_quien_factura
     assert por_fila[6].variantes[0].posteriores == 1
@@ -196,11 +233,11 @@ async def test_aplicar_carga_rota_da_de_alta_y_crea_codigo(s):
     assert out.precios_creados == 7  # b va a 2 especialidades
     assert out.filas_rotadas == 3 and out.vigencias_borradas == 2
 
-    # a: se cerró la anterior el día previo y se abrió la nueva, sólo Honorarios.
+    # a: se cerró la anterior el día previo y se abrió la nueva, con los tres importes.
     va = await _activos(s, a.id)
     assert len(va) == 1 and va[0].vigencia_desde == VIG and va[0].especialidad_id_colegio == e1
     assert await _comps(s, va[0].id) == {
-        "Honorarios": Decimal("1100.00"), "Gastos": Decimal("0.00"), "Ayudante": Decimal("0.00"),
+        "Honorarios": Decimal("1100.00"), "Gastos": Decimal("50.00"), "Ayudante": Decimal("25.00"),
     }
     cerrada = (await s.execute(select(Valor).where(
         Valor.obra_social_nro == OS, Valor.nomenclador_id == a.id, Valor.estado == "cerrado",
@@ -209,7 +246,7 @@ async def test_aplicar_carga_rota_da_de_alta_y_crea_codigo(s):
     hist = (await s.execute(select(HistorialPrecioCodigo).where(
         HistorialPrecioCodigo.valores_id == va[0].id,
     ))).scalar_one()
-    assert hist.motivo_cambio == "valor_fijo_actualizado" and hist.precio_total == Decimal("1100.00")
+    assert hist.motivo_cambio == "valor_fijo_actualizado" and hist.precio_total == Decimal("1175.00")
 
     # b: alta con la plantilla, por presupuesto, una variante por especialidad.
     vb = await _activos(s, b.id)
@@ -251,7 +288,9 @@ async def test_aplicar_carga_rota_da_de_alta_y_crea_codigo(s):
     assert par_n.sin_restriccion_especialidad
     vn = await _activos(s, nuevo.id)
     assert len(vn) == 1 and vn[0].especialidad_id_colegio is None
-    assert (await _comps(s, vn[0].id))["Honorarios"] == Decimal("7000.00")
+    assert await _comps(s, vn[0].id) == {
+        "Honorarios": Decimal("7000.00"), "Gastos": Decimal("0.00"), "Ayudante": Decimal("700.00"),
+    }
 
 
 @pytest.mark.asyncio
@@ -276,9 +315,9 @@ async def test_aplicar_rechaza_si_cambio_el_estado_o_la_accion_no_vale(s):
 async def test_aplicar_exige_decidir_quien_factura_y_duplicados(s):
     (a, b, c, d, e), (e1, _) = await _preparar(s)
     filas = [
-        {"fila": 2, "codigo": c.codigo, "descripcion": "C", "valor": 500},
-        {"fila": 3, "codigo": a.codigo, "descripcion": "A1", "valor": 10},
-        {"fila": 4, "codigo": a.codigo, "descripcion": "A2", "valor": 20},
+        {"fila": 2, "codigo": c.codigo, "descripcion": "C", "honorarios": 500},
+        {"fila": 3, "codigo": a.codigo, "descripcion": "A1", "honorarios": 10},
+        {"fila": 4, "codigo": a.codigo, "descripcion": "A2", "honorarios": 20},
     ]
     previa = await importar_fijos.previsualizar(s, ImportarFijosIn(
         obra_social_nro=OS, vigencia_desde=VIG, encabezado=ENC, filas=filas,
@@ -407,5 +446,47 @@ async def test_replicar_en_una_os_fuera_de_la_familia_da_422(s):
         await importar_fijos.aplicar(s, ImportarFijosAplicarIn(
             obra_social_nro=OS, vigencia_desde=VIG, encabezado=ENC, filas=_filas(a, b, c, d, e)[:1],
             replicar_en=[81], decisiones=[{"fila": 2, "estado_visto": "rotar", "accion": "rotar"}],
+        ), "t")
+    assert ex.value.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_sin_cambio_compara_cada_componente_y_no_solo_el_total(s):
+    """Mismo total con otro reparto entre honorarios, gastos y ayudante NO es «sin cambio»."""
+    (a, b, c, d, e), _ = await _preparar(s)   # d: Honorarios 200 desde VIG
+
+    def fila(**montos):
+        return [{"fila": 2, "codigo": d.codigo, "descripcion": "D", **montos}]
+
+    async def previa(filas):
+        out = await importar_fijos.previsualizar(s, ImportarFijosIn(
+            obra_social_nro=OS, vigencia_desde=VIG, encabezado=ENC, filas=filas,
+        ))
+        return out.filas[0]
+
+    igual = await previa(fila(honorarios=200))
+    assert igual.estado == "misma_vigencia" and igual.sin_cambio and igual.accion_sugerida == "omitir"
+    assert igual.avisos == ["El precio vigente ya es el mismo"]
+
+    otro_reparto = await previa(fila(honorarios=150, gastos=50))   # total 200, componentes distintos
+    assert not otro_reparto.sin_cambio and otro_reparto.accion_sugerida == "sobrescribir"
+
+    con_ayudante = await previa(fila(honorarios=200, ayudante=10))
+    assert not con_ayudante.sin_cambio and con_ayudante.total == Decimal("210.00")
+
+
+@pytest.mark.asyncio
+async def test_estructura_vieja_se_rechaza_al_previsualizar_y_aplicar(s):
+    (a, *_), _ = await _preparar(s)
+    filas = [{"fila": 2, "codigo": a.codigo, "descripcion": "A", "honorarios": 10}]
+    vieja = ["CODIGO", "DESCRIPCION", "VALOR"]
+    with pytest.raises(HTTPException) as ex:
+        await importar_fijos.previsualizar(s, ImportarFijosIn(
+            obra_social_nro=OS, vigencia_desde=VIG, encabezado=vieja, filas=filas,
+        ))
+    assert ex.value.status_code == 422 and "HONORARIOS" in ex.value.detail
+    with pytest.raises(HTTPException) as ex:
+        await importar_fijos.aplicar(s, ImportarFijosAplicarIn(
+            obra_social_nro=OS, vigencia_desde=VIG, encabezado=vieja, filas=filas, decisiones=[],
         ), "t")
     assert ex.value.status_code == 422

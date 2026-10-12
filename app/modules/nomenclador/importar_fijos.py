@@ -1,4 +1,5 @@
-"""Importar valores fijos NE de una obra social desde un Excel `CODIGO | DESCRIPCION | VALOR`.
+"""Importar valores fijos NE de una obra social desde un Excel
+`CODIGO | DESCRIPCION | HONORARIOS | GASTOS | AYUDANTE`.
 
 Carga PRECIOS (no recalcula). Dos pasos sobre el mismo body:
 - `clasificar`: sólo lectura. Dice, fila por fila, en qué estado está el código en la
@@ -7,8 +8,9 @@ Carga PRECIOS (no recalcula). Dos pasos sobre el mismo body:
 - `aplicar`: vuelve a clasificar (no confía en la vista previa), valida las decisiones
   del usuario y escribe todo en una sola transacción — o se carga todo o nada.
 
-Cada fila se carga como NE de modalidad fija: Honorarios = VALOR, Gastos y Ayudante
-en 0 ("PRESUPUESTO" → por presupuesto, los tres en 0). Una variante por cada
+Cada fila se carga como NE de modalidad fija, con un importe por componente. Una celda
+vacía de importe vale 0, pero al menos uno tiene que ser mayor a 0. Las tres vacías (o
+"PRESUPUESTO" en HONORARIOS) → por presupuesto: los tres componentes en 0. Una variante por cada
 especialidad que factura el código en la O.S., o una sola sin especialidad si el par
 es "sin restricción" (mismo criterio que `routes_valores.importar_valores_csv`).
 
@@ -34,6 +36,7 @@ from app.db.models.nomenclador_cmc import (
     NomencladorCMC,
     NomencladorPlantillaEspecialidad,
     Valor,
+    ValorComponente,
     ValorEspecialidad,
 )
 from app.modules.nomenclador import alta_os, aplicar_plantilla, service
@@ -54,7 +57,7 @@ from app.modules.nomenclador.schemas import (
     VarianteActualOut,
 )
 
-ENCABEZADO = ("CODIGO", "DESCRIPCION", "VALOR")
+ENCABEZADO = ("CODIGO", "DESCRIPCION", "HONORARIOS", "GASTOS", "AYUDANTE")
 PRESUPUESTO = "PRESUPUESTO"
 _DOS_DEC = Decimal("0.01")
 
@@ -93,8 +96,8 @@ def _norm(texto) -> str:
 
 
 def validar_encabezado(encabezado: list) -> None:
-    """422 si la fila 1 no es exactamente CODIGO | DESCRIPCION | VALOR (sin importar
-    mayúsculas ni tildes). Celdas vacías a la derecha se toleran."""
+    """422 si la fila 1 no es exactamente CODIGO | DESCRIPCION | HONORARIOS | GASTOS |
+    AYUDANTE (sin importar mayúsculas ni tildes). Celdas vacías a la derecha se toleran."""
     recibido = [_norm(c) for c in encabezado]
     while recibido and not recibido[-1]:
         recibido.pop()
@@ -105,31 +108,61 @@ def validar_encabezado(encabezado: list) -> None:
         ))
 
 
-def parsear_valor(raw) -> tuple[Optional[Decimal], bool, Optional[str]]:
-    """`(importe, por_presupuesto, error)`. Acepta números, texto en formato AR
-    ("$ 1.234.567", "1.234,50") y PRESUPUESTO."""
+def _parsear_importe(raw, columna: str) -> tuple[Optional[Decimal], bool, Optional[str]]:
+    """`(importe, es_presupuesto, error)` de una celda. Vacía = 0. Acepta números y texto en
+    formato AR ("$ 1.234.567", "1.234,50"); PRESUPUESTO se reconoce y lo valida quien llama."""
     if raw is None or (isinstance(raw, str) and not raw.strip()):
-        return None, False, "Falta el valor"
+        return Decimal("0.00"), False, None
     if isinstance(raw, bool):
-        return None, False, f"Valor inválido: {raw}"
+        return None, False, f"{columna}: valor inválido ({raw})"
     if isinstance(raw, (int, float)):
         try:
             importe = Decimal(str(raw))
         except InvalidOperation:
-            return None, False, f"Valor inválido: {raw}"
+            return None, False, f"{columna}: valor inválido ({raw})"
     else:
         s = str(raw)
         if _norm(s) == PRESUPUESTO:
             return None, True, None
-        s = s.replace("$", "").replace(" ", "").replace(" ", "")
+        s = s.replace("$", "").replace(" ", "").replace(" ", "")
         if re.fullmatch(r"\d{1,3}(\.\d{3})+(,\d+)?", s) or re.fullmatch(r"\d+,\d+", s):
             s = s.replace(".", "").replace(",", ".")      # 1.234.567,50 → 1234567.50
         elif not re.fullmatch(r"\d+(\.\d{1,2})?", s):     # 37965 / 37965.5
-            return None, False, f"Valor inválido: «{raw}»"
+            return None, False, f"{columna}: valor inválido («{raw}»)"
         importe = Decimal(s)
-    if importe <= 0:
-        return None, False, f"El valor tiene que ser mayor a 0 (llegó {raw})"
+    if importe < 0:
+        return None, False, f"{columna}: no puede ser negativo (llegó {raw})"
     return importe.quantize(_DOS_DEC), False, None
+
+
+def _vacia(raw) -> bool:
+    return raw is None or (isinstance(raw, str) and not raw.strip())
+
+
+def parsear_importes(
+    honorarios, gastos, ayudante,
+) -> tuple[Decimal, Decimal, Decimal, bool, Optional[str]]:
+    """`(honorarios, gastos, ayudante, por_presupuesto, error)` de una fila. Es por
+    presupuesto si las tres celdas vienen vacías (o HONORARIOS dice PRESUPUESTO); entonces
+    los tres valen 0. Con error, los importes no se pueden usar."""
+    cero = Decimal("0.00")
+    if _vacia(honorarios) and _vacia(gastos) and _vacia(ayudante):
+        return cero, cero, cero, True, None
+    h, presupuesto, error = _parsear_importe(honorarios, "HONORARIOS")
+    g, g_presu, g_error = _parsear_importe(gastos, "GASTOS")
+    a, a_presu, a_error = _parsear_importe(ayudante, "AYUDANTE")
+    error = error or g_error or a_error
+    if error is None and (g_presu or a_presu):
+        error = "PRESUPUESTO sólo se admite en HONORARIOS"
+    if error is not None:
+        return cero, cero, cero, False, error
+    if presupuesto:
+        if g or a:
+            return cero, cero, cero, False, "Con PRESUPUESTO en HONORARIOS, GASTOS y AYUDANTE tienen que estar vacíos"
+        return cero, cero, cero, True, None
+    if h + g + a <= 0:
+        return cero, cero, cero, False, "Al menos uno de HONORARIOS, GASTOS o AYUDANTE tiene que ser mayor a 0"
+    return h, g, a, False, None
 
 
 def normalizar_codigo(raw) -> str:
@@ -140,14 +173,13 @@ def normalizar_codigo(raw) -> str:
     return str(raw).strip()
 
 
-def componentes_fijos(importe: Optional[Decimal], por_presupuesto: bool) -> list[dict]:
-    """Honorarios = importe; Gastos y Ayudante en 0. Por presupuesto, los tres en 0."""
-    honorarios = Decimal("0") if por_presupuesto or importe is None else importe
+def componentes_fijos(honorarios: Decimal, gastos: Decimal, ayudante: Decimal) -> list[dict]:
+    """Un componente fijo por concepto, con su importe (por presupuesto, los tres en 0)."""
     return [
         {"concepto": concepto, "galeno_id": None, "cantidad": Decimal("0"),
          "valor_unitario": monto, "orden": orden}
         for orden, (concepto, monto) in enumerate((
-            ("Honorarios", honorarios), ("Gastos", Decimal("0")), ("Ayudante", Decimal("0")),
+            ("Honorarios", honorarios), ("Gastos", gastos), ("Ayudante", ayudante),
         ))
     ]
 
@@ -162,6 +194,8 @@ class _Contexto:
     plantillas: dict[str, list[int]]                      # código → plantilla del Colegio
     ne: dict[tuple[int, Optional[int]], list[Valor]]      # variante → valores NE (viejo→nuevo)
     precios: dict[int, Decimal] = field(default_factory=dict)  # valor_id → precio_total
+    # valor_id → (honorarios, gastos, ayudante) si los tres son fijos; None si alguno se calcula
+    montos: dict[int, Optional[tuple[Decimal, Decimal, Decimal]]] = field(default_factory=dict)
 
 
 async def _contexto(db: AsyncSession, obra_social_nro: int, codigos: set[str]) -> _Contexto:
@@ -205,6 +239,25 @@ async def _contexto(db: AsyncSession, obra_social_nro: int, codigos: set[str]) -
             HistorialPrecioCodigo.valores_id, HistorialPrecioCodigo.precio_total,
         ).where(HistorialPrecioCodigo.valores_id.in_(valor_ids[i:i + 1000])))).all():
             ctx.precios[vid] = precio
+        por_valor: dict[int, dict[str, Decimal]] = {}
+        calculables: set[int] = set()
+        for vid, concepto, galeno_id, vu in (await db.execute(select(
+            ValorComponente.valor_id, ValorComponente.concepto, ValorComponente.galeno_id,
+            ValorComponente.valor_unitario,
+        ).where(
+            ValorComponente.valor_id.in_(valor_ids[i:i + 1000]), ValorComponente.activo == True,  # noqa: E712
+        ))).all():
+            if galeno_id is not None:
+                calculables.add(vid)
+            else:
+                por_valor.setdefault(vid, {})[concepto] = vu or Decimal("0")
+        for vid in {*por_valor, *calculables}:
+            fijos = por_valor.get(vid, {})
+            ctx.montos[vid] = None if vid in calculables else (
+                fijos.get("Honorarios", Decimal("0")),
+                fijos.get("Gastos", Decimal("0")),
+                fijos.get("Ayudante", Decimal("0")),
+            )
     return ctx
 
 
@@ -240,10 +293,11 @@ async def clasificar(
     candidatos: set[str] = set()
     for f in filas:
         cod = normalizar_codigo(f.codigo)
-        importe, presupuesto, error = parsear_valor(f.valor)
+        montos = parsear_importes(f.honorarios, f.gastos, f.ayudante)
+        error = montos[4]
         if not cod:
             error = "Falta el código"
-        parseadas.append((f, cod, importe, presupuesto, error))
+        parseadas.append((f, cod, montos[:3], montos[3], error))
         if cod:
             candidatos.add(cod)
             if cod.isdigit() and len(cod) < 6:
@@ -255,7 +309,9 @@ async def clasificar(
     )
 
     out: list[FilaPreviaOut] = []
-    for f, cod, importe, presupuesto, error in parseadas:
+    for f, cod, montos, presupuesto, error in parseadas:
+        honorarios, gastos, ayudante = montos
+        importe = None if presupuesto or error else sum(montos, Decimal("0"))
         avisos: list[str] = []
         if cod and cod not in ctx.noms and cod.isdigit() and len(cod) < 6 and cod.zfill(6) in ctx.noms:
             avisos.append(f"El código {cod} no existe; se tomó {cod.zfill(6)}")
@@ -263,7 +319,9 @@ async def clasificar(
         base = dict(
             fila=f.fila, codigo=cod, codigo_excel=normalizar_codigo(f.codigo) or None,
             descripcion_excel=(f.descripcion or "").strip() or None,
-            valor=importe, por_presupuesto=presupuesto, avisos=avisos,
+            honorarios=None if error else honorarios, gastos=None if error else gastos,
+            ayudante=None if error else ayudante, total=importe,
+            por_presupuesto=presupuesto, avisos=avisos,
         )
         nom = ctx.noms.get(cod)
         if error is None and nom is not None and not nom.activo:
@@ -292,7 +350,7 @@ async def clasificar(
         # Precio NE de cada variante destino.
         variantes: list[VarianteActualOut] = []
         hay_posterior = hay_misma = hay_cubre = False
-        precios_previos: list[Decimal] = []
+        iguales: list[bool] = []  # por variante: el precio vigente ya es el que se carga
         for esp in variantes_dest:
             vs = ctx.ne.get((nom.id, esp), [])
             posteriores = [v for v in vs if v.vigencia_desde > vigencia]
@@ -306,8 +364,12 @@ async def clasificar(
             precio = ctx.precios.get(ref.id) if ref is not None else None
             if ref is not None and ref.por_presupuesto:
                 precio = None
-            if precio is not None:
-                precios_previos.append(precio)
+            iguales.append(
+                ref is not None and (
+                    ref.por_presupuesto if presupuesto
+                    else not ref.por_presupuesto and ctx.montos.get(ref.id) == montos
+                )
+            )
             variantes.append(VarianteActualOut(
                 especialidad_id_colegio=esp,
                 especialidad=nombres.get(esp) if esp is not None else None,
@@ -339,17 +401,8 @@ async def clasificar(
         requiere_qf = estado == "sin_quien_factura" or (
             estado in ("sin_alta", "suspendido") and not sin_restr and not esps
         )
-        # Mismo precio en todas las variantes (y mismo tipo): no hay nada que rotar.
-        sin_cambio = (
-            estado in ("rotar", "misma_vigencia") and not presupuesto
-            and len(precios_previos) == len(variantes_dest) > 0
-            and all(p == importe for p in precios_previos)
-        ) or (
-            estado in ("rotar", "misma_vigencia") and presupuesto and all(
-                (ctx.ne.get((nom.id, e)) or [None])[-1] is not None
-                and ctx.ne[(nom.id, e)][-1].por_presupuesto for e in variantes_dest
-            )
-        )
+        # Mismos importes en todas las variantes (y mismo tipo): no hay nada que rotar.
+        sin_cambio = estado in ("rotar", "misma_vigencia") and bool(iguales) and all(iguales)
         if sin_cambio:
             avisos.append("El precio vigente ya es el mismo")
         if estado in ("sin_alta", "suspendido") and (hay_posterior or hay_misma):
@@ -623,7 +676,7 @@ async def _aplicar_en_os(
                 "vigencia_desde": vigencia, "observacion": None,
             }
             (con_previo if previos else sin_previo).append(
-                (campos, componentes_fijos(f.valor, f.por_presupuesto))
+                (campos, componentes_fijos(f.honorarios, f.gastos, f.ayudante))
             )
         if habia_precio:
             tot.rotadas += 1

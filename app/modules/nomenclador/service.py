@@ -1123,23 +1123,11 @@ async def regenerar_historial_por_galeno(
         .values(galeno_id=nuevo_galeno_id)
     )
 
-    # 3. Para cada valor afectado, regenerar historial
-    fecha_corte = vigencia_desde - datetime.timedelta(days=1)
-    for valor_id in valor_ids_afectados:
-        await regenerar_historial_por_valores(
-            valor_id, fecha_corte, db, motivo="galeno_actualizado",
-            nueva_vigencia_desde=vigencia_desde,
-        )
-        # Reasignar la referencia de cambio al galeno nuevo
-        await db.execute(
-            update(HistorialPrecioCodigo)
-            .where(
-                HistorialPrecioCodigo.valores_id == valor_id,
-                HistorialPrecioCodigo.vigencia_hasta.is_(None),
-                HistorialPrecioCodigo.motivo_cambio == "galeno_actualizado",
-            )
-            .values(referencia_cambio_id=nuevo_galeno_id)
-        )
+    # 3. Para cada valor afectado, regenerar historial (en bloque; admite una vigencia anterior
+    # a las ya cargadas: borra las posteriores y deja ésta como la última).
+    await _regenerar_historial_en_bloque(
+        {valor_id: nuevo_galeno_id for valor_id in valor_ids_afectados}, vigencia_desde, db,
+    )
 
     return len(valor_ids_afectados)
 
@@ -1246,14 +1234,16 @@ async def _regenerar_historial_en_bloque(
     nom_ids = list({k[1] for k in plan})
     existentes: dict[tuple, HistorialPrecioCodigo] = {}
     abiertas: dict[tuple, list[int]] = {}
+    a_borrar: list[int] = []
     for lote in _lotes(nom_ids):
         for h in (await db.execute(
             select(HistorialPrecioCodigo).where(
                 HistorialPrecioCodigo.obra_social_nro.in_(os_nros),
                 HistorialPrecioCodigo.nomenclador_id.in_(lote),
                 or_(
-                    HistorialPrecioCodigo.vigencia_desde == vigencia_desde,
+                    HistorialPrecioCodigo.vigencia_desde >= vigencia_desde,
                     HistorialPrecioCodigo.vigencia_hasta.is_(None),
+                    HistorialPrecioCodigo.vigencia_hasta >= vigencia_desde,
                 ),
             )
         )).scalars():
@@ -1262,7 +1252,11 @@ async def _regenerar_historial_en_bloque(
                 continue
             if h.vigencia_desde == vigencia_desde:
                 existentes[clave] = h
-            elif h.vigencia_hasta is None:
+            elif h.vigencia_desde > vigencia_desde:
+                # Vigencia anterior a las cargadas: la que se carga pasa a ser la última.
+                a_borrar.append(h.id)
+            else:
+                # Cubre la fecha (abierta o cerrada después de ella): se cierra el día anterior.
                 abiertas.setdefault(clave, []).append(h.id)
 
     ahora = datetime.datetime.utcnow()
@@ -1289,6 +1283,11 @@ async def _regenerar_historial_en_bloque(
             "referencia_cambio_id": galeno_nuevo_id, "fecha_cambio": ahora,
         })
 
+    for lote in _lotes(a_borrar):
+        await db.execute(
+            delete(HistorialPrecioCodigo).where(HistorialPrecioCodigo.id.in_(lote))
+            .execution_options(synchronize_session=False)
+        )
     for lote in _lotes(a_cerrar):
         await db.execute(
             update(HistorialPrecioCodigo)

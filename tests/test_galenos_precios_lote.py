@@ -112,14 +112,60 @@ async def test_si_un_galeno_no_se_puede_actualizar_no_se_aplica_ninguno(s):
 
 
 @pytest.mark.asyncio
-async def test_vigencia_anterior_a_la_del_galeno_no_aplica_nada(s):
+async def test_vigencia_anterior_a_la_del_galeno_la_reubica_y_pasa_a_ser_la_ultima(s):
+    """Como en los valores: una vigencia anterior no se rechaza, es la última y reemplaza lo posterior."""
     await _sembrar(s)
-    resp = await actualizar_precios_galenos_lote(
-        _body((COD_HON, "150"), (COD_GAS, "20"), vigencia=datetime.date(2026, 6, 1)), s,
+    anterior = datetime.date(2026, 6, 1)
+    r = await actualizar_precios_galenos_lote(
+        _body((COD_HON, "150"), (COD_GAS, "20"), vigencia=anterior), s,
     )
-    assert resp.status_code == 422
-    assert {e["codigo"] for e in json.loads(resp.body)["errores"]} == {COD_HON, COD_GAS}
-    assert (await _vigente(s, COD_HON)).valor_unitario == Decimal("100")
+    assert (r.galenos, r.filas, r.valores_recalculados) == (2, 2, 1)
+
+    g = await _vigente(s, COD_HON)
+    assert (g.vigencia_desde, g.valor_unitario) == (anterior, Decimal("150"))
+    assert (await _vigente(s, COD_GAS)).vigencia_desde == anterior
+
+    # El historial posterior se borró: queda una sola fila, desde la fecha cargada, con el precio nuevo.
+    assert [(x.vigencia_desde, x.vigencia_hasta, x.precio_total) for x in await _historial(s)] == [
+        (anterior, None, Decimal("360.00")),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_vigencia_en_el_medio_cierra_la_que_la_cubria_y_borra_las_posteriores(s):
+    await _sembrar(s)
+    await actualizar_precios_galenos_lote(_body((COD_HON, "150"), (COD_GAS, "20")), s)   # rota a 01/08
+    medio = datetime.date(2026, 7, 15)
+    await actualizar_precios_galenos_lote(_body((COD_HON, "200"), (COD_GAS, "30"), vigencia=medio), s)
+
+    filas = list((await s.execute(
+        select(Galeno).where(Galeno.obra_social_nro == OS, Galeno.codigo == COD_HON).order_by(Galeno.vigencia_desde)
+    )).scalars())
+    assert [(f.vigencia_desde, f.vigencia_hasta, f.valor_unitario) for f in filas] == [
+        (VIG, medio - datetime.timedelta(days=1), Decimal("100")),
+        (medio, None, Decimal("200")),
+    ]
+    # 2 x 200 + 3 x 30 = 490
+    assert [(x.vigencia_desde, x.vigencia_hasta, x.precio_total) for x in await _historial(s)] == [
+        (VIG, medio - datetime.timedelta(days=1), Decimal("230.00")),
+        (medio, None, Decimal("490.00")),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_el_valor_sigue_apuntando_a_un_galeno_que_existe_tras_reubicar(s):
+    from app.db.models.nomenclador_cmc import ValorComponente
+
+    valor = await _sembrar(s)
+    await actualizar_precios_galenos_lote(_body((COD_HON, "150"), (COD_GAS, "20")), s)
+    await actualizar_precios_galenos_lote(
+        _body((COD_HON, "200"), (COD_GAS, "30"), vigencia=datetime.date(2026, 6, 1)), s,
+    )
+    ids = {c.galeno_id for c in (await s.execute(
+        select(ValorComponente).where(ValorComponente.valor_id == valor.id)
+    )).scalars() if c.galeno_id}
+    existentes = set((await s.execute(select(Galeno.id).where(Galeno.id.in_(ids)))).scalars())
+    assert ids == existentes and len(ids) == 2
 
 
 @pytest.mark.asyncio

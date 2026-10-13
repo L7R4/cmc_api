@@ -4,7 +4,7 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
-from sqlalchemy import select
+from sqlalchemy import delete, select, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -71,6 +71,57 @@ async def _validar_mezcla_niveles(
         )
 
 
+async def _reubicar_vigencia_galeno(
+    db: AsyncSession,
+    galeno: Galeno,
+    nuevo_valor_unitario: Decimal,
+    vigencia_desde: datetime.date,
+) -> Galeno:
+    """Vigencia ANTERIOR a la del galeno vigente. Igual que en los valores (`liberar_vigencias`),
+    la que se carga pasa a ser la última de ese galeno y nivel:
+
+    - las vigencias que arrancan en esa fecha o después se borran (los componentes de valores que
+      las usaban pasan al galeno que queda);
+    - la que cubría la fecha se cierra el día anterior;
+    - el galeno vigente conserva su fila (y los valores que lo usan) pero pasa a regir desde la
+      fecha y con el precio nuevo.
+
+    Devuelve la misma fila: quien llama regenera el historial de los códigos desde esa fecha.
+    No comitea.
+    """
+    mismo_nivel = Galeno.nivel.is_(None) if galeno.nivel is None else Galeno.nivel == galeno.nivel
+    filas = (await db.execute(
+        select(Galeno).where(
+            Galeno.obra_social_nro == galeno.obra_social_nro,
+            Galeno.codigo == galeno.codigo,
+            mismo_nivel,
+            Galeno.id != galeno.id,
+        )
+    )).scalars().all()
+    a_borrar = [f for f in filas if f.vigencia_desde >= vigencia_desde]
+    corte = vigencia_desde - datetime.timedelta(days=1)
+    for f in filas:
+        if f.vigencia_desde < vigencia_desde and (f.vigencia_hasta is None or f.vigencia_hasta >= vigencia_desde):
+            f.vigencia_hasta = corte
+    await db.flush()
+
+    ids = [f.id for f in a_borrar]
+    if ids:
+        # Los componentes (también los de valores cerrados) no pueden quedar apuntando a una fila borrada.
+        await db.execute(
+            update(ValorComponente).where(ValorComponente.galeno_id.in_(ids))
+            .values(galeno_id=galeno.id).execution_options(synchronize_session=False)
+        )
+        await db.execute(delete(Galeno).where(Galeno.id.in_(ids)).execution_options(synchronize_session=False))
+        for f in a_borrar:
+            db.expunge(f)
+
+    galeno.vigencia_desde = vigencia_desde
+    galeno.valor_unitario = nuevo_valor_unitario
+    await db.flush()
+    return galeno
+
+
 async def _rotar_fila_galeno(
     db: AsyncSession,
     galeno_anterior: Galeno,
@@ -79,8 +130,9 @@ async def _rotar_fila_galeno(
 ) -> Galeno:
     """
     Sólo la fila del galeno: cierra la vigencia de la actual y crea la nueva con el precio
-    nuevo (o, con la misma vigencia, corrige el precio en el lugar). NO toca el historial
-    de los códigos que lo usan: eso lo hace quien llama. No comitea.
+    nuevo. Con la misma vigencia corrige el precio en el lugar y con una anterior la reubica
+    (ver `_reubicar_vigencia_galeno`). NO toca el historial de los códigos que lo usan: eso lo
+    hace quien llama. No comitea.
     """
     if vigencia_desde == galeno_anterior.vigencia_desde:
         galeno_anterior.valor_unitario = nuevo_valor_unitario
@@ -89,11 +141,7 @@ async def _rotar_fila_galeno(
 
     fecha_corte = vigencia_desde - datetime.timedelta(days=1)
     if galeno_anterior.vigencia_desde > fecha_corte:
-        raise HTTPException(
-            422,
-            f"vigencia_desde ({vigencia_desde}) debe ser posterior a la vigencia "
-            f"actual del galeno ({galeno_anterior.vigencia_desde})",
-        )
+        return await _reubicar_vigencia_galeno(db, galeno_anterior, nuevo_valor_unitario, vigencia_desde)
 
     galeno_anterior.vigencia_hasta = fecha_corte
     galeno_anterior.activo = False
@@ -659,16 +707,8 @@ async def actualizar_precios_galenos_lote(
                 "motivo": "No hay un galeno vigente con ese código en la obra social",
             })
             continue
-        anterior = next((g for g in filas if g.vigencia_desde > body.vigencia_desde), None)
-        if anterior:
-            errores.append({
-                "codigo": item.codigo, "nombre": anterior.nombre,
-                "motivo": (
-                    f"La vigencia ({body.vigencia_desde:%d/%m/%Y}) es anterior a la del galeno "
-                    f"actual ({anterior.vigencia_desde:%d/%m/%Y})"
-                ),
-            })
-            continue
+        # Una vigencia anterior a la del galeno actual no se rechaza: se reubica como en los
+        # valores (la que se carga pasa a ser la última). El front avisa antes de guardar.
         cambios.extend((g, item.nuevo_valor_unitario) for g in filas)
 
     if errores:

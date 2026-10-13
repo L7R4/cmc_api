@@ -355,3 +355,17 @@ def test_ayudante_va_con_su_cabeza_aunque_ella_no_se_apunte_a_si_misma():
     afuera = dataclasses.replace(cirujano, fuera_de_filtro=True)
     a = armar([afuera, ayudante], ExportOpciones(agrupacion="por_socio"))
     assert a.secciones == []
+
+
+def test_el_total_de_coseguro_es_por_unidad_cantidad_por_sesion():
+    """El coseguro se descuenta por unidad ((h+g+a − coseguro) × cantidad × sesión): el total de
+    coseguros es el de cada fila × sus unidades, igual que la cabecera de la vista."""
+    a = _fila(1, "10", "ACOSTA, MARIA", "Consulta", 3, "B", monto="33262")
+    a.coseguro, a.cantidad = Decimal("11700"), 2                 # 23.400
+    b = _fila(2, "10", "ACOSTA, MARIA", "Practica", 4, "C", monto="33262")
+    b.coseguro, b.sesion = Decimal("500"), 3                     # 1.500
+    c = _fila(3, "10", "ACOSTA, MARIA", "Consulta", 5, "D", monto="33262")
+    c.coseguro = Decimal("100")                                  # 100 (1 × 1)
+    armado = armar([a, b, c], ExportOpciones(agrupacion="plana"))
+    assert armado.resumen.total_coseguro == Decimal("25000.00")
+    assert armado.secciones[0].grupos[0].total_coseguro == Decimal("25000.00")

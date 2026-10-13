@@ -293,7 +293,9 @@ def _stats_de_lineas(lineas: list[LineaPrestacion], equipo_siempre: bool = False
             s.monto += f.subtotal
             total_hon += f.honorarios
             total_gas += f.gastos
-            total_cos += f.coseguro
+            # El coseguro se descuenta por unidad (importe = (h+g+a − coseguro) × cantidad × sesión):
+            # lo que se descontó en total es el de la fila × sus unidades, igual que la cabecera de la vista.
+            total_cos += f.coseguro * (f.cantidad or 1) * (f.sesion or 1)
             total_gral += f.subtotal
     return stats, total_hon, total_gas, total_cos, total_gral
 

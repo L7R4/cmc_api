@@ -25,6 +25,7 @@ from app.modules.nomenclador.schemas import (
     GalenoOut,
     GalenoPlantillaNivelOut,
     GalenoPlantillaOut,
+    GalenoResumenOut,
     GalenosImportarIn,
     GalenosImportarResult,
     GalenosPrecioLoteIn,
@@ -162,6 +163,15 @@ async def list_galenos(
     stmt = stmt.order_by(Galeno.codigo, Galeno.nivel, Galeno.vigencia_desde.desc())
     result = await db.execute(stmt)
     return result.scalars().all()
+
+
+@router.get("/resumen_nomenclador", response_model=List[GalenoResumenOut])
+async def resumen_galenos_nomenclador(obra_social_nro: int = Query(...), db: AsyncSession = Depends(get_db)):
+    """Por galeno de la obra social: nomencladores que lo usan, modo (calculado / por nivel) y
+    qué niveles tienen unidades distintas a la escala. Para Actualizar galenos."""
+    from app.modules.nomenclador import nivelados
+
+    return await nivelados.resumen_galenos(db, obra_social_nro)
 
 
 @router.patch("/visibilidad", response_model=GalenoVisibilidadOut)

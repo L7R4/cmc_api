@@ -24,6 +24,7 @@ from app.db.models.nomenclador_cmc import (
     MedicoCodigoHabilitado,
     NomencladorCMC,
     NomencladorDescripcionLegacy,
+    NomencladorNivelado,
     NomencladorPlantillaEspecialidad,
     Valor,
     ValorComponente,
@@ -1864,6 +1865,13 @@ async def crear_galenos_base(
     return creados
 
 
+async def id_nomenclador_nacional(db: AsyncSession) -> Optional[int]:
+    """Id del nomenclador 'nacional' (`nm_nomenclador_nivelado.tipo`): lo llevan los valores NN."""
+    return (await db.execute(
+        select(NomencladorNivelado.id).where(NomencladorNivelado.tipo == "nacional").limit(1)
+    )).scalar_one_or_none()
+
+
 async def generar_valores_nn_por_rangos(
     obra_social_nro: int,
     vigencia_desde: datetime.date,
@@ -1897,6 +1905,7 @@ async def generar_valores_nn_por_rangos(
     """
     # 1. Galenos base vigentes de la OS (nivel NULL), indexados por codigo
     galenos = await _galenos_base_nn(db, obra_social_nro)
+    id_nacional = await id_nomenclador_nacional(db)
 
     # 1b. Rechazar si algún galeno base tiene VU = 0 (no sirve para calcular precios)
     if not permitir_valor_cero:
@@ -1970,6 +1979,7 @@ async def generar_valores_nn_por_rangos(
                 especialidad_id_colegio=None,
                 sin_restriccion_especialidad=sin_restriccion,
                 por_presupuesto=False,
+                nomenclador_nivelado_id=id_nacional,
                 vigencia_desde=vigencia_desde,
                 vigencia_hasta=None,
                 estado="activo",
@@ -2110,6 +2120,7 @@ async def completar_base_nn(
     )).scalars())
     habilitacion = await _estado_habilitacion_os(db, obra_social_nro)
     plantillas = await _plantillas_por_codigo(db)
+    id_nacional = await id_nomenclador_nacional(db)
 
     filas: list[tuple[dict, list[dict]]] = []
     habilitar: list[dict] = []
@@ -2138,7 +2149,7 @@ async def completar_base_nn(
                 "descripcion": nom.nomenclador_nacional.descripcion,
                 "nivel": None, "complejidad": None, "especialidad_id_colegio": None,
                 "sin_restriccion_especialidad": sin_restriccion, "por_presupuesto": False,
-                "vigencia_desde": vigencia_desde,
+                "nomenclador_nivelado_id": id_nacional, "vigencia_desde": vigencia_desde,
             },
             componentes,
         ))

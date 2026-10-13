@@ -49,7 +49,7 @@ from app.db.models.nomenclador_cmc import (
     HistorialPrecioCodigo, ValorDocumento,
     NomencladorNacional, ValorEspecialidad, NomencladorDescripcionLegacy,
     NomencladorPlantillaEspecialidad, CodigoObraSocial,
-    NomencladorNivelado, NomencladorNiveladoCodigo,
+    NomencladorNivelado, NomencladorNiveladoCodigo, NomencladorNivel,
 )
 # Datos del propio Colegio (CUIT, CBU, teléfonos, casillas de correo).
 from app.db.models.institucion import Institucion, InstitucionTelefono, InstitucionEmail
@@ -109,7 +109,7 @@ __all__ = [
     "HistorialPrecioCodigo", "ValorDocumento",
     "NomencladorNacional", "ValorEspecialidad", "NomencladorDescripcionLegacy",
     "NomencladorPlantillaEspecialidad", "CodigoObraSocial",
-    "NomencladorNivelado", "NomencladorNiveladoCodigo",
+    "NomencladorNivelado", "NomencladorNiveladoCodigo", "NomencladorNivel",
     # datos institucionales del Colegio
     "Institucion", "InstitucionTelefono", "InstitucionEmail",
     # calendarios (feriados, cumpleaños, tareas del mes)

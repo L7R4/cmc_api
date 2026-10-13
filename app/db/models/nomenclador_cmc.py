@@ -215,8 +215,9 @@ class Galeno(Base):
     vigencia_desde: Mapped[datetime.date] = mapped_column(Date, nullable=False)
     vigencia_hasta: Mapped[Optional[datetime.date]] = mapped_column(Date, nullable=True)
     valor_unitario: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), nullable=False)
-    # Unidades-plantilla por concepto (por OS): defaults que toma el ValorComponente
-    # calculable al asociar este galeno a un código con cantidad=0. Nullable: si el
+    # Unidades por concepto. En un galeno NIVELADO son el AJUSTE de esta OS sobre la escala
+    # del nomenclador (`nm_nomenclador_nivel`): NULL = usa la escala. Defaults que toma el
+    # ValorComponente calculable al asociar este galeno a un código con cantidad=0. Si el
     # concepto no tiene unidad acá, el pre-fill cae a nm_nomenclador.unidades_* (NN).
     unidades_honorarios: Mapped[Optional[Decimal]] = mapped_column(DECIMAL(10, 2), nullable=True)
     unidades_ayudante: Mapped[Optional[Decimal]] = mapped_column(DECIMAL(10, 2), nullable=True)
@@ -225,6 +226,12 @@ class Galeno(Base):
     # Solo para el boletín del médico (/panel/boletin-valores): False lo oculta ahí.
     # Se setea por (OS, código) en todas sus filas; las rotaciones lo heredan.
     visible: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="1")
+    # True → esta OS pactó un PRECIO FIJO POR NIVEL: cada nivel tiene su propio precio
+    # (valor_unitario) y se factura como 1 unidad de honorarios (+ el ayudante). False →
+    # "calculado": un mismo valor unitario por unidades de la escala del nomenclador.
+    precio_por_nivel: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="0"
+    )
     observacion: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.now()
@@ -311,6 +318,16 @@ class NomencladorNivelado(Base):
     nombre: Mapped[str] = mapped_column(String(120), nullable=False)
     galeno_grupo: Mapped[str] = mapped_column(String(100), nullable=False)
     niveles: Mapped[int] = mapped_column(Integer, nullable=False)
+    # 'nivelado' (Cirugía adulto 7/10, infantil, FASGO, Urología…) | 'nacional' (el
+    # Nomenclador Nacional: unidades por código en `nm_nomenclador_nacional` y galeno
+    # asignado por rango de código — ver service._RANGOS_*). Un único registro 'nacional'.
+    tipo: Mapped[str] = mapped_column(String(20), nullable=False, default="nivelado", server_default="nivelado")
+    # Galeno (slug de nm_galenos.codigo) de honorarios y ayudante, y el de gastos.
+    # Reemplazan a `galeno_grupo` para decidir con qué galeno de la O.S. se cotiza.
+    galeno_codigo: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    galeno_gastos_codigo: Mapped[Optional[str]] = mapped_column(
+        String(100), nullable=True, default="gasto_quirurgico", server_default="gasto_quirurgico"
+    )
     # ID_COLEGIO_ESPE de las especialidades a las que se aplica el nomenclador ([7, 30, ...]).
     # NULL o [] = todas las del código. Al aplicarlo a una O.S. sólo se carga precio en las que
     # están en la lista Y habilitadas para el código en esa O.S.
@@ -321,6 +338,34 @@ class NomencladorNivelado(Base):
     )
     updated_at: Mapped[datetime.datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class NomencladorNivel(Base):
+    """ESCALA de un nomenclador nivelado: las unidades de cada nivel. Es la fuente única
+    de las unidades (antes vivían en el galeno de cada O.S. y en la plantilla).
+
+    `unidades_ayudante` NULL = el 25 % de las de honorarios (el ayudante se paga a esa
+    razón y al facturar se divide según los ayudantes cargados). Una O.S. puede ajustar
+    las unidades de un nivel en su galeno (`nm_galenos.unidades_*` no NULL)."""
+    __tablename__ = "nm_nomenclador_nivel"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    nomenclador_nivelado_id: Mapped[int] = mapped_column(
+        ForeignKey("nm_nomenclador_nivelado.id"), nullable=False
+    )
+    nivel: Mapped[int] = mapped_column(Integer, nullable=False)
+    unidades_honorarios: Mapped[Decimal] = mapped_column(DECIMAL(10, 2), nullable=False)
+    unidades_ayudante: Mapped[Optional[Decimal]] = mapped_column(DECIMAL(10, 2), nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint("nomenclador_nivelado_id", "nivel", name="uq_nm_nomenclador_nivel"),
     )
 
 
@@ -422,6 +467,10 @@ class Valor(Base):
     por_presupuesto: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="0"
     )
+    # Nomenclador (`nm_nomenclador_nivelado`) con el que se factura este valor: sus
+    # componentes salen de la escala de ese nomenclador y del galeno de la O.S. NULL = valor
+    # fijo o armado a mano (galeno × cantidad libres).
+    nomenclador_nivelado_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     vigencia_desde: Mapped[datetime.date] = mapped_column(Date, nullable=False)
     vigencia_hasta: Mapped[Optional[datetime.date]] = mapped_column(Date, nullable=True)
     estado: Mapped[str] = mapped_column(
@@ -476,6 +525,7 @@ class Valor(Base):
         Index("ix_nm_valores_complejidad", "complejidad"),
         Index("ix_nm_valores_estado", "estado"),
         Index("ix_nm_valores_por_presupuesto", "por_presupuesto"),
+        Index("ix_nm_valores_nomenclador_nivelado", "nomenclador_nivelado_id"),
     )
 
 

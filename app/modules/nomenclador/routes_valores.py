@@ -17,11 +17,12 @@ from app.db.models.nomenclador_cmc import (
     HistorialPrecioCodigo,
     Homologador,
     NomencladorCMC,
+    NomencladorNivelado,
     Valor,
     ValorComponente,
     ValorEspecialidad,
 )
-from app.modules.nomenclador import alta_os, service
+from app.modules.nomenclador import alta_os, nivelados, service
 from app.modules.nomenclador.schemas import (
     ActualizacionMasivaResult,
     ActualizarPorcentajeIn,
@@ -163,9 +164,15 @@ async def _valores_out(db: AsyncSession, valores: list[Valor]) -> list[ValorOut]
         if cat and cat.strip()
     }
 
+    ids_nomenclador = {v.nomenclador_nivelado_id for v in valores if v.nomenclador_nivelado_id}
+    nombres_nomenclador = dict((await db.execute(
+        select(NomencladorNivelado.id, NomencladorNivelado.nombre).where(NomencladorNivelado.id.in_(ids_nomenclador))
+    )).all()) if ids_nomenclador else {}
+
     salida = []
     for v in valores:
         out = ValorOut.model_validate(v)
+        out.nomenclador_nivelado = nombres_nomenclador.get(v.nomenclador_nivelado_id)
         out.descripcion_efectiva = service.descripcion_efectiva(
             v, legacy.get((v.codigo, v.obra_social_nro))
         )
@@ -341,6 +348,7 @@ async def _crear_valor_con_componentes(
     *,
     motivo: str = "carga_inicial",
     fecha_corte: Optional[datetime.date] = None,
+    nomenclador_nivelado_id: Optional[int] = None,
 ) -> Valor:
     nom = await db.get(NomencladorCMC, nomenclador_id)
     if not nom:
@@ -371,6 +379,7 @@ async def _crear_valor_con_componentes(
         especialidad_id_colegio=especialidad_id_colegio,
         sin_restriccion_especialidad=sin_restriccion_especialidad,
         por_presupuesto=por_presupuesto,
+        nomenclador_nivelado_id=None if por_presupuesto else nomenclador_nivelado_id,
         cantidad_ayudantes=cantidad_ayudantes,
         coseguro=coseguro,
         vigencia_desde=vigencia_desde,
@@ -481,6 +490,8 @@ async def _clonar_valor(
         ),
         cantidad_ayudantes=origen.cantidad_ayudantes,
         coseguro=origen.coseguro,
+        # Si los componentes se transforman ya no son los del nomenclador.
+        nomenclador_nivelado_id=origen.nomenclador_nivelado_id if transform_componente is None else None,
         vigencia_desde=vigencia_desde,
         vigencia_hasta=None,
         estado="activo",
@@ -875,6 +886,19 @@ async def sugerir_componentes_nn(
     )
 
 
+@router.get("/componentes_nomenclador", response_model=ComponentesNNSugeridosOut)
+async def sugerir_componentes_nomenclador(
+    obra_social_nro: int = Query(...),
+    nomenclador_id: int = Query(..., description="Código del Colegio (nm_nomenclador.id)"),
+    nomenclador_slug: str = Query(..., description="Nomenclador con el que se factura"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Componentes de un valor que se factura "por nomenclador": el nivel del código en ese
+    nomenclador, su escala y el galeno de la obra social (o, en el Nacional, el galeno del rango).
+    Para precargar el alta manual en Por obra social. No escribe nada."""
+    return await nivelados.componentes_para_codigo(db, nomenclador_slug, obra_social_nro, nomenclador_id)
+
+
 @router.get("/vigencias")
 async def listar_vigencias_cargadas(
     obra_social_nro: int = Query(...),
@@ -1083,6 +1107,7 @@ async def create_valor(body: ValorCreate, db: AsyncSession = Depends(get_db)):
         requiere_autorizacion=body.requiere_autorizacion,
         coseguro=body.coseguro,
         sin_restriccion_especialidad=sin_restriccion,
+        nomenclador_nivelado_id=body.nomenclador_nivelado_id,
     )
 
     await db.commit()
@@ -1146,6 +1171,7 @@ async def create_valor_multi(body: ValorCreateMulti, db: AsyncSession = Depends(
             requiere_autorizacion=individual.requiere_autorizacion,
             coseguro=individual.coseguro,
             sin_restriccion_especialidad=sin_restriccion,
+            nomenclador_nivelado_id=individual.nomenclador_nivelado_id,
         )
         creados.append(valor)
 
@@ -1443,10 +1469,25 @@ async def _actualizar_valor_core(
     # de la base todas las vigencias más nuevas y la cargada pasa a ser la última.
     fecha_corte = body.vigencia_desde - datetime.timedelta(days=1)
 
+    # Con qué nomenclador se factura el valor nuevo: el que dice quien edita, o (si no dice
+    # nada) el del valor que se cierra mientras siga siendo calculado por galeno.
+    es_galeno_nuevo = (not body.por_presupuesto) and any(c.galeno_id is not None for c in body.componentes)
+    if body.definir_nomenclador and body.nomenclador_nivelado_id is not None:
+        if not es_galeno_nuevo:
+            raise HTTPException(422, "Un valor fijo no se factura por nomenclador")
+        if await db.get(NomencladorNivelado, body.nomenclador_nivelado_id) is None:
+            raise HTTPException(422, "Nomenclador no encontrado")
+
+    def _nomenclador_nuevo(v: Valor) -> Optional[int]:
+        if not es_galeno_nuevo:
+            return None
+        return body.nomenclador_nivelado_id if body.definir_nomenclador else v.nomenclador_nivelado_id
+
     # Los datos de cada variante se toman ANTES de liberar: si la vigencia actual
     # arranca en la fecha cargada o después, `liberar_vigencia` la borra.
     def _datos(v: Valor) -> dict:
         return dict(
+            nomenclador_nivelado_id=_nomenclador_nuevo(v),
             obra_social_nro=v.obra_social_nro, nomenclador_id=v.nomenclador_id, origen=v.origen,
             descripcion=body.descripcion or v.descripcion,
             nivel=body.nivel if body.nivel is not None else v.nivel,

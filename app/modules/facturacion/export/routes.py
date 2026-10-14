@@ -27,6 +27,8 @@ from app.modules.facturacion.export import encabezado as encabezado_mod
 from app.modules.facturacion.export import excel as excel_mod
 from app.modules.facturacion.export import pdf as pdf_mod
 from app.modules.facturacion.export import boreal_xlsx as boreal_xlsx_mod
+from app.modules.facturacion.export import dasuten_txt as dasuten_txt_mod
+from app.modules.facturacion.export import omint_xlsx as omint_xlsx_mod
 from app.modules.facturacion.export import unne_txt as unne_txt_mod
 from app.modules.facturacion.export.schemas import (
     COLUMNAS_DEFAULT,
@@ -173,6 +175,37 @@ async def export_boreal_xlsx(id: int, db: AsyncSession = Depends(get_db)):
         content=plano.contenido,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f'attachment; filename="{plano.nombre_archivo}"'},
+    )
+
+
+@router.get("/facturas/{id}/export/omint.xlsx")
+async def export_omint_xlsx(id: int, db: AsyncSession = Depends(get_db)):
+    """Plano de OMINT (O.S. 243) en Excel — ver `omint_xlsx`."""
+    t0 = time.perf_counter()
+    factura = await datos_mod.obtener_factura(db, id)
+    plano = await omint_xlsx_mod.generar(db, factura)
+    logger.info(
+        "export omint.xlsx factura=%s filas=%s tiempo=%.2fs", id, plano.filas, time.perf_counter() - t0,
+    )
+    return Response(
+        content=plano.contenido,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{plano.nombre_archivo}"'},
+    )
+
+
+@router.get("/facturas/{id}/export/dasuten.txt")
+async def export_dasuten_txt(id: int, db: AsyncSession = Depends(get_db)):
+    """TXT de prestaciones de DASUTEN (O.S. 137) — ver `dasuten_txt`."""
+    t0 = time.perf_counter()
+    factura = await datos_mod.obtener_factura(db, id)
+    txt = await dasuten_txt_mod.generar(db, factura)
+    logger.info(
+        "export dasuten.txt factura=%s lineas=%s tiempo=%.2fs", id, txt.lineas, time.perf_counter() - t0,
+    )
+    return Response(
+        content=txt.contenido, media_type="text/plain; charset=iso-8859-1",
+        headers={"Content-Disposition": f'attachment; filename="{txt.nombre_archivo}"'},
     )
 
 

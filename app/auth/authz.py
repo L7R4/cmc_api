@@ -702,6 +702,12 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     ("GET", "/api/importaciones/unne/periodos"): Scope.FACTURACION_CARGAR,
     ("POST", "/api/importaciones/unne/previsualizar"): Scope.FACTURACION_CARGAR,
     ("POST", "/api/importaciones/unne/confirmar"): Scope.FACTURACION_CARGAR,
+    ("GET", "/api/importaciones/planilla/plantilla"): Scope.FACTURACION_CARGAR,
+    ("GET", "/api/importaciones/planilla/periodos"): Scope.FACTURACION_CARGAR,
+    ("POST", "/api/importaciones/planilla/previsualizar"): Scope.FACTURACION_CARGAR,
+    ("POST", "/api/importaciones/planilla/confirmar"): Scope.FACTURACION_CARGAR,
+    ("GET", "/api/importaciones/planilla/lotes/{lote}"): Scope.FACTURACION_CARGAR,
+    ("POST", "/api/importaciones/planilla/lotes/{lote}/cancelar"): Scope.FACTURACION_CARGAR,
 
     ("GET", "/api/reportes_nm/boletin"): Scope.NOMENCLADOR_LEER,
     ("GET", "/api/reportes_nm/evolucion_precios"): Scope.NOMENCLADOR_LEER,

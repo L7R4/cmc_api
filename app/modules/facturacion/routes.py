@@ -821,7 +821,8 @@ async def editar_prestacion(
 @router.delete("/prestaciones/{id}", status_code=status.HTTP_204_NO_CONTENT)
 async def anular_prestacion(
     id: int,
+    con_equipo: bool = Query(False, description="Si es la cabecera de un equipo, anula también a sus integrantes."),
     user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    await service.anular_prestacion(db, id)
+    await service.anular_prestacion(db, id, con_equipo=con_equipo)

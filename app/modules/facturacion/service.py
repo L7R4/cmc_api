@@ -1,4 +1,5 @@
 import datetime
+from dataclasses import dataclass
 from types import SimpleNamespace
 import os
 import shutil
@@ -757,17 +758,31 @@ async def eliminar_afiliado_por_id(db: AsyncSession, afiliado_id: int) -> None:
     await db.commit()
 
 
-async def paciente_de(db: AsyncSession, item) -> tuple[Optional[str], Optional[str]]:
+async def paciente_de(
+    db: AsyncSession, item, nuevos: Optional[dict[str, Optional[str]]] = None,
+) -> tuple[Optional[str], Optional[str]]:
     """(dni_p, nom_ape_p) de una prestación nueva: del afiliado elegido por id; si no,
-    por número contra el padrón; si no, el nombre suelto que haya venido."""
+    por número contra el padrón; si no, el nombre suelto que haya venido.
+
+    `nuevos` (sólo la importación por planilla): números que todavía no están en el padrón
+    pero que se van a registrar junto con la importación → número y nombre → no se exige
+    que existan."""
     afiliado_id = getattr(item, "afiliado_id", None)
     if afiliado_id:
         af = await db.get(Afiliado, afiliado_id)
         if af is None:
             raise HTTPException(422, "El afiliado elegido ya no existe en el padrón.")
         return af.dni, af.nombre
+    if nuevos is not None and item.dni_paciente in nuevos:
+        return item.dni_paciente, nuevos[item.dni_paciente] or getattr(item, "nombre_paciente", None) or None
     if item.dni_paciente:
-        return item.dni_paciente, await _nombre_desde_afiliado(db, item.dni_paciente)
+        # El padrón manda; si el número no está, vale el nombre que haya venido (la
+        # planilla de importación trae ambos).
+        return item.dni_paciente, (
+            await _nombre_desde_afiliado(db, item.dni_paciente)
+            or getattr(item, "nombre_paciente", None)
+            or None
+        )
     return None, (getattr(item, "nombre_paciente", None) or None)
 
 
@@ -1616,6 +1631,15 @@ async def guardar_prestaciones_complementaria(
     )
 
 
+@dataclass
+class EquipoPreparado:
+    """Las filas de un alta (individual o equipo) ya validadas y cotizadas, SIN
+    escribir. `cabeza_idx` es la posición, dentro de `filas`, de la fila del cirujano."""
+    filas: list[DetalleFacturacionCMC]
+    cabeza_idx: Optional[int]
+    importe_total: Decimal
+
+
 async def _insertar_prestaciones(
     db: AsyncSession,
     *,
@@ -1630,6 +1654,38 @@ async def _insertar_prestaciones(
     `guardar_prestaciones_complementaria` (carga en complemento). El llamador ya
     resolvió y validó `periodo`/`version_destino` (gate de fase, existencia de
     cabecera, etc.) — acá solo se arman y persisten las filas."""
+    prep = await preparar_equipo(
+        db, cod_obra=cod_obra, periodo=periodo, version_destino=version_destino,
+        items=items, usuario=usuario, actor=actor,
+    )
+    ids = await persistir_equipo(db, prep)
+
+    # Cabecera de facturación abierta para la OS+período. Idempotente: para la carga
+    # normal la crea si es la primera prestación del período; para la complementaria
+    # ya existe (se creó con POST /facturas/complemento), así que no hace nada.
+    await _ensure_factura_abierta(db, cod_obra, periodo, usuario)
+
+    await db.commit()
+    return GuardadoResponse(ids=ids, importe_total=prep.importe_total, periodo=periodo)
+
+
+async def preparar_equipo(
+    db: AsyncSession,
+    *,
+    cod_obra: str,
+    periodo: str,
+    version_destino: int,
+    items: list[PrestacionItem],
+    usuario: str,
+    actor: str,
+    pacientes_nuevos: Optional[dict[str, Optional[str]]] = None,
+) -> EquipoPreparado:
+    """Valida y cotiza un alta (1 ítem = individual, N = equipo) y devuelve las filas
+    SIN agregarlas a la sesión ni escribir nada. Corta con `HTTPException` ante el
+    primer problema, antes de persistir cualquier fila del grupo.
+
+    Separada de la escritura (`persistir_equipo`) para que la importación por planilla
+    pueda previsualizar con exactamente las mismas reglas que la carga manual."""
     # En carga múltiple (equipo) no se permite repetir el mismo prestador. La identidad
     # del prestador es (payee, ejecutor): bajo una misma clínica pueden convivir varios
     # médicos ejecutores distintos, pero no dos filas idénticas.
@@ -1649,7 +1705,7 @@ async def _insertar_prestaciones(
 
     # Pediatra: máximo uno, sólo sobre parto/cesárea, y nunca como ítem 0 — el ítem 0
     # es siempre el cirujano y es quien tiene que quedar de cabeza del grupo (ver la
-    # elección de `cabeza_id` más abajo). Dos formas de llegar acá:
+    # elección de `cabeza_idx` más abajo). Dos formas de llegar acá:
     #   (a) alta nueva del equipo completo: varios ítems, el 0 es el cirujano;
     #   (b) agregar un pediatra a un equipo YA guardado (editar): un único ítem que ya
     #       trae `grupo_equipo_id` apuntando a la cabeza existente — ahí el ítem 0 SÍ es
@@ -1692,10 +1748,9 @@ async def _insertar_prestaciones(
                 db, item.cod_nomenclador, cod_obra, item.autorizacion
             )
 
-    ids: list[int] = []
     total_acum = Decimal("0")
     filas: list[DetalleFacturacionCMC] = []
-    cabeza_id: Optional[int] = None  # fila del médico (honorarios > 0) = cabeza del equipo
+    cabeza_idx: Optional[int] = None  # fila del médico (honorarios > 0) = cabeza del equipo
 
     for i, item in enumerate(items):
         es_pediatra = item.rol == ROL_PEDIATRA
@@ -1722,7 +1777,7 @@ async def _insertar_prestaciones(
         if item.cod_nomenclador in CODIGOS_NO_PERMITIDOS:
             raise HTTPException(422, "Código no permitido")
 
-        dni_paciente, nombre_paciente = await paciente_de(db, item)
+        dni_paciente, nombre_paciente = await paciente_de(db, item, pacientes_nuevos)
 
         # El precio sale de la especialidad del médico ejecutor (= el propio médico si el
         # payee no es una clínica).
@@ -1801,6 +1856,23 @@ async def _insertar_prestaciones(
             version=version_destino,
             sin_valorizar=sin_valorizar,
         )
+        total_acum += total
+        filas.append(row)
+        # El pediatra también factura honorarios (de su propio código) pero NO puede
+        # quedar de cabeza: la cabeza es siempre el cirujano. La validación de arriba ya
+        # garantiza que el ítem 0 no es el pediatra; este `not es_pediatra` es la segunda
+        # barrera, a prueba de que el payload llegue reordenado.
+        if cabeza_idx is None and h > 0 and not es_pediatra:
+            cabeza_idx = len(filas) - 1
+
+    return EquipoPreparado(filas=filas, cabeza_idx=cabeza_idx, importe_total=total_acum)
+
+
+async def persistir_equipo(db: AsyncSession, prep: EquipoPreparado) -> list[int]:
+    """Agrega a la sesión las filas de `preparar_equipo`, las enlaza como equipo y
+    devuelve sus ids. NO hace commit: lo decide quien llama."""
+    ids: list[int] = []
+    for row in prep.filas:
         db.add(row)
         await db.flush()  # asigna id_detalle_prestaciones (PK)
         # `nro_orden` ya no es un contador propio (el PK alcanza como identificador
@@ -1808,21 +1880,14 @@ async def _insertar_prestaciones(
         # legacy que liquidación (`nro_orden_cmc`) y lotes todavía leen para mostrar.
         row.nro_orden = str(row.id_detalle_prestaciones)
         ids.append(row.id_detalle_prestaciones)
-        total_acum += total
-        filas.append(row)
-        # El pediatra también factura honorarios (de su propio código) pero NO puede
-        # quedar de cabeza: la cabeza es siempre el cirujano. La validación de arriba ya
-        # garantiza que el ítem 0 no es el pediatra; este `not es_pediatra` es la segunda
-        # barrera, a prueba de que el payload llegue reordenado.
-        if cabeza_id is None and h > 0 and not es_pediatra:
-            cabeza_id = row.id_detalle_prestaciones
 
     # Vínculo de equipo: en POST multi-ítem, las filas sin grupo explícito apuntan a la
     # fila del médico (cabeza). El médico también queda con grupo = su propio id, así
     # `WHERE grupo_equipo_id = <id>` trae todo el equipo.
-    if len(items) > 1 and cabeza_id is not None:
-        cabeza_row = next(r for r in filas if r.id_detalle_prestaciones == cabeza_id)
-        for row in filas:
+    if len(prep.filas) > 1 and prep.cabeza_idx is not None:
+        cabeza_row = prep.filas[prep.cabeza_idx]
+        cabeza_id = cabeza_row.id_detalle_prestaciones
+        for row in prep.filas:
             if row.grupo_equipo_id is None:
                 row.grupo_equipo_id = cabeza_id
             # Cada integrante (ayudante, pediatra) se guarda con el MISMO tipo que la cabeza:
@@ -1830,14 +1895,7 @@ async def _insertar_prestaciones(
             # resto se carga como médico y por su cuenta saldría por la categoría del código.
             if row.grupo_equipo_id == cabeza_id and row.id_detalle_prestaciones != cabeza_id and cabeza_row.tipo:
                 row.tipo = cabeza_row.tipo
-
-    # Cabecera de facturación abierta para la OS+período. Idempotente: para la carga
-    # normal la crea si es la primera prestación del período; para la complementaria
-    # ya existe (se creó con POST /facturas/complemento), así que no hace nada.
-    await _ensure_factura_abierta(db, cod_obra, periodo, usuario)
-
-    await db.commit()
-    return GuardadoResponse(ids=ids, importe_total=total_acum, periodo=periodo)
+    return ids
 
 
 # ── Listado de facturas / períodos ───────────────────────────────────────────
@@ -2229,7 +2287,11 @@ async def listar_prestaciones(
     if tipo is not None:
         filtros.append(M.tipo == tipo)
     if grupo_equipo_id is not None:
-        filtros.append(M.grupo_equipo_id == grupo_equipo_id)
+        # Incluye a la cabecera aunque no tenga el grupo cargado (cargas viejas: los
+        # integrantes apuntan a ella pero ella misma quedó con `grupo_equipo_id` NULL).
+        filtros.append(
+            (M.grupo_equipo_id == grupo_equipo_id) | (M.id_detalle_prestaciones == grupo_equipo_id)
+        )
     if dni_paciente is not None:
         filtros.append(M.dni_p == dni_paciente)
     if nombre_paciente is not None:
@@ -2444,17 +2506,21 @@ async def obtener_prestacion(db: AsyncSession, prestacion_id: int) -> Prestacion
     # listado ya trae y este endpoint dejaba en None por una asimetría de vieja data.
     principal = (await _to_prestacion_read_list(db, [row]))[0]
     principal.grupo = []
-    if row.grupo_equipo_id is not None:
-        siblings = (await db.execute(
-            select(DetalleFacturacionCMC)
-            .where(
-                DetalleFacturacionCMC.grupo_equipo_id == row.grupo_equipo_id,
-                DetalleFacturacionCMC.id_detalle_prestaciones != prestacion_id,
-                DetalleFacturacionCMC.estado != "X",
-            )
-            .order_by(DetalleFacturacionCMC.id_detalle_prestaciones.asc())
-        )).scalars().all()
-        principal.grupo = await _to_prestacion_read_list(db, siblings)
+    # La cabecera de una carga vieja puede tener `grupo_equipo_id` NULL aunque otras filas
+    # apunten a ella: su equipo es el que cuelga de su propio id. Y cuando `row` es un
+    # integrante, la cabecera se incluye por id (tenga o no su propio grupo cargado).
+    grupo_id = row.grupo_equipo_id if row.grupo_equipo_id is not None else prestacion_id
+    siblings = (await db.execute(
+        select(DetalleFacturacionCMC)
+        .where(
+            (DetalleFacturacionCMC.grupo_equipo_id == grupo_id)
+            | (DetalleFacturacionCMC.id_detalle_prestaciones == grupo_id),
+            DetalleFacturacionCMC.id_detalle_prestaciones != prestacion_id,
+            DetalleFacturacionCMC.estado != "X",
+        )
+        .order_by(DetalleFacturacionCMC.id_detalle_prestaciones.asc())
+    )).scalars().all()
+    principal.grupo = await _to_prestacion_read_list(db, siblings)
     return principal
 
 
@@ -3002,7 +3068,7 @@ async def listar_periodos_propios(db: AsyncSession, cod_medico: str) -> list[dic
 
 
 # ── Soft-delete ──────────────────────────────────────────────────────────────
-async def anular_prestacion(db: AsyncSession, prestacion_id: int) -> None:
+async def anular_prestacion(db: AsyncSession, prestacion_id: int, con_equipo: bool = False) -> None:
     row = await db.get(DetalleFacturacionCMC, prestacion_id)
     if row is None:
         raise HTTPException(404, "Prestación no encontrada")
@@ -3013,6 +3079,18 @@ async def anular_prestacion(db: AsyncSession, prestacion_id: int) -> None:
     _gate_edicion(await _get_factura(db, row.cod_obr, row.periodo))
     cod_obra, periodo = row.cod_obr, row.periodo
     row.estado = "X"
+    # Con `con_equipo`, anular a la cabecera (el médico) se lleva a todo su equipo; anular a
+    # un integrante (ayudante, pediatra…) anula solo esa fila y el resto queda como estaba.
+    if con_equipo and (row.grupo_equipo_id is None or row.grupo_equipo_id == prestacion_id):
+        integrantes = (await db.execute(
+            select(DetalleFacturacionCMC).where(
+                DetalleFacturacionCMC.grupo_equipo_id == prestacion_id,
+                DetalleFacturacionCMC.id_detalle_prestaciones != prestacion_id,
+                DetalleFacturacionCMC.estado == "A",
+            )
+        )).scalars().all()
+        for integrante in integrantes:
+            integrante.estado = "X"
     await db.flush()
     # Si era la última prestación abierta del período, se elimina la cabecera abierta.
     await _cleanup_factura_si_vacia(db, cod_obra, periodo)

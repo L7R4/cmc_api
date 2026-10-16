@@ -69,7 +69,7 @@ COLUMNAS: tuple[Columna, ...] = (
     Columna("ROL", False, 10, "@",
             "Rol dentro del equipo: MEDICO (cirujano, cabeza) · AYUDANTE · PEDIATRA. Vacío: MEDICO.", "AYUDANTE"),
     Columna("COMENTARIOS", False, 40, "@",
-            "Texto libre. No se guarda: se muestra en la previsualización para ubicar la fila.",
+            "Texto libre para uso propio. El sistema no lo guarda ni lo muestra.",
             "Agregada desde factura 1107"),
 )
 

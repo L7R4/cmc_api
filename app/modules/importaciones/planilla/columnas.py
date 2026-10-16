@@ -32,7 +32,9 @@ COLUMNAS: tuple[Columna, ...] = (
     Columna("MATRICULA", False, 11, "0",
             "Matrícula del médico. Sólo control: si no es la del NRO_SOCIO, la fila queda en «Elegir socio».", "1827"),
     Columna("CLINICA", False, 10, "0",
-            "NRO_SOCIO de la clínica. Obligatorio en SANATORIO; opcional en HONORARIOS INDIVIDUALES (es el lugar).", "9882"),
+            "Sólo el número (NRO_SOCIO) de la clínica, como figura en el listado de médicos. Obligatorio en SANATORIO; "
+            "en HONORARIOS INDIVIDUALES es el lugar donde se hizo la prestación (opcional). Tiene que estar marcada "
+            "como clínica/organización en el sistema.", "9882"),
     Columna("FECHA", False, 12, "DD/MM/YYYY",
             "Fecha de la práctica (dd/mm/aaaa). Vacía: se cotiza con la fecha de hoy y la fila queda sin fecha.", "08/09/2026"),
     Columna("AUTORIZACION", False, 14, "@",

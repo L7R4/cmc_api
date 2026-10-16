@@ -98,3 +98,19 @@ def test_nro_de_registro_es_una_columna_mas_que_se_puede_sacar():
     assert con[0] == "id" and "id" not in sin
     # Por defecto sigue saliendo (también en el detalle por médico).
     assert "nro_registro" in ExportOpciones().columnas
+
+
+def test_la_clinica_es_una_columna_del_export_con_el_numero_de_la_clinica():
+    from app.modules.facturacion.export.armado import valores_fila
+    from app.modules.facturacion.export.schemas import COLUMNAS_DEFAULT
+
+    assert "clinica" in COLUMNAS_DEFAULT and "clinica" in ExportOpciones().columnas
+    # Va entre la matrícula y la autorización, igual que en la planilla de importación.
+    cols = spec_columnas(["matricula", "clinica", "autorizacion"], con_tipo=False)
+    assert [c.header for c in cols] == ["SOCIO", "MATRI.", "CLINICA", "AUTORIZACION", "SUB. TOTAL"]
+
+    f = _filas()[0]
+    f.cod_clinica = 9830
+    assert valores_fila(cols, f)[2] == 9830
+    f.cod_clinica = None
+    assert valores_fila(cols, f)[2] == ""

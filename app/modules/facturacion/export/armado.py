@@ -642,6 +642,10 @@ _DEFINICIONES: dict[str, ColumnaSpec] = {
     "prestador": ColumnaSpec("prestador", "PRESTADOR", 40, 26, "L", False, lambda f: f.prestador_nombre or ""),
     "obra_social": ColumnaSpec("obra_social", "OBRA SOCIAL", 40, 26, "L", False, lambda f: f.obra_social_nombre or f.cod_obr or ""),
     "matricula": ColumnaSpec("matricula", "MATRI.", 12, 8, "C", False, lambda f: f.matricula or ""),
+    # Código (NRO_SOCIO) de la clínica donde se hizo la prestación: sanatorios y honorarios
+    # individuales con clínica; vacío si el médico factura solo. Es el mismo número que lleva
+    # la columna CLINICA de la planilla de importación, así lo exportado se puede volver a subir.
+    "clinica": ColumnaSpec("clinica", "CLINICA", 12, 9, "C", False, lambda f: f.cod_clinica or ""),
     "autorizacion": ColumnaSpec("autorizacion", "AUTORIZACION", 22, 14, "C", False, lambda f: f.autorizacion or ""),
     "fecha": ColumnaSpec("fecha", "FECHA", 16, 11, "C", False, lambda f: _fmt_fecha(f.fecha_practica)),
     "codigo": ColumnaSpec("codigo", "CODIGO", 15, 10, "C", False, lambda f: f.codigo or ""),

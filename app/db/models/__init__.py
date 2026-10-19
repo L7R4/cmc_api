@@ -55,6 +55,8 @@ from app.db.models.nomenclador_cmc import (
 from app.db.models.institucion import Institucion, InstitucionTelefono, InstitucionEmail
 # Calendarios del Colegio: feriados, cumpleaños y tareas del mes.
 from app.db.models.agenda import AgendaEvento
+# Cuaderno de tareas personal del Inicio del panel.
+from app.db.models.tareas_dia import TareaDia
 
 __all__ = [
     "Base", "AuditMixin",
@@ -114,5 +116,7 @@ __all__ = [
     "Institucion", "InstitucionTelefono", "InstitucionEmail",
     # calendarios (feriados, cumpleaños, tareas del mes)
     "AgendaEvento",
+    # cuaderno de tareas personal del Inicio
+    "TareaDia",
     # validaciones con obras sociales (tablas propias, no legacy)
 ]

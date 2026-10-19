@@ -192,6 +192,22 @@ class Settings(BaseSettings):
     SANCOR_PASAPORTE_PROD: SecretStr = SecretStr("")
     SANCOR_TIMEOUT: int = 30
 
+    # ── Portales externos: credenciales compartidas ──────────────────────────
+    # Usuario y clave del portal de Unión Personal que el Colegio comparte con
+    # sus prestadores para autorizar por fuera del panel. Estaban escritos en
+    # el front, o sea en un archivo público. Los entrega
+    # `GET /api/validaciones/portales/upcn/credenciales` a quien tiene sesión.
+    # Vacíos = la guía avisa que no están cargados.
+    UPCN_PORTAL_USUARIO: SecretStr = SecretStr("")
+    UPCN_PORTAL_CLAVE: SecretStr = SecretStr("")
+    # Mismo criterio para IOSFA (sólo usuario: el CUIT con guiones), Medifé y Prevención Salud.
+    IOSFA_PORTAL_USUARIO: SecretStr = SecretStr("")
+    IOSFA_PORTAL_CLAVE: SecretStr = SecretStr("")
+    MEDIFE_PORTAL_USUARIO: SecretStr = SecretStr("")
+    MEDIFE_PORTAL_CLAVE: SecretStr = SecretStr("")
+    PREVENCION_PORTAL_USUARIO: SecretStr = SecretStr("")
+    PREVENCION_PORTAL_CLAVE: SecretStr = SecretStr("")
+
     # ── Nobis Salud (O.S. 62) — WSGeCROS ─────────────────────────────────────
     # Mismo criterio que Sancor: sin default. Insertar una orden (y anularla) es
     # un efecto real en el sistema de Nobis.

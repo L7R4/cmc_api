@@ -11,6 +11,9 @@ class ValorDocumentoOut(BaseModel):
 
     id: int
     obra_social_nro: int
+    #: Nombre de la obra social, para el listado que junta los documentos de
+    #: todas. `None` si la O.S. salió del catálogo y el documento quedó.
+    obra_social_nombre: Optional[str] = None
     #: La vigencia que respalda: la misma fecha que agrupa las filas de
     #: `nm_valores` de esa actualización.
     vigencia_desde: datetime.date

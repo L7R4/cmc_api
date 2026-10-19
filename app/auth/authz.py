@@ -561,6 +561,10 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     # Importar el padrón de OSPM: operación del Colegio, no del prestador —
     # mismo scope que el resto de las mutaciones de padrón.
     ("POST", "/api/validaciones/ospm/padron"): Scope.PADRON_EDITAR,
+    # Usuario y clave compartidos de un portal externo (Unión Personal). Los ve
+    # cualquier usuario con sesión; las cuentas de organización quedan afuera
+    # en el propio endpoint (routes_portales.py). Sin scope nuevo a propósito.
+    ("GET", "/api/validaciones/portales/{slug}/credenciales"): SOLO_AUTENTICADO,
 
     # ── Nomenclador ──────────────────────────────────────────────────────────
     ("GET", "/api/nomenclador/"): Scope.NOMENCLADOR_LEER,

@@ -301,6 +301,9 @@ class MedicoDetailOut(BaseModel):
     cbu: Optional[str] = None
     observacion: Optional[str] = None
     es_organizacion: Optional[bool] = None
+    # `listado_medico.INGRESAR` — 'D' = médico, 'E'/'A' = personal del Colegio.
+    # La credencial lo usa para no titular "Dr./Dra." a quien no es médico.
+    ingresar: Optional[str] = None
     adherente: Optional[bool] = None
     interior: Optional[bool] = None
     attach_titulo: Optional[str] = None

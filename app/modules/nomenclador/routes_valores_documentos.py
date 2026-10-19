@@ -72,10 +72,15 @@ async def _leer_csv(archivo: UploadFile) -> tuple[bytes, int]:
     raise HTTPException(415, "El .csv no es texto legible (UTF-8 ni latin-1).")
 
 
-def _to_out(row: ValorDocumento, nombre: Optional[str] = None) -> ValorDocumentoOut:
+def _to_out(
+    row: ValorDocumento,
+    nombre: Optional[str] = None,
+    obra_social_nombre: Optional[str] = None,
+) -> ValorDocumentoOut:
     return ValorDocumentoOut(
         id=row.id,
         obra_social_nro=row.obra_social_nro,
+        obra_social_nombre=obra_social_nombre,
         vigencia_desde=row.vigencia_desde,
         nombre_original=row.nombre_original,
         content_type=row.content_type,
@@ -97,9 +102,23 @@ async def _nombres_por_id(db: AsyncSession, ids: set[int]) -> dict[int, str]:
     return dict(filas)
 
 
+async def _obras_sociales_por_nro(db: AsyncSession, nros: set[int]) -> dict[int, str]:
+    """`NRO_OBRASOCIAL` → nombre, en una sola consulta."""
+    if not nros:
+        return {}
+    filas = (await db.execute(
+        text("SELECT NRO_OBRASOCIAL, OBRA_SOCIAL FROM obras_sociales "
+             "WHERE NRO_OBRASOCIAL IN :nros").bindparams(bindparam("nros", expanding=True)),
+        {"nros": list(nros)},
+    )).all()
+    return {nro: (nombre or "").strip() for nro, nombre in filas}
+
+
 @router.get("/documentos", response_model=List[ValorDocumentoOut])
 async def listar_documentos(
-    obra_social_nro: int = Query(..., ge=1),
+    obra_social_nro: Optional[int] = Query(
+        None, ge=1, description="Si se omite, devuelve los de todas las obras sociales."
+    ),
     vigencia_desde: Optional[datetime.date] = Query(
         None, description="Si se omite, devuelve los de todas las vigencias de la O.S."
     ),
@@ -110,15 +129,26 @@ async def listar_documentos(
     La pantalla del historial los pide todos de una y los agrupa en memoria,
     igual que hace con los valores: son unos pocos por obra social y así el
     listado no dispara una request por fila.
+
+    Sin `obra_social_nro` devuelve los de todas: es el listado «Valores PDF»
+    del perfil del personal, que junta los respaldos en una sola tabla. No se
+    pagina por lo mismo que `/actualizaciones`: crece con la cantidad de
+    actualizaciones, que son unas pocas por mes.
     """
-    stmt = select(ValorDocumento).where(ValorDocumento.obra_social_nro == obra_social_nro)
+    stmt = select(ValorDocumento)
+    if obra_social_nro is not None:
+        stmt = stmt.where(ValorDocumento.obra_social_nro == obra_social_nro)
     if vigencia_desde is not None:
         stmt = stmt.where(ValorDocumento.vigencia_desde == vigencia_desde)
     stmt = stmt.order_by(ValorDocumento.vigencia_desde.desc(), ValorDocumento.id.desc())
 
     filas = (await db.execute(stmt)).scalars().all()
     nombres = await _nombres_por_id(db, {f.subido_por for f in filas if f.subido_por})
-    return [_to_out(r, nombres.get(r.subido_por)) for r in filas]
+    obras = await _obras_sociales_por_nro(db, {f.obra_social_nro for f in filas})
+    return [
+        _to_out(r, nombres.get(r.subido_por), obras.get(r.obra_social_nro) or None)
+        for r in filas
+    ]
 
 
 @router.post("/documentos", response_model=ValorDocumentoOut, status_code=status.HTTP_201_CREATED)

@@ -563,6 +563,7 @@ async def obtener_medico(
             ListadoMedico.attach_cbu.label("attach_cbu"),
             ListadoMedico.attach_dni.label("attach_dni"),
             ListadoMedico.es_organizacion.label("es_organizacion"),
+            ListadoMedico.INGRESAR.label("ingresar"),
             ListadoMedico.adherente.label("adherente"),
             ListadoMedico.interior.label("interior"),
         )

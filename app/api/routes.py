@@ -54,6 +54,7 @@ from app.modules.solicitudes_cambio.routes import (
     router_socio as solicitudes_cambio_socio_router,
 )
 from app.modules.validaciones.routes import router as validaciones_router
+from app.modules.validaciones.routes_portales import router as validaciones_portales_router
 
 # Mobile app (cmc-app) BFF — read-only, additive; see app/modules/mobile/routes.py
 from app.modules.mobile.routes import router as mobile_router
@@ -78,6 +79,7 @@ api_router.include_router(liquidacion_router, prefix="/liquidacion", tags=["Liqu
 api_router.include_router(facturacion_router, prefix="/facturacion", tags=["Facturación"])
 api_router.include_router(facturacion_export_router, prefix="/facturacion", tags=["Facturación"])
 api_router.include_router(validaciones_router, prefix="/validaciones", tags=["Validaciones O.S."])
+api_router.include_router(validaciones_portales_router, prefix="/validaciones", tags=["Validaciones O.S."])
 api_router.include_router(deducciones_router, prefix="/deducciones", tags=["Deducciones - Generar"])
 api_router.include_router(conceptos_router, prefix="/conceptos", tags=["Conceptos"])
 api_router.include_router(cobranzas_router, prefix="/cobranzas", tags=["Cobranzas"])

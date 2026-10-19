@@ -10,6 +10,11 @@ from app.db.models import AuditLog
 _MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 _EXCLUDED_PREFIXES = ("/uploads", "/docs", "/redoc", "/openapi.json")
 
+# Contenido personal de cada usuario: se audita que hubo una request (quién, cuándo,
+# qué ruta), pero ni el cuerpo ni el detalle del error, que repite lo que escribió.
+# Si no, quien tenga `auditoria:leer` leería el cuaderno de los demás.
+_SIN_CONTENIDO_PREFIXES = ("/api/tareas",)
+
 _MAX_BODY_CHARS = 4096
 _MAX_ERROR_DETAIL_CHARS = 500
 _REDACTED_KEYS = {
@@ -153,6 +158,7 @@ class AuditMiddleware:
         finally:
             duration_ms = int((time.perf_counter() - start) * 1000)
             nro_socio, role = _decode_user(authorization)
+            personal = path.startswith(_SIN_CONTENIDO_PREFIXES)
 
             error_detail = None
             if excepcion is not None:
@@ -179,8 +185,8 @@ class AuditMiddleware:
                 duration_ms=duration_ms,
                 ip=client[0] if client else None,
                 user_agent=(_header(headers, b"user-agent") or "")[:255] or None,
-                request_body=_build_request_body(b"".join(body_chunks), content_type),
-                error_detail=error_detail,
+                request_body=None if personal else _build_request_body(b"".join(body_chunks), content_type),
+                error_detail=None if personal else error_detail,
                 # El mismo id que viaja en X-Request-ID y que lleva cada línea
                 # de log de esta petición. Lo asigna RequestContextMiddleware;
                 # el fallback cubre el caso de que ese middleware no esté.

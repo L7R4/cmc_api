@@ -18,6 +18,7 @@ from app.modules.nomenclador.routes_reportes import router as reportes_nm_router
 
 from app.modules.archivos.routes import router as archivos_router
 from app.modules.avisos.routes import router as avisos_router
+from app.modules.tareas.routes import router as tareas_router
 from app.modules.beneficios.routes import router as beneficios_router
 from app.modules.beneficios.routes import router_socio as beneficios_socio_router
 from app.modules.auditoria.routes import router as auditoria_router
@@ -101,6 +102,7 @@ api_router.include_router(
 )
 api_router.include_router(beneficios_router, prefix="/beneficios", tags=["Beneficios"])
 api_router.include_router(avisos_router, prefix="/avisos", tags=["Avisos"])
+api_router.include_router(tareas_router, prefix="/tareas", tags=["Tareas del Inicio"])
 api_router.include_router(noticias_router, prefix="/noticias", tags=["Noticias"])
 api_router.include_router(planillas_router, prefix="/planillas", tags=["Planillas de Consulta"])
 api_router.include_router(publicidades_medico_router, prefix="/publicidad-medicos", tags=["publicidad-medicos"])

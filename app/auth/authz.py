@@ -148,6 +148,17 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     # subdirectorio no declarado.
     ("GET", "/api/archivos/{ruta:path}"): SOLO_AUTENTICADO,
 
+    # ── Cuaderno de tareas del Inicio ────────────────────────────────────────
+    # Personal de cada usuario: no hay scope que aplique. El handler filtra por el
+    # `uid` del token y no acepta ningún parámetro que elija otro usuario; una
+    # tarea ajena responde 404. Ver app/modules/tareas/routes.py.
+    ("GET", "/api/tareas/"): SOLO_AUTENTICADO,
+    ("POST", "/api/tareas/"): SOLO_AUTENTICADO,
+    ("POST", "/api/tareas/importar"): SOLO_AUTENTICADO,
+    ("DELETE", "/api/tareas/hechas"): SOLO_AUTENTICADO,
+    ("PATCH", "/api/tareas/{tarea_id}"): SOLO_AUTENTICADO,
+    ("DELETE", "/api/tareas/{tarea_id}"): SOLO_AUTENTICADO,
+
     # ── Avisos push ──────────────────────────────────────────────────────────
     ("GET", "/api/avisos/"): Scope.AVISO_GESTIONAR,
     ("POST", "/api/avisos/"): Scope.AVISO_GESTIONAR,

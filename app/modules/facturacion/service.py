@@ -1,4 +1,5 @@
 import datetime
+from dataclasses import dataclass
 from types import SimpleNamespace
 import os
 import shutil
@@ -9,6 +10,7 @@ from typing import NamedTuple, Optional, Sequence
 from fastapi import HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import String, and_, case, cast, func, or_, select, tuple_, update
+from sqlalchemy.orm import load_only
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -110,17 +112,16 @@ TIPO_SANATORIO = "Sanatorio"
 CATEGORIA_HONORARIOS_INDIVIDUALES = "Honorarios individuales"
 TIPO_PRACTICA = "Practica"
 TIPO_CONSULTA = "Consulta"
-# Sin clínica: 0-419999 = Practica, >=420000 = Consulta (decisión usuario 2026-08-28,
-# reemplaza a la `categoria` del nomenclador como driver de `tipo` en ese caso).
-COD_MAX_PRACTICA = 419999
+# Categorías del código que pasan tal cual a `tipo`. Sin categoría (o con una que no es
+# ninguna de éstas) la prestación es Practica (decisión usuario 2026-10-07, reemplaza a la
+# regla por rango de código del 2026-08-28: ≤419999 Practica, resto Consulta).
+_TIPOS_DE_CATEGORIA = {TIPO_CONSULTA, TIPO_PRACTICA, CATEGORIA_HONORARIOS_INDIVIDUALES, TIPO_SANATORIO}
 
 
-def tipo_por_codigo(codigo: Optional[str]) -> Optional[str]:
-    """`tipo` derivado del rango del código cuando no hay clínica de por medio.
-    None si el código no es puramente numérico (se cae al fallback de `_get_categoria`)."""
-    if codigo is None or not codigo.isdigit():
-        return None
-    return TIPO_PRACTICA if int(codigo) <= COD_MAX_PRACTICA else TIPO_CONSULTA
+def tipo_de_categoria(categoria: Optional[str]) -> str:
+    """`tipo` para la categoría del código en la obra social; Practica si no tiene."""
+    c = (categoria or "").strip()
+    return c if c in _TIPOS_DE_CATEGORIA else TIPO_PRACTICA
 
 # Ventana por defecto cuando la OS no define `dia_corte` (20 = del 20 al 20).
 DIA_CORTE_DEFAULT = 20
@@ -211,8 +212,19 @@ async def listar_medicos_todos(db: AsyncSession) -> list[dict]:
     incompleto era invisible (ningún texto/número lo matchea por accidente);
     acá, sin filtro de texto, entraba siempre y tiraba 500 en cada carga."""
     M = ListadoMedico
+    # Solo las columnas que usa `_medicos_con_especialidades`: el registro completo
+    # (domicilios, adjuntos, credenciales…) multiplicaba lo que se lee y se arma para
+    # ~3.700 filas en cada apertura del formulario.
     rows = list(
-        (await db.execute(select(M).where(M.NOMBRE.isnot(None)).order_by(M.NOMBRE)))
+        (await db.execute(
+            select(M)
+            .options(load_only(
+                M.ID, M.NRO_SOCIO, M.NOMBRE, M.MATRICULA_PROV, M.CATEGORIA,
+                M.condicion_impositiva, M.es_organizacion, M.conceps_espec,
+            ))
+            .where(M.NOMBRE.isnot(None))
+            .order_by(M.NOMBRE)
+        ))
         .scalars()
         .all()
     )
@@ -694,10 +706,13 @@ async def _afiliado_por_id(db: AsyncSession, afiliado_id: int) -> Afiliado:
     return af
 
 
-async def actualizar_afiliado(db: AsyncSession, afiliado_id: int, payload: AfiliadoUpdate) -> Afiliado:
+async def actualizar_afiliado(
+    db: AsyncSession, afiliado_id: int, payload: AfiliadoUpdate,
+) -> tuple[Afiliado, int]:
     """Edición del afiliado (lápiz de la carga). Además del padrón, corrige el número y
-    el nombre copiados en sus prestaciones no anuladas de facturas ABIERTAS; las de
-    facturas cerradas quedan como se facturaron."""
+    el nombre copiados en sus prestaciones no anuladas de facturas ABIERTAS (de cualquier
+    obra social y período); las de facturas cerradas quedan como se facturaron.
+    Devuelve el afiliado y cuántas prestaciones se corrigieron."""
     af = await _afiliado_por_id(db, afiliado_id)
     if payload.dni and payload.dni != af.dni:
         otro = await get_afiliado_by_dni(db, payload.dni)
@@ -720,7 +735,7 @@ async def actualizar_afiliado(db: AsyncSession, afiliado_id: int, payload: Afili
         )
     await db.commit()
     await db.refresh(af)
-    return af
+    return af, len(ids)
 
 
 async def eliminar_afiliado_por_id(db: AsyncSession, afiliado_id: int) -> None:
@@ -743,17 +758,31 @@ async def eliminar_afiliado_por_id(db: AsyncSession, afiliado_id: int) -> None:
     await db.commit()
 
 
-async def paciente_de(db: AsyncSession, item) -> tuple[Optional[str], Optional[str]]:
+async def paciente_de(
+    db: AsyncSession, item, nuevos: Optional[dict[str, Optional[str]]] = None,
+) -> tuple[Optional[str], Optional[str]]:
     """(dni_p, nom_ape_p) de una prestación nueva: del afiliado elegido por id; si no,
-    por número contra el padrón; si no, el nombre suelto que haya venido."""
+    por número contra el padrón; si no, el nombre suelto que haya venido.
+
+    `nuevos` (sólo la importación por planilla): números que todavía no están en el padrón
+    pero que se van a registrar junto con la importación → número y nombre → no se exige
+    que existan."""
     afiliado_id = getattr(item, "afiliado_id", None)
     if afiliado_id:
         af = await db.get(Afiliado, afiliado_id)
         if af is None:
             raise HTTPException(422, "El afiliado elegido ya no existe en el padrón.")
         return af.dni, af.nombre
+    if nuevos is not None and item.dni_paciente in nuevos:
+        return item.dni_paciente, nuevos[item.dni_paciente] or getattr(item, "nombre_paciente", None) or None
     if item.dni_paciente:
-        return item.dni_paciente, await _nombre_desde_afiliado(db, item.dni_paciente)
+        # El padrón manda; si el número no está, vale el nombre que haya venido (la
+        # planilla de importación trae ambos).
+        return item.dni_paciente, (
+            await _nombre_desde_afiliado(db, item.dni_paciente)
+            or getattr(item, "nombre_paciente", None)
+            or None
+        )
     return None, (getattr(item, "nombre_paciente", None) or None)
 
 
@@ -1151,6 +1180,7 @@ async def resolver_precio(
                 admite_pediatra=admite_pediatra,
                 requiere_autorizacion=bool(par and par.requiere_autorizacion),
                 cantidad_ayudantes=(par.cantidad_ayudantes if par else None),
+                tipo_codigo=tipo_de_categoria(await _get_categoria(db, codigo, cod_obra)),
             )
         return PrecioResponse(
             admitido=False, motivo=e.message,
@@ -1197,6 +1227,7 @@ async def resolver_precio(
         coseguro=out.coseguro,
         admite_pediatra=admite_pediatra,
         admite_laparoscopia=out.admite_laparoscopia,
+        tipo_codigo=tipo_de_categoria(await _get_categoria(db, codigo, cod_obra)),
     )
 
 
@@ -1314,23 +1345,33 @@ async def derivar_tipo(
     cod_obra: Optional[str] = None,
 ) -> Optional[str]:
     """`tipo` único de la prestación. Lo decide el prestador
-    (`resolver_prestador`) y, si éste no fuerza nada, el rango del código
-    (0-419999 → Practica, ≥420000 → Consulta; decisión usuario 2026-08-28); si el
-    código no es numérico, cae a la `categoria` del catálogo como último fallback.
+    (`resolver_prestador`) y, si éste no fuerza nada, la categoría del código para la
+    obra social (`_get_categoria`: override de la OS > alta del código > catálogo);
+    sin categoría, Practica (decisión usuario 2026-10-07; ver `tipo_de_categoria`).
 
     Los dos casos que fuerzan `tipo` (ver `resolver_prestador`): la clínica como
     prestador → 'Sanatorio'; el médico con clínica como ámbito → 'Honorarios
     individuales'.
 
-    `cod_obra` desambigua el código y habilita el override de categoría por obra
-    social, usado solo en el fallback de código no numérico.
+    `cod_obra` desambigua el código y habilita el override de categoría por obra social.
 
     Nota (2026-07-31): antes el driver era `payee.es_organizacion`. Hoy el payee
     (`cod_med`) es siempre un médico y la clínica vive en `cod_clinica`.
     """
     if tipo_forzado:
         return tipo_forzado
-    return tipo_por_codigo(cod_nomenclador) or await _get_categoria(db, cod_nomenclador, cod_obra)
+    return tipo_de_categoria(await _get_categoria(db, cod_nomenclador, cod_obra))
+
+
+async def tipos_sin_clinica(
+    db: AsyncSession, pares: set[tuple[Optional[str], Optional[str]]],
+) -> dict[tuple[Optional[str], Optional[str]], str]:
+    """`derivar_tipo` sin prestador que fuerce nada, para cada (código, OS) — fallback de
+    las filas legacy con `tipo` NULL al mostrarlas. Son pocas: una consulta por par."""
+    return {
+        (cod, obra): (await derivar_tipo(db, cod, None, obra) if cod else TIPO_PRACTICA)
+        for cod, obra in pares
+    }
 
 
 
@@ -1507,16 +1548,16 @@ def conceptos_sin_precio(item) -> str:
 
 # ── Guardado ─────────────────────────────────────────────────────────────────
 async def exigir_obra_social_activa(db: AsyncSession, cod_obra: str) -> None:
-    """422 si la obra social está dada de baja (`MARCA='N'`): no se le cargan
+    """422 si la obra social está dada de baja (`activo=False`): no se le cargan
     prestaciones nuevas ni se le mueven prestaciones. Lo ya cargado sigue visible."""
     try:
         nro = int(cod_obra)
     except (TypeError, ValueError):
         return
-    marca = (await db.execute(
-        select(ObrasSociales.MARCA).where(ObrasSociales.NRO_OBRASOCIAL == nro).limit(1)
+    activo = (await db.execute(
+        select(ObrasSociales.activo).where(ObrasSociales.NRO_OBRASOCIAL == nro).limit(1)
     )).scalar_one_or_none()
-    if marca == "N":
+    if activo is not None and not activo:
         raise HTTPException(
             422, f"La obra social {nro} está desactivada: no se le pueden cargar prestaciones."
         )
@@ -1590,6 +1631,15 @@ async def guardar_prestaciones_complementaria(
     )
 
 
+@dataclass
+class EquipoPreparado:
+    """Las filas de un alta (individual o equipo) ya validadas y cotizadas, SIN
+    escribir. `cabeza_idx` es la posición, dentro de `filas`, de la fila del cirujano."""
+    filas: list[DetalleFacturacionCMC]
+    cabeza_idx: Optional[int]
+    importe_total: Decimal
+
+
 async def _insertar_prestaciones(
     db: AsyncSession,
     *,
@@ -1604,6 +1654,38 @@ async def _insertar_prestaciones(
     `guardar_prestaciones_complementaria` (carga en complemento). El llamador ya
     resolvió y validó `periodo`/`version_destino` (gate de fase, existencia de
     cabecera, etc.) — acá solo se arman y persisten las filas."""
+    prep = await preparar_equipo(
+        db, cod_obra=cod_obra, periodo=periodo, version_destino=version_destino,
+        items=items, usuario=usuario, actor=actor,
+    )
+    ids = await persistir_equipo(db, prep)
+
+    # Cabecera de facturación abierta para la OS+período. Idempotente: para la carga
+    # normal la crea si es la primera prestación del período; para la complementaria
+    # ya existe (se creó con POST /facturas/complemento), así que no hace nada.
+    await _ensure_factura_abierta(db, cod_obra, periodo, usuario)
+
+    await db.commit()
+    return GuardadoResponse(ids=ids, importe_total=prep.importe_total, periodo=periodo)
+
+
+async def preparar_equipo(
+    db: AsyncSession,
+    *,
+    cod_obra: str,
+    periodo: str,
+    version_destino: int,
+    items: list[PrestacionItem],
+    usuario: str,
+    actor: str,
+    pacientes_nuevos: Optional[dict[str, Optional[str]]] = None,
+) -> EquipoPreparado:
+    """Valida y cotiza un alta (1 ítem = individual, N = equipo) y devuelve las filas
+    SIN agregarlas a la sesión ni escribir nada. Corta con `HTTPException` ante el
+    primer problema, antes de persistir cualquier fila del grupo.
+
+    Separada de la escritura (`persistir_equipo`) para que la importación por planilla
+    pueda previsualizar con exactamente las mismas reglas que la carga manual."""
     # En carga múltiple (equipo) no se permite repetir el mismo prestador. La identidad
     # del prestador es (payee, ejecutor): bajo una misma clínica pueden convivir varios
     # médicos ejecutores distintos, pero no dos filas idénticas.
@@ -1623,7 +1705,7 @@ async def _insertar_prestaciones(
 
     # Pediatra: máximo uno, sólo sobre parto/cesárea, y nunca como ítem 0 — el ítem 0
     # es siempre el cirujano y es quien tiene que quedar de cabeza del grupo (ver la
-    # elección de `cabeza_id` más abajo). Dos formas de llegar acá:
+    # elección de `cabeza_idx` más abajo). Dos formas de llegar acá:
     #   (a) alta nueva del equipo completo: varios ítems, el 0 es el cirujano;
     #   (b) agregar un pediatra a un equipo YA guardado (editar): un único ítem que ya
     #       trae `grupo_equipo_id` apuntando a la cabeza existente — ahí el ítem 0 SÍ es
@@ -1666,10 +1748,9 @@ async def _insertar_prestaciones(
                 db, item.cod_nomenclador, cod_obra, item.autorizacion
             )
 
-    ids: list[int] = []
     total_acum = Decimal("0")
     filas: list[DetalleFacturacionCMC] = []
-    cabeza_id: Optional[int] = None  # fila del médico (honorarios > 0) = cabeza del equipo
+    cabeza_idx: Optional[int] = None  # fila del médico (honorarios > 0) = cabeza del equipo
 
     for i, item in enumerate(items):
         es_pediatra = item.rol == ROL_PEDIATRA
@@ -1696,7 +1777,7 @@ async def _insertar_prestaciones(
         if item.cod_nomenclador in CODIGOS_NO_PERMITIDOS:
             raise HTTPException(422, "Código no permitido")
 
-        dni_paciente, nombre_paciente = await paciente_de(db, item)
+        dni_paciente, nombre_paciente = await paciente_de(db, item, pacientes_nuevos)
 
         # El precio sale de la especialidad del médico ejecutor (= el propio médico si el
         # payee no es una clínica).
@@ -1775,6 +1856,23 @@ async def _insertar_prestaciones(
             version=version_destino,
             sin_valorizar=sin_valorizar,
         )
+        total_acum += total
+        filas.append(row)
+        # El pediatra también factura honorarios (de su propio código) pero NO puede
+        # quedar de cabeza: la cabeza es siempre el cirujano. La validación de arriba ya
+        # garantiza que el ítem 0 no es el pediatra; este `not es_pediatra` es la segunda
+        # barrera, a prueba de que el payload llegue reordenado.
+        if cabeza_idx is None and h > 0 and not es_pediatra:
+            cabeza_idx = len(filas) - 1
+
+    return EquipoPreparado(filas=filas, cabeza_idx=cabeza_idx, importe_total=total_acum)
+
+
+async def persistir_equipo(db: AsyncSession, prep: EquipoPreparado) -> list[int]:
+    """Agrega a la sesión las filas de `preparar_equipo`, las enlaza como equipo y
+    devuelve sus ids. NO hace commit: lo decide quien llama."""
+    ids: list[int] = []
+    for row in prep.filas:
         db.add(row)
         await db.flush()  # asigna id_detalle_prestaciones (PK)
         # `nro_orden` ya no es un contador propio (el PK alcanza como identificador
@@ -1782,36 +1880,22 @@ async def _insertar_prestaciones(
         # legacy que liquidación (`nro_orden_cmc`) y lotes todavía leen para mostrar.
         row.nro_orden = str(row.id_detalle_prestaciones)
         ids.append(row.id_detalle_prestaciones)
-        total_acum += total
-        filas.append(row)
-        # El pediatra también factura honorarios (de su propio código) pero NO puede
-        # quedar de cabeza: la cabeza es siempre el cirujano. La validación de arriba ya
-        # garantiza que el ítem 0 no es el pediatra; este `not es_pediatra` es la segunda
-        # barrera, a prueba de que el payload llegue reordenado.
-        if cabeza_id is None and h > 0 and not es_pediatra:
-            cabeza_id = row.id_detalle_prestaciones
 
     # Vínculo de equipo: en POST multi-ítem, las filas sin grupo explícito apuntan a la
     # fila del médico (cabeza). El médico también queda con grupo = su propio id, así
     # `WHERE grupo_equipo_id = <id>` trae todo el equipo.
-    if len(items) > 1 and cabeza_id is not None:
-        cabeza_row = next(r for r in filas if r.id_detalle_prestaciones == cabeza_id)
-        for row in filas:
+    if len(prep.filas) > 1 and prep.cabeza_idx is not None:
+        cabeza_row = prep.filas[prep.cabeza_idx]
+        cabeza_id = cabeza_row.id_detalle_prestaciones
+        for row in prep.filas:
             if row.grupo_equipo_id is None:
                 row.grupo_equipo_id = cabeza_id
             # Cada integrante (ayudante, pediatra) se guarda con el MISMO tipo que la cabeza:
             # sólo la fila de la cabeza sabe si la clínica fue el prestador (Sanatorio); el
-            # resto se carga como médico y por su cuenta saldría por el rango del código.
+            # resto se carga como médico y por su cuenta saldría por la categoría del código.
             if row.grupo_equipo_id == cabeza_id and row.id_detalle_prestaciones != cabeza_id and cabeza_row.tipo:
                 row.tipo = cabeza_row.tipo
-
-    # Cabecera de facturación abierta para la OS+período. Idempotente: para la carga
-    # normal la crea si es la primera prestación del período; para la complementaria
-    # ya existe (se creó con POST /facturas/complemento), así que no hace nada.
-    await _ensure_factura_abierta(db, cod_obra, periodo, usuario)
-
-    await db.commit()
-    return GuardadoResponse(ids=ids, importe_total=total_acum, periodo=periodo)
+    return ids
 
 
 # ── Listado de facturas / períodos ───────────────────────────────────────────
@@ -1920,6 +2004,75 @@ async def calcular_publicado(
 
 
 # ── Detalle de factura agrupado por prestador ────────────────────────────────
+def _fecha_o_none(v):
+    """El legacy guardó `0000-00-00` en las fechas sin dato: el driver lo devuelve como texto
+    y rompe la respuesta. Sólo se informan las fechas reales."""
+    return v if isinstance(v, datetime.date) else None
+
+
+async def _datos_cabecera_factura(db: AsyncSession, factura: FacturacionCMC) -> dict:
+    """Datos de la cabecera para el encabezado del listado: nombre de la obra social, números
+    de factura, fechas, quién la creó/cerró, comprobante y complementos del mismo período."""
+    nombre_os = None
+    try:
+        nro_os = int(factura.cod_obr) if factura.cod_obr is not None else None
+    except (TypeError, ValueError):
+        nro_os = None
+    if nro_os is not None:
+        nombre_os = (await db.execute(
+            select(ObrasSociales.OBRA_SOCIAL).where(ObrasSociales.NRO_OBRASOCIAL == nro_os)
+        )).scalars().first()
+
+    nros_factura = [
+        " ".join(p for p in (str(t or "").strip(), str(n or "").strip()) if p)
+        for t, n in (
+            (factura.tipo_factura, factura.nro_factura),
+            (factura.tipo_factura_2, factura.nro_factura_2),
+            (factura.tipo_factura_3, factura.nro_factura_3),
+        ) if (n or "").strip()
+    ]
+
+    # `usuario` y `fecha` se pisan en el cierre (ver FacturacionCMC): sólo son "cerrada por"
+    # y "fecha de cierre" cuando la fase del Colegio ya está cerrada.
+    cerrada = (factura.estado or "").upper() in FACTURA_ESTADOS_CERRADOS
+
+    socios: set[int] = set()
+    for cod in (factura.usuario, factura.creado_por):
+        try:
+            if cod is not None:
+                socios.add(int(cod))
+        except (TypeError, ValueError):
+            continue
+    nombres: dict[str, str] = {}
+    if socios:
+        nombres = {
+            str(n): nom for n, nom in (await db.execute(
+                select(ListadoMedico.NRO_SOCIO, ListadoMedico.NOMBRE).where(ListadoMedico.NRO_SOCIO.in_(socios))
+            )).all()
+        }
+
+    otras = (await db.execute(
+        select(FacturacionCMC.id_prestaciones, FacturacionCMC.version).where(
+            FacturacionCMC.cod_obr == factura.cod_obr, FacturacionCMC.periodo == factura.periodo,
+            FacturacionCMC.id_prestaciones != factura.id_prestaciones,
+        ).order_by(FacturacionCMC.version)
+    )).all()
+
+    return {
+        "nombre_obra_social": nombre_os,
+        "numeros_factura": nros_factura,
+        "fecha_cierre": _fecha_o_none(factura.fecha) if cerrada else None,
+        "fecha_envio": _fecha_o_none(factura.fecha_envio),
+        "fecha_recepcion": _fecha_o_none(factura.fecha_recep),
+        "cerrada_por": (nombres.get(str(factura.usuario)) or str(factura.usuario)) if cerrada and factura.usuario else None,
+        "creada_por": (nombres.get(str(factura.creado_por)) or str(factura.creado_por)) if factura.creado_por else None,
+        "creada_en": factura.creado_en if isinstance(factura.creado_en, datetime.datetime) else None,
+        "documento_url": url_archivo(factura.documento_url),
+        "afip": factura.afip,
+        "otras_versiones": [{"id_factura": i, "version": v} for i, v in otras],
+    }
+
+
 async def obtener_factura_detalle(db: AsyncSession, factura_id: int) -> dict:
     """Detalle de una factura (cabecera `facturacion`): sus prestaciones
     (`detalle_facturacion` de la misma OS+período **y versión**, excluyendo anuladas)
@@ -1979,6 +2132,10 @@ async def obtener_factura_detalle(db: AsyncSession, factura_id: int) -> dict:
     # Fallback para filas legacy con `tipo` NULL (la columna se puebla recién al cargar
     # por el módulo nuevo; el histórico de CMC nunca la tuvo). Se deriva on-the-fly con
     # la misma regla que `derivar_tipo`/`resolver_prestador`, sin tocar la fila persistida.
+    tipos_legacy = await tipos_sin_clinica(
+        db, {(r.cod_nom, str(r.cod_obr) if r.cod_obr is not None else None) for r in rows if r.tipo is None},
+    )
+
     def _tipo_de(r: DetalleFacturacionCMC) -> Optional[str]:
         if r.tipo is not None:
             return r.tipo
@@ -1987,7 +2144,7 @@ async def obtener_factura_detalle(db: AsyncSession, factura_id: int) -> dict:
             return TIPO_SANATORIO
         if r.cod_clinica:  # 0 = sentinel legacy "sin clínica"
             return CATEGORIA_HONORARIOS_INDIVIDUALES
-        return tipo_por_codigo(r.cod_nom)
+        return tipos_legacy[(r.cod_nom, str(r.cod_obr) if r.cod_obr is not None else None)]
 
     # Agrupar por cod_med preservando el orden de aparición (ya viene ordenado por fecha).
     # cod_med puede volver como int en filas legacy (columna declarada String pero
@@ -2060,6 +2217,8 @@ async def obtener_factura_detalle(db: AsyncSession, factura_id: int) -> dict:
     orden_grupos.sort(key=lambda c: (grupos[c]["nombre"] or "", c))
     prestadores = [grupos[c] for c in orden_grupos]
 
+    cabecera = await _datos_cabecera_factura(db, factura)
+
     return {
         "id_factura": factura.id_prestaciones,
         "periodo": factura.periodo,
@@ -2069,6 +2228,7 @@ async def obtener_factura_detalle(db: AsyncSession, factura_id: int) -> dict:
         "estado_doctor": factura.estado_doctor,
         "version": factura.version,
         "es_complemento": factura.version > 1,
+        **cabecera,
         # Unidades facturadas, no filas: una prestación con cantidad=2 y sesion=3 cuenta 6
         # (mismo criterio que el importe: cantidad * sesion).
         "total_prestaciones": sum((r.cantidad or 1) * (r.sesion or 1) for r in rows),
@@ -2127,7 +2287,11 @@ async def listar_prestaciones(
     if tipo is not None:
         filtros.append(M.tipo == tipo)
     if grupo_equipo_id is not None:
-        filtros.append(M.grupo_equipo_id == grupo_equipo_id)
+        # Incluye a la cabecera aunque no tenga el grupo cargado (cargas viejas: los
+        # integrantes apuntan a ella pero ella misma quedó con `grupo_equipo_id` NULL).
+        filtros.append(
+            (M.grupo_equipo_id == grupo_equipo_id) | (M.id_detalle_prestaciones == grupo_equipo_id)
+        )
     if dni_paciente is not None:
         filtros.append(M.dni_p == dni_paciente)
     if nombre_paciente is not None:
@@ -2342,17 +2506,21 @@ async def obtener_prestacion(db: AsyncSession, prestacion_id: int) -> Prestacion
     # listado ya trae y este endpoint dejaba en None por una asimetría de vieja data.
     principal = (await _to_prestacion_read_list(db, [row]))[0]
     principal.grupo = []
-    if row.grupo_equipo_id is not None:
-        siblings = (await db.execute(
-            select(DetalleFacturacionCMC)
-            .where(
-                DetalleFacturacionCMC.grupo_equipo_id == row.grupo_equipo_id,
-                DetalleFacturacionCMC.id_detalle_prestaciones != prestacion_id,
-                DetalleFacturacionCMC.estado != "X",
-            )
-            .order_by(DetalleFacturacionCMC.id_detalle_prestaciones.asc())
-        )).scalars().all()
-        principal.grupo = await _to_prestacion_read_list(db, siblings)
+    # La cabecera de una carga vieja puede tener `grupo_equipo_id` NULL aunque otras filas
+    # apunten a ella: su equipo es el que cuelga de su propio id. Y cuando `row` es un
+    # integrante, la cabecera se incluye por id (tenga o no su propio grupo cargado).
+    grupo_id = row.grupo_equipo_id if row.grupo_equipo_id is not None else prestacion_id
+    siblings = (await db.execute(
+        select(DetalleFacturacionCMC)
+        .where(
+            (DetalleFacturacionCMC.grupo_equipo_id == grupo_id)
+            | (DetalleFacturacionCMC.id_detalle_prestaciones == grupo_id),
+            DetalleFacturacionCMC.id_detalle_prestaciones != prestacion_id,
+            DetalleFacturacionCMC.estado != "X",
+        )
+        .order_by(DetalleFacturacionCMC.id_detalle_prestaciones.asc())
+    )).scalars().all()
+    principal.grupo = await _to_prestacion_read_list(db, siblings)
     return principal
 
 
@@ -2900,7 +3068,7 @@ async def listar_periodos_propios(db: AsyncSession, cod_medico: str) -> list[dic
 
 
 # ── Soft-delete ──────────────────────────────────────────────────────────────
-async def anular_prestacion(db: AsyncSession, prestacion_id: int) -> None:
+async def anular_prestacion(db: AsyncSession, prestacion_id: int, con_equipo: bool = False) -> None:
     row = await db.get(DetalleFacturacionCMC, prestacion_id)
     if row is None:
         raise HTTPException(404, "Prestación no encontrada")
@@ -2911,6 +3079,18 @@ async def anular_prestacion(db: AsyncSession, prestacion_id: int) -> None:
     _gate_edicion(await _get_factura(db, row.cod_obr, row.periodo))
     cod_obra, periodo = row.cod_obr, row.periodo
     row.estado = "X"
+    # Con `con_equipo`, anular a la cabecera (el médico) se lleva a todo su equipo; anular a
+    # un integrante (ayudante, pediatra…) anula solo esa fila y el resto queda como estaba.
+    if con_equipo and (row.grupo_equipo_id is None or row.grupo_equipo_id == prestacion_id):
+        integrantes = (await db.execute(
+            select(DetalleFacturacionCMC).where(
+                DetalleFacturacionCMC.grupo_equipo_id == prestacion_id,
+                DetalleFacturacionCMC.id_detalle_prestaciones != prestacion_id,
+                DetalleFacturacionCMC.estado == "A",
+            )
+        )).scalars().all()
+        for integrante in integrantes:
+            integrante.estado = "X"
     await db.flush()
     # Si era la última prestación abierta del período, se elimina la cabecera abierta.
     await _cleanup_factura_si_vacia(db, cod_obra, periodo)

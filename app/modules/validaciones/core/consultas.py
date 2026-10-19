@@ -3,6 +3,7 @@ búsqueda de códigos. Comparten filtro y armado de vista sin importar la obra
 social — lo específico de cada una ya quedó grabado en `detalle_facturacion`.
 """
 import datetime
+import unicodedata
 from typing import Optional, Sequence
 
 from fastapi import HTTPException
@@ -20,10 +21,9 @@ from app.modules.validaciones.core.medicos import get_medico
 from app.modules.validaciones.core.periodos import ORIGEN_MEDICO, partes_periodo, periodo_cerrado
 
 
-# Cuántas filas del catálogo se leen por cada una que se devuelve en
-# `buscar_codigos`. Cubre el dedupe (fila propia de la OS + compartida) y los
-# códigos que el médico no puede facturar. Subirlo mejora los resultados de un
-# médico con pocas habilitaciones a costa de más consultas de precio.
+# Cuántos habilitados se cotizan, como máximo, por cada código que se devuelve en
+# `buscar_codigos`. Cubre los que el lookup descarta (precio fuera de vigencia, $ 0).
+# Subirlo mejora los resultados a costa de más consultas de precio.
 _FACTOR_BARRIDO = 5
 
 
@@ -191,6 +191,42 @@ async def listar_periodos(
     return salida
 
 
+def _normal(texto: str) -> str:
+    """Minúsculas y sin acentos, para comparar lo tipeado con las descripciones."""
+    sin_marcas = unicodedata.normalize("NFD", texto or "")
+    return "".join(c for c in sin_marcas if not unicodedata.combining(c)).casefold()
+
+
+def _filtrar_habilitados(habilitados: list[dict], q: str) -> list[dict]:
+    """Los habilitados que coinciden con lo tipeado, por código o por descripción.
+
+    Cada palabra tiene que aparecer en el código o en la descripción (sin acentos ni
+    mayúsculas). Van primero los que coinciden por código —el código exacto, luego el
+    que empieza igual, luego el que lo contiene— y después los que sólo coinciden por
+    nombre, así Enter sigue tomando el código que se estaba tipeando. Sin texto, todos.
+    """
+    palabras = _normal(q).split()
+    if not palabras:
+        return habilitados
+    ranking: list[tuple[int, str, dict]] = []
+    for h in habilitados:
+        codigo = h["codigo"].casefold()
+        desc = _normal(h.get("descripcion") or "")
+        if not all(p in codigo or p in desc for p in palabras):
+            continue
+        if codigo == palabras[0]:
+            puesto = 0
+        elif codigo.startswith(palabras[0]):
+            puesto = 1
+        elif any(p in codigo for p in palabras):
+            puesto = 2
+        else:
+            puesto = 3
+        ranking.append((puesto, h["codigo"], h))
+    ranking.sort(key=lambda t: (t[0], t[1]))
+    return [h for _, _, h in ranking]
+
+
 async def buscar_codigos(
     db: AsyncSession, obra_social_id: int, nro_socio: int, q: str, limite: int = 20
 ) -> list[dict]:
@@ -200,12 +236,17 @@ async def buscar_codigos(
     El precio sale del mismo lookup que usa facturación, así que lo que ve el
     prestador acá es lo que después se le va a liquidar.
 
-    Los no admitidos —sin habilitación por especialidad, sin precio vigente— no
-    se devuelven. Antes salían con `admitido=False` y un motivo, y el buscador
-    los pintaba en gris: el prestador no los puede usar, así que verlos sólo
-    servía para que intentara elegirlos. Como efecto secundario, el `limite`
-    ahora rinde — una búsqueda corta podía gastar las 20 filas en códigos
-    inservibles y esconder los que sí servían.
+    Se parte de lo que el médico tiene habilitado en esa obra social (sus
+    especialidades + excepciones individuales + códigos sin restricción, el mismo
+    alcance que evalúa `lookup_precio`) y recién ahí se busca por código o por
+    descripción. Antes se recorría el catálogo entero en orden de código, se leían
+    unas pocas filas y se descartaba lo no habilitado: sin texto el médico veía sólo
+    lo que caía entre los primeros códigos, y la búsqueda no entendía descripciones.
+
+    Los no admitidos —sin precio vigente, fuera de ventana— no se devuelven. Antes
+    salían con `admitido=False` y un motivo, y el buscador los pintaba en gris: el
+    prestador no los puede usar, así que verlos sólo servía para que intentara
+    elegirlos.
 
     **Los que cotizan $ 0 tampoco se devuelven**, con el mismo criterio: es lo
     que `Contexto.precio()` rechaza con 422 al cargar, así que ofrecerlos sería
@@ -216,25 +257,25 @@ async def buscar_codigos(
     medico = await get_medico(db, nro_socio)
     hoy = datetime.date.today()
 
-    # El código es identidad única desde la fase 3 de la reestructura del
-    # nomenclador: no hace falta filtrar por OS ni dedupear entre fila propia y
-    # compartida. La descripción sale de `resolver_precio` (vía descripcion_
-    # efectiva, con su propio fallback legacy) — no de acá.
-    stmt = select(NomencladorCMC.codigo).where(NomencladorCMC.activo.is_(True))
-    termino = (q or "").strip()
-    if termino:
-        stmt = stmt.where(NomencladorCMC.codigo.like(f"%{termino}%"))
-    # Se leen más filas de las que se devuelven porque de acá se cae por la
-    # habilitación. El techo es lo que acota el costo — `resolver_precio` es una
-    # consulta por fila —, y el `break` corta apenas se juntan `limite` códigos
-    # usables, que es el caso normal.
-    stmt = stmt.order_by(NomencladorCMC.codigo).limit(limite * _FACTOR_BARRIDO)
-    codigos = (await db.execute(stmt)).scalars().all()
+    habilitados = await service_nm.listar_codigos_habilitados(db, medico, None, obra_social_id)
+    # Sólo se cotizan los que esa obra social tiene con precio activo: es una consulta
+    # que ahorra una resolución de precio por cada habilitado sin precio.
+    con_precio = set((await db.execute(
+        select(Valor.codigo)
+        .where(Valor.obra_social_nro == obra_social_id, Valor.estado == "activo")
+        .distinct()
+    )).scalars().all())
+    candidatos = _filtrar_habilitados(
+        [h for h in habilitados if h["codigo"] in con_precio], (q or "").strip()
+    )
 
     salida: list[dict] = []
-    for codigo in codigos:
+    # El techo acota el costo —`resolver_precio` es una consulta por fila— cuando el
+    # médico tiene muchos habilitados con precio fuera de vigencia.
+    for h in candidatos[: limite * _FACTOR_BARRIDO]:
         if len(salida) >= limite:
             break
+        codigo = h["codigo"]
         try:
             precio = await resolver_precio(db, str(obra_social_id), medico, codigo, hoy)
         except HTTPException:
@@ -245,7 +286,7 @@ async def buscar_codigos(
         salida.append(
             {
                 "codigo": codigo,
-                "descripcion": precio.descripcion or "",
+                "descripcion": precio.descripcion or h.get("descripcion") or "",
                 "honorarios": precio.honorarios,
                 "gastos": precio.gastos,
                 "total": precio.honorarios + precio.gastos,

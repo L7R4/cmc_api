@@ -42,7 +42,7 @@ def s(db, monkeypatch):
 
 
 async def _preparar(db, *, con_galenos=True):
-    db.add(ObrasSociales(NRO_OBRASOCIAL=OS, OBRA_SOCIAL="PRUEBA NIVELADOS", MARCA="S", cuit="0"))
+    db.add(ObrasSociales(NRO_OBRASOCIAL=OS, OBRA_SOCIAL="PRUEBA NIVELADOS", cuit="0"))
     if con_galenos:
         for nivel in range(1, 8):
             db.add(Galeno(
@@ -231,3 +231,112 @@ async def test_editar_y_agregar_codigo_validan_el_nivel(s):
     assert exc.value.status_code == 409
     with pytest.raises(ValueError):
         NiveladoCodigoIn(nivel=2, unidades=Decimal("5"))
+
+
+@pytest.mark.asyncio
+async def test_la_lista_de_especialidades_acota_donde_se_carga_precio(s):
+    (a, b, c, d), (e1, e2) = await _preparar(s)
+    nom = (await s.execute(select(NomencladorNivelado).where(NomencladorNivelado.slug == SLUG))).scalar_one()
+    # e2 ya tenía un precio de `a` fuera del nomenclador: no se toca.
+    await _crear_valor_con_componentes(
+        db=s, obra_social_nro=OS, nomenclador_id=a.id, origen="NE", vigencia_desde=HOY,
+        componentes_in=[ValorComponenteIn(concepto="Honorarios", valor_unitario=Decimal("10"))],
+        descripcion="X", nivel=None, complejidad=None, especialidad_id_colegio=e2, observacion=None,
+    )
+    assert await nivelados.actualizar_especialidades(s, SLUG, [e1, e1]) == [e1]
+    assert nom.especialidades == [e1]
+
+    previa = await nivelados.aplicar(s, SLUG, OS, HOY, dry_run=True, usuario="t")
+    estados = {f.codigo: f.estado for f in previa.filas}
+    assert estados[a.codigo] == "crear" and estados[b.codigo] == "crear"
+    assert next(f for f in previa.filas if f.codigo == a.codigo).precios == 1  # sólo e1
+
+    await nivelados.aplicar(s, SLUG, OS, HOY, dry_run=False, usuario="t")
+    va = {v.especialidad_id_colegio: v for v in await _activos(s, a.id)}
+    assert sorted(va) == [e1, e2]
+    assert va[e1].nivel == 3  # nuevo, del nomenclador
+    assert va[e2].nivel is None and (await _comps(s, va[e2].id))["Honorarios"].valor_unitario == Decimal("10")
+
+
+@pytest.mark.asyncio
+async def test_codigo_sin_ninguna_especialidad_del_nomenclador_queda_fuera(s):
+    (a, b, c, d), (e1, e2) = await _preparar(s)
+    await nivelados.actualizar_especialidades(s, SLUG, [e2])  # b y d solo se facturan por e1
+
+    out = await nivelados.aplicar(s, SLUG, OS, HOY, dry_run=False, usuario="t")
+    estados = {f.codigo: f.estado for f in out.filas}
+    assert estados[a.codigo] == "creado"
+    assert estados[b.codigo] == estados[d.codigo] == "fuera_de_especialidad"
+    assert estados[c.codigo] == "sin_quien_factura"
+    assert out.resumen.fuera_de_especialidad == 2
+    assert [v.especialidad_id_colegio for v in await _activos(s, a.id)] == [e2]
+    assert await _activos(s, b.id) == [] and await _activos(s, d.id) == []
+
+
+@pytest.mark.asyncio
+async def test_sin_restriccion_con_lista_agrega_un_ne_por_especialidad_y_no_toca_el_nn(s):
+    """El código sigue «sin restricción» (su NN vale para cualquier médico); el NE del nomenclador es
+    sólo de sus especialidades: un precio NE por cada una, que se habilitan."""
+    from app.modules.nomenclador import alta_os, service
+    from app.modules.nomenclador.schemas import AltaCodigoItem, AltaCodigosIn
+
+    (a, b, c, d), (e1, e2) = await _preparar(s)
+    await alta_os.dar_de_alta(s, AltaCodigosIn(items=[
+        AltaCodigoItem(obra_social_nro=OS, nomenclador_id=b.id, sin_restriccion_especialidad=True),
+    ]), "t")
+    await _crear_valor_con_componentes(
+        db=s, obra_social_nro=OS, nomenclador_id=b.id, origen="NN", vigencia_desde=HOY,
+        componentes_in=[ValorComponenteIn(concepto="Honorarios", valor_unitario=Decimal("10"))],
+        descripcion="NN", nivel=None, complejidad=None, especialidad_id_colegio=None, observacion=None,
+        sin_restriccion_especialidad=True,
+    )
+    await nivelados.actualizar_especialidades(s, SLUG, [e1, e2])
+
+    previa = await nivelados.aplicar(s, SLUG, OS, HOY, dry_run=True, usuario="t")
+    fila_b = next(f for f in previa.filas if f.codigo == b.codigo)
+    assert fila_b.estado == "crear" and fila_b.precios == 2
+
+    await nivelados.aplicar(s, SLUG, OS, HOY, dry_run=False, usuario="t")
+    activos = await _activos(s, b.id)
+    assert sorted((v.origen, v.especialidad_id_colegio or 0) for v in activos) == [("NE", e1), ("NE", e2), ("NN", 0)]
+    assert all(v.sin_restriccion_especialidad is True for v in activos)  # el par sigue sin restricción
+    assert (await alta_os.get_par(s, OS, b.id)).sin_restriccion_especialidad is True
+    assert {e1, e2} <= set(await service.especialidades_habilitadas_de(s, b.codigo, OS))
+
+
+@pytest.mark.asyncio
+async def test_actualizar_especialidades_valida_y_vacio_es_todas(s):
+    (_, _, _, _), (e1, e2) = await _preparar(s)
+    with pytest.raises(HTTPException) as exc:
+        await nivelados.actualizar_especialidades(s, SLUG, [e1, 999_999])
+    assert exc.value.status_code == 422
+    await nivelados.actualizar_especialidades(s, SLUG, [e1])
+    assert [n.especialidades for n in await nivelados.listar(s) if n.slug == SLUG] == [[e1]]
+    assert await nivelados.actualizar_especialidades(s, SLUG, []) == []
+    nom = (await s.execute(select(NomencladorNivelado).where(NomencladorNivelado.slug == SLUG))).scalar_one()
+    assert nom.especialidades is None
+
+
+@pytest.mark.asyncio
+async def test_alta_previa_sin_config_hereda_sin_restriccion_del_catalogo(s):
+    """Un código ya dado de alta en la O.S. sin nada configurado (p. ej. una aplicación anterior que
+    lo dejó "sin quién factura") y marcado "sin restricción" en el catálogo se cotiza: un único
+    precio sin especialidad (el nomenclador no tiene lista), y el par queda "sin restricción"."""
+    from app.modules.nomenclador import alta_os
+    from app.modules.nomenclador.schemas import AltaCodigoItem, AltaCodigosIn
+
+    (a, b, c, d), (e1, e2) = await _preparar(s)  # c: plantilla vacía
+    await alta_os.dar_de_alta(s, AltaCodigosIn(items=[
+        AltaCodigoItem(obra_social_nro=OS, nomenclador_id=c.id, especialidades=[]),
+    ]), "t")
+    assert (await alta_os.get_par(s, OS, c.id)).sin_restriccion_especialidad is False
+    c.sin_restriccion_especialidad = True  # se marca en el catálogo después del alta
+    await s.flush()
+
+    previa = await nivelados.aplicar(s, SLUG, OS, HOY, dry_run=True, usuario="t")
+    assert next(f for f in previa.filas if f.codigo == c.codigo).estado == "crear"
+
+    await nivelados.aplicar(s, SLUG, OS, HOY, dry_run=False, usuario="t")
+    [vc] = await _activos(s, c.id)
+    assert vc.especialidad_id_colegio is None and vc.sin_restriccion_especialidad is True
+    assert (await alta_os.get_par(s, OS, c.id)).sin_restriccion_especialidad is True

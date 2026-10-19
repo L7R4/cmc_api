@@ -17,10 +17,13 @@ Las modalidades (`ExportOpciones.agrupacion`) comparten una sola estructura:
 
 - **por_socio**: orden FIJO (ignora `orden`), una única `Seccion` sin título. Socios
   A-Z; dentro de cada uno, con subtítulo por tramo: consultas y prácticas por fecha
-  (más nueva primero), honorarios individuales y sanatorios por paciente A-Z, cada
-  paciente con su subtítulo ("PACIENTE <nombre>") y su "TOTAL PACIENTE <nombre>".
-  Cada grupo lleva su título y su "RESUMEN SOCIO"; en Excel va todo en una sola hoja
-  (`Armado.una_hoja`).
+  (más nueva primero) y honorarios individuales por paciente A-Z, cada paciente con su
+  subtítulo ("PACIENTE <nombre>") y su "TOTAL PACIENTE <nombre>". Cada grupo lleva su título
+  y su "RESUMEN SOCIO"; en Excel va todo en una sola hoja (`Armado.una_hoja`). Los
+  sanatorios NO van en el grupo del socio: forman al final un bloque único "SANATORIOS" con el
+  subtítulo de cada clínica A-Z, dentro el de cada paciente A-Z con su total y, debajo,
+  las prestaciones ordenadas por socio A-Z. No entran en el RESUMEN SOCIO, sí en el
+  RESUMEN GENERAL.
 - **por_tipo**: una `Seccion` por tipo (Consulta/Practica/Honorarios
   individuales/Sanatorio) que tenga filas, cada una arranca en página/hoja nueva con
   su subtotal. Dentro, un grupo por socio (A-Z) con sus filas ordenadas por `orden` +
@@ -132,7 +135,11 @@ class Seccion:
 
     @property
     def total(self) -> Decimal:
-        return sum((g.total_general for g in self.grupos), Decimal("0"))
+        """Lo que se factura en la sección: con el equipo de TODAS las cirugías, también
+        las de Honorarios individuales / Sanatorios (que no suman al subtotal de su socio).
+        Así la suma de las secciones da el total general."""
+        lineas = [l for g in self.grupos for l in g.lineas]
+        return quantize_money(_stats_de_lineas(lineas, equipo_siempre=True)[4])
 
 
 @dataclass
@@ -271,18 +278,24 @@ def _stats_de_lineas(lineas: list[LineaPrestacion], equipo_siempre: bool = False
     dict[str, StatsTipo], Decimal, Decimal, Decimal, Decimal,
 ]:
     """Totales de las líneas: la fila y su equipo anidado (`hijos`), salvo el de las
-    cirugías de Honorarios individuales / Sanatorios (`equipo_siempre` lo incluye igual)."""
+    cirugías de Honorarios individuales / Sanatorios (`equipo_siempre` lo incluye igual).
+
+    Por tipo, el equipo cuenta con el tipo de su CABEZA (el ayudante de una cirugía de Sanatorio suma
+    en Sanatorio aunque su propia fila diga Práctica): es como se lista en el documento, así el
+    subtotal de cada sección, el resumen de cada socio, el resumen general y la carátula coinciden."""
     stats: dict[str, StatsTipo] = {t: StatsTipo() for t in TIPOS_EN_ORDEN}
     total_hon = total_gas = total_cos = total_gral = Decimal("0")
     for linea in lineas:
         hijos = linea.hijos if equipo_siempre or _suma_equipo(linea.fila) else []
         for f in [linea.fila, *hijos]:
-            s = stats.setdefault(f.tipo, StatsTipo())
+            s = stats.setdefault(linea.fila.tipo, StatsTipo())
             s.cantidad += (f.cantidad or 0) * (f.sesion or 1)
             s.monto += f.subtotal
             total_hon += f.honorarios
             total_gas += f.gastos
-            total_cos += f.coseguro
+            # El coseguro se descuenta por unidad (importe = (h+g+a − coseguro) × cantidad × sesión):
+            # lo que se descontó en total es el de la fila × sus unidades, igual que la cabecera de la vista.
+            total_cos += f.coseguro * (f.cantidad or 1) * (f.sesion or 1)
             total_gral += f.subtotal
     return stats, total_hon, total_gas, total_cos, total_gral
 
@@ -337,18 +350,27 @@ def _clave_natural(s: str | None) -> tuple:
 
 def _clave_paciente(f: FilaExport) -> tuple:
     """Paciente A-Z (nombre, después documento); dentro del mismo paciente, más nueva primero."""
-    return ((f.afiliado or "").casefold(), _clave_natural(f.nro_afiliado), *_clave_fecha_desc(f))
+    return (_normal(f.afiliado), _clave_natural(_normal(f.nro_afiliado)), *_clave_fecha_desc(f))
 
 
 def _normal(s: str | None) -> str:
     return " ".join((s or "").split()).casefold()
 
 
+def _clave_sanatorio(f: FilaExport) -> tuple:
+    """Sanatorios: clínica A-Z; dentro de la clínica, paciente A-Z (nombre, después
+    documento); dentro del paciente, socio A-Z; después la fecha, más nueva primero."""
+    return (
+        _clave_clinica(f), _normal(f.afiliado), _clave_natural(_normal(f.nro_afiliado)),
+        _nombre_clave(f.prestador_nombre, f.cod_medico), *_clave_fecha_desc(f),
+    )
+
+
 def _marcar_pacientes(lineas: list[LineaPrestacion], con_total: bool = False) -> None:
     """Honorarios individuales / Sanatorios ordenados por paciente: pone el subtítulo
     "PACIENTE X" en la primera línea de cada paciente (las líneas ya vienen con las de un
     mismo paciente seguidas) y, con `con_total`, su total en la última — equipo incluido.
-    El paciente se identifica por documento/afiliado (o nombre) y, en Sanatorios, también
+    El paciente se identifica por nombre y documento/afiliado y, en Sanatorios, también
     por clínica: el mismo paciente en otra clínica es otro bloque."""
     previa: tuple | None = None
     bloque: list[LineaPrestacion] = []
@@ -366,7 +388,9 @@ def _marcar_pacientes(lineas: list[LineaPrestacion], con_total: bool = False) ->
             cerrar()
             previa = None
             continue
-        clave = (_normal(f.nro_afiliado) or _normal(f.afiliado), f.cod_clinica if f.tipo == "Sanatorio" else None)
+        # La misma clave que ordena (`_clave_paciente`: nombre y número), así un bloque
+        # nunca se parte por tener las filas del paciente separadas.
+        clave = (_normal(f.afiliado), _normal(f.nro_afiliado), f.cod_clinica if f.tipo == "Sanatorio" else None)
         if clave != previa:
             cerrar()
             previa = clave
@@ -380,14 +404,16 @@ _TRAMOS_MEDICO: list[tuple[str, str, Callable[[FilaExport], tuple]]] = [
     ("Consulta", "CONSULTAS", _clave_fecha_desc),
     ("Practica", "PRACTICAS", _clave_fecha_desc),
     ("Honorarios individuales", "HONORARIOS INDIVIDUALES", _clave_paciente),
-    ("Sanatorio", "SANATORIOS", lambda f: (_clave_clinica(f), *_clave_paciente(f))),
 ]
 
 
 def _armar_por_socio(filas: list[FilaExport], equipo: dict[int, list[FilaExport]]) -> list[Seccion]:
+    """Los médicos A-Z con sus consultas, prácticas y honorarios individuales, y al final un
+    bloque único de SANATORIOS: no van dentro de cada médico porque se ordenan por clínica,
+    paciente y recién después socio, algo que un grupo de un solo socio no puede expresar."""
     grupos: list[GrupoSocio] = []
     tipos_tramo = {t for t, _, _ in _TRAMOS_MEDICO}
-    for filas_socio in _por_socio(filas).values():
+    for filas_socio in _por_socio([f for f in filas if f.tipo != "Sanatorio"]).values():
         lineas: list[LineaPrestacion] = []
         for tipo, subtitulo, clave in _TRAMOS_MEDICO:
             tramo = sorted((f for f in filas_socio if f.tipo == tipo), key=clave)
@@ -401,54 +427,51 @@ def _armar_por_socio(filas: list[FilaExport], equipo: dict[int, list[FilaExport]
             lineas.append(LineaPrestacion(
                 fila=f, hijos=equipo.get(f.id, []), subtitulo="OTRAS" if i == 0 else None,
             ))
-        _marcar_clinicas(lineas)
         _marcar_pacientes(lineas, con_total=True)
         f0 = filas_socio[0]
         grupos.append(_armar_grupo(
             f0.cod_medico, f0.prestador_nombre, f0.matricula, lineas, True, titulo=_titulo_socio(f0),
         ))
     grupos.sort(key=lambda g: _nombre_clave(g.nombre, g.cod_medico))
-    return [Seccion(titulo=None, grupos=grupos)] if grupos else []
+    secciones = [Seccion(titulo=None, grupos=grupos)] if grupos else []
+
+    sanatorios = sorted((f for f in filas if f.tipo == "Sanatorio"), key=_clave_sanatorio)
+    if sanatorios:
+        # Subtítulos: SANATORIOS, cada clínica y cada paciente (con su total); el socio solo ordena.
+        lineas = _lineas(sanatorios, equipo)
+        _marcar_clinicas(lineas)
+        _marcar_pacientes(lineas, con_total=True)
+        secciones.append(Seccion(
+            titulo="SANATORIOS", grupos=[_armar_grupo(None, None, None, lineas, False)],
+        ))
+    return secciones
 
 
 def _armar_por_tipo(
     filas: list[FilaExport], equipo: dict[int, list[FilaExport]], opciones: ExportOpciones,
 ) -> list[Seccion]:
     orden, direccion = opciones.orden, opciones.direccion
-    por_paciente = {
-        "Honorarios individuales": opciones.orden_honorarios == "paciente",
-        "Sanatorio": opciones.orden_sanatorio == "paciente",
-    }
     secciones = []
     for tipo in TIPOS_EN_ORDEN:
         filas_tipo = [f for f in filas if f.tipo == tipo]
         if not filas_tipo:
             continue
+        # Honorarios individuales y Sanatorios van SIEMPRE por paciente (igual que en «Por socio»): la
+        # sección entera por paciente A-Z (en Sanatorios, dentro de cada clínica), con el subtítulo y el
+        # total de cada paciente y sin partir por socio (el socio está en su columna).
+        if tipo in ("Honorarios individuales", "Sanatorio"):
+            clave = _clave_sanatorio if tipo == "Sanatorio" else _clave_paciente
+            lineas = _lineas(sorted(filas_tipo, key=clave), equipo)
+            _marcar_clinicas(lineas)
+            _marcar_pacientes(lineas, con_total=True)
+            secciones.append(Seccion(titulo=ETIQUETA_TIPO[tipo], grupos=[_armar_grupo(None, None, None, lineas, False)]))
+            continue
         grupos = []
         for filas_socio in _por_socio(filas_tipo).values():
             f0 = filas_socio[0]
-            # Con "paciente" (sólo Honorarios individuales y Sanatorios) los pacientes van A-Z
-            # dentro de cada socio y, en Sanatorios, de cada clínica (que siguen agrupadas A-Z).
-            if por_paciente.get(tipo):
-                ordenadas = sorted(filas_socio, key=_clave_paciente)
-            elif tipo in por_paciente:
-                # "Médico": rige el orden elegido, y lo que ese orden no distingue (con
-                # "nombre del socio", todas las filas del socio empatan) queda por
-                # paciente A-Z en vez de en el orden de carga. `sorted` es estable,
-                # también con `reverse`.
-                ordenadas = _ordenar(sorted(filas_socio, key=_clave_paciente), orden, direccion)
-            else:
-                ordenadas = _ordenar(filas_socio, orden, direccion)
-            if tipo == "Sanatorio":
-                ordenadas = sorted(ordenadas, key=_clave_clinica)  # estable: conserva el orden dentro de cada clínica
-            lineas = _lineas(ordenadas, equipo)
-            _marcar_clinicas(lineas)
-            # Por paciente: cada paciente cierra con su total, en lugar del subtotal del socio.
-            if por_paciente.get(tipo):
-                _marcar_pacientes(lineas, con_total=True)
+            lineas = _lineas(_ordenar(filas_socio, orden, direccion), equipo)
             grupos.append(_armar_grupo(
-                f0.cod_medico, f0.prestador_nombre, f0.matricula, lineas, False,
-                subtotal_medico=not por_paciente.get(tipo),
+                f0.cod_medico, f0.prestador_nombre, f0.matricula, lineas, False, subtotal_medico=True,
             ))
         grupos.sort(key=lambda g: _nombre_clave(g.nombre, g.cod_medico))
         secciones.append(Seccion(titulo=ETIQUETA_TIPO[tipo], grupos=grupos))
@@ -459,8 +482,15 @@ def armar(filas: list[FilaExport], opciones: ExportOpciones) -> Armado:
     # El equipo de cada cabeza va SIEMPRE anidado bajo ella (completo, también las integrantes
     # que el filtro dejó afuera) y nunca como línea propia de su socio. Los filtros se aplican
     # a la cabeza: si ella queda afuera, su equipo entero queda afuera.
-    ids_cabezas = {f.id for f in filas if f.grupo_equipo_id == f.id}
-    cabezas_afuera = {f.id for f in filas if f.grupo_equipo_id == f.id and f.fuera_de_filtro}
+    # Cabeza = quien se apunta a sí mismo O a quien apunta algún integrante presente (hay
+    # cirugías cargadas sin el autoapuntado: sus ayudantes igual van con ellas, como en la vista).
+    ids_filas = {f.id: f for f in filas}
+    ids_cabezas = {f.id for f in filas if f.grupo_equipo_id == f.id} | {
+        f.grupo_equipo_id for f in filas
+        if f.grupo_equipo_id is not None and f.grupo_equipo_id != f.id
+        and f.grupo_equipo_id in ids_filas and ids_filas[f.grupo_equipo_id].grupo_equipo_id is None
+    }
+    cabezas_afuera = {i for i in ids_cabezas if ids_filas[i].fuera_de_filtro}
     candidatas = [
         f for f in filas
         if not f.fuera_de_filtro and not (f.grupo_equipo_id in cabezas_afuera and f.grupo_equipo_id != f.id)
@@ -510,19 +540,58 @@ def anidados_filas(equipo: dict[int, list[FilaExport]]) -> list[FilaExport]:
     return [h for hijos in equipo.values() for h in hijos]
 
 
-def texto_subtotal_medico(grupo: GrupoSocio, moneda: str = "") -> str:
-    """Línea de cierre de un socio en por_tipo (la misma para Excel y PDF)."""
-    nombre = f" {grupo.nombre}" if grupo.nombre else ""
-    return (
-        f"SUBTOTAL SOCIO {grupo.cod_medico}{nombre} ({len(grupo.lineas)}): "
-        f"{moneda}{grupo.total_general:,.2f}"
-    )
+# ── Textos de los documentos (los mismos para PDF y Excel) ─────────────────
+# Título de sección: en los documentos va con el nombre completo.
+_TITULO_SECCION = {"HONORARIO": "HONORARIOS INDIVIDUALES", "SANATORIO": "SANATORIOS"}
+# Subtítulos de tramo que NO se imprimen: la columna TIPO (C / P) ya lo dice.
+TRAMOS_OCULTOS = {"CONSULTAS", "PRACTICAS"}
 
 
-def texto_total_paciente(linea: LineaPrestacion, moneda: str = "") -> str:
-    """Línea de cierre de un paciente (por_tipo ordenado por paciente), igual en Excel y PDF."""
+def titulo_seccion(titulo: str | None) -> str | None:
+    return _TITULO_SECCION.get(titulo, titulo) if titulo else titulo
+
+
+def texto_resumen_socio(grupo: GrupoSocio) -> str:
+    """«Consulta: 5 - $142,500.00, Practica: 1 - $86,881.82, Total: $229,381.82». El coseguro, si el
+    socio lo tiene, va antes del total."""
+    partes = [
+        f"{ETIQUETA_TIPO.get(t, t).capitalize()}: {s.cantidad} - ${s.monto:,.2f}"
+        for t, s in grupo.stats_por_tipo.items() if s.cantidad
+    ]
+    if grupo.total_coseguro > 0:
+        partes.append(f"Coseguro: ${grupo.total_coseguro:,.2f}")
+    partes.append(f"Total: ${grupo.total_general:,.2f}")
+    return ", ".join(partes)
+
+
+def texto_subtotal_socio(grupo: GrupoSocio) -> str:
+    """Cierre del socio en «Por tipo»: solo el total, sin su código ni su nombre (las filas ya lo llevan)."""
+    return f"Total: ${grupo.total_general:,.2f}"
+
+
+def texto_total_paciente(linea: LineaPrestacion) -> str:
+    """Cierre del paciente, con el mismo estilo que el del socio (mayúsculas solo al inicio, «$» pegado
+    al monto): en mayúsculas sostenidas parecía más grande que el total del socio."""
     nombre, total = linea.total_paciente or ("", Decimal("0"))
-    return f"TOTAL PACIENTE {nombre}: {moneda}{total:,.2f}" if nombre else f"TOTAL PACIENTE: {moneda}{total:,.2f}"
+    return f"Total paciente {nombre}: ${total:,.2f}" if nombre else f"Total paciente: ${total:,.2f}"
+
+
+def rotulo_paciente(linea: LineaPrestacion) -> str:
+    """Honorarios individuales: «<clínica> - Paciente: <nombre>» (sin clínica, solo «Paciente: ...»).
+    Sanatorios: la clínica va en su propia línea, así que acá solo «Paciente: <nombre>»."""
+    nombre = (linea.subtitulo_paciente or "").removeprefix("PACIENTE").strip()
+    f = linea.fila
+    if f.tipo == "Honorarios individuales":
+        clinica = " ".join((f.clinica_nombre or (str(f.cod_clinica) if f.cod_clinica else "")).split())
+        if clinica:
+            return f"{clinica} - Paciente: {nombre}"
+    return f"Paciente: {nombre}"
+
+
+def total_paciente_con_fondo(linea: LineaPrestacion, opciones: ExportOpciones) -> bool:
+    """El total del paciente va con fondo gris clarito en sanatorios y en todo «Por tipo»; en honorarios
+    de «Por socio», con una línea fina."""
+    return linea.fila.tipo == "Sanatorio" or opciones.agrupacion == "por_tipo"
 
 
 # ── Especificación de columnas (compartida por excel.py y pdf.py) ───────────
@@ -543,6 +612,22 @@ class ColumnaSpec:
     valor: Callable[[FilaExport], object]
 
 
+def valor_unitario(f: FilaExport) -> Optional[Decimal]:
+    """Lo que vale la práctica por unidad: honorarios + gastos − coseguro, sin porcentaje
+    de cantidad/sesión (el SUB. TOTAL es esto × cantidad × sesión). Igual que la columna
+    "Valor unitario" de la vista; el ayudante cobra un monto aparte y no la lleva."""
+    if f.tipo_prestador == "Ayudante":
+        return None
+    return quantize_money(f.honorarios + f.gastos - f.coseguro)
+
+
+def honorarios_de_fila(f: FilaExport) -> Decimal:
+    """Lo que muestra la columna HONORARIOS. El ayudante guarda lo que cobra en `ayudante`
+    (con `honorarios` en 0), así que su fila mostraría 0 mientras el SUB. TOTAL sí lo
+    cuenta; igual que la columna "Honorarios" de la vista, se muestra ese monto."""
+    return f.ayudante if f.tipo_prestador == "Ayudante" else f.honorarios
+
+
 def _fmt_fecha(d: Optional[datetime.date]) -> str:
     # "-" y no un guión largo: los caracteres fuera de Latin-1 rompen fpdf2 con
     # las fuentes core (Helvetica) — ver el fix en pdf.py/caratula.py/routes.py.
@@ -557,6 +642,10 @@ _DEFINICIONES: dict[str, ColumnaSpec] = {
     "prestador": ColumnaSpec("prestador", "PRESTADOR", 40, 26, "L", False, lambda f: f.prestador_nombre or ""),
     "obra_social": ColumnaSpec("obra_social", "OBRA SOCIAL", 40, 26, "L", False, lambda f: f.obra_social_nombre or f.cod_obr or ""),
     "matricula": ColumnaSpec("matricula", "MATRI.", 12, 8, "C", False, lambda f: f.matricula or ""),
+    # Código (NRO_SOCIO) de la clínica donde se hizo la prestación: sanatorios y honorarios
+    # individuales con clínica; vacío si el médico factura solo. Es el mismo número que lleva
+    # la columna CLINICA de la planilla de importación, así lo exportado se puede volver a subir.
+    "clinica": ColumnaSpec("clinica", "CLINICA", 12, 9, "C", False, lambda f: f.cod_clinica or ""),
     "autorizacion": ColumnaSpec("autorizacion", "AUTORIZACION", 22, 14, "C", False, lambda f: f.autorizacion or ""),
     "fecha": ColumnaSpec("fecha", "FECHA", 16, 11, "C", False, lambda f: _fmt_fecha(f.fecha_practica)),
     "codigo": ColumnaSpec("codigo", "CODIGO", 15, 10, "C", False, lambda f: f.codigo or ""),
@@ -564,9 +653,10 @@ _DEFINICIONES: dict[str, ColumnaSpec] = {
     "afiliado": ColumnaSpec("afiliado", "AFILIADO", 40, 26, "L", False, lambda f: f.afiliado or ""),
     "cantidad": ColumnaSpec("cantidad", "CANT.", 12, 8, "C", False, lambda f: f"{f.cantidad}-{f.sesion}"),
     "porcentaje": ColumnaSpec("porcentaje", "%", 9, 6, "R", True, lambda f: f.porcentaje or 0),
-    "honorarios": ColumnaSpec("honorarios", "HONORARIOS", 22, 14, "R", True, lambda f: f.honorarios),
+    "honorarios": ColumnaSpec("honorarios", "HONORARIOS", 22, 14, "R", True, lambda f: honorarios_de_fila(f)),
     "gastos": ColumnaSpec("gastos", "GASTOS", 22, 14, "R", True, lambda f: f.gastos),
     "coseguro": ColumnaSpec("coseguro", "COSEGURO", 22, 14, "R", True, lambda f: f.coseguro),
+    "valor_unitario": ColumnaSpec("valor_unitario", "VALOR UNIT.", 22, 14, "R", True, lambda f: valor_unitario(f)),
     "diagnostico": ColumnaSpec("diagnostico", "DIAGNOSTICO", 42, 28, "L", False, lambda f: f.diagnostico or ""),
     "via": ColumnaSpec("via", "VIA", 9, 6, "C", False, lambda f: f.via or ""),  # "T" / "L"
     "especialidad": ColumnaSpec("especialidad", "ESPECIALIDAD", 30, 22, "L", False, lambda f: f.especialidad_nombre or ""),
@@ -588,7 +678,9 @@ def spec_columnas(columnas_habilitadas: list[str], con_tipo: bool = True) -> lis
     """`con_tipo=False` saca la columna TIPO: agrupado por tipo, cada hoja/sección ya es
     de un solo tipo y la columna repetiría lo mismo en todas las filas."""
     seleccion = [_DEFINICIONES[k] for k in _DEFINICIONES if k in columnas_habilitadas]
-    return [_COL_ID, _COL_SOCIO, *seleccion, _COL_SUBTOTAL, *([_COL_TIPO] if con_tipo else [])]
+    # "Nro. REG." (id_detalle_prestaciones) es una columna más del panel: se puede sacar.
+    id_reg = [_COL_ID] if "nro_registro" in columnas_habilitadas else []
+    return [*id_reg, _COL_SOCIO, *seleccion, _COL_SUBTOTAL, *([_COL_TIPO] if con_tipo else [])]
 
 
 def con_columna_tipo(opciones: ExportOpciones) -> bool:

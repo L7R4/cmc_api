@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -10,6 +10,7 @@ from app.auth.deps import get_current_user, get_current_user_with_scopes_and_rol
 from app.db.database import get_db
 from app.db.models import Especialidad
 from app.db.models.nomenclador_cmc import (
+    CodigoObraSocial,
     MedicoCodigoHabilitado,
     NomencladorCMC,
     Valor,
@@ -46,11 +47,20 @@ async def list_nomenclador(
     en_descripcion: bool = Query(
         False,
         description=(
-            "Con `q`: busca también en la descripción del catálogo. Primero los que "
-            "empiezan con `q` en el código, después el resto en orden de código."
+            "Con `q`: busca también en la descripción. Primero los que empiezan con `q` "
+            "en el código, después el resto en orden de código. Con `obra_social_nro` la "
+            "descripción es la que esa obra social pactó (la del catálogo suele estar "
+            "vacía), y es la que se devuelve."
         ),
     ),
     categoria: Optional[str] = Query(None),
+    tipo: Optional[Literal[service.TIPOS_FILTRO]] = Query(
+        None,
+        description=(
+            "Consulta / Practica / Honorarios individuales, por la categoría del catálogo. "
+            "Sin categoría cuenta como Practica (ver `service.condicion_tipo`)."
+        ),
+    ),
     complejidad: Optional[str] = Query(None),
     obra_social_nro: Optional[int] = Query(
         None,
@@ -78,22 +88,36 @@ async def list_nomenclador(
     user, _scopes, role = dep
 
     stmt = select(NomencladorCMC)
-    if q:
-        # Por código o por descripción del catálogo (los buscadores de práctica dicen
-        # "por código o por nombre"; antes solo miraba el código).
-        stmt = stmt.where(
-            NomencladorCMC.codigo.contains(q) | NomencladorCMC.descripcion.ilike(f"%{q}%")
-        )
+    q = q.strip() if q else q
+    descripcion_os = bool(q and en_descripcion and obra_social_nro is not None)
     if q and en_descripcion:
-        stmt = stmt.where(or_(
-            NomencladorCMC.codigo.contains(q), NomencladorCMC.descripcion.contains(q),
-        )).order_by(
+        coincide = or_(NomencladorCMC.codigo.contains(q), NomencladorCMC.descripcion.contains(q))
+        if descripcion_os:
+            # La descripción vive por obra social (`nm_valores`, o el alta sin precio):
+            # buscar solo en el catálogo no encuentra los códigos que lo tienen vacío.
+            coincide = or_(
+                coincide,
+                exists().where(
+                    Valor.nomenclador_id == NomencladorCMC.id,
+                    Valor.obra_social_nro == obra_social_nro,
+                    Valor.estado == "activo",
+                    Valor.descripcion.contains(q),
+                ),
+                exists().where(
+                    CodigoObraSocial.nomenclador_id == NomencladorCMC.id,
+                    CodigoObraSocial.obra_social_nro == obra_social_nro,
+                    CodigoObraSocial.descripcion.contains(q),
+                ),
+            )
+        stmt = stmt.where(coincide).order_by(
             case((NomencladorCMC.codigo.startswith(q), 0), else_=1), NomencladorCMC.codigo,
         )
     elif q:
         stmt = stmt.where(NomencladorCMC.codigo.contains(q))
     if categoria:
         stmt = stmt.where(NomencladorCMC.categoria == categoria)
+    if tipo:
+        stmt = stmt.where(service.condicion_tipo(NomencladorCMC.categoria, tipo))
     if complejidad:
         stmt = stmt.where(NomencladorCMC.complejidad == complejidad)
     if activo is not None:
@@ -154,8 +178,34 @@ async def list_nomenclador(
             stmt = stmt.where(~inhabilitado, habilitado)
 
     stmt = stmt.offset((page - 1) * size).limit(size)
-    result = await db.execute(stmt)
-    return result.scalars().all()
+    filas = (await db.execute(stmt)).scalars().all()
+    if not descripcion_os or not filas:
+        return filas
+
+    # Con obra social, el texto de cada código es el que esa OS pactó.
+    ids = [n.id for n in filas]
+    pactada = dict((await db.execute(
+        select(Valor.nomenclador_id, func.max(Valor.descripcion))
+        .where(
+            Valor.obra_social_nro == obra_social_nro, Valor.nomenclador_id.in_(ids),
+            Valor.estado == "activo", Valor.descripcion.is_not(None), Valor.descripcion != "",
+        )
+        .group_by(Valor.nomenclador_id)
+    )).all())
+    alta = dict((await db.execute(
+        select(CodigoObraSocial.nomenclador_id, CodigoObraSocial.descripcion)
+        .where(
+            CodigoObraSocial.obra_social_nro == obra_social_nro,
+            CodigoObraSocial.nomenclador_id.in_(ids),
+            CodigoObraSocial.descripcion.is_not(None), CodigoObraSocial.descripcion != "",
+        )
+    )).all())
+    salida = []
+    for n in filas:
+        out = NomencladorOut.model_validate(n)
+        out.descripcion = pactada.get(n.id) or alta.get(n.id) or n.descripcion
+        salida.append(out)
+    return salida
 
 
 @router.get("/codigos", response_model=List[str])
@@ -252,26 +302,11 @@ async def create_nomenclador(body: NomencladorCreate, db: AsyncSession = Depends
     a la base de datos", que no le dice al operador lo único que necesita saber: que
     ese número ya está tomado y por qué práctica.
     """
-    ya_existe = (
-        await db.execute(
-            select(NomencladorCMC).where(NomencladorCMC.codigo == body.codigo)
-        )
-    ).scalar_one_or_none()
-    if ya_existe:
-        raise HTTPException(
-            409,
-            f"El código {body.codigo} ya existe. Usá otro número o editá el existente.",
-        )
-
-    datos = body.model_dump(exclude={"especialidades"})
-    datos["descripcion"] = (datos.get("descripcion") or "").strip() or None
-    obj = NomencladorCMC(**datos)
-    db.add(obj)
     try:
-        await db.flush()
-        if not body.sin_restriccion_especialidad:
-            await aplicar_plantilla.reemplazar_plantilla(db, obj.codigo, body.especialidades)
+        obj = await aplicar_plantilla.crear_codigo(db, body)
         await db.commit()
+    except aplicar_plantilla.CodigoExistente as e:
+        raise HTTPException(409, str(e))
     except ValueError as e:
         await db.rollback()
         raise HTTPException(422, str(e))
@@ -376,7 +411,8 @@ async def propagar_especialidades(
 ):
     """"Actualizar en obras sociales": lleva la plantilla a las O.S. que ya tienen el
     código dado de alta. `agregar` suma lo nuevo; `igualar` además quita lo que
-    sobra (salvo especialidades con precio propio). `dry_run` = vista previa."""
+    sobra, también las especialidades con precio propio (ese precio se da de baja
+    desde hoy). `dry_run` = vista previa."""
     nom = await db.get(NomencladorCMC, id)
     if not nom:
         raise HTTPException(404, "Código no encontrado")

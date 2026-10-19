@@ -32,7 +32,7 @@ def s(db, monkeypatch):
 
 async def _setup(db, *, sin_restriccion=False, plantilla=True) -> tuple[NomencladorCMC, list[int]]:
     for nro in (OS_A, OS_B):
-        db.add(ObrasSociales(NRO_OBRASOCIAL=nro, OBRA_SOCIAL=f"PRUEBA ALTA NE {nro}", MARCA="S", cuit="0"))
+        db.add(ObrasSociales(NRO_OBRASOCIAL=nro, OBRA_SOCIAL=f"PRUEBA ALTA NE {nro}", cuit="0"))
     nom = NomencladorCMC(codigo="ZZ9901", descripcion="PRUEBA ALTA NE", activo=True,
                          sin_restriccion_especialidad=sin_restriccion)
     db.add(nom)

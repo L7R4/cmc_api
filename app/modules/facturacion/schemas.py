@@ -120,6 +120,12 @@ class AfiliadoRead(BaseModel):
         from_attributes = True
 
 
+class AfiliadoEditado(AfiliadoRead):
+    """Respuesta de la edición: el afiliado y cuántas prestaciones de facturas abiertas
+    se corrigieron con él."""
+    prestaciones_actualizadas: int = 0
+
+
 # ── Prestaciones — request ───────────────────────────────────────────────────
 class PrestacionItem(BaseModel):
     """Un prestador individual (cirujano o ayudante).
@@ -367,6 +373,10 @@ class PrecioResponse(BaseModel):
     # su galeno (nombre y nivel, si es nivelado).
     origen: Optional[str] = None
     tipo_valor: Optional[Literal["fijo", "calculable"]] = None
+    # `tipo` que le da al código su categoría en la OS (ver `tipo_de_categoria`), sin
+    # contar el que fuerza la clínica. El front habilita ayudantes siempre que sea
+    # 'Honorarios individuales' o 'Sanatorio'. En las ramas "no admitido" viene None.
+    tipo_codigo: Optional[str] = None
     galeno_nombre: Optional[str] = None
     galeno_nivel: Optional[int] = None
 
@@ -554,6 +564,7 @@ class FacturaRead(BaseModel):
     creado_por: Optional[str] = None
     creado_en: Optional[datetime.datetime] = None
     creado_por_nombre: Optional[str] = None  # NOMBRE resuelto contra ListadoMedico (batch, no persistido)
+    nombre_obra_social: Optional[str] = None  # resuelto contra obras_sociales (batch, no persistido)
     # Visibilidad para el médico: true si hay al menos una fila de
     # detalle_facturacion publicada para este cod_obr+periodo (cualquier
     # versión). No es una columna de `facturacion` — se estampa después de
@@ -741,6 +752,18 @@ class FacturaDetalleOut(BaseModel):
     estado_doctor: Optional[str] = None
     version: int = 1                # 1 = original; 2+ = factura complementaria
     es_complemento: bool = False
+    # Datos de la cabecera para el encabezado del listado (ver `_datos_cabecera_factura`).
+    nombre_obra_social: Optional[str] = None
+    numeros_factura: list[str] = []
+    fecha_cierre: Optional[datetime.date] = None
+    fecha_envio: Optional[datetime.date] = None
+    fecha_recepcion: Optional[datetime.date] = None
+    cerrada_por: Optional[str] = None
+    creada_por: Optional[str] = None
+    creada_en: Optional[datetime.datetime] = None
+    documento_url: Optional[str] = None
+    afip: Optional[str] = None
+    otras_versiones: list[dict] = []   # [{id_factura, version}] del mismo período y OS
     total_prestaciones: int
     total_importe: Decimal
     prestadores: list[PrestadorFacturaGrupoOut]

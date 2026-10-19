@@ -19,12 +19,15 @@ from app.modules.catalogs.schemas import (
     ContactoSimpleOut,
     DireccionOut,
     DocumentoOut,
+    ObraSocialCreadaOut,
     ObraSocialCreate,
     ObraSocialOut,
     ObraSocialSimpleOut,
     ObraSocialUpdate,
+    ReplicacionAltaOut,
 )
 from app.modules.facturacion.service import asegurar_puntero_propio
+from app.modules.nomenclador import replicar_cabecera
 from app.modules.nomenclador.schemas import ObraSocialFamiliaItem
 from app.modules.nomenclador.service import sembrar_nomenclador_nuevo
 
@@ -115,8 +118,7 @@ def _build_out(
         nro_obra_social=obj.NRO_OBRASOCIAL,
         nombre=obj.OBRA_SOCIAL,
         denominacion=f"{obj.NRO_OBRASOCIAL} — {obj.OBRA_SOCIAL}",
-        marca=obj.MARCA,
-        ver_valor=obj.VER_VALOR,
+        activo=obj.activo,
         cuit=obj.cuit,
         direccion_real=obj.direccion_real,
         condicion_iva=obj.condicion_iva,
@@ -212,8 +214,7 @@ _CAMPOS_OS_PUBLICOS = frozenset({
     "nro_obra_social",
     "nombre",
     "denominacion",
-    "marca",
-    "ver_valor",
+    "activo",
     "obra_social_principal_id",
     "obra_social_principal",
     "asociadas",
@@ -245,7 +246,7 @@ async def list_obras_sociales(
     ),
     incluir_inactivas: bool = Query(
         False,
-        description="Incluye las dadas de baja (MARCA='N'). Por default quedan "
+        description="Incluye las dadas de baja (activo=false). Por default quedan "
                      "afuera, igual que cualquier baja lógica del sistema.",
     ),
     user: dict | None = Depends(usuario_opcional),
@@ -274,7 +275,7 @@ async def list_obras_sociales(
     if solo_principales:
         query = query.where(ObrasSociales.obra_social_principal_id.is_(None))
     if not incluir_inactivas:
-        query = query.where(ObrasSociales.MARCA != "N")
+        query = query.where(ObrasSociales.activo.is_(True))
 
     result = await db.execute(query)
     objs = list(result.scalars().all())
@@ -306,7 +307,7 @@ async def get_obra_social(
     return _build_out(obj, principal, asociadas)
 
 
-@router.post("/", response_model=ObraSocialOut, status_code=status.HTTP_201_CREATED)
+@router.post("/", response_model=ObraSocialCreadaOut, status_code=status.HTTP_201_CREATED)
 async def create_obra_social(
     payload: ObraSocialCreate,
     db: AsyncSession = Depends(get_db),
@@ -321,18 +322,30 @@ async def create_obra_social(
             detail=f"Ya existe una obra social con nro_obra_social={payload.nro_obra_social}",
         )
 
+    cabecera: Optional[ObrasSociales] = None
     if payload.obra_social_principal_id is not None:
         res_p = await db.execute(
             select(ObrasSociales).where(ObrasSociales.ID == payload.obra_social_principal_id)
         )
-        if not res_p.scalar_one_or_none():
+        cabecera = res_p.scalar_one_or_none()
+        if not cabecera:
             raise HTTPException(status_code=404, detail="obra_social_principal_id no encontrada")
+        if cabecera.obra_social_principal_id is not None:
+            raise HTTPException(
+                status_code=422,
+                detail="La obra social cabecera elegida es a su vez derivada de otra: "
+                       "elegí la cabecera de la familia.",
+            )
+    replicar = payload.replicar if payload.replicar and payload.replicar.alguno else None
+    if replicar and cabecera is None:
+        raise HTTPException(
+            status_code=422, detail="Para replicar hay que elegir la obra social cabecera.",
+        )
 
     obj = ObrasSociales(
         NRO_OBRASOCIAL=payload.nro_obra_social,
         OBRA_SOCIAL=payload.nombre,
-        MARCA=payload.marca,
-        VER_VALOR=payload.ver_valor,
+        activo=True,  # toda obra social nueva nace activa
         # `cuit` (minúscula, "extendido") y `CUIT` (legacy, varchar(11) NOT
         # NULL DEFAULT '0') son literalmente la misma columna física: MySQL
         # compara nombres de columna sin distinguir mayúsculas. Un `None`
@@ -367,6 +380,25 @@ async def create_obra_social(
     await asegurar_puntero_propio(db, obj.NRO_OBRASOCIAL)
     await db.commit()
 
+    # Replicar de la cabecera (opcional). Cada bloque corre aislado: si falla, la obra social
+    # ya está creada y el error vuelve en `replicacion`. Va ANTES del sembrado NN: con los
+    # galenos reales los NN nacen con precio, y lo que se copia de la cabecera (códigos, NN
+    # propios) no lo pisa el sembrado, que solo completa lo que falta.
+    pasos = []
+    if replicar:
+        origen_nro, destino_nro = cabecera.NRO_OBRASOCIAL, obj.NRO_OBRASOCIAL
+        if replicar.galenos:
+            pasos.append(await replicar_cabecera.copiar_galenos(db, origen_nro, destino_nro))
+        if replicar.nomencladores:
+            pasos.append(await replicar_cabecera.copiar_codigos(db, origen_nro, destino_nro, None))
+            # Con «valores» los precios de los nivelados ya vienen tal cual de la cabecera:
+            # recalcularlos con la plantilla del nomenclador podría dar otro número.
+            if not replicar.valores:
+                pasos.append(await replicar_cabecera.copiar_nivelados(db, origen_nro, destino_nro, None))
+        if replicar.valores:
+            pasos.append(await replicar_cabecera.copiar_valores(db, origen_nro, destino_nro))
+        await db.commit()
+
     try:
         await sembrar_nomenclador_nuevo(obj.NRO_OBRASOCIAL, VIGENCIA_NOMENCLADOR_INICIAL, db)
         await db.commit()
@@ -381,7 +413,12 @@ async def create_obra_social(
         )
 
     principal, asociadas = await _load_principal_and_asociadas(obj, db)
-    return _build_out(obj, principal, asociadas)
+    salida = ObraSocialCreadaOut(**_build_out(obj, principal, asociadas).model_dump())
+    if replicar:
+        salida.replicacion = ReplicacionAltaOut(
+            cabecera_nro=cabecera.NRO_OBRASOCIAL, cabecera_nombre=cabecera.OBRA_SOCIAL, pasos=pasos,
+        )
+    return salida
 
 
 @router.get("/familia/{nro_obra_social}", response_model=List[ObraSocialFamiliaItem])
@@ -420,8 +457,18 @@ async def update_obra_social(
         res_p = await db.execute(
             select(ObrasSociales).where(ObrasSociales.ID == payload.obra_social_principal_id)
         )
-        if not res_p.scalar_one_or_none():
+        nueva_cabecera = res_p.scalar_one_or_none()
+        if not nueva_cabecera:
             raise HTTPException(status_code=404, detail="obra_social_principal_id no encontrada")
+        if (
+            nueva_cabecera.obra_social_principal_id is not None
+            and obj.obra_social_principal_id != payload.obra_social_principal_id
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="La obra social cabecera elegida es a su vez derivada de otra: "
+                       "elegí la cabecera de la familia.",
+            )
         if await _crearia_ciclo(db, id, payload.obra_social_principal_id):
             raise HTTPException(
                 status_code=422,
@@ -432,8 +479,7 @@ async def update_obra_social(
     scalar_map = {
         "nro_obra_social": "NRO_OBRASOCIAL",
         "nombre": "OBRA_SOCIAL",
-        "marca": "MARCA",
-        "ver_valor": "VER_VALOR",
+        "activo": "activo",
         "cuit": "cuit",
         "direccion_real": "direccion_real",
         "condicion_iva": "condicion_iva",
@@ -476,7 +522,7 @@ async def delete_obra_social(
     id: int = Path(..., ge=1),
     db: AsyncSession = Depends(get_db),
 ) -> Response:
-    """Baja lógica: `MARCA='N'`, igual que el resto del sistema legacy.
+    """Baja lógica: `activo=False`.
 
     Antes esto era un `db.delete()` físico. Dos problemas reales, no
     hipotéticos (ver auditoría O-03): `ajuste` y `lote_ajuste` tienen FK
@@ -486,14 +532,13 @@ async def delete_obra_social(
     entre ellas— la referencian por `NRO_OBRASOCIAL`/`cod_obr` **sin FK**, así
     que quedaban apuntando a un número inexistente sin ningún aviso.
 
-    `MARCA='N'` ya es, en el resto del sistema, "esta obra social no está
-    habilitada" — es lo que filtra `catalogo_obras_sociales` para el padrón.
-    Reusarlo acá evita inventar un segundo flag de baja y hace que "eliminar"
-    también la saque del padrón. El listado (`GET /`) la oculta por default;
+    `activo` es, en todo el sistema, "esta obra social está habilitada" — es lo que
+    filtra `catalogo_obras_sociales` para el padrón. Reusarlo acá evita inventar un
+    segundo flag de baja y hace que "eliminar" también la saque del padrón. El listado (`GET /`) la oculta por default;
     `incluir_inactivas=true` la trae de vuelta para poder reactivarla.
     """
     obj = await _get_or_404(id, db)
-    obj.MARCA = "N"
+    obj.activo = False
     await db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 

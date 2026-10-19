@@ -36,6 +36,11 @@ engine = create_async_engine(
     echo=not settings.IS_PRODUCTION,
     pool_pre_ping=True,
     pool_recycle=3600,
+    # La base de producción limita las conexiones por usuario (`max_user_connections`,
+    # ~10) y es compartida con otras herramientas. Con el pool por defecto (5 + 10) la API
+    # llegaba a ocupar todo el cupo y nadie más podía conectarse (error 1203). Tope: 5.
+    pool_size=3,
+    max_overflow=2,
 )
 
 AsyncSessionLocal = sessionmaker(

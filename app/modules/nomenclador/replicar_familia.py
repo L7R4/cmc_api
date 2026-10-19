@@ -59,7 +59,7 @@ async def familia_de(db: AsyncSession, nro_os: int) -> list[ObraSocialFamiliaIte
         return []
     filas = (await db.execute(
         select(ObrasSociales).where(
-            ObrasSociales.NRO_OBRASOCIAL.in_(nros), ObrasSociales.MARCA != "N"
+            ObrasSociales.NRO_OBRASOCIAL.in_(nros), ObrasSociales.activo.is_(True)
         ).order_by(ObrasSociales.OBRA_SOCIAL)
     )).scalars().all()
     return [
@@ -153,7 +153,7 @@ async def _copiar_estado(db: AsyncSession, origen: int, dest: int, nom: Nomencla
             por_presupuesto=v.por_presupuesto, cantidad_ayudantes=v.cantidad_ayudantes,
             categoria=v.categoria, requiere_autorizacion=v.requiere_autorizacion,
             coseguro=v.coseguro, sin_restriccion_especialidad=v.sin_restriccion_especialidad,
-            motivo="replicacion",
+            motivo="replicacion", nomenclador_nivelado_id=v.nomenclador_nivelado_id,
         )
 
 
@@ -198,7 +198,7 @@ async def _replicar_valor_en(
                 por_presupuesto=a.por_presupuesto, cantidad_ayudantes=a.cantidad_ayudantes,
                 categoria=a.categoria, requiere_autorizacion=a.requiere_autorizacion,
                 coseguro=a.coseguro, sin_restriccion_especialidad=sin_restriccion,
-                motivo="replicacion",
+                motivo="replicacion", nomenclador_nivelado_id=a.nomenclador_nivelado_id,
             )
             creadas += 1
         if creadas == 0:
@@ -248,6 +248,7 @@ async def _replicar_valor_en(
         coseguro=ecu.coseguro if ecu.coseguro is not None else base.coseguro,
         sin_restriccion_especialidad=base.sin_restriccion_especialidad,
         motivo="replicacion",
+        nomenclador_nivelado_id=ecu.nomenclador_nivelado_id if ecu.definir_nomenclador else None,
     )
     return "creado", "Se creó la variante"
 

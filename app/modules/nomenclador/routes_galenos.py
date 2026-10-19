@@ -3,7 +3,9 @@ from decimal import Decimal
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select
+from fastapi.responses import JSONResponse
+from sqlalchemy import delete, select, update
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.database import get_db
@@ -23,8 +25,11 @@ from app.modules.nomenclador.schemas import (
     GalenoOut,
     GalenoPlantillaNivelOut,
     GalenoPlantillaOut,
+    GalenoResumenOut,
     GalenosImportarIn,
     GalenosImportarResult,
+    GalenosPrecioLoteIn,
+    GalenosPrecioLoteOut,
     GalenoUpdate,
     GalenoVisibilidadIn,
     GalenoVisibilidadOut,
@@ -66,35 +71,77 @@ async def _validar_mezcla_niveles(
         )
 
 
-async def _rotar_precio_galeno(
+async def _reubicar_vigencia_galeno(
+    db: AsyncSession,
+    galeno: Galeno,
+    nuevo_valor_unitario: Decimal,
+    vigencia_desde: datetime.date,
+) -> Galeno:
+    """Vigencia ANTERIOR a la del galeno vigente. Igual que en los valores (`liberar_vigencias`),
+    la que se carga pasa a ser la última de ese galeno y nivel:
+
+    - las vigencias que arrancan en esa fecha o después se borran (los componentes de valores que
+      las usaban pasan al galeno que queda);
+    - la que cubría la fecha se cierra el día anterior;
+    - el galeno vigente conserva su fila (y los valores que lo usan) pero pasa a regir desde la
+      fecha y con el precio nuevo.
+
+    Devuelve la misma fila: quien llama regenera el historial de los códigos desde esa fecha.
+    No comitea.
+    """
+    mismo_nivel = Galeno.nivel.is_(None) if galeno.nivel is None else Galeno.nivel == galeno.nivel
+    filas = (await db.execute(
+        select(Galeno).where(
+            Galeno.obra_social_nro == galeno.obra_social_nro,
+            Galeno.codigo == galeno.codigo,
+            mismo_nivel,
+            Galeno.id != galeno.id,
+        )
+    )).scalars().all()
+    a_borrar = [f for f in filas if f.vigencia_desde >= vigencia_desde]
+    corte = vigencia_desde - datetime.timedelta(days=1)
+    for f in filas:
+        if f.vigencia_desde < vigencia_desde and (f.vigencia_hasta is None or f.vigencia_hasta >= vigencia_desde):
+            f.vigencia_hasta = corte
+    await db.flush()
+
+    ids = [f.id for f in a_borrar]
+    if ids:
+        # Los componentes (también los de valores cerrados) no pueden quedar apuntando a una fila borrada.
+        await db.execute(
+            update(ValorComponente).where(ValorComponente.galeno_id.in_(ids))
+            .values(galeno_id=galeno.id).execution_options(synchronize_session=False)
+        )
+        await db.execute(delete(Galeno).where(Galeno.id.in_(ids)).execution_options(synchronize_session=False))
+        for f in a_borrar:
+            db.expunge(f)
+
+    galeno.vigencia_desde = vigencia_desde
+    galeno.valor_unitario = nuevo_valor_unitario
+    await db.flush()
+    return galeno
+
+
+async def _rotar_fila_galeno(
     db: AsyncSession,
     galeno_anterior: Galeno,
     nuevo_valor_unitario: Decimal,
     vigencia_desde: datetime.date,
 ) -> Galeno:
     """
-    Cierra la vigencia del galeno actual, crea la fila nueva con el precio nuevo
-    y regenera el historial de todos los códigos afectados (Regla A).
-    No comitea: corre dentro de la transacción del caller.
+    Sólo la fila del galeno: cierra la vigencia de la actual y crea la nueva con el precio
+    nuevo. Con la misma vigencia corrige el precio en el lugar y con una anterior la reubica
+    (ver `_reubicar_vigencia_galeno`). NO toca el historial de los códigos que lo usan: eso lo
+    hace quien llama. No comitea.
     """
     if vigencia_desde == galeno_anterior.vigencia_desde:
         galeno_anterior.valor_unitario = nuevo_valor_unitario
         await db.flush()
-        await service.regenerar_historial_por_galeno(
-            galeno_id_anterior=galeno_anterior.id,
-            nuevo_galeno_id=galeno_anterior.id,
-            vigencia_desde=vigencia_desde,
-            db=db,
-        )
         return galeno_anterior
 
     fecha_corte = vigencia_desde - datetime.timedelta(days=1)
     if galeno_anterior.vigencia_desde > fecha_corte:
-        raise HTTPException(
-            422,
-            f"vigencia_desde ({vigencia_desde}) debe ser posterior a la vigencia "
-            f"actual del galeno ({galeno_anterior.vigencia_desde})",
-        )
+        return await _reubicar_vigencia_galeno(db, galeno_anterior, nuevo_valor_unitario, vigencia_desde)
 
     galeno_anterior.vigencia_hasta = fecha_corte
     galeno_anterior.activo = False
@@ -117,7 +164,21 @@ async def _rotar_precio_galeno(
     )
     db.add(nuevo_galeno)
     await db.flush()
+    return nuevo_galeno
 
+
+async def _rotar_precio_galeno(
+    db: AsyncSession,
+    galeno_anterior: Galeno,
+    nuevo_valor_unitario: Decimal,
+    vigencia_desde: datetime.date,
+) -> Galeno:
+    """
+    Cierra la vigencia del galeno actual, crea la fila nueva con el precio nuevo
+    y regenera el historial de todos los códigos afectados (Regla A).
+    No comitea: corre dentro de la transacción del caller.
+    """
+    nuevo_galeno = await _rotar_fila_galeno(db, galeno_anterior, nuevo_valor_unitario, vigencia_desde)
     await service.regenerar_historial_por_galeno(
         galeno_id_anterior=galeno_anterior.id,
         nuevo_galeno_id=nuevo_galeno.id,
@@ -150,6 +211,15 @@ async def list_galenos(
     stmt = stmt.order_by(Galeno.codigo, Galeno.nivel, Galeno.vigencia_desde.desc())
     result = await db.execute(stmt)
     return result.scalars().all()
+
+
+@router.get("/resumen_nomenclador", response_model=List[GalenoResumenOut])
+async def resumen_galenos_nomenclador(obra_social_nro: int = Query(...), db: AsyncSession = Depends(get_db)):
+    """Por galeno de la obra social: nomencladores que lo usan, modo (calculado / por nivel) y
+    qué niveles tienen unidades distintas a la escala. Para Actualizar galenos."""
+    from app.modules.nomenclador import nivelados
+
+    return await nivelados.resumen_galenos(db, obra_social_nro)
 
 
 @router.patch("/visibilidad", response_model=GalenoVisibilidadOut)
@@ -593,6 +663,81 @@ async def actualizar_precio_galeno_masivo(
 
     await db.commit()
     return ActualizacionMasivaResult(actualizados=actualizados, errores=errores)
+
+
+@router.post("/actualizar_precios_lote", response_model=GalenosPrecioLoteOut)
+async def actualizar_precios_galenos_lote(
+    body: GalenosPrecioLoteIn, db: AsyncSession = Depends(get_db)
+):
+    """
+    Cambia el precio de varios galenos de una obra social en UNA transacción: o se
+    aplican todos o no se aplica ninguno. Cada ítem es un código y el valor unitario nuevo
+    para todos sus niveles vigentes (los niveles conservan sus unidades).
+
+    Se valida todo antes de escribir: si algún galeno no se puede actualizar, responde 422
+    con `errores` (uno por galeno) y no se toca nada. Los valores que usan varios de los
+    galenos se recalculan una sola vez, con todos los precios nuevos.
+    """
+    codigos = [i.codigo for i in body.items]
+    repetidos = sorted({c for c in codigos if codigos.count(c) > 1})
+    if repetidos:
+        raise HTTPException(422, f"Código repetido en el pedido: {', '.join(repetidos)}")
+
+    vigentes = (await db.execute(
+        select(Galeno)
+        .where(
+            Galeno.obra_social_nro == body.obra_social_nro,
+            Galeno.codigo.in_(codigos),
+            Galeno.vigencia_hasta.is_(None),
+            Galeno.activo == True,
+        )
+        .order_by(Galeno.codigo, Galeno.nivel)
+    )).scalars().all()
+    por_codigo: dict[str, list[Galeno]] = {}
+    for g in vigentes:
+        por_codigo.setdefault(g.codigo, []).append(g)
+
+    errores: list[dict] = []
+    cambios: list[tuple[Galeno, Decimal]] = []
+    for item in body.items:
+        filas = por_codigo.get(item.codigo)
+        if not filas:
+            errores.append({
+                "codigo": item.codigo, "nombre": item.codigo,
+                "motivo": "No hay un galeno vigente con ese código en la obra social",
+            })
+            continue
+        # Una vigencia anterior a la del galeno actual no se rechaza: se reubica como en los
+        # valores (la que se carga pasa a ser la última). El front avisa antes de guardar.
+        cambios.extend((g, item.nuevo_valor_unitario) for g in filas)
+
+    if errores:
+        return JSONResponse(status_code=422, content={
+            "detail": "No se aplicó ningún cambio: " + "; ".join(
+                f"{e['nombre']}: {e['motivo']}" for e in errores
+            ),
+            "errores": errores,
+        })
+
+    try:
+        pares = []
+        for galeno, nuevo_vu in cambios:
+            nuevo = await _rotar_fila_galeno(db, galeno, nuevo_vu, body.vigencia_desde)
+            pares.append((galeno.id, nuevo.id))
+        valores = await service.regenerar_historial_por_galenos(pares, body.vigencia_desde, db)
+        await db.commit()
+    except DBAPIError:
+        # Otra actualización de la misma obra social corriendo a la vez (clave duplicada,
+        # deadlock o espera de bloqueo): nada quedó aplicado.
+        await db.rollback()
+        raise HTTPException(
+            409,
+            "No se aplicó ningún cambio: hay otra actualización de esta obra social en curso "
+            "o los datos cambiaron. Recargá la pantalla y volvé a intentar.",
+        )
+    return GalenosPrecioLoteOut(
+        galenos=len(body.items), filas=len(cambios), valores_recalculados=valores,
+    )
 
 
 @router.delete("/{id}", status_code=204)

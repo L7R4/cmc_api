@@ -2,7 +2,7 @@ import csv
 import datetime
 import io
 from decimal import Decimal
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from sqlalchemy import delete, func, select, update
@@ -10,17 +10,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.common.uploads import leer_texto
 from app.db.database import get_db
-from app.db.models.catalogs import ObrasSociales
+from app.db.models.catalogs import Especialidad, ObrasSociales
 from app.db.models.nomenclador_cmc import (
+    CodigoObraSocial,
     Galeno,
     HistorialPrecioCodigo,
     Homologador,
     NomencladorCMC,
+    NomencladorNivelado,
     Valor,
     ValorComponente,
     ValorEspecialidad,
 )
-from app.modules.nomenclador import alta_os, service
+from app.modules.nomenclador import alta_os, nivelados, service
 from app.modules.nomenclador.schemas import (
     ActualizacionMasivaResult,
     ActualizarPorcentajeIn,
@@ -35,7 +37,11 @@ from app.modules.nomenclador.schemas import (
     DiagnosticoSinHistorialOut,
     GenerarValoresNNIn,
     GenerarValoresNNResult,
+    HistorialCodigoOut,
+    HistorialPorCodigoOut,
     HistorialPrecioOut,
+    HistorialVarianteOut,
+    HistorialVersionOut,
     ImportarCSVResult,
     LookupPrecioIn,
     LookupPrecioOut,
@@ -140,13 +146,42 @@ async def _valores_out(db: AsyncSession, valores: list[Valor]) -> list[ValorOut]
             if clave in pares:
                 especialidades_por_par.setdefault(clave, []).append(f.especialidad_id_colegio)
 
+    # Categoría efectiva: la del valor > la del par (alta en la OS) > la del catálogo.
+    nom_ids = {v.nomenclador_id for v in valores}
+    cat_catalogo = dict((await db.execute(
+        select(NomencladorCMC.id, NomencladorCMC.categoria).where(NomencladorCMC.id.in_(nom_ids))
+    )).all())
+    cat_par = {
+        (os_nro, nom_id): cat
+        for os_nro, nom_id, cat in (await db.execute(
+            select(CodigoObraSocial.obra_social_nro, CodigoObraSocial.nomenclador_id,
+                   CodigoObraSocial.categoria)
+            .where(
+                CodigoObraSocial.obra_social_nro.in_({v.obra_social_nro for v in valores}),
+                CodigoObraSocial.nomenclador_id.in_(nom_ids),
+            )
+        )).all()
+        if cat and cat.strip()
+    }
+
+    ids_nomenclador = {v.nomenclador_nivelado_id for v in valores if v.nomenclador_nivelado_id}
+    nombres_nomenclador = dict((await db.execute(
+        select(NomencladorNivelado.id, NomencladorNivelado.nombre).where(NomencladorNivelado.id.in_(ids_nomenclador))
+    )).all()) if ids_nomenclador else {}
+
     salida = []
     for v in valores:
         out = ValorOut.model_validate(v)
+        out.nomenclador_nivelado = nombres_nomenclador.get(v.nomenclador_nivelado_id)
         out.descripcion_efectiva = service.descripcion_efectiva(
             v, legacy.get((v.codigo, v.obra_social_nro))
         )
         out.especialidades = especialidades_por_par.get((v.obra_social_nro, v.codigo), [])
+        out.categoria_efectiva = (
+            (v.categoria if v.categoria and v.categoria.strip() else None)
+            or cat_par.get((v.obra_social_nro, v.nomenclador_id))
+            or cat_catalogo.get(v.nomenclador_id)
+        )
         salida.append(out)
     return salida
 
@@ -313,6 +348,7 @@ async def _crear_valor_con_componentes(
     *,
     motivo: str = "carga_inicial",
     fecha_corte: Optional[datetime.date] = None,
+    nomenclador_nivelado_id: Optional[int] = None,
 ) -> Valor:
     nom = await db.get(NomencladorCMC, nomenclador_id)
     if not nom:
@@ -343,6 +379,7 @@ async def _crear_valor_con_componentes(
         especialidad_id_colegio=especialidad_id_colegio,
         sin_restriccion_especialidad=sin_restriccion_especialidad,
         por_presupuesto=por_presupuesto,
+        nomenclador_nivelado_id=None if por_presupuesto else nomenclador_nivelado_id,
         cantidad_ayudantes=cantidad_ayudantes,
         coseguro=coseguro,
         vigencia_desde=vigencia_desde,
@@ -453,6 +490,8 @@ async def _clonar_valor(
         ),
         cantidad_ayudantes=origen.cantidad_ayudantes,
         coseguro=origen.coseguro,
+        # Si los componentes se transforman ya no son los del nomenclador.
+        nomenclador_nivelado_id=origen.nomenclador_nivelado_id if transform_componente is None else None,
         vigencia_desde=vigencia_desde,
         vigencia_hasta=None,
         estado="activo",
@@ -517,6 +556,19 @@ async def list_valores(
     vigencia_desde: Optional[datetime.date] = Query(
         None, description="Filtra por la vigencia exacta (no 'vigente a', la fecha exacta que abrió esa versión)."
     ),
+    q: Optional[str] = Query(None, description="Contiene en el código o en la descripción."),
+    tipo: Optional[Literal[service.TIPOS_FILTRO]] = Query(
+        None,
+        description="Consulta / Practica / Honorarios individuales, por la categoría del código en la O.S. "
+                    "(requiere obra_social_nro).",
+    ),
+    por_presupuesto: Optional[bool] = Query(None, description="True: solo los precios por presupuesto."),
+    especialidad_habilitada: Optional[int] = Query(
+        None,
+        description="ID_COLEGIO_ESPE: solo los códigos que la obra social tiene habilitados para esa "
+                    "especialidad (nm_valor_especialidad). No es lo mismo que `especialidad_id_colegio`, "
+                    "que filtra la variante NE del precio. Requiere obra_social_nro.",
+    ),
     page: int = Query(1, ge=1),
     size: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
@@ -524,6 +576,23 @@ async def list_valores(
     stmt = select(Valor)
     if obra_social_nro:
         stmt = stmt.where(Valor.obra_social_nro == obra_social_nro)
+    if q and q.strip():
+        t = q.strip()
+        stmt = stmt.where(Valor.codigo.contains(t, autoescape=True) | Valor.descripcion.contains(t, autoescape=True))
+    if tipo and obra_social_nro:
+        catalogo = select(NomencladorCMC.categoria).where(NomencladorCMC.id == Valor.nomenclador_id).scalar_subquery()
+        stmt = stmt.where(service.condicion_tipo(
+            service.categoria_os_sql(obra_social_nro, Valor.nomenclador_id, catalogo), tipo,
+        ))
+    if por_presupuesto is not None:
+        stmt = stmt.where(Valor.por_presupuesto == por_presupuesto)
+    if especialidad_habilitada is not None and obra_social_nro:
+        stmt = stmt.where(Valor.codigo.in_(
+            select(ValorEspecialidad.codigo).where(
+                ValorEspecialidad.obra_social_nro == obra_social_nro,
+                ValorEspecialidad.especialidad_id_colegio == especialidad_habilitada,
+            )
+        ))
     if codigo:
         stmt = stmt.where(Valor.codigo == codigo)
     if nivel is not None:
@@ -614,6 +683,111 @@ async def resumen_por_vigencia(
         for vigencia, datos in por_vigencia.items()
     ]
     return sorted(salida, key=lambda r: r.vigencia_desde, reverse=True)
+
+
+_ORDEN_ORIGEN = {"NN": 0, "NE": 1}
+
+
+def _subtotal(snapshot, concepto: str) -> Decimal:
+    return sum(
+        (Decimal(str(c.get("subtotal") or 0)) for c in (snapshot or [])
+         if str(c.get("concepto", "")).lower() == concepto.lower()),
+        Decimal("0"),
+    )
+
+
+@router.get("/historial_por_codigo", response_model=HistorialPorCodigoOut)
+async def historial_por_codigo(
+    obra_social_nro: int = Query(...),
+    q: Optional[str] = Query(None, description="Código (empieza con) o descripción (contiene)."),
+    tipo: Optional[Literal[service.TIPOS_FILTRO]] = Query(
+        None, description="Consulta / Practica / Honorarios individuales, por la categoría del código en la O.S.",
+    ),
+    page: int = Query(1, ge=1),
+    size: int = Query(50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+):
+    """Todo el historial de precios de una obra social, agrupado por código y, dentro
+    de cada código, por variante (NN / NE base / NE por especialidad).
+
+    Pagina por código: primero elige la página de códigos con historial que cumplen
+    los filtros y recién después trae sus filas de `nm_historial_precio_codigo`. La
+    variación de cada versión se calcula contra la anterior de la misma variante, como
+    en `resumen_por_vigencia` (MySQL 5.7, sin `LAG`).
+    """
+    N, P, H = NomencladorCMC, CodigoObraSocial, HistorialPrecioCodigo
+    con_historial = (
+        select(H.nomenclador_id).where(H.obra_social_nro == obra_social_nro).distinct().subquery()
+    )
+    categoria = service.categoria_os_sql(obra_social_nro, N.id, N.categoria)
+    descripcion = func.coalesce(func.nullif(func.trim(P.descripcion), ""), N.descripcion, "")
+    base = (
+        select(N.id, N.codigo, descripcion.label("descripcion"), categoria.label("categoria"))
+        .join(con_historial, con_historial.c.nomenclador_id == N.id)
+        .outerjoin(P, (P.nomenclador_id == N.id) & (P.obra_social_nro == obra_social_nro))
+    )
+    if q and q.strip():
+        t = q.strip()
+        base = base.where(N.codigo.like(f"{t}%") | N.descripcion.like(f"%{t}%") | P.descripcion.like(f"%{t}%"))
+    if tipo:
+        base = base.where(service.condicion_tipo(categoria, tipo))
+
+    total = (await db.execute(select(func.count()).select_from(base.subquery()))).scalar_one()
+    codigos = (await db.execute(
+        base.order_by(N.codigo).offset((page - 1) * size).limit(size)
+    )).all()
+    if not codigos:
+        return HistorialPorCodigoOut(obra_social_nro=obra_social_nro, total=total, page=page, size=size, items=[])
+
+    filas = (await db.execute(
+        select(H).where(
+            H.obra_social_nro == obra_social_nro,
+            H.nomenclador_id.in_([c.id for c in codigos]),
+        ).order_by(H.vigencia_desde, H.id)
+    )).scalars().all()
+
+    esp_ids = {f.especialidad_id_colegio for f in filas if f.especialidad_id_colegio is not None}
+    nombres_esp = dict((await db.execute(
+        select(Especialidad.ID_COLEGIO_ESPE, Especialidad.ESPECIALIDAD)
+        .where(Especialidad.ID_COLEGIO_ESPE.in_(esp_ids))
+    )).all()) if esp_ids else {}
+
+    # (nomenclador_id, origen, especialidad) → versiones de la más vieja a la más nueva.
+    cadenas: dict[tuple, list[HistorialVersionOut]] = {}
+    for f in filas:
+        cadena = cadenas.setdefault((f.nomenclador_id, f.origen, f.especialidad_id_colegio), [])
+        anterior = cadena[-1].total if cadena else None
+        cadena.append(HistorialVersionOut(
+            vigencia_desde=f.vigencia_desde,
+            vigencia_hasta=f.vigencia_hasta,
+            honorarios=_subtotal(f.componentes_snapshot, "Honorarios"),
+            ayudante=_subtotal(f.componentes_snapshot, "Ayudante"),
+            gastos=_subtotal(f.componentes_snapshot, "Gastos"),
+            total=f.precio_total,
+            variacion_pct=(
+                float((f.precio_total - anterior) / anterior * 100) if anterior else None
+            ),
+            motivo_cambio=f.motivo_cambio,
+        ))
+
+    items = []
+    for c in codigos:
+        claves = sorted(
+            (k for k in cadenas if k[0] == c.id),
+            key=lambda k: (_ORDEN_ORIGEN.get(k[1], 9), k[2] is not None,
+                           (nombres_esp.get(k[2]) or str(k[2] or ""))),
+        )
+        items.append(HistorialCodigoOut(
+            nomenclador_id=c.id, codigo=c.codigo, descripcion=c.descripcion, categoria=c.categoria,
+            variantes=[
+                HistorialVarianteOut(
+                    origen=k[1], especialidad_id_colegio=k[2], especialidad=nombres_esp.get(k[2]),
+                    versiones=list(reversed(cadenas[k])),
+                )
+                for k in claves
+            ],
+        ))
+    return HistorialPorCodigoOut(obra_social_nro=obra_social_nro, total=total, page=page, size=size, items=items)
 
 
 @router.get("/por_vigencia")
@@ -710,6 +884,19 @@ async def sugerir_componentes_nn(
             for c in comps
         ],
     )
+
+
+@router.get("/componentes_nomenclador", response_model=ComponentesNNSugeridosOut)
+async def sugerir_componentes_nomenclador(
+    obra_social_nro: int = Query(...),
+    nomenclador_id: int = Query(..., description="Código del Colegio (nm_nomenclador.id)"),
+    nomenclador_slug: str = Query(..., description="Nomenclador con el que se factura"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Componentes de un valor que se factura "por nomenclador": el nivel del código en ese
+    nomenclador, su escala y el galeno de la obra social (o, en el Nacional, el galeno del rango).
+    Para precargar el alta manual en Por obra social. No escribe nada."""
+    return await nivelados.componentes_para_codigo(db, nomenclador_slug, obra_social_nro, nomenclador_id)
 
 
 @router.get("/vigencias")
@@ -920,6 +1107,7 @@ async def create_valor(body: ValorCreate, db: AsyncSession = Depends(get_db)):
         requiere_autorizacion=body.requiere_autorizacion,
         coseguro=body.coseguro,
         sin_restriccion_especialidad=sin_restriccion,
+        nomenclador_nivelado_id=body.nomenclador_nivelado_id,
     )
 
     await db.commit()
@@ -983,6 +1171,7 @@ async def create_valor_multi(body: ValorCreateMulti, db: AsyncSession = Depends(
             requiere_autorizacion=individual.requiere_autorizacion,
             coseguro=individual.coseguro,
             sin_restriccion_especialidad=sin_restriccion,
+            nomenclador_nivelado_id=individual.nomenclador_nivelado_id,
         )
         creados.append(valor)
 
@@ -1280,10 +1469,25 @@ async def _actualizar_valor_core(
     # de la base todas las vigencias más nuevas y la cargada pasa a ser la última.
     fecha_corte = body.vigencia_desde - datetime.timedelta(days=1)
 
+    # Con qué nomenclador se factura el valor nuevo: el que dice quien edita, o (si no dice
+    # nada) el del valor que se cierra mientras siga siendo calculado por galeno.
+    es_galeno_nuevo = (not body.por_presupuesto) and any(c.galeno_id is not None for c in body.componentes)
+    if body.definir_nomenclador and body.nomenclador_nivelado_id is not None:
+        if not es_galeno_nuevo:
+            raise HTTPException(422, "Un valor fijo no se factura por nomenclador")
+        if await db.get(NomencladorNivelado, body.nomenclador_nivelado_id) is None:
+            raise HTTPException(422, "Nomenclador no encontrado")
+
+    def _nomenclador_nuevo(v: Valor) -> Optional[int]:
+        if not es_galeno_nuevo:
+            return None
+        return body.nomenclador_nivelado_id if body.definir_nomenclador else v.nomenclador_nivelado_id
+
     # Los datos de cada variante se toman ANTES de liberar: si la vigencia actual
     # arranca en la fecha cargada o después, `liberar_vigencia` la borra.
     def _datos(v: Valor) -> dict:
         return dict(
+            nomenclador_nivelado_id=_nomenclador_nuevo(v),
             obra_social_nro=v.obra_social_nro, nomenclador_id=v.nomenclador_id, origen=v.origen,
             descripcion=body.descripcion or v.descripcion,
             nivel=body.nivel if body.nivel is not None else v.nivel,
@@ -1516,7 +1720,7 @@ async def replicar_a_obras_sociales(
     if body.modo == "todas":
         habilitadas = (
             await db.execute(
-                select(ObrasSociales.NRO_OBRASOCIAL).where(ObrasSociales.MARCA == "S")
+                select(ObrasSociales.NRO_OBRASOCIAL).where(ObrasSociales.activo.is_(True))
             )
         ).scalars().all()
         exclusiones = set(body.obras_sociales) | {origen.obra_social_nro}

@@ -27,14 +27,14 @@ AgrupacionExport = Literal["todo_junto", "por_tipo", "por_socio", "plana"]
 # obligatorias (identifican la fila y cierran el resumen) — no forman parte del
 # selector, así que no están acá.
 ColumnaExport = Literal[
-    "prestador", "obra_social", "matricula", "autorizacion", "fecha", "codigo",
+    "nro_registro", "prestador", "obra_social", "matricula", "clinica", "autorizacion", "fecha", "codigo",
     "nro_afiliado", "afiliado", "cantidad", "porcentaje",
-    "honorarios", "gastos", "coseguro", "diagnostico", "via", "especialidad",
+    "honorarios", "gastos", "coseguro", "valor_unitario", "diagnostico", "via", "especialidad",
     "estado_validacion",
 ]
 
 COLUMNAS_DEFAULT: list[ColumnaExport] = [
-    "prestador", "matricula", "autorizacion", "fecha", "codigo",
+    "nro_registro", "prestador", "matricula", "clinica", "autorizacion", "fecha", "codigo",
     "nro_afiliado", "afiliado", "cantidad", "porcentaje",
     "honorarios", "gastos",
 ]
@@ -45,7 +45,7 @@ COLUMNAS_DEFAULT: list[ColumnaExport] = [
 # cada fila es ruido — lo que hace falta por fila es de qué obra social es, y
 # el coseguro, que no venía en el default genérico.
 COLUMNAS_DEFAULT_POR_MEDICO: list[ColumnaExport] = [
-    "obra_social", "matricula", "autorizacion", "fecha", "codigo",
+    "nro_registro", "obra_social", "matricula", "clinica", "autorizacion", "fecha", "codigo",
     "nro_afiliado", "afiliado", "cantidad", "porcentaje",
     "honorarios", "gastos", "coseguro",
 ]

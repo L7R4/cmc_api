@@ -2,11 +2,14 @@
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.deps import get_current_user
 from app.db.database import get_db
+from app.modules.importaciones.planilla import estado, servicio as planilla
+from app.modules.importaciones.planilla.plantilla import generar_plantilla
+from app.modules.importaciones.planilla.schemas import LoteOut, PeriodosPlanillaOut, PlanillaIn, PlanillaOut
 from app.modules.importaciones.prevencion import servicio as prevencion
 from app.modules.importaciones.swiss import servicio as swiss
 from app.modules.importaciones.unne import servicio as unne
@@ -210,3 +213,141 @@ async def confirmar_unne(
         body.archivo, salida.resumen.duplicadas, salida.resumen.omitidas,
     )
     return salida
+
+
+# ── Planilla del Colegio ──────────────────────────────────────────────────────
+
+
+def _nro_socio(user: dict) -> str:
+    """Quién importa, para `usuario` del detalle: igual que la carga manual de facturación."""
+    return str(user["nro_socio"])
+
+
+@router.get("/planilla/plantilla")
+async def plantilla_planilla(user=Depends(get_current_user)):
+    """La plantilla .xlsx vacía, generada con las columnas vigentes."""
+    return Response(
+        content=generar_plantilla(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="plantilla_importacion_prestaciones.xlsx"'},
+    )
+
+
+@router.get("/planilla/periodos", response_model=PeriodosPlanillaOut)
+async def periodos_planilla(
+    obra_social: int = Query(..., description="NRO_OBRASOCIAL destino de la carga"),
+    db: AsyncSession = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    """Períodos conocidos de esa obra social, el sugerido y el primero en que se puede cargar."""
+    return await planilla.periodos(db, obra_social)
+
+
+@router.post("/planilla/previsualizar", response_model=PlanillaOut)
+async def previsualizar_planilla(
+    body: PlanillaIn,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    """Qué se grabaría de la planilla. **No escribe nada.**
+
+    Cada fila se valida con las mismas reglas que la carga manual; lo que no entra
+    vuelve con su motivo.
+    """
+    return await planilla.procesar(db, datos=body, usuario=_nro_socio(user), grabar=False)
+
+
+@router.post("/planilla/confirmar", response_model=PlanillaOut)
+async def confirmar_planilla(
+    body: PlanillaIn,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    """Graba lo que la previsualización marcó grabable, **todo o nada**: un único commit.
+
+    Exige `lote`. Se puede seguir (`GET /planilla/lotes/{lote}`) y cancelar
+    (`POST /planilla/lotes/{lote}/cancelar`) mientras corre; cancelada responde 409 y no
+    graba nada. Ver `planilla/estado.py`.
+    """
+    usuario = _nro_socio(user)
+    lote = body.lote
+    if not lote:
+        raise HTTPException(422, "Falta el lote de la importación.")
+    estado.limpiar_viejos()
+
+    async def cancelado() -> bool:
+        return estado.cancelacion_pedida(lote)
+
+    def progreso(fase: str, hecho: int, total: int) -> None:
+        estado.escribir(lote, fase, hecho, total, forzar=hecho in (0, total))
+
+    try:
+        await _revisar_antes(cancelado)
+        estado.escribir(lote, "validando", 0, len(body.filas), forzar=True)
+        salida = await planilla.procesar(
+            db, datos=body, usuario=usuario, grabar=True, cancelado=cancelado, progreso=progreso,
+        )
+    except planilla.ImportacionCancelada:
+        await db.rollback()
+        estado.escribir(lote, "cancelada", forzar=True)
+        log.info("Import planilla cancelada por el usuario %s (O.S. %s, lote %s).", usuario, body.obra_social, lote)
+        raise HTTPException(409, "Importación cancelada: no se grabó nada.")
+    except BaseException as e:
+        detalle = e.detail if isinstance(e, HTTPException) and isinstance(e.detail, str) else type(e).__name__
+        estado.escribir(lote, "error", forzar=True, detalle=detalle)
+        raise
+    estado.escribir(lote, "grabada", salida.resumen.grabables, salida.resumen.total, forzar=True)
+    log.info(
+        "Import planilla (O.S. %s): %s de %s filas grabadas en el período %s por el usuario %s "
+        "(archivo %r, lote %s, %s repetidas, %s omitidas).",
+        body.obra_social, salida.resumen.grabables, salida.resumen.total, salida.resumen.periodo,
+        usuario, body.archivo, lote, salida.resumen.duplicadas, salida.resumen.omitidas,
+    )
+    return salida
+
+
+async def _revisar_antes(cancelado) -> None:
+    """Cancelar antes de que la importación empiece también vale."""
+    if await cancelado():
+        raise planilla.ImportacionCancelada()
+
+
+def _lote_o_422(lote: str) -> str:
+    if not estado.lote_valido(lote):
+        raise HTTPException(422, "Lote inválido.")
+    return lote
+
+
+@router.post("/planilla/lotes/{lote}/cancelar", status_code=202)
+async def cancelar_planilla(lote: str, user=Depends(get_current_user)):
+    """Pide cancelar la importación de ese lote. Responde enseguida: el resultado lo
+    informa la propia importación (409 si frenó a tiempo; 200 si el commit ya había
+    empezado), y se puede consultar en `GET /planilla/lotes/{lote}`."""
+    estado.pedir_cancelacion(_lote_o_422(lote))
+    return {"lote": lote, "pedida": True}
+
+
+@router.get("/planilla/lotes/{lote}", response_model=LoteOut)
+async def lote_planilla(
+    lote: str,
+    obra_social: int = Query(...),
+    periodo: str = Query(..., pattern=r"^\d{6}$"),
+    db: AsyncSession = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    """Avance de la importación y cuántas prestaciones quedaron grabadas con ese lote.
+
+    Sirve para dibujar el progreso y para saber qué pasó si la respuesta de «confirmar»
+    no llegó (por ejemplo, un corte de red).
+    """
+    _lote_o_422(lote)
+    e = estado.leer(lote) or {}
+    contar = e.get("estado") in (None, "grabada", "guardando")
+    base = (
+        await planilla.estado_lote(db, obra_social=obra_social, periodo=periodo, lote=lote)
+        if contar else LoteOut(lote=lote)
+    )
+    return LoteOut(
+        lote=lote, estado=e.get("estado", "desconocido"), hecho=e.get("hecho", 0), total=e.get("total", 0),
+        grabadas=base.grabadas, importe_total=base.importe_total,
+    )

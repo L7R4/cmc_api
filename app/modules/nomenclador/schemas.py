@@ -366,6 +366,26 @@ class GalenoActualizarPrecioMasivoIn(BaseModel):
         return self
 
 
+class GalenoPrecioLoteItem(BaseModel):
+    codigo: str
+    # Un solo valor unitario para todos los niveles vigentes del galeno (cada nivel
+    # conserva sus unidades).
+    nuevo_valor_unitario: Decimal = Field(ge=0)
+
+
+class GalenosPrecioLoteIn(BaseModel):
+    """Cambio de precio de varios galenos de una obra social: todo o nada."""
+    obra_social_nro: int
+    vigencia_desde: datetime.date
+    items: List[GalenoPrecioLoteItem] = Field(min_length=1, max_length=500)
+
+
+class GalenosPrecioLoteOut(BaseModel):
+    galenos: int
+    filas: int  # galenos x niveles rotados
+    valores_recalculados: int
+
+
 class GalenoOut(BaseModel):
     id: int
     obra_social_nro: int
@@ -380,6 +400,7 @@ class GalenoOut(BaseModel):
     unidades_gastos: Optional[Decimal]
     activo: bool
     visible: bool = True
+    precio_por_nivel: bool = False
     observacion: Optional[str]
     created_at: datetime.datetime
 
@@ -691,11 +712,15 @@ class ComponenteNNSugeridoOut(BaseModel):
 
 
 class ComponentesNNSugeridosOut(BaseModel):
-    """Precarga del alta manual de un NN. `disponible=False` → `motivo` dice por qué
-    (sin NN vinculado, fuera de rango, galeno base no vigente en la OS)."""
+    """Precarga del alta manual de un NN (o de un valor "por nomenclador"). `disponible=False`
+    → `motivo` dice por qué (sin NN vinculado, fuera de rango, galeno no vigente en la OS)."""
     disponible: bool
     motivo: Optional[str] = None
     componentes: List[ComponenteNNSugeridoOut] = []
+    # Sólo "por nomenclador": nivel del código, id del nomenclador y modo del galeno.
+    nivel: Optional[int] = None
+    nomenclador_nivelado_id: Optional[int] = None
+    precio_por_nivel: Optional[bool] = None
 
 
 class ValorComponenteOut(BaseModel):
@@ -764,6 +789,9 @@ class ValorCreate(BaseModel):
     # Importe que el afiliado paga de su bolsillo por esta práctica en esta OS;
     # se descuenta del total a liquidar (ver facturacion.calcular_importe_total).
     coseguro: Decimal = Field(Decimal("0"), ge=0)
+    # Nomenclador con el que se factura (`nm_nomenclador_nivelado.id`): los componentes
+    # vienen de `GET /valores_nm/componentes_nomenclador`. NULL = valor fijo o manual.
+    nomenclador_nivelado_id: Optional[int] = None
     vigencia_desde: datetime.date
     observacion: Optional[str] = None
     componentes: List[ValorComponenteIn] = []
@@ -806,6 +834,7 @@ class ValorCreateMulti(BaseModel):
     por_presupuesto: bool = False
     cantidad_ayudantes: Optional[int] = Field(None, ge=0)
     coseguro: Decimal = Field(Decimal("0"), ge=0)
+    nomenclador_nivelado_id: Optional[int] = None
     vigencia_desde: datetime.date
     observacion: Optional[str] = None
     componentes: List[ValorComponenteIn] = []
@@ -838,6 +867,7 @@ class ValorCreateMulti(BaseModel):
             por_presupuesto=self.por_presupuesto,
             cantidad_ayudantes=self.cantidad_ayudantes,
             coseguro=self.coseguro,
+            nomenclador_nivelado_id=self.nomenclador_nivelado_id,
             vigencia_desde=self.vigencia_desde,
             observacion=self.observacion,
             componentes=self.componentes,
@@ -916,6 +946,11 @@ class ValorCerrarYCrearIn(BaseModel):
     # (mismas obra_social_nro + nomenclador_id, otra especialidad) activas al momento
     # de cerrar. No aplica a NN (no tiene hermanas por especialidad).
     aplicar_a_variantes: bool = False
+    # Cómo se factura el valor nuevo. `definir_nomenclador=False` conserva el nomenclador del
+    # valor que se cierra (sólo si el nuevo sigue siendo calculado); True fija
+    # `nomenclador_nivelado_id` (None = valor fijo o manual).
+    definir_nomenclador: bool = False
+    nomenclador_nivelado_id: Optional[int] = None
 
     @model_validator(mode="after")
     def check_componentes(self) -> "ValorCerrarYCrearIn":
@@ -942,6 +977,7 @@ class ReplicaAltaIn(BaseModel):
     por_presupuesto: bool = False
     cantidad_ayudantes: Optional[int] = Field(None, ge=0)
     coseguro: Decimal = Field(Decimal("0"), ge=0)
+    nomenclador_nivelado_id: Optional[int] = None
     vigencia_desde: datetime.date
     observacion: Optional[str] = None
     componentes: List[ValorComponenteIn] = []
@@ -1035,6 +1071,9 @@ class ValorOut(BaseModel):
     nivel: Optional[int]
     complejidad: Optional[str]
     categoria: Optional[str] = None
+    # La que vale para esta OS: la del valor > la del alta del código en la OS > la del
+    # catálogo. Para mostrar y filtrar por tipo; ver routes_valores._valores_out.
+    categoria_efectiva: Optional[str] = None
     requiere_autorizacion: Optional[bool] = None
     especialidad_id_colegio: Optional[int]
     por_presupuesto: bool = False
@@ -1045,6 +1084,9 @@ class ValorOut(BaseModel):
     especialidades: List[int] = []
     cantidad_ayudantes: Optional[int] = None
     coseguro: Decimal = Decimal("0")
+    # Nomenclador con el que se factura (NULL = fijo o manual) y su nombre para mostrar.
+    nomenclador_nivelado_id: Optional[int] = None
+    nomenclador_nivelado: Optional[str] = None
     # Modalidad de la ecuación: 'galeno' | 'fijo' | 'por_presupuesto'
     modalidad: str
     vigencia_desde: datetime.date
@@ -1195,7 +1237,7 @@ class ReplicarObrasSocialesIn(BaseModel):
 
     `modo`:
       - "subset" → `obras_sociales` son los destinos.
-      - "todas"  → todas las OS habilitadas (MARCA="S") MENOS `obras_sociales` (exclusiones).
+      - "todas"  → todas las OS activas MENOS `obras_sociales` (exclusiones).
     """
     origen_valor_id: int
     modo: Literal["subset", "todas"] = "subset"
@@ -1351,6 +1393,46 @@ class ResumenVigenciaOut(BaseModel):
     #: código (mismo nomenclador_id + origen + especialidad). `None` cuando
     #: ningún código de esta vigencia tenía una versión previa — primera carga.
     avg_pct: Optional[float] = None
+
+
+class HistorialVersionOut(BaseModel):
+    """Una versión del precio de una variante (una fila de `nm_historial_precio_codigo`)."""
+    vigencia_desde: datetime.date
+    vigencia_hasta: Optional[datetime.date] = None
+    honorarios: Decimal
+    ayudante: Decimal
+    gastos: Decimal
+    total: Decimal
+    #: Contra la versión anterior de la misma variante; `None` en la primera.
+    variacion_pct: Optional[float] = None
+    motivo_cambio: str
+
+
+class HistorialVarianteOut(BaseModel):
+    """Una variante del precio del código: NN, o NE base / de una especialidad."""
+    origen: str
+    especialidad_id_colegio: Optional[int] = None
+    especialidad: Optional[str] = None
+    #: De la más nueva a la más vieja.
+    versiones: List[HistorialVersionOut]
+
+
+class HistorialCodigoOut(BaseModel):
+    nomenclador_id: int
+    codigo: str
+    descripcion: str
+    #: Categoría efectiva en la OS; el front la muestra como tipo.
+    categoria: Optional[str] = None
+    #: NN primero, después NE (base y luego por especialidad).
+    variantes: List[HistorialVarianteOut]
+
+
+class HistorialPorCodigoOut(BaseModel):
+    obra_social_nro: int
+    total: int
+    page: int
+    size: int
+    items: List[HistorialCodigoOut]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1587,7 +1669,7 @@ class PlantillaEspecialidadesOut(BaseModel):
 class PropagarEspecialidadesIn(BaseModel):
     obra_social_nros: List[int] = Field(..., min_length=1)
     # agregar = sólo suma lo nuevo de la plantilla; igualar = además quita lo que
-    # la O.S. tenga de más (salvo especialidades con precio NE activo).
+    # la O.S. tenga de más, aunque tenga precio NE activo (ese precio se da de baja).
     modo: Literal["agregar", "igualar"] = "agregar"
     dry_run: bool = False
 
@@ -1599,8 +1681,8 @@ class PropagarEspecialidadesItem(BaseModel):
     motivo: Optional[str] = None
     agrega: List[int] = []
     quita: List[int] = []
-    # Se quitarían pero tienen precio NE activo: se quedan.
-    conserva_por_precio: List[int] = []
+    # Subconjunto de `quita` que tenía precio NE activo: se da de baja con la especialidad.
+    quita_con_precio: List[int] = []
 
 
 class PropagarEspecialidadesOut(BaseModel):
@@ -1637,10 +1719,19 @@ class NomencladorNiveladoOut(BaseModel):
     galeno_grupo: str
     galeno_codigo: Optional[str] = None
     galeno_nombre: Optional[str] = None
+    galeno_gastos_codigo: Optional[str] = None
+    # 'nivelado' | 'nacional' (el Nacional no tiene escala por nivel ni se aplica a una O.S.)
+    tipo: str = "nivelado"
     niveles: int
+    # ID_COLEGIO_ESPE a las que se aplica; vacío = todas las del código.
+    especialidades: List[int] = []
     total_codigos: int
     por_nivel: dict[int, int]
     con_unidades: int
+
+
+class NiveladoEspecialidadesIn(BaseModel):
+    especialidades: List[int] = Field(default_factory=list)
 
 
 class NiveladoCodigoOut(BaseModel):
@@ -1677,14 +1768,71 @@ class NiveladoCodigoAltaIn(NiveladoCodigoIn):
     nomenclador_id: int
 
 
-class AplicarNiveladoIn(BaseModel):
-    obra_social_nro: int
+class NomencladorDeCodigoOut(BaseModel):
+    """Un nomenclador con el que se puede facturar un código (alta de valor "por nomenclador")."""
+    id: int
+    slug: str
+    nombre: str
+    tipo: str
+    niveles: int
+    nivel_del_codigo: Optional[int] = None     # None: nacional o código "de N unidades"
+    unidades_del_codigo: Optional[Decimal] = None
+
+
+class NiveladoEscalaNivel(BaseModel):
+    nivel: int = Field(ge=1)
+    unidades_honorarios: Decimal = Field(ge=0)
+    # None = el 25 % de las de honorarios.
+    unidades_ayudante: Optional[Decimal] = Field(None, ge=0)
+
+
+class NiveladoEscalaOut(BaseModel):
+    slug: str
+    nombre: str
+    galeno_codigo: Optional[str] = None
+    galeno_gastos_codigo: Optional[str] = None
+    niveles: List[NiveladoEscalaNivel]
+    # Obras sociales que tienen el galeno de este nomenclador (cantidad de niveles igual).
+    obras_sociales: int = 0
+
+
+class NiveladoEscalaIn(BaseModel):
+    niveles: List[NiveladoEscalaNivel] = Field(min_length=1, max_length=40)
+
+
+class RecalcularNiveladoIn(BaseModel):
     vigencia_desde: datetime.date
     dry_run: bool = True
 
 
+class AplicarNiveladoAjuste(BaseModel):
+    """Unidades de un nivel PARA ESTA obra social (pisan la escala del nomenclador)."""
+    nivel: int = Field(ge=1)
+    unidades_honorarios: Optional[Decimal] = Field(None, ge=0)
+    unidades_ayudante: Optional[Decimal] = Field(None, ge=0)
+
+
+class AplicarNiveladoGaleno(BaseModel):
+    """Cómo se crea el galeno de la obra social cuando no lo tiene, o cuando cambia de
+    nomenclador (7 ↔ 10 niveles). Con el galeno ya cargado en esos niveles sólo se usan
+    los `ajustes`."""
+    # False: calculado (unidades × `valor_unitario`). True: precio fijo por nivel.
+    precio_por_nivel: bool = False
+    valor_unitario: Optional[Decimal] = Field(None, gt=0)
+    precios_por_nivel: Optional[dict[int, Decimal]] = None
+    ajustes: List[AplicarNiveladoAjuste] = Field(default_factory=list)
+
+
+class AplicarNiveladoIn(BaseModel):
+    obra_social_nro: int
+    vigencia_desde: datetime.date
+    dry_run: bool = True
+    galeno: Optional[AplicarNiveladoGaleno] = None
+
+
 EstadoAplicarNivelado = Literal[
-    "crear", "creado", "reemplazar", "reemplazado", "sin_quien_factura", "suspendido", "omitido",
+    "crear", "creado", "reemplazar", "reemplazado", "sin_quien_factura", "fuera_de_especialidad",
+    "suspendido", "omitido",
 ]
 
 
@@ -1711,10 +1859,23 @@ class AplicarNiveladoResumen(BaseModel):
     reemplazar: int
     vigencias_borradas: int
     sin_quien_factura: int
+    # El código no tiene ninguna de las especialidades del nomenclador: no se le carga precio.
+    fuera_de_especialidad: int = 0
     suspendido: int
     omitido: int
     precios: int
     altas: int
+
+
+class AplicarNiveladoCambio(BaseModel):
+    """La obra social usa otro nomenclador con el mismo galeno (7 ↔ 10 niveles): al
+    aplicar, sus valores se eliminan y se crean con el nomenclador nuevo."""
+    desde_slug: str
+    desde_nombre: str
+    niveles_desde: int
+    valores_eliminados: int
+    codigos_sin_reemplazo: int
+    valores_a_crear: int = 0
 
 
 class AplicarNiveladoOut(BaseModel):
@@ -1722,5 +1883,185 @@ class AplicarNiveladoOut(BaseModel):
     obra_social_nro: int
     nomenclador: str
     galeno_nombre: str
+    # Se creó (o se va a crear) el galeno de la obra social con los datos de `galeno`.
+    galeno_creado: bool = False
+    cambio: Optional[AplicarNiveladoCambio] = None
     resumen: AplicarNiveladoResumen
     filas: List[AplicarNiveladoFila]
+
+
+class NiveladoGalenoNivel(BaseModel):
+    nivel: int
+    valor_unitario: Decimal
+    unidades_honorarios: Decimal   # efectivas (ajuste o escala)
+    unidades_ayudante: Decimal
+    ajustado: bool
+
+
+class GalenoResumenOut(BaseModel):
+    """Un galeno de la O.S. para la pantalla Actualizar galenos: con qué nomencladores se
+    usa, cómo se calcula y qué niveles se apartan de la escala."""
+    codigo: str
+    nomencladores: List[str] = Field(default_factory=list)
+    # calculado: unidades × valor unitario · por_nivel: precio fijo por nivel
+    modo: Literal["calculado", "por_nivel"] = "calculado"
+    niveles: List[NiveladoGalenoNivel] = Field(default_factory=list)
+
+
+class NiveladoEstadoOsOut(BaseModel):
+    """Qué tiene la obra social del galeno de un nomenclador, para armar el modal de aplicar."""
+    obra_social_nro: int
+    obra_social: str
+    niveles_nomenclador: int = 0
+    # ok: tiene el galeno con los niveles del nomenclador · falta: no tiene galeno ·
+    # otros_niveles: lo tiene con otra cantidad de niveles (cambio de nomenclador).
+    galeno_estado: Literal["ok", "falta", "otros_niveles"]
+    niveles_os: Optional[int] = None
+    precio_por_nivel: Optional[bool] = None
+    niveles: List[NiveladoGalenoNivel] = Field(default_factory=list)
+    cambio: Optional[AplicarNiveladoCambio] = None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Importar valores fijos NE desde Excel (CODIGO | DESCRIPCION | HONORARIOS | GASTOS | AYUDANTE)
+# ─────────────────────────────────────────────────────────────────────────────
+
+EstadoFilaFija = Literal[
+    "error", "duplicado", "sin_catalogo", "suspendido", "sin_alta",
+    "sin_quien_factura", "vigente_posterior", "misma_vigencia", "rotar", "nuevo",
+]
+AccionFija = Literal[
+    "omitir", "cargar", "rotar", "sobrescribir", "reemplazar",
+    "alta_y_cargar", "reactivar_y_cargar", "crear_y_cargar",
+]
+
+
+class ImportarFijosFilaIn(BaseModel):
+    """Una fila del Excel tal como la leyó el front. Los importes llegan crudos (número o
+    texto: "$ 1.234.567"; HONORARIOS admite además "PRESUPUESTO") y los interpreta el back."""
+    fila: int
+    codigo: Optional[str] = None
+    descripcion: Optional[str] = None
+    honorarios: Optional[str | float | int] = None
+    gastos: Optional[str | float | int] = None
+    ayudante: Optional[str | float | int] = None
+
+
+class ImportarFijosIn(BaseModel):
+    obra_social_nro: int
+    vigencia_desde: datetime.date
+    # Fila 1 del Excel: se valida contra CODIGO | DESCRIPCION | HONORARIOS | GASTOS | AYUDANTE.
+    encabezado: List[Optional[str]]
+    filas: List[ImportarFijosFilaIn] = Field(..., min_length=1, max_length=5000)
+
+
+class DecisionFijaIn(BaseModel):
+    fila: int
+    # Estado que el usuario vio en la previsualización: si cambió, se pide previsualizar de nuevo.
+    estado_visto: EstadoFilaFija
+    accion: AccionFija
+    # Quién factura, cuando la fila lo pide (alta sin plantilla, sin quién factura,
+    # código nuevo). Lista = esas especialidades; `sin_restriccion` = cualquier médico.
+    especialidades: Optional[List[int]] = None
+    sin_restriccion: Optional[bool] = None
+    # Sólo para `crear_y_cargar`: categoría del código nuevo en el catálogo.
+    categoria: Optional[str] = Field(None, max_length=100)
+
+
+class ImportarFijosAplicarIn(ImportarFijosIn):
+    decisiones: List[DecisionFijaIn]
+    # Otras O.S. de la familia (ver `replicar_familia.familia_de`) donde cargar lo mismo.
+    replicar_en: List[int] = Field(default_factory=list)
+
+
+class VarianteActualOut(BaseModel):
+    """Precio NE que ya tiene una de las variantes destino de la fila."""
+    especialidad_id_colegio: Optional[int] = None
+    especialidad: Optional[str] = None
+    precio_actual: Optional[Decimal] = None
+    vigencia_desde: Optional[datetime.date] = None
+    vigencia_hasta: Optional[datetime.date] = None
+    variacion_pct: Optional[float] = None
+    # Vigencias de esta variante desde la fecha nueva en adelante (se borran al reemplazar).
+    posteriores: int = 0
+
+
+class ReplicaFilaOut(BaseModel):
+    """Qué pasaría con la fila en una O.S. de la familia si se carga en la principal.
+    `accion` None = ahí no se replica (`motivo` dice por qué)."""
+    obra_social_nro: int
+    estado: EstadoFilaFija
+    accion: Optional[AccionFija] = None
+    motivo: Optional[str] = None
+
+
+class FilaPreviaOut(BaseModel):
+    fila: int
+    codigo: str
+    codigo_excel: Optional[str] = None
+    descripcion_excel: Optional[str] = None
+    descripcion_os: Optional[str] = None
+    nomenclador_id: Optional[int] = None
+    categoria: Optional[str] = None
+    # Importes que se cargan (None si la fila no se pudo interpretar o es por presupuesto).
+    honorarios: Optional[Decimal] = None
+    gastos: Optional[Decimal] = None
+    ayudante: Optional[Decimal] = None
+    total: Optional[Decimal] = None
+    por_presupuesto: bool = False
+    estado: EstadoFilaFija
+    # Estado de la fila sin contar que el código está repetido en el archivo.
+    estado_base: Optional[EstadoFilaFija] = None
+    motivo: Optional[str] = None
+    acciones: List[AccionFija]
+    # None = la fila requiere una decisión del usuario.
+    accion_sugerida: Optional[AccionFija] = None
+    # La acción (salvo omitir) necesita que se elija quién factura.
+    requiere_quien_factura: bool = False
+    # Quién factura hoy o, sin alta, la plantilla del Colegio (sugerencia).
+    especialidades: List[int] = Field(default_factory=list)
+    sin_restriccion: bool = False
+    variantes: List[VarianteActualOut] = Field(default_factory=list)
+    sin_cambio: bool = False
+    avisos: List[str] = Field(default_factory=list)
+    replicas: List[ReplicaFilaOut] = Field(default_factory=list)
+
+
+class ImportarFijosPreviewOut(BaseModel):
+    obra_social_nro: int
+    vigencia_desde: datetime.date
+    # Otras O.S. de la familia: vacío = no se ofrece replicar.
+    familia: List[ObraSocialFamiliaItem] = Field(default_factory=list)
+    total: int
+    por_estado: dict[str, int]
+    filas: List[FilaPreviaOut]
+
+
+class ReplicaOmitidaOut(BaseModel):
+    fila: int
+    codigo: str
+    motivo: str
+
+
+class ReplicaOSOut(BaseModel):
+    obra_social_nro: int
+    nombre: str
+    estado: Literal["ok", "error"]
+    motivo: Optional[str] = None
+    precios_creados: int = 0
+    filas_cargadas: int = 0
+    altas: int = 0
+    omitidas: List[ReplicaOmitidaOut] = Field(default_factory=list)
+
+
+class ImportarFijosAplicarOut(BaseModel):
+    obra_social_nro: int
+    vigencia_desde: datetime.date
+    precios_creados: int
+    filas_cargadas: int
+    filas_rotadas: int
+    altas: int
+    codigos_creados: int
+    vigencias_borradas: int
+    omitidas: int
+    replicas: List[ReplicaOSOut] = Field(default_factory=list)

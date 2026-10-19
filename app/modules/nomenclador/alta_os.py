@@ -379,7 +379,7 @@ async def cambiar_estado(
 
 async def listar_por_os(
     db: AsyncSession, obra_social_nro: int, *, estado: Optional[str] = None,
-    q: Optional[str] = None, page: int = 1, size: int = 50,
+    q: Optional[str] = None, tipo: Optional[str] = None, page: int = 1, size: int = 50,
 ) -> CodigosPorOSOut:
     N, P = NomencladorCMC, CodigoObraSocial
     con_precio = (
@@ -419,6 +419,11 @@ async def listar_por_os(
     if q and q.strip():
         like = f"%{q.strip()}%"
         base = base.where(or_(N.codigo.like(f"{q.strip()}%"), N.descripcion.like(like), P.descripcion.like(like)))
+    if tipo:
+        # Como `q`, acota también los conteos por estado: muestran lo que hay de ese tipo.
+        base = base.where(service.condicion_tipo(
+            service.categoria_os_sql(obra_social_nro, N.id, N.categoria), tipo,
+        ))
 
     sub = base.subquery()
     conteos = {e: 0 for e in ESTADOS}
@@ -456,7 +461,7 @@ async def ficha(db: AsyncSession, nomenclador_id: int) -> FichaCodigoOut:
 
     obras = (await db.execute(
         select(ObrasSociales.NRO_OBRASOCIAL, ObrasSociales.OBRA_SOCIAL)
-        .where(ObrasSociales.MARCA != "N")
+        .where(ObrasSociales.activo.is_(True))
         .order_by(ObrasSociales.OBRA_SOCIAL)
     )).all()
     pares = {
@@ -542,9 +547,10 @@ async def propagar_plantilla(
 ):
     """Lleva la plantilla del Colegio (etapa 2) a las O.S. que YA tienen el código
     dado de alta. `agregar`: suma lo que falta. `igualar`: además quita lo que la
-    O.S. tenga de más, salvo las especialidades con precio NE activo (quedarían sin
-    con qué cotizar). Las O.S. "sin restricción" o sin alta se saltean. Cada O.S. en
-    su savepoint. No hace commit."""
+    O.S. tenga de más, también las especialidades con precio NE activo: esas dejan de
+    poder facturar y su precio se da de baja desde hoy (`quita_con_precio` las informa,
+    para que la vista previa lo avise). Las O.S. "sin restricción" o sin alta se
+    saltean. Cada O.S. en su savepoint. No hace commit."""
     from app.modules.nomenclador.schemas import PropagarEspecialidadesItem
 
     plantilla = set(await _plantilla(db, nom.codigo))
@@ -566,7 +572,7 @@ async def propagar_plantilla(
         actuales = await service.especialidades_habilitadas_de(db, nom.codigo, nro)
         agrega = sorted(plantilla - actuales)
         quita: list[int] = []
-        conserva: list[int] = []
+        quita_con_precio: list[int] = []
         if modo == "igualar":
             con_precio = set((await db.execute(select(Valor.especialidad_id_colegio).where(
                 Valor.obra_social_nro == nro, Valor.codigo == nom.codigo,
@@ -574,22 +580,22 @@ async def propagar_plantilla(
                 Valor.especialidad_id_colegio.is_not(None),
             ))).scalars())
             sobran = actuales - plantilla
-            conserva = sorted(sobran & con_precio)
-            quita = sorted(sobran - con_precio)
+            quita = sorted(sobran)
+            quita_con_precio = sorted(sobran & con_precio)
         if not agrega and not quita:
             out.append(PropagarEspecialidadesItem(
-                obra_social_nro=nro, nombre=nombre, estado="sin_cambios",
-                conserva_por_precio=conserva))
+                obra_social_nro=nro, nombre=nombre, estado="sin_cambios"))
             continue
         try:
             if not dry_run:
                 async with db.begin_nested():
                     await service.reemplazar_especialidades(
                         db, nro, nom.codigo, sorted((actuales | set(agrega)) - set(quita)),
+                        cerrar_dependientes=True,
                     )
             out.append(PropagarEspecialidadesItem(
                 obra_social_nro=nro, nombre=nombre, estado="actualizada",
-                agrega=agrega, quita=quita, conserva_por_precio=conserva))
+                agrega=agrega, quita=quita, quita_con_precio=quita_con_precio))
         except ValueError as e:
             out.append(PropagarEspecialidadesItem(
                 obra_social_nro=nro, nombre=nombre, estado="error", motivo=str(e)))

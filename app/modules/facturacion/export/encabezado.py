@@ -35,6 +35,11 @@ TELEFONOS_FALLBACK = ["(0379) 4427421", "4422066"]
 @dataclass
 class EncabezadoExport:
     lineas: list[str]  # siempre 5, en el orden del formato de arriba
+    # Solo el PDF: período y obra social (sin el rótulo «Facturación correspondiente a:» ni «Obra
+    # social (nro)») van al costado derecho de las dos primeras líneas, y las líneas 4 y 5 de arriba
+    # no se repiten. Vacíos: el PDF usa el formato de 5 líneas. El Excel usa siempre `lineas`.
+    periodo: str = ""
+    obra_social: str = ""
 
 
 async def _linea_institucion(db: AsyncSession) -> tuple[str, str]:
@@ -76,6 +81,14 @@ async def _nombre_obra_social(db: AsyncSession, cod_obr: Optional[str]) -> str:
     return os_row.OBRA_SOCIAL if os_row else cod_obr
 
 
+def _texto_obra_social(nombre: object, cod_obr: object) -> str:
+    """«<nombre> (<nro>)» para el costado derecho del encabezado del PDF."""
+    nombre = str(nombre or "").strip()
+    if not cod_obr:
+        return nombre
+    return f"{nombre} ({cod_obr})" if nombre and nombre != str(cod_obr) else f"({cod_obr})"
+
+
 async def construir_encabezado(db: AsyncSession, factura: FacturacionCMC) -> EncabezadoExport:
     razon_social, linea_domicilio = await _linea_institucion(db)
     obra_social_nombre = await _nombre_obra_social(db, factura.cod_obr)
@@ -86,7 +99,8 @@ async def construir_encabezado(db: AsyncSession, factura: FacturacionCMC) -> Enc
         _linea_facturas(factura),
         f"Facturación correspondiente a: {periodo}",
         f"Obra social ({factura.cod_obr}) {obra_social_nombre}",
-    ])
+    ], periodo=str(periodo),
+        obra_social=_texto_obra_social(obra_social_nombre, factura.cod_obr))
 
 
 async def construir_encabezado_por_medico(
@@ -122,4 +136,4 @@ async def construir_encabezado_por_medico(
         linea_medico,
         f"Facturación correspondiente a: {periodo_label}",
         "Detalle por médico - todas las obras sociales",
-    ])
+    ], periodo=periodo_label, obra_social="Detalle por médico - todas las obras sociales")

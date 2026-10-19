@@ -17,6 +17,7 @@ from app.modules.facturacion.schemas import (
     ActividadEventoOut,
     AfiliadoCreate,
     AfiliadoRead,
+    AfiliadoEditado,
     AfiliadoUpdate,
     AvanzarPeriodoMedicoPayload,
     AvanzarPeriodoMedicoResponse,
@@ -133,7 +134,7 @@ async def buscar_obras_sociales(
     limit: int = Query(20, ge=1, le=20),
     solo_activas: bool = Query(
         True,
-        description="Excluye las dadas de baja (MARCA='N'). false solo para resolver el "
+        description="Excluye las dadas de baja (activo=false). false solo para resolver el "
                     "nombre de prestaciones ya cargadas, nunca para elegir una OS.",
     ),
     db: AsyncSession = Depends(get_db),
@@ -144,7 +145,7 @@ async def buscar_obras_sociales(
         cond = or_(O.NRO_OBRASOCIAL == int(q), cond)
     stmt = select(O).where(cond)
     if solo_activas:
-        stmt = stmt.where(O.MARCA != "N")
+        stmt = stmt.where(O.activo.is_(True))
     rows = (
         await db.execute(stmt.limit(limit))
     ).scalars().all()
@@ -160,7 +161,7 @@ async def listar_obras_sociales_todas(db: AsyncSession = Depends(get_db)):
     `/medicos/todos`."""
     O = ObrasSociales
     rows = (
-        await db.execute(select(O).where(O.MARCA != "N").order_by(O.OBRA_SOCIAL))
+        await db.execute(select(O).where(O.activo.is_(True)).order_by(O.OBRA_SOCIAL))
     ).scalars().all()
     return [
         {"id": o.ID, "nro_obra_social": o.NRO_OBRASOCIAL, "nombre": o.OBRA_SOCIAL}
@@ -251,13 +252,14 @@ async def eliminar_afiliado(
 
 # Por id y en otra ruta: un afiliado puede no tener número, y `/afiliados/{dni:path}`
 # se tragaría cualquier sufijo ("/afiliados/id/5").
-@router.patch("/afiliados-id/{afiliado_id}", response_model=AfiliadoRead)
+@router.patch("/afiliados-id/{afiliado_id}", response_model=AfiliadoEditado)
 async def actualizar_afiliado(
     afiliado_id: int, payload: AfiliadoUpdate, db: AsyncSession = Depends(get_db),
 ):
     """Edición del afiliado (lápiz de la carga). Corrige también sus prestaciones no
-    anuladas de facturas abiertas."""
-    return await service.actualizar_afiliado(db, afiliado_id, payload)
+    anuladas de facturas abiertas y devuelve cuántas."""
+    af, n = await service.actualizar_afiliado(db, afiliado_id, payload)
+    return AfiliadoEditado.model_validate(af).model_copy(update={"prestaciones_actualizadas": n})
 
 
 @router.delete("/afiliados-id/{afiliado_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -337,6 +339,22 @@ async def listar_facturas(
         )).all()
         nombres = {str(nro_socio): nombre for nro_socio, nombre in med_rows}
 
+    # Nombre de cada obra social, también en batch (la lista lo muestra junto al número).
+    nros_os: set[int] = set()
+    for row in rows:
+        try:
+            nros_os.add(int(row.cod_obr))
+        except (TypeError, ValueError):
+            continue
+    nombres_os: dict[int, str] = {}
+    if nros_os:
+        os_rows = (await db.execute(
+            select(ObrasSociales.NRO_OBRASOCIAL, ObrasSociales.OBRA_SOCIAL).where(
+                ObrasSociales.NRO_OBRASOCIAL.in_(nros_os)
+            )
+        )).all()
+        nombres_os = {int(nro): (nombre or "").strip() for nro, nombre in os_rows if nombre}
+
     # Importe en vivo para las cabeceras abiertas (normales o complementos): el
     # `importe` persistido solo se escribe al cerrar, mientras está abierto vale 0.
     importes_abiertos = await service.calcular_importes_abiertos(db, rows)
@@ -357,6 +375,10 @@ async def listar_facturas(
         if factura.id_prestaciones in importes_abiertos:
             factura.importe = importes_abiertos[factura.id_prestaciones]
         factura.publicado = publicado_por_id.get(factura.id_prestaciones, False)
+        try:
+            factura.nombre_obra_social = nombres_os.get(int(factura.cod_obr)) or None
+        except (TypeError, ValueError):
+            pass
         out.append(factura)
     response.headers["X-Total-Count"] = str(total)
     response.headers["Content-Range"] = f"facturas {offset}-{offset + len(rows)}/{total}"
@@ -799,7 +821,8 @@ async def editar_prestacion(
 @router.delete("/prestaciones/{id}", status_code=status.HTTP_204_NO_CONTENT)
 async def anular_prestacion(
     id: int,
+    con_equipo: bool = Query(False, description="Si es la cabecera de un equipo, anula también a sus integrantes."),
     user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    await service.anular_prestacion(db, id)
+    await service.anular_prestacion(db, id, con_equipo=con_equipo)

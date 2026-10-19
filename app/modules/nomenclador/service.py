@@ -13,6 +13,7 @@ from typing import List, Optional
 
 from sqlalchemy import and_, delete, exists, func, insert, or_, select, true, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 from sqlalchemy.orm.attributes import set_committed_value
 
 from app.common.money import quantize_money
@@ -23,6 +24,7 @@ from app.db.models.nomenclador_cmc import (
     MedicoCodigoHabilitado,
     NomencladorCMC,
     NomencladorDescripcionLegacy,
+    NomencladorNivelado,
     NomencladorPlantillaEspecialidad,
     Valor,
     ValorComponente,
@@ -456,6 +458,54 @@ def categoria_efectiva(
     if valor is not None and valor.categoria and valor.categoria.strip():
         return valor.categoria
     return nomenclador.categoria if nomenclador is not None else None
+
+
+# ── Filtro por tipo (Consulta / Práctica / Honorarios individuales) ──────────
+# Mismo criterio que el `tipo` de la prestación (facturacion.service.tipo_de_categoria):
+# sin categoría, o con una que no es de las conocidas, cuenta como Práctica. Sanatorio
+# queda afuera del filtro a pedido del usuario (2026-10-08): no es "Práctica" ni se
+# ofrece como opción.
+TIPO_CONSULTA = "Consulta"
+TIPO_PRACTICA = "Practica"
+TIPO_HONORARIOS_INDIVIDUALES = "Honorarios individuales"
+TIPOS_FILTRO = (TIPO_CONSULTA, TIPO_PRACTICA, TIPO_HONORARIOS_INDIVIDUALES)
+_CATEGORIAS_NO_PRACTICA = (TIPO_CONSULTA, TIPO_HONORARIOS_INDIVIDUALES, "Sanatorio")
+
+
+def condicion_tipo(categoria, tipo: str):
+    """Condición SQL «la categoría `categoria` (columna o expresión) es del `tipo`»."""
+    if tipo == TIPO_PRACTICA:
+        return or_(categoria.is_(None), categoria.not_in(_CATEGORIAS_NO_PRACTICA))
+    return categoria == tipo
+
+
+def _no_vacia(col):
+    return func.nullif(func.trim(col), "")
+
+
+def categoria_os_sql(obra_social_nro: int, nomenclador_id, categoria_catalogo):
+    """Expresión SQL con la categoría efectiva de un código en una OS, correlacionada
+    por `nomenclador_id`. Misma precedencia que `facturacion.service._get_categoria`:
+    la de un precio activo de la OS > la del alta del código en la OS > la del catálogo.
+    """
+    # Alias propios: quien la usa suele tener ya `Valor` o `CodigoObraSocial` en su
+    # FROM, y sin alias la subconsulta se correlacionaría con esas tablas.
+    V, P = aliased(Valor), aliased(CodigoObraSocial)
+    del_valor = (
+        select(func.max(_no_vacia(V.categoria)))
+        .where(
+            V.obra_social_nro == obra_social_nro,
+            V.nomenclador_id == nomenclador_id,
+            V.estado == "activo",
+        )
+        .scalar_subquery()
+    )
+    del_par = (
+        select(func.max(_no_vacia(P.categoria)))
+        .where(P.obra_social_nro == obra_social_nro, P.nomenclador_id == nomenclador_id)
+        .scalar_subquery()
+    )
+    return func.coalesce(del_valor, del_par, _no_vacia(categoria_catalogo))
 
 
 def requiere_autorizacion_efectiva(valor: Optional[Valor]) -> bool:
@@ -1073,25 +1123,181 @@ async def regenerar_historial_por_galeno(
         .values(galeno_id=nuevo_galeno_id)
     )
 
-    # 3. Para cada valor afectado, regenerar historial
-    fecha_corte = vigencia_desde - datetime.timedelta(days=1)
-    for valor_id in valor_ids_afectados:
-        await regenerar_historial_por_valores(
-            valor_id, fecha_corte, db, motivo="galeno_actualizado",
-            nueva_vigencia_desde=vigencia_desde,
-        )
-        # Reasignar la referencia de cambio al galeno nuevo
-        await db.execute(
-            update(HistorialPrecioCodigo)
-            .where(
-                HistorialPrecioCodigo.valores_id == valor_id,
-                HistorialPrecioCodigo.vigencia_hasta.is_(None),
-                HistorialPrecioCodigo.motivo_cambio == "galeno_actualizado",
-            )
-            .values(referencia_cambio_id=nuevo_galeno_id)
-        )
+    # 3. Para cada valor afectado, regenerar historial (en bloque; admite una vigencia anterior
+    # a las ya cargadas: borra las posteriores y deja ésta como la última).
+    await _regenerar_historial_en_bloque(
+        {valor_id: nuevo_galeno_id for valor_id in valor_ids_afectados}, vigencia_desde, db,
+    )
 
     return len(valor_ids_afectados)
+
+
+async def regenerar_historial_por_galenos(
+    pares: list[tuple[int, int]],
+    vigencia_desde: datetime.date,
+    db: AsyncSession,
+) -> int:
+    """
+    Regla A para VARIOS galenos a la vez: `pares` son `(galeno_anterior_id, galeno_nuevo_id)`.
+
+    Un valor calculable suele usar más de un galeno (honorarios + gastos). Rotarlos de a uno
+    con `regenerar_historial_por_galeno` recalcula ese valor una vez por galeno y deja filas
+    intermedias en el historial; acá se repunta todo primero y cada valor afectado se
+    recalcula UNA sola vez, ya con todos los precios nuevos. Retorna cuántos valores.
+    """
+    anteriores = {ant: nuevo for ant, nuevo in pares}
+    if not anteriores:
+        return 0
+    filas = (await db.execute(
+        select(ValorComponente.valor_id, ValorComponente.galeno_id)
+        .join(Valor, Valor.id == ValorComponente.valor_id)
+        .where(
+            ValorComponente.galeno_id.in_(list(anteriores)),
+            ValorComponente.activo == True,
+            Valor.estado == "activo",
+        )
+    )).all()
+    if not filas:
+        return 0
+
+    # A cada valor se le anota el galeno nuevo (el primero, si usa varios) como referencia.
+    referencia: dict[int, int] = {}
+    for valor_id, galeno_id in filas:
+        referencia.setdefault(valor_id, anteriores[galeno_id])
+
+    for ant, nuevo in anteriores.items():
+        if ant == nuevo:  # misma fila (cambio de precio con la vigencia vigente)
+            continue
+        await db.execute(
+            update(ValorComponente)
+            .where(ValorComponente.galeno_id == ant, ValorComponente.activo == True)
+            .values(galeno_id=nuevo)
+        )
+
+    await _regenerar_historial_en_bloque(referencia, vigencia_desde, db)
+    return len(referencia)
+
+
+async def _regenerar_historial_en_bloque(
+    referencia: dict[int, int],
+    vigencia_desde: datetime.date,
+    db: AsyncSession,
+) -> None:
+    """Misma regla que `regenerar_historial_por_valores` (motivo `galeno_actualizado`) para
+    muchos valores, con una cantidad de consultas que depende de los lotes y no de los
+    valores. `referencia`: `{valor_id: galeno_nuevo_id}`.
+
+    Por cada valor: si ya hay una fila de historial de su variante con esa `vigencia_desde`
+    la actualiza; si no, cierra la vigente de la variante y abre una nueva. Antes eran ~7
+    consultas por valor (2.200 valores = 30 s contra la base local, mucho más en prod).
+
+    Las filas de historial se tocan con UPDATE/INSERT directos: lo que la sesión tenga
+    cargado de `nm_historial_precio_codigo` queda desactualizado.
+    """
+    fecha_corte = vigencia_desde - datetime.timedelta(days=1)
+    valor_ids = list(referencia)
+
+    valores: dict[int, tuple] = {}
+    comps_por_valor: dict[int, list[ValorComponente]] = {}
+    for lote in _lotes(valor_ids):
+        for fila in (await db.execute(
+            select(Valor.id, Valor.nomenclador_id, Valor.obra_social_nro, Valor.origen,
+                   Valor.especialidad_id_colegio).where(Valor.id.in_(lote))
+        )).all():
+            valores[fila.id] = (fila.obra_social_nro, fila.nomenclador_id, fila.origen,
+                                fila.especialidad_id_colegio)
+        for c in (await db.execute(
+            select(ValorComponente)
+            .where(ValorComponente.valor_id.in_(lote), ValorComponente.activo == True)
+            .order_by(ValorComponente.valor_id, ValorComponente.orden)
+        )).scalars():
+            comps_por_valor.setdefault(c.valor_id, []).append(c)
+
+    galeno_ids = {c.galeno_id for cs in comps_por_valor.values() for c in cs if c.galeno_id}
+    galenos: dict[int, Galeno] = {}
+    for lote in _lotes(list(galeno_ids)):
+        galenos.update({g.id: g for g in (await db.execute(
+            select(Galeno).where(Galeno.id.in_(lote))
+        )).scalars()})
+
+    # Un plan por variante: si dos valores comparten variante gana el último, igual que
+    # cuando se procesaban de a uno (el segundo encontraba la fila del primero).
+    plan: dict[tuple, tuple[int, Decimal, list]] = {}
+    for valor_id in valor_ids:
+        clave = valores.get(valor_id)
+        if clave is None:
+            continue
+        precio, snapshot = precio_y_snapshot(comps_por_valor.get(valor_id, []), galenos)
+        plan[clave] = (valor_id, precio, snapshot)
+
+    os_nros = {k[0] for k in plan}
+    nom_ids = list({k[1] for k in plan})
+    existentes: dict[tuple, HistorialPrecioCodigo] = {}
+    abiertas: dict[tuple, list[int]] = {}
+    a_borrar: list[int] = []
+    for lote in _lotes(nom_ids):
+        for h in (await db.execute(
+            select(HistorialPrecioCodigo).where(
+                HistorialPrecioCodigo.obra_social_nro.in_(os_nros),
+                HistorialPrecioCodigo.nomenclador_id.in_(lote),
+                or_(
+                    HistorialPrecioCodigo.vigencia_desde >= vigencia_desde,
+                    HistorialPrecioCodigo.vigencia_hasta.is_(None),
+                    HistorialPrecioCodigo.vigencia_hasta >= vigencia_desde,
+                ),
+            )
+        )).scalars():
+            clave = (h.obra_social_nro, h.nomenclador_id, h.origen, h.especialidad_id_colegio)
+            if clave not in plan:
+                continue
+            if h.vigencia_desde == vigencia_desde:
+                existentes[clave] = h
+            elif h.vigencia_desde > vigencia_desde:
+                # Vigencia anterior a las cargadas: la que se carga pasa a ser la última.
+                a_borrar.append(h.id)
+            else:
+                # Cubre la fecha (abierta o cerrada después de ella): se cierra el día anterior.
+                abiertas.setdefault(clave, []).append(h.id)
+
+    ahora = datetime.datetime.utcnow()
+    a_cerrar: list[int] = []
+    nuevas: list[dict] = []
+    for clave, (valor_id, precio, snapshot) in plan.items():
+        galeno_nuevo_id = referencia[valor_id]
+        previa = existentes.get(clave)
+        if previa is not None:
+            previa.precio_total = precio
+            previa.componentes_snapshot = snapshot
+            previa.motivo_cambio = "galeno_actualizado"
+            previa.vigencia_hasta = None
+            previa.valores_id = valor_id
+            previa.referencia_cambio_id = galeno_nuevo_id
+            previa.fecha_cambio = ahora
+            continue
+        a_cerrar.extend(abiertas.get(clave, []))
+        nuevas.append({
+            "nomenclador_id": clave[1], "obra_social_nro": clave[0], "origen": clave[2],
+            "especialidad_id_colegio": clave[3], "vigencia_desde": vigencia_desde,
+            "vigencia_hasta": None, "precio_total": precio, "valores_id": valor_id,
+            "componentes_snapshot": snapshot, "motivo_cambio": "galeno_actualizado",
+            "referencia_cambio_id": galeno_nuevo_id, "fecha_cambio": ahora,
+        })
+
+    for lote in _lotes(a_borrar):
+        await db.execute(
+            delete(HistorialPrecioCodigo).where(HistorialPrecioCodigo.id.in_(lote))
+            .execution_options(synchronize_session=False)
+        )
+    for lote in _lotes(a_cerrar):
+        await db.execute(
+            update(HistorialPrecioCodigo)
+            .where(HistorialPrecioCodigo.id.in_(lote))
+            .values(vigencia_hasta=fecha_corte)
+            .execution_options(synchronize_session=False)
+        )
+    for lote in _lotes(nuevas):
+        await db.execute(insert(HistorialPrecioCodigo), lote)
+    await db.flush()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1658,6 +1864,13 @@ async def crear_galenos_base(
     return creados
 
 
+async def id_nomenclador_nacional(db: AsyncSession) -> Optional[int]:
+    """Id del nomenclador 'nacional' (`nm_nomenclador_nivelado.tipo`): lo llevan los valores NN."""
+    return (await db.execute(
+        select(NomencladorNivelado.id).where(NomencladorNivelado.tipo == "nacional").limit(1)
+    )).scalar_one_or_none()
+
+
 async def generar_valores_nn_por_rangos(
     obra_social_nro: int,
     vigencia_desde: datetime.date,
@@ -1691,6 +1904,7 @@ async def generar_valores_nn_por_rangos(
     """
     # 1. Galenos base vigentes de la OS (nivel NULL), indexados por codigo
     galenos = await _galenos_base_nn(db, obra_social_nro)
+    id_nacional = await id_nomenclador_nacional(db)
 
     # 1b. Rechazar si algún galeno base tiene VU = 0 (no sirve para calcular precios)
     if not permitir_valor_cero:
@@ -1764,6 +1978,7 @@ async def generar_valores_nn_por_rangos(
                 especialidad_id_colegio=None,
                 sin_restriccion_especialidad=sin_restriccion,
                 por_presupuesto=False,
+                nomenclador_nivelado_id=id_nacional,
                 vigencia_desde=vigencia_desde,
                 vigencia_hasta=None,
                 estado="activo",
@@ -1904,6 +2119,7 @@ async def completar_base_nn(
     )).scalars())
     habilitacion = await _estado_habilitacion_os(db, obra_social_nro)
     plantillas = await _plantillas_por_codigo(db)
+    id_nacional = await id_nomenclador_nacional(db)
 
     filas: list[tuple[dict, list[dict]]] = []
     habilitar: list[dict] = []
@@ -1932,7 +2148,7 @@ async def completar_base_nn(
                 "descripcion": nom.nomenclador_nacional.descripcion,
                 "nivel": None, "complejidad": None, "especialidad_id_colegio": None,
                 "sin_restriccion_especialidad": sin_restriccion, "por_presupuesto": False,
-                "vigencia_desde": vigencia_desde,
+                "nomenclador_nivelado_id": id_nacional, "vigencia_desde": vigencia_desde,
             },
             componentes,
         ))

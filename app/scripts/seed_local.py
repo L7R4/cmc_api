@@ -115,7 +115,7 @@ async def _seed_public_data(db: AsyncSession) -> None:
     # One Obra Social
     obra = (await db.execute(select(ObrasSociales).where(ObrasSociales.ID == 1))).scalar_one_or_none()
     if not obra:
-        db.add(ObrasSociales(ID=1, NRO_OBRASOCIAL=1, OBRA_SOCIAL="Obra Social Demo", MARCA="S", VER_VALOR="S"))
+        db.add(ObrasSociales(ID=1, NRO_OBRASOCIAL=1, OBRA_SOCIAL="Obra Social Demo", activo=True))
 
     # One News item
     noticia = (await db.execute(select(Noticia).where(Noticia.titulo == "Welcome to the Local Demo"))).scalar_one_or_none()

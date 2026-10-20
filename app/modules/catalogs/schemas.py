@@ -5,6 +5,8 @@ from typing import List, Literal, Optional
 
 from pydantic import BaseModel, Field, field_serializer, field_validator
 
+from app.common.dates import normalizar_dia_corte
+
 
 # ── Boletin Observaciones ────────────────────────────────────────
 class ObservacionIn(BaseModel):
@@ -183,10 +185,15 @@ class ObraSocialCreate(BaseModel):
     obra_social_principal_id: Optional[int] = None
     # Solo con cabecera: qué copiar de ella. Sin cabecera se rechaza.
     replicar: Optional[ReplicarAltaIn] = None
-    # Ventana del período: 1 = mes completo, 20 = del 20 al 20, 31 = último día del mes
-    # (se recorta al largo de cada mes). El front envía 31 cuando el check "Último día del
-    # mes" está marcado; default 20.
-    dia_corte: int = Field(20, ge=1, le=31)
+    # Ventana del período: 2 a 27 = del D al D (20 = del 20 al 20); desde el 28 es "último
+    # día del mes" y se guarda como 31 (se recorta al largo de cada mes). El front envía 31
+    # cuando el check "Último día del mes" está marcado; default 20.
+    dia_corte: int = Field(20, ge=2, le=31)
+
+    @field_validator("dia_corte")
+    @classmethod
+    def _dia_corte_ultimo(cls, v: int) -> int:
+        return normalizar_dia_corte(v)
     # Habilita la documentación digital de las prestaciones (ver `documentacion.py`).
     documentacion_digital: bool = False
     contactos: List[ContactoIn] = Field(default_factory=list)
@@ -203,11 +210,17 @@ class ObraSocialUpdate(BaseModel):
     plazo_vencimiento: Optional[int] = None
     fecha_alta_convenio: Optional[date] = None
     obra_social_principal_id: Optional[int] = None
-    dia_corte: Optional[int] = Field(None, ge=1, le=31)
+    dia_corte: Optional[int] = Field(None, ge=2, le=31)
     documentacion_digital: Optional[bool] = None
+
     # Si se provee, reemplaza la lista completa
     contactos: Optional[List[ContactoIn]] = None
     direcciones: Optional[List[DireccionIn]] = None
+
+    @field_validator("dia_corte")
+    @classmethod
+    def _dia_corte_ultimo(cls, v: Optional[int]) -> Optional[int]:
+        return None if v is None else normalizar_dia_corte(v)
 
 
 class ObraSocialOut(BaseModel):

@@ -5,8 +5,8 @@ import pytest
 from pydantic import ValidationError
 
 from app.modules.catalogs.schemas import ObraSocialCreate, ObraSocialUpdate
+from app.common.dates import DIA_CORTE_ULTIMO, normalizar_dia_corte
 from app.modules.facturacion.service import (
-    DIA_CORTE_ULTIMO,
     fecha_a_periodo,
     periodo_medico_por_fecha,
     ventana_periodo,
@@ -33,14 +33,15 @@ def test_corte_fijo_sigue_igual():
     # 20: el médico carga el 20 en el período viejo y pasa al siguiente el 21.
     assert periodo_medico_por_fecha(D(2026, 10, 20), 20) == "202610"
     assert periodo_medico_por_fecha(D(2026, 10, 21), 20) == "202611"
-    # mes completo
-    assert periodo_medico_por_fecha(D(2026, 10, 31), 1) == "202610"
 
 
-def test_dia_30_en_mes_de_31_no_es_fin_de_mes():
-    # Antes de este cambio 30 era la forma de pedir "fin de mes": el 31/oct ya saltaba.
-    assert periodo_medico_por_fecha(D(2026, 10, 31), 30) == "202611"
-    assert periodo_medico_por_fecha(D(2026, 10, 31), DIA_CORTE_ULTIMO) == "202610"
+@pytest.mark.parametrize("dia", [28, 29, 30, 31])
+def test_desde_el_28_es_ultimo_dia(dia):
+    # Un 30 viejo (así se pedía "fin de mes") también corta el 31/oct, no el 30.
+    assert normalizar_dia_corte(dia) == DIA_CORTE_ULTIMO
+    assert periodo_medico_por_fecha(D(2026, 10, 31), dia) == "202610"
+    assert periodo_medico_por_fecha(D(2026, 11, 1), dia) == "202611"
+    assert normalizar_dia_corte(27) == 27
 
 
 @pytest.mark.parametrize("fecha, esperado", [
@@ -59,12 +60,14 @@ def test_ventana_periodo_ultimo_dia():
     assert ventana_periodo("202803", DIA_CORTE_ULTIMO) == (D(2028, 2, 29), D(2028, 3, 31))
     # Cortes fijos: sin cambios.
     assert ventana_periodo("202611", 20) == (D(2026, 10, 20), D(2026, 11, 20))
-    assert ventana_periodo("202611", 1) == (D(2026, 11, 1), D(2026, 12, 1))
 
 
-def test_schema_acepta_hasta_31():
-    assert ObraSocialCreate(nro_obra_social=1, nombre="X", dia_corte=31).dia_corte == 31
-    assert ObraSocialUpdate(dia_corte=31).dia_corte == 31
-    for malo in (0, 32):
+def test_schema_normaliza_desde_el_28_y_rechaza_1():
+    for dia in (28, 30, 31):
+        assert ObraSocialCreate(nro_obra_social=1, nombre="X", dia_corte=dia).dia_corte == 31
+        assert ObraSocialUpdate(dia_corte=dia).dia_corte == 31
+    assert ObraSocialUpdate(dia_corte=27).dia_corte == 27
+    assert ObraSocialUpdate().dia_corte is None
+    for malo in (0, 1, 32):
         with pytest.raises(ValidationError):
             ObraSocialUpdate(dia_corte=malo)

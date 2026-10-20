@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.passwords import hash_password_inicial
 from app.common.money import quantize_money
+from app.common.dates import DIA_CORTE_ULTIMO, normalizar_dia_corte
 from app.common.files import url_archivo
 from app.common.uploads import DOCUMENTOS, validate_upload
 from app.db.models import (
@@ -127,8 +128,6 @@ def tipo_de_categoria(categoria: Optional[str]) -> str:
 
 # Ventana por defecto cuando la OS no define `dia_corte` (20 = del 20 al 20).
 DIA_CORTE_DEFAULT = 20
-# `dia_corte` = 31 es "el último día del mes": se recorta al largo de cada mes (28/29/30/31).
-DIA_CORTE_ULTIMO = 31
 
 UPLOAD_ROOT_FACTURAS = os.path.join("uploads", "facturas")
 
@@ -493,23 +492,25 @@ def _add_month(year: int, month: int, delta: int) -> tuple[int, int]:
 
 # ── Ventana por OS (dia_corte) ───────────────────────────────────────────────
 def _dia_efectivo(dia_corte: int, year: int, month: int) -> int:
-    """`dia_corte` recortado al largo del mes: con 31 (o 30 en febrero) el corte cae
-    siempre en el último día real, sin desbordar a un día inexistente."""
-    return min(dia_corte, calendar.monthrange(year, month)[1])
+    """Día de corte real del mes: desde el 28 es el último día (28/29/30/31 según el
+    mes), el resto se respeta tal cual."""
+    if normalizar_dia_corte(dia_corte) == DIA_CORTE_ULTIMO:
+        return calendar.monthrange(year, month)[1]
+    return dia_corte
 
 
 def fecha_a_periodo(fecha: datetime.date, dia_corte: int) -> str:
     """Período "YYYYMM" al que pertenece una fecha de servicio según la ventana de
     la OS.
 
-    - `dia_corte <= 1` (mes completo): el período es el mes calendario de la fecha.
-    - `dia_corte = D > 1` (del D al D, convención "hacia atrás"): el período del mes
-      M abarca ``[día D del mes M-1, día D del mes M)``. Por lo tanto una fecha con
-      día >= D pertenece al mes siguiente. Ej. (D=20): 10/jul → 202607; 25/jun →
-      202607; 10/jun → 202606. La ventana de 202607 es [20/jun, 20/jul).
+    `dia_corte = D` (del D al D, convención "hacia atrás"): el período del mes M abarca
+    ``[día D del mes M-1, día D del mes M)``. Por lo tanto una fecha con día >= D
+    pertenece al mes siguiente. Ej. (D=20): 10/jul → 202607; 25/jun → 202607; 10/jun →
+    202606. La ventana de 202607 es [20/jun, 20/jul). Con "último día del mes" D es el
+    último día real de cada mes.
     """
     y, m = fecha.year, fecha.month
-    if dia_corte > 1 and fecha.day >= _dia_efectivo(dia_corte, y, m):
+    if fecha.day >= _dia_efectivo(dia_corte, y, m):
         y, m = _add_month(y, m, 1)
     return f"{y}{m:02d}"
 
@@ -519,14 +520,9 @@ def ventana_periodo(periodo: str, dia_corte: int) -> tuple[datetime.date, dateti
     Sirve tanto para ubicar la prestación como para el plazo operativo de carga/cierre."""
     y = int(periodo[:4])
     m = int(periodo[4:6])
-    if dia_corte <= 1:
-        inicio = datetime.date(y, m, 1)
-        fy, fm = _add_month(y, m, 1)
-        fin = datetime.date(fy, fm, 1)
-    else:
-        py, pm = _add_month(y, m, -1)
-        inicio = datetime.date(py, pm, _dia_efectivo(dia_corte, py, pm))
-        fin = datetime.date(y, m, _dia_efectivo(dia_corte, y, m))
+    py, pm = _add_month(y, m, -1)
+    inicio = datetime.date(py, pm, _dia_efectivo(dia_corte, py, pm))
+    fin = datetime.date(y, m, _dia_efectivo(dia_corte, y, m))
     return inicio, fin
 
 
@@ -547,10 +543,8 @@ def periodo_medico_por_fecha(hoy: datetime.date, dia_corte: int) -> str:
     """Período que le toca cargar al médico HOY, según el `dia_corte` de la OS.
 
     El corte se evalúa en `dia_corte + 1`: el médico carga el período viejo TODO el
-    día de corte inclusive, y recién pasa al siguiente al día siguiente. Mes completo
-    (`dia_corte <= 1`) usa directamente el mes calendario de hoy."""
-    if dia_corte <= 1:
-        return f"{hoy.year}{hoy.month:02d}"
+    día de corte inclusive, y recién pasa al siguiente al día siguiente. Con "último día
+    del mes" eso es el 1.º del mes siguiente."""
     y, m = hoy.year, hoy.month
     if hoy.day >= _dia_efectivo(dia_corte, y, m) + 1:
         y, m = _add_month(y, m, 1)

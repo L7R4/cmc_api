@@ -4,6 +4,16 @@ from typing import Optional, Tuple, Union
 
 _PERIODO_RX = re.compile(r"^\s*(\d{4})[-/]?(\d{1,2})\s*$")
 
+# `obras_sociales.dia_corte`: 31 es "el último día del mes" (se recorta al largo de cada
+# mes) y cualquier valor desde el 28 se toma como tal. Sin día 1 ni "mes completo".
+DIA_CORTE_ULTIMO = 31
+DIA_CORTE_DESDE_ULTIMO = 28
+
+
+def normalizar_dia_corte(dia: int) -> int:
+    """Desde el 28 en adelante es siempre "último día del mes" (31); el resto queda igual."""
+    return DIA_CORTE_ULTIMO if dia >= DIA_CORTE_DESDE_ULTIMO else dia
+
 
 def normalizar_periodo(periodo_id: str) -> Tuple[int, int, str]:
     m = _PERIODO_RX.match(periodo_id or "")

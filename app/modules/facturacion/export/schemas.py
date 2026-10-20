@@ -52,6 +52,11 @@ COLUMNAS_DEFAULT_POR_MEDICO: list[ColumnaExport] = [
 
 TipoPrestacion = Literal["Consulta", "Practica", "Honorarios individuales", "Sanatorio"]
 
+# Filtro de documentación digital (sólo tiene efecto en obras sociales que la tienen habilitada):
+# `con` = la prestación tiene documentos; `falta` = los exige y no los tiene; `no_requiere` = su
+# código no los exige.
+DocumentacionExport = Literal["con", "falta", "no_requiere"]
+
 
 class ExportOpciones(BaseModel):
     """Opciones del panel — llegan como query params (ver `routes.py::_parse_opciones`)
@@ -76,6 +81,7 @@ class ExportOpciones(BaseModel):
     cod_medicos: Optional[list[str]] = None  # subset de socios/prestadores
     revisado: Optional[bool] = None
     tipos: Optional[list[TipoPrestacion]] = None
+    documentacion: Optional[DocumentacionExport] = None
 
 
 # "vista": configuración de la VISTA del listado (agrupación, orden, filtros, columnas…).
@@ -86,7 +92,7 @@ TipoDocumentoPreset = Literal["detalle", "caratula", "vista"]
 # Claves que guarda un preset de vista (espejo de `VistaOpciones` del front).
 CLAVES_PRESET_VISTA = {
     "orden", "direccion", "agrupacion", "agruparEquipo", "ordenHonorarios", "ordenSanatorio", "columnas",
-    "fecha_desde", "fecha_hasta", "id_especialidad", "cod_medicos", "revisado", "tipos",
+    "fecha_desde", "fecha_hasta", "id_especialidad", "cod_medicos", "revisado", "tipos", "documentacion", "columnasV",
 }
 
 

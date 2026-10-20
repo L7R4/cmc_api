@@ -55,6 +55,20 @@ class Settings(BaseSettings):
     JWT_SECRET: SecretStr                 
     JWT_ALG: str = "HS256"
     ACCESS_MINUTES: int = 15
+    # Segundos que se cachea en memoria el corte de sesiones (`tokens_valid_from`)
+    # de cada usuario. Ahorra un SELECT por request; a cambio, cortar una sesión
+    # desde otro proceso tarda hasta este tiempo. 0 = sin cache.
+    SESSION_CACHE_SECONDS: int = 30
+
+    # Pool de conexiones a la base, POR PROCESO. El total que ve la base es
+    # UVICORN_WORKERS x (DB_POOL_SIZE + DB_MAX_OVERFLOW) y tiene que quedar por
+    # debajo de `max_user_connections` (10 en producción) con margen para el
+    # legacy, phpMyAdmin y los scripts. Con 2 workers y 3+2 son 10: sin margen.
+    DB_POOL_SIZE: int = 3
+    DB_MAX_OVERFLOW: int = 2
+    # Un `SELECT 1` por checkout que descarta conexiones muertas. Apagarlo solo
+    # si `pool_recycle` alcanza (ver app/db/database.py).
+    DB_POOL_PRE_PING: bool = True
     REFRESH_DAYS: int = 15
     
     COOKIE_SAMESITE: str
@@ -78,6 +92,10 @@ class Settings(BaseSettings):
 
     # Secreto de máquina para endpoints llamados por el cron (no un JWT de usuario).
     CRON_SECRET: str | None = None
+
+    # Cuánto se conserva `audit_log` (guarda cuerpos de request, aunque tapados).
+    # El cron diario borra lo más viejo; ver `POST /api/auditoria/purge-cron`.
+    AUDIT_RETENCION_MESES: int = 12
 
     # Llave para cifrar los secretos que la aplicación tiene que poder MOSTRAR
     # —hoy sólo las contraseñas de las casillas de correo del Colegio, ver

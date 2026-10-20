@@ -34,13 +34,15 @@ engine = create_async_engine(
     # no está pensado para contenerlos (documentos, CBU y CUIT viajan como
     # parámetros de bind). Ahora sigue al entorno.
     echo=not settings.IS_PRODUCTION,
-    pool_pre_ping=True,
+    pool_pre_ping=settings.DB_POOL_PRE_PING,
     pool_recycle=3600,
     # La base de producción limita las conexiones por usuario (`max_user_connections`,
     # ~10) y es compartida con otras herramientas. Con el pool por defecto (5 + 10) la API
-    # llegaba a ocupar todo el cupo y nadie más podía conectarse (error 1203). Tope: 5.
-    pool_size=3,
-    max_overflow=2,
+    # llegaba a ocupar todo el cupo y nadie más podía conectarse (error 1203). Tope por proceso: 5
+    # por defecto; son configurables (DB_POOL_SIZE / DB_MAX_OVERFLOW) porque el total es
+    # procesos x tope y hay que mantenerlo debajo del cupo.
+    pool_size=settings.DB_POOL_SIZE,
+    max_overflow=settings.DB_MAX_OVERFLOW,
 )
 
 AsyncSessionLocal = sessionmaker(

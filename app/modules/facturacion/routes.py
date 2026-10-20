@@ -10,8 +10,8 @@ from app.auth.ownership import filtro_socio, socio_objetivo
 from app.common.files import url_archivo
 from app.core.config import settings
 from app.db.database import get_db
-from app.db.models import ListadoMedico, NomencladorCMC, ObrasSociales
-from app.modules.facturacion import recotizar as recotizar_mod, revalorizar as revalorizar_mod, service
+from app.db.models import DetalleFacturacionCMC, ListadoMedico, NomencladorCMC, ObrasSociales
+from app.modules.facturacion import documentacion, recotizar as recotizar_mod, revalorizar as revalorizar_mod, service
 from app.modules.facturacion.schemas import (
     AutorizacionExistente,
     ActividadEventoOut,
@@ -33,6 +33,8 @@ from app.modules.facturacion.schemas import (
     ClinicaUpdate,
     CodigoHabilitadoOut,
     ComplementoCreate,
+    DocumentoPrestacionOut,
+    DocumentosOrdenIn,
     FacturaDetalleOut,
     FacturaRead,
     GuardadoResponse,
@@ -291,7 +293,9 @@ async def precio_nomenclador(
 ):
     medico = await service.check_medico_activo(db, cod_medico)
     fecha = service.fecha_para_precio(fecha)
-    return await service.resolver_precio(db, cod_obra, medico, codigo, fecha, via=via, con_admision_via=True)
+    precio = await service.resolver_precio(db, cod_obra, medico, codigo, fecha, via=via, con_admision_via=True)
+    precio.requiere_documentacion = await documentacion.requiere_documentacion(db, cod_obra, codigo)
+    return precio
 
 
 # ── Facturas / períodos ──────────────────────────────────────────────────────
@@ -751,6 +755,68 @@ async def marcar_revisado(
     si alguno no existe, no se modifica ninguna prestación.
     """
     return await service.marcar_revisado(db, payload.marcados, payload.desmarcados)
+
+
+# ── Documentación digital de una prestación (el Colegio) ─────────────────────
+async def _detalle_abierto(db: AsyncSession, prestacion_id: int, *, para_editar: bool) -> DetalleFacturacionCMC:
+    detalle = await db.get(DetalleFacturacionCMC, prestacion_id)
+    if detalle is None or detalle.estado == "X":
+        raise HTTPException(404, "La prestación no existe o está anulada.")
+    if para_editar and detalle.estado == "C":
+        raise HTTPException(409, "La factura está cerrada: ya no se pueden cambiar los documentos.")
+    return detalle
+
+
+@router.get("/prestaciones/{prestacion_id}/documentos", response_model=list[DocumentoPrestacionOut])
+async def listar_documentos(prestacion_id: int, db: AsyncSession = Depends(get_db)):
+    detalle = await _detalle_abierto(db, prestacion_id, para_editar=False)
+    return [documentacion.doc_out(d) for d in await documentacion.listar(db, detalle.id_detalle_prestaciones)]
+
+
+@router.post("/prestaciones/{prestacion_id}/documentos", response_model=list[DocumentoPrestacionOut])
+async def agregar_documentos(
+    prestacion_id: int,
+    documentos: list[UploadFile] = File(...),
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Suma archivos (PDF, JPG o PNG, por su contenido real) a la documentación de la prestación."""
+    detalle = await _detalle_abierto(db, prestacion_id, para_editar=True)
+    await documentacion.agregar(db, detalle, documentos, "colegio", _usuario(user))
+    return [documentacion.doc_out(d) for d in await documentacion.listar(db, detalle.id_detalle_prestaciones)]
+
+
+@router.put("/prestaciones/{prestacion_id}/documentos/{doc_id}", response_model=list[DocumentoPrestacionOut])
+async def reemplazar_documento(
+    prestacion_id: int,
+    doc_id: int,
+    archivo: UploadFile = File(...),
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Cambia un documento por otro archivo, conservando su lugar en el orden."""
+    detalle = await _detalle_abierto(db, prestacion_id, para_editar=True)
+    await documentacion.reemplazar(db, detalle, doc_id, archivo, "colegio", _usuario(user))
+    return [documentacion.doc_out(d) for d in await documentacion.listar(db, detalle.id_detalle_prestaciones)]
+
+
+@router.delete("/prestaciones/{prestacion_id}/documentos/{doc_id}", response_model=list[DocumentoPrestacionOut])
+async def eliminar_documento(prestacion_id: int, doc_id: int, db: AsyncSession = Depends(get_db)):
+    """Quita un documento. Si era el último de una prestación que los exige, la prestación
+    vuelve a «sin auditar»."""
+    detalle = await _detalle_abierto(db, prestacion_id, para_editar=True)
+    await documentacion.eliminar(db, detalle, doc_id, es_medico=False)
+    return [documentacion.doc_out(d) for d in await documentacion.listar(db, detalle.id_detalle_prestaciones)]
+
+
+@router.patch("/prestaciones/{prestacion_id}/documentos/orden", response_model=list[DocumentoPrestacionOut])
+async def reordenar_documentos(
+    prestacion_id: int, payload: DocumentosOrdenIn, db: AsyncSession = Depends(get_db),
+):
+    """Cambia el orden en que salen los documentos en el PDF de la factura."""
+    detalle = await _detalle_abierto(db, prestacion_id, para_editar=True)
+    docs = await documentacion.reordenar(db, detalle.id_detalle_prestaciones, payload.ids)
+    return [documentacion.doc_out(d) for d in docs]
 
 
 @router.patch("/facturas/publicado", response_model=PublicarPeriodoResponse)

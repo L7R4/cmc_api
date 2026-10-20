@@ -2,7 +2,7 @@ import datetime
 from decimal import Decimal
 from typing import Optional
 
-from sqlalchemy import DECIMAL, JSON, BigInteger, Boolean, Date, DateTime, Integer, String, Text, func
+from sqlalchemy import DECIMAL, JSON, BigInteger, Boolean, Date, DateTime, Enum, ForeignKey, Index, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -166,6 +166,32 @@ class DetalleFacturacionCMC(Base):
     )
     # Orden/receta en PDF que adjunta el prestador (ruta relativa en uploads/).
     orden_path: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
+
+
+class DetalleDocumento(Base):
+    """Documento digital de una prestación (orden, bono, ticket…). Una prestación puede tener
+    varios; `posicion` es el orden en que salen en el PDF de la factura. `path` es relativo
+    a uploads/ y se sirve siempre por el endpoint autorizado (`common/files.url_archivo`)."""
+    __tablename__ = "detalle_facturacion_documento"
+    __table_args__ = (Index("ix_detalle_doc_detalle", "detalle_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # BIGINT como `detalle_facturacion.id_detalle_prestaciones`: una FK exige el mismo tipo.
+    detalle_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("detalle_facturacion.id_detalle_prestaciones", ondelete="CASCADE"), nullable=False
+    )
+    posicion: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    path: Mapped[str] = mapped_column(String(300), nullable=False)
+    nombre_original: Mapped[str] = mapped_column(String(255), nullable=False)
+    content_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    size: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    # Quién lo subió: el médico desde la integración o el Colegio desde facturación.
+    origen: Mapped[str] = mapped_column(
+        Enum("medico", "colegio", name="detalle_doc_origen_enum"), nullable=False, default="medico",
+        server_default="medico",
+    )
+    subido_por: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
 
 
 class FacturacionCMC(Base):

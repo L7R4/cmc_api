@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import logging
 import secrets
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Literal, Optional
 
@@ -207,10 +208,57 @@ async def revocar_sesiones(
         .values(tokens_valid_from=ahora)
     )
     await db.commit()
+    invalidar_cache_corte(user_id)
     log.info("sesiones revocadas: user_id=%s motivo=%s", user_id, motivo)
 
 
 # ── Validación del access token ──────────────────────────────────────────────
+
+# Cache de `tokens_valid_from` por usuario, en memoria de cada proceso.
+#
+# Sin esto, TODA request autenticada hace un SELECT antes de empezar (más el
+# ping del pool): dos viajes a la base por pedido, que pesan si la base está lejos
+# del API. Con el cache, un usuario activo paga ese SELECT una vez cada
+# `SESSION_CACHE_SECONDS`.
+#
+# El costo, aceptado: cortar una sesión desde OTRO proceso tarda hasta ese tiempo en
+# hacer efecto. En el proceso que revoca (`revocar_sesiones`) el efecto es
+# inmediato porque se descarta la entrada. Con `SESSION_CACHE_SECONDS=0` se
+# desactiva y vuelve a consultarse en cada request.
+_CACHE_MAX = 5000
+# uid -> (timestamp de corte en segundos | None, vence_en (monotonic))
+_cache_corte: dict[int, tuple[int | None, float]] = {}
+
+
+def invalidar_cache_corte(user_id: int | None = None) -> None:
+    """Descarta lo cacheado de un usuario (o de todos si no se indica)."""
+    if user_id is None:
+        _cache_corte.clear()
+    else:
+        _cache_corte.pop(user_id, None)
+
+
+async def _corte_de(db: AsyncSession, uid: int) -> int | None:
+    ttl = settings.SESSION_CACHE_SECONDS
+    ahora = time.monotonic()
+    if ttl > 0:
+        hit = _cache_corte.get(uid)
+        if hit is not None and hit[1] > ahora:
+            return hit[0]
+
+    corte = (
+        await db.execute(
+            select(ListadoMedico.tokens_valid_from).where(ListadoMedico.ID == uid)
+        )
+    ).scalar_one_or_none()
+    ts = None if corte is None else int(corte.replace(tzinfo=timezone.utc).timestamp())
+
+    if ttl > 0:
+        if len(_cache_corte) >= _CACHE_MAX:
+            _cache_corte.clear()
+        _cache_corte[uid] = (ts, ahora + ttl)
+    return ts
+
 
 async def access_revocado(db: AsyncSession, uid: int | None, iat: int | None) -> bool:
     """`True` si el access token se emitió antes del último corte de sesiones.
@@ -228,13 +276,8 @@ async def access_revocado(db: AsyncSession, uid: int | None, iat: int | None) ->
     if uid is None or iat is None:
         return False
 
-    corte = (
-        await db.execute(
-            select(ListadoMedico.tokens_valid_from).where(ListadoMedico.ID == uid)
-        )
-    ).scalar_one_or_none()
-
+    corte = await _corte_de(db, uid)
     if corte is None:
         return False
 
-    return int(iat) < int(corte.replace(tzinfo=timezone.utc).timestamp())
+    return int(iat) < corte

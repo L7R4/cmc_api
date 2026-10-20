@@ -829,6 +829,11 @@ class CodigoObraSocial(Base):
     sin_restriccion_especialidad: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="0"
     )
+    # La prestación de este código exige documentación digital. Sólo cuenta si la obra
+    # social la tiene habilitada (`ObrasSociales.documentacion_digital`).
+    requiere_documentacion: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="0"
+    )
     observacion: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     estado: Mapped[str] = mapped_column(
         Enum("activo", "suspendido", name="nm_cos_estado_enum"),

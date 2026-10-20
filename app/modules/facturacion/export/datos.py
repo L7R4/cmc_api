@@ -28,7 +28,7 @@ from app.db.models import (
     ListadoMedico,
     ObrasSociales,
 )
-from app.modules.facturacion import service
+from app.modules.facturacion import documentacion, service
 from app.modules.facturacion.equipo import CandidatoEquipo, clave_paciente, inferir_equipos
 from app.modules.facturacion.export.schemas import ExportOpciones
 
@@ -82,6 +82,32 @@ class FilaExport:
     # Clínica de la prestación (el ámbito, o el prestador en los Sanatorios).
     cod_clinica: Optional[int] = None
     clinica_nombre: Optional[str] = None
+    # Documentación digital (sólo con la obra social habilitada): si el código la exige y cuántos
+    # archivos tiene la prestación.
+    requiere_documentacion: bool = False
+    documentos: int = 0
+
+
+def _cumple_documentacion(f: "FilaExport", filtro: str) -> bool:
+    if filtro == "con":
+        return f.documentos > 0
+    if filtro == "falta":
+        return f.requiere_documentacion and f.documentos == 0
+    return not f.requiere_documentacion  # no_requiere
+
+
+async def marcar_documentacion(db: AsyncSession, cod_obr: Optional[str], filas: list["FilaExport"]) -> None:
+    """Completa `requiere_documentacion` y `documentos` de cada fila. No hace nada si la obra
+    social no tiene la documentación digital habilitada."""
+    if not filas or not await documentacion.obra_social_con_documentacion(db, cod_obr):
+        return
+    requeridos = await documentacion.codigos_que_requieren(db, cod_obr, list({f.codigo for f in filas}))
+    cuentan = await documentacion.contar(db, [f.id for f in filas])
+    for f in filas:
+        f.requiere_documentacion = f.codigo in requeridos and not documentacion.es_integrante_de_equipo(
+            f.grupo_equipo_id, f.id,
+        )
+        f.documentos = cuentan.get(f.id, 0)
 
 
 async def _resolver_especialidades(db: AsyncSession, ids: set[int]) -> dict[int, str]:
@@ -244,7 +270,16 @@ async def obtener_filas_export(
 
     if not filas_raw:
         return []
-    return await _materializar_filas(db, filas_raw, opciones, ids_extra, virtual)
+    filas = await _materializar_filas(db, filas_raw, opciones, ids_extra, virtual)
+    await marcar_documentacion(db, factura.cod_obr, filas)
+    if opciones.documentacion:
+        # Igual que el filtro de tipo: lo que no cumple se conserva marcado si es de un equipo,
+        # para poder mostrarlo bajo su cabeza.
+        for f in filas:
+            if not _cumple_documentacion(f, opciones.documentacion):
+                f.fuera_de_filtro = True
+        filas = [f for f in filas if not f.fuera_de_filtro or f.grupo_equipo_id is not None]
+    return filas
 
 
 async def obtener_filas_export_por_medico(

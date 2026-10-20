@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 import time
 import uuid
 
@@ -13,14 +14,35 @@ _EXCLUDED_PREFIXES = ("/uploads", "/docs", "/redoc", "/openapi.json")
 # Contenido personal de cada usuario: se audita que hubo una request (quién, cuándo,
 # qué ruta), pero ni el cuerpo ni el detalle del error, que repite lo que escribió.
 # Si no, quien tenga `auditoria:leer` leería el cuaderno de los demás.
-_SIN_CONTENIDO_PREFIXES = ("/api/tareas",)
+_SIN_CONTENIDO_PREFIXES = (
+    "/api/tareas",
+    "/api/solicitudes-cambio",
+    "/api/mobile/solicitudes-cambio",
+    "/api/institucion/mails",
+)
 
 _MAX_BODY_CHARS = 4096
 _MAX_ERROR_DETAIL_CHARS = 500
+# Una clave se tapa si es exactamente una de estas...
 _REDACTED_KEYS = {
     "password", "passwd", "clave", "token", "refresh_token",
     "access_token", "authorization", "secret", "cbu",
 }
+# ...o si CONTIENE alguno de estos fragmentos (`dni_afiliado`, `nro_cuit`,
+# `telefono_movil`, `mail_contacto`). Son los datos personales que un cuerpo de
+# request puede traer y que quien lea la auditoría no tiene por qué ver.
+_REDACTED_FRAGMENTS = (
+    "password", "passwd", "secret", "token",
+    "dni", "cuit", "cuil", "documento",
+    "telefono", "celular", "movil", "email", "mail",
+    "domicilio", "direccion", "cbu",
+)
+
+# Datos personales que aparecen como VALOR dentro de un texto libre, sin una
+# clave que los delate (observaciones, notas, un cuerpo que no es JSON).
+_RE_EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+_RE_CUIT = re.compile(r"(?<!\d)\d{2}-?\d{8}-?\d(?!\d)")
+
 
 # Referencias fuertes a las tareas fire-and-forget: sin esto, asyncio puede
 # recolectar la task a mitad de ejecución si nadie más la referencia.
@@ -35,15 +57,37 @@ def _should_audit(method: str, path: str) -> bool:
     return path.startswith("/api/") and method in _MUTATING_METHODS
 
 
+def _clave_sensible(k: str) -> bool:
+    k = str(k).lower()
+    return k in _REDACTED_KEYS or any(f in k for f in _REDACTED_FRAGMENTS)
+
+
+def _tapar_texto(texto: str) -> str:
+    return _RE_CUIT.sub("***", _RE_EMAIL.sub("***", texto))
+
+
 def _redact(value):
     if isinstance(value, dict):
         return {
-            k: ("***" if k.lower() in _REDACTED_KEYS else _redact(v))
+            k: ("***" if _clave_sensible(k) else _redact(v))
             for k, v in value.items()
         }
     if isinstance(value, list):
         return [_redact(v) for v in value]
+    if isinstance(value, str):
+        return _tapar_texto(value)
     return value
+
+
+def _redact_query(qs: str) -> str | None:
+    """La query string también puede traer `?dni=...` o `?email=...`."""
+    if not qs:
+        return None
+    partes = []
+    for par in qs.split("&"):
+        k, sep, v = par.partition("=")
+        partes.append(f"{k}=***" if sep and _clave_sensible(k) else _tapar_texto(par))
+    return "&".join(partes)[:1000] or None
 
 
 def _build_request_body(raw: bytes, content_type: str) -> str | None:
@@ -58,7 +102,7 @@ def _build_request_body(raw: bytes, content_type: str) -> str | None:
         parsed = json.loads(raw)
         text = json.dumps(_redact(parsed), ensure_ascii=False)
     except (ValueError, UnicodeDecodeError):
-        text = raw.decode("utf-8", errors="replace")
+        text = _tapar_texto(raw.decode("utf-8", errors="replace"))
 
     if len(text) > _MAX_BODY_CHARS:
         return text[:_MAX_BODY_CHARS] + "...<truncado>"
@@ -169,7 +213,7 @@ class AuditMiddleware:
                 try:
                     parsed = json.loads(b"".join(error_chunks))
                     if isinstance(parsed, dict) and "detail" in parsed:
-                        error_detail = str(parsed["detail"])[:_MAX_ERROR_DETAIL_CHARS]
+                        error_detail = _tapar_texto(str(parsed["detail"]))[:_MAX_ERROR_DETAIL_CHARS]
                 except (ValueError, UnicodeDecodeError):
                     pass
 
@@ -177,7 +221,7 @@ class AuditMiddleware:
                 method=method,
                 path=path,
                 route=_route_template(scope),
-                query_params=(scope.get("query_string") or b"").decode("latin-1")[:1000] or None,
+                query_params=_redact_query((scope.get("query_string") or b"").decode("latin-1")),
                 user_id=None,  # se resuelve por join a listado_medico.NRO_SOCIO al consultar
                 nro_socio=nro_socio,
                 role=role,

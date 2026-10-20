@@ -20,7 +20,8 @@ import datetime
 from typing import Iterable, Optional
 
 from fastapi import HTTPException
-from sqlalchemy import and_, case, func, insert, or_, select
+from sqlalchemy import and_, case, cast, func, insert, or_, select
+from sqlalchemy.dialects.mysql import BIGINT
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.catalogs import Especialidad, ObrasSociales
@@ -35,6 +36,9 @@ from app.db.models.nomenclador_cmc import (
 )
 from app.modules.nomenclador import service
 from app.modules.nomenclador.schemas import (
+    AccionCodigoResultado,
+    AccionCodigosIn,
+    AccionCodigosOut,
     AltaCodigoItem,
     AltaCodigoResultado,
     AltaCodigosIn,
@@ -120,6 +124,8 @@ async def detalle_par(db: AsyncSession, obra_social_nro: int, nomenclador_id: in
         categoria=par.categoria if par else None,
         complejidad=par.complejidad if par else None,
         requiere_autorizacion=par.requiere_autorizacion if par else None,
+        requiere_documentacion=bool(par and par.requiere_documentacion),
+        documentacion_digital=await _os_con_documentacion(db, obra_social_nro),
         cantidad_ayudantes=par.cantidad_ayudantes if par else None,
         observacion=par.observacion if par else None,
         sin_restriccion_especialidad=bool(par and par.sin_restriccion_especialidad),
@@ -317,6 +323,10 @@ async def actualizar_par(
     if par is None:
         raise HTTPException(404, "El código no está dado de alta en esta obra social")
     datos = cambios.model_dump(exclude_unset=True)
+    if datos.get("requiere_documentacion"):
+        await _exigir_os_con_documentacion(db, obra_social_nro)
+    if "requiere_documentacion" in datos:
+        par.requiere_documentacion = bool(datos["requiere_documentacion"])
     for campo in ("descripcion", "categoria", "complejidad", "requiere_autorizacion",
                   "cantidad_ayudantes", "observacion"):
         if campo in datos:
@@ -375,11 +385,79 @@ async def cambiar_estado(
     return await detalle_par(db, obra_social_nro, nomenclador_id)
 
 
+# ─── Documentación digital y acciones en bloque ──────────────────────────────
+
+async def _os_con_documentacion(db: AsyncSession, obra_social_nro: int) -> bool:
+    return bool((await db.execute(
+        select(ObrasSociales.documentacion_digital).where(ObrasSociales.NRO_OBRASOCIAL == obra_social_nro)
+    )).scalar())
+
+
+async def _exigir_os_con_documentacion(db: AsyncSession, obra_social_nro: int) -> None:
+    if not await _os_con_documentacion(db, obra_social_nro):
+        raise HTTPException(
+            409, "La obra social no tiene la documentación digital habilitada. Habilitala primero "
+                 "en la edición de la obra social.",
+        )
+
+
+async def _aplicar_accion_uno(
+    db: AsyncSession, obra_social_nro: int, nomenclador_id: int, accion: str, os_con_doc: bool,
+) -> AccionCodigoResultado:
+    nom = await db.get(NomencladorCMC, nomenclador_id)
+    codigo = nom.codigo if nom else "?"
+
+    def res(estado: str, motivo: Optional[str] = None) -> AccionCodigoResultado:
+        return AccionCodigoResultado(
+            nomenclador_id=nomenclador_id, codigo=codigo, estado=estado, motivo=motivo,
+        )
+
+    par = await get_par(db, obra_social_nro, nomenclador_id)
+    if par is None:
+        return res("no_aplica", "No está dado de alta en la obra social")
+
+    if accion == "suspender":
+        if par.estado == "suspendido":
+            return res("no_aplica", "Ya estaba suspendido")
+        par.estado = "suspendido"
+    elif accion == "reactivar":
+        if par.estado != "suspendido":
+            return res("no_aplica", "No estaba suspendido")
+        par.estado = "activo"
+    elif accion == "activar_documentacion":
+        if not os_con_doc:
+            return res("no_aplica", "La obra social no tiene la documentación digital habilitada")
+        if par.requiere_documentacion:
+            return res("no_aplica", "Ya llevaba documentación digital")
+        par.requiere_documentacion = True
+    else:  # desactivar_documentacion
+        if not par.requiere_documentacion:
+            return res("no_aplica", "No llevaba documentación digital")
+        par.requiere_documentacion = False
+    await db.flush()
+    return res("aplicado")
+
+
+async def aplicar_accion(db: AsyncSession, body: AccionCodigosIn) -> AccionCodigosOut:
+    """Aplica una acción a cada código elegido, cada uno en su propio savepoint (uno que no
+    corresponde no deshace los demás). No hace commit."""
+    os_con_doc = await _os_con_documentacion(db, body.obra_social_nro)
+    resultados: list[AccionCodigoResultado] = []
+    for nid in dict.fromkeys(body.nomenclador_ids):
+        async with db.begin_nested():
+            resultados.append(await _aplicar_accion_uno(db, body.obra_social_nro, nid, body.accion, os_con_doc))
+    return AccionCodigosOut(
+        accion=body.accion, aplicados=sum(1 for r in resultados if r.estado == "aplicado"),
+        resultados=resultados,
+    )
+
+
 # ─── Listado por obra social (pantalla "Códigos por obra social") ─────────────
 
 async def listar_por_os(
     db: AsyncSession, obra_social_nro: int, *, estado: Optional[str] = None,
     q: Optional[str] = None, tipo: Optional[str] = None, page: int = 1, size: int = 50,
+    codigo_desde: Optional[int] = None, codigo_hasta: Optional[int] = None,
 ) -> CodigosPorOSOut:
     N, P = NomencladorCMC, CodigoObraSocial
     con_precio = (
@@ -408,6 +486,7 @@ async def listar_por_os(
             N.id, N.codigo, N.descripcion, P.descripcion.label("desc_os"), estado_sql,
             P.sin_restriccion_especialidad, func.coalesce(esp_os.c.n, 0).label("esp_os"),
             func.coalesce(esp_pl.c.n, 0).label("esp_pl"), N.sin_restriccion_especialidad.label("pl_sr"),
+            func.coalesce(P.requiere_documentacion, False).label("req_doc"),
         )
         .select_from(N)
         .outerjoin(P, and_(P.nomenclador_id == N.id, P.obra_social_nro == obra_social_nro))
@@ -419,6 +498,15 @@ async def listar_por_os(
     if q and q.strip():
         like = f"%{q.strip()}%"
         base = base.where(or_(N.codigo.like(f"{q.strip()}%"), N.descripcion.like(like), P.descripcion.like(like)))
+    if codigo_desde is not None or codigo_hasta is not None:
+        # Rango numérico de códigos (ambos extremos incluidos). Los que no son sólo dígitos
+        # quedan fuera: no tienen un lugar en el rango. Acota también los conteos.
+        numero = cast(N.codigo, BIGINT(unsigned=True))
+        base = base.where(N.codigo.op("REGEXP")("^[0-9]+$"))
+        if codigo_desde is not None:
+            base = base.where(numero >= codigo_desde)
+        if codigo_hasta is not None:
+            base = base.where(numero <= codigo_hasta)
     if tipo:
         # Como `q`, acota también los conteos por estado: muestran lo que hay de ese tipo.
         base = base.where(service.condicion_tipo(
@@ -438,6 +526,7 @@ async def listar_por_os(
     )).all()
     return CodigosPorOSOut(
         obra_social_nro=obra_social_nro, total=total, page=page, size=size, conteos=conteos,
+        documentacion_digital=await _os_con_documentacion(db, obra_social_nro),
         items=[
             CodigoPorOSItem(
                 nomenclador_id=f.id, codigo=f.codigo, descripcion_colegio=f.descripcion,
@@ -445,6 +534,7 @@ async def listar_por_os(
                 sin_restriccion_especialidad=bool(f.sin_restriccion_especialidad),
                 especialidades_os=f.esp_os, especialidades_plantilla=f.esp_pl,
                 plantilla_sin_restriccion=bool(f.pl_sr),
+                requiere_documentacion=bool(f.req_doc),
             )
             for f in filas
         ],

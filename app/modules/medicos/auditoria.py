@@ -17,6 +17,7 @@ en Python.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Optional
 
@@ -44,6 +45,27 @@ class Chequeo:
     where: str
     # Chequeos que se resuelven agrupando (duplicados) en vez de filtrando.
     group_by: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        # `where` y `group_by` se interpolan en el SQL (`contar` y `detalle`).
+        # Hoy son constantes de este archivo; esto hace que el día que alguien
+        # arme un `Chequeo` con texto que viene de afuera falle al construirlo
+        # en vez de quedar inyectable. La entrada del usuario nunca llega acá:
+        # `detalle` solo la usa como clave de `POR_ID`.
+        if self.group_by is not None and not _RE_COLUMNA.fullmatch(self.group_by):
+            raise ValueError(f"group_by inválido en chequeo {self.id!r}")
+        if _RE_SQL_PELIGROSO.search(self.where):
+            raise ValueError(f"where inválido en chequeo {self.id!r}")
+
+
+# Un identificador de columna y nada más.
+_RE_COLUMNA = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# Lo que un fragmento de WHERE de solo lectura no necesita: encadenar
+# sentencias, comentarios, barras invertidas o palabras de escritura/DDL.
+_RE_SQL_PELIGROSO = re.compile(
+    r";|--|/\*|#|\\|\b(?:INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|TRUNCATE|UNION|INTO|SLEEP)\b",
+    re.IGNORECASE,
+)
 
 
 CHEQUEOS: tuple[Chequeo, ...] = (
@@ -261,15 +283,15 @@ async def detalle(db: AsyncSession, chequeo_id: str, limit: int = 50) -> list[di
             f"WHERE {c.where} GROUP BY {c.group_by} HAVING COUNT(*) > 1) "
             # Las filas duplicadas van juntas: si no, el operador tiene que
             # buscar el par a ojo entre 200 resultados.
-            f"ORDER BY {c.group_by}, NRO_SOCIO LIMIT {tope}"
+            f"ORDER BY {c.group_by}, NRO_SOCIO LIMIT :tope"
         )
     else:
         sql = text(
             f"SELECT {_COLS} FROM listado_medico WHERE {c.where} "
-            f"ORDER BY NRO_SOCIO LIMIT {tope}"
+            "ORDER BY NRO_SOCIO LIMIT :tope"
         )
 
-    filas = (await db.execute(sql)).mappings().all()
+    filas = (await db.execute(sql, {"tope": tope})).mappings().all()
     return [
         {
             "id": f["ID"],

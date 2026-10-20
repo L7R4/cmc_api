@@ -41,6 +41,11 @@ class ObrasSociales(Base):
     # Reemplaza a MARCA ('S'/'N'): False = obra social dada de baja (baja lógica). Toda obra
     # social nueva nace activa.
     activo: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=text("1"))
+    # Habilita la documentación digital de las prestaciones. Un código la exige sólo si
+    # además está marcado `CodigoObraSocial.requiere_documentacion`.
+    documentacion_digital: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("0")
+    )
 
     # Extended fields
     cuit: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)

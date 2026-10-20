@@ -23,9 +23,11 @@ Autorización: el prestador es el dueño del token. El personal del Colegio que
 carga en nombre de un médico puede mandar `nro_socio`, pero necesita el scope
 `medicos:leer`.
 """
+import json
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, File, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
+from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.deps import get_current_user
@@ -45,6 +47,7 @@ from app.modules.validaciones.core.periodos import (
 )
 from app.modules.validaciones.schemas import (
     CodigoOut,
+    DocumentoOut,
     PeriodoActualOut,
     PeriodoOut,
     PrestacionCreate,
@@ -176,6 +179,90 @@ async def cargar_prestacion(
     obras.obtener_o_error(payload.obra_social)  # siempre levanta 422
 
 
+def _origen(user: dict, socio: int) -> str:
+    """Quién sube: el propio médico, o el Colegio operando por él."""
+    return "medico" if int(user["nro_socio"]) == socio else "colegio"
+
+
+@router.post("/prestaciones/documentada", response_model=PrestacionOut, status_code=status.HTTP_201_CREATED)
+async def cargar_prestacion_documentada(
+    datos: str = Form(..., description="El JSON de `POST /prestaciones`, como texto"),
+    documentos: List[UploadFile] = File(default_factory=list, description="PDF, JPG o PNG"),
+    db: AsyncSession = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    """Igual que `POST /prestaciones`, con los documentos de la prestación en la misma
+    solicitud. Es lo que se usa cuando el código exige documentación digital: sin archivos
+    responde 422 antes de consultar a la obra social, y los archivos se graban junto con la
+    prestación o no se graba nada."""
+    try:
+        payload = PrestacionCreate.model_validate_json(datos)
+    except ValidationError as e:
+        raise HTTPException(422, json.loads(e.json(include_url=False)))
+    propio = int(user["nro_socio"])
+    socio = _socio_objetivo(user, payload.nro_socio)
+    if payload.obra_social not in obras.POR_NRO:
+        obras.obtener_o_error(payload.obra_social)  # siempre levanta 422
+    return await pipeline.crear_prestacion(
+        db, payload=payload, nro_socio=socio, usuario_carga=propio, archivos=documentos,
+    )
+
+
+@router.get("/prestaciones/{prestacion_id}/documentos", response_model=List[DocumentoOut])
+async def listar_documentos(
+    prestacion_id: int,
+    nro_socio: Optional[int] = Query(None),
+    db: AsyncSession = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    socio = _socio_objetivo(user, nro_socio)
+    return await pipeline.listar_documentos(db, prestacion_id, socio)
+
+
+@router.post("/prestaciones/{prestacion_id}/documentos", response_model=PrestacionOut)
+async def agregar_documentos(
+    prestacion_id: int,
+    documentos: List[UploadFile] = File(...),
+    nro_socio: Optional[int] = Query(None),
+    db: AsyncSession = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    """Suma archivos (PDF, JPG o PNG) a la documentación de una prestación."""
+    socio = _socio_objetivo(user, nro_socio)
+    return await pipeline.agregar_documentos(
+        db, prestacion_id, socio, documentos, _origen(user, socio), int(user["nro_socio"]),
+    )
+
+
+@router.put("/prestaciones/{prestacion_id}/documentos/{doc_id}", response_model=PrestacionOut)
+async def reemplazar_documento(
+    prestacion_id: int,
+    doc_id: int,
+    archivo: UploadFile = File(...),
+    nro_socio: Optional[int] = Query(None),
+    db: AsyncSession = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    """Cambia un documento por otro archivo, conservando su lugar en el orden."""
+    socio = _socio_objetivo(user, nro_socio)
+    return await pipeline.reemplazar_documento(
+        db, prestacion_id, socio, doc_id, archivo, _origen(user, socio), int(user["nro_socio"]),
+    )
+
+
+@router.delete("/prestaciones/{prestacion_id}/documentos/{doc_id}", response_model=PrestacionOut)
+async def eliminar_documento(
+    prestacion_id: int,
+    doc_id: int,
+    nro_socio: Optional[int] = Query(None),
+    db: AsyncSession = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    """Quita un documento. Si la prestación los exige, tiene que quedar al menos uno (409)."""
+    socio = _socio_objetivo(user, nro_socio)
+    return await pipeline.eliminar_documento(db, prestacion_id, socio, doc_id)
+
+
 @router.post("/prestaciones/{prestacion_id}/orden", response_model=PrestacionOut)
 async def adjuntar_orden(
     prestacion_id: int,
@@ -184,9 +271,12 @@ async def adjuntar_orden(
     db: AsyncSession = Depends(get_db),
     user=Depends(get_current_user),
 ):
-    """Sube la orden/receta en PDF de una prestación (hoy lo usa Boreal)."""
+    """Sube la orden/receta de una prestación. Es un documento más de la prestación:
+    se conserva para el front anterior; lo nuevo usa `/documentos`."""
     socio = _socio_objetivo(user, nro_socio)
-    return await pipeline.adjuntar_orden(db, prestacion_id, socio, archivo)
+    return await pipeline.adjuntar_orden(
+        db, prestacion_id, socio, archivo, _origen(user, socio), int(user["nro_socio"]),
+    )
 
 
 @router.delete("/prestaciones/{prestacion_id}", status_code=status.HTTP_204_NO_CONTENT)

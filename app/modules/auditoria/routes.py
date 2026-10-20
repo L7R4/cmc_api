@@ -1,10 +1,11 @@
 from datetime import datetime, timedelta, UTC
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.db.database import get_db
 from app.db.models import AuditLog, ListadoMedico
 from app.modules.auditoria.schemas import AuditLogDetail, AuditLogListItem, PurgeResult
@@ -100,13 +101,7 @@ async def obtener_auditoria(audit_id: int, db: AsyncSession = Depends(get_db)):
     )
 
 
-@router.delete("/purge", response_model=PurgeResult)
-async def purgar_auditoria(
-    months: int = Query(12, ge=1, le=120),
-    db: AsyncSession = Depends(get_db),
-):
-    """Borra en lotes los registros más viejos que `months` meses (evita
-    lockear la tabla entera en MySQL 5.7 con un DELETE masivo)."""
+async def _borrar_anteriores(db: AsyncSession, months: int) -> int:
     corte = datetime.now(UTC) - timedelta(days=months * 30)
     deleted_total = 0
 
@@ -121,5 +116,32 @@ async def purgar_auditoria(
         deleted_total += len(ids)
         if len(ids) < _PURGE_BATCH_SIZE:
             break
+    return deleted_total
 
-    return PurgeResult(ok=True, deleted=deleted_total, months=months)
+
+@router.delete("/purge", response_model=PurgeResult)
+async def purgar_auditoria(
+    months: int = Query(12, ge=1, le=120),
+    db: AsyncSession = Depends(get_db),
+):
+    """Borra en lotes los registros más viejos que `months` meses (evita
+    lockear la tabla entera en MySQL 5.7 con un DELETE masivo)."""
+    deleted = await _borrar_anteriores(db, months)
+    return PurgeResult(ok=True, deleted=deleted, months=months)
+
+
+def _verificar_cron_secret(x_cron_secret: Optional[str] = Header(None)) -> None:
+    if not settings.CRON_SECRET or x_cron_secret != settings.CRON_SECRET:
+        raise HTTPException(401, "Secreto de cron inválido o no configurado")
+
+
+@router.post(
+    "/purge-cron",
+    response_model=PurgeResult,
+    dependencies=[Depends(_verificar_cron_secret)],
+)
+async def purgar_auditoria_cron(db: AsyncSession = Depends(get_db)):
+    """Purga con la retención configurada (`AUDIT_RETENCION_MESES`). Lo llama el
+    cron diario con `X-Cron-Secret`, sin usuario."""
+    months = settings.AUDIT_RETENCION_MESES
+    return PurgeResult(ok=True, deleted=await _borrar_anteriores(db, months), months=months)

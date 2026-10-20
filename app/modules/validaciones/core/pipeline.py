@@ -4,20 +4,18 @@ obras sociales (`obras.POR_NRO`) — nada más acá sabe que existen obras
 sociales particulares.
 """
 import datetime
-import os
-import uuid
+from typing import Sequence
 
 from fastapi import HTTPException, UploadFile
-from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.common.files import UPLOAD_ROOT
-from app.common.uploads import validate_upload
 from app.db.models import DetalleFacturacionCMC
+from app.modules.facturacion import documentacion
 from app.modules.facturacion.service import _cleanup_factura_si_vacia
 from app.modules.validaciones import obras
 from app.modules.validaciones.core.consultas import _descripciones
 from app.modules.validaciones.core.contrato import Contexto
+from app.modules.validaciones.core.documentos import enriquecer
 from app.modules.validaciones.core.entrada import parsear_entrada
 from app.modules.validaciones.core.grabado import (
     DETALLE_ACTIVO,
@@ -35,11 +33,9 @@ from app.modules.validaciones.core.periodos import (
 from app.modules.validaciones.legacy import espejo as espejo_legacy
 from app.modules.validaciones.schemas import PrestacionCreate
 
-_SOLO_PDF = frozenset({".pdf"})
-
-
 async def crear_prestacion(
-    db: AsyncSession, *, payload: PrestacionCreate, nro_socio: int, usuario_carga: int
+    db: AsyncSession, *, payload: PrestacionCreate, nro_socio: int, usuario_carga: int,
+    archivos: Sequence[UploadFile] = (),
 ) -> dict:
     obra = obras.obtener_o_error(payload.obra_social)
     entrada = parsear_entrada(obra.entrada, payload)
@@ -52,6 +48,15 @@ async def crear_prestacion(
     # real (token, orden) — no se pide si después no se va a poder grabar.
     await gate_periodo(db, obra.nro, periodo)
 
+    # Documentación digital: si la obra social y el código la exigen, sin archivos no se valida.
+    # Va antes de hablar con la O.S. por lo mismo que el gate de arriba. Los archivos también
+    # se verifican acá, por su contenido real.
+    infos = await documentacion.validar_archivos(archivos)
+    if not infos and await documentacion.requiere_documentacion(db, obra.nro, payload.codigo):
+        raise HTTPException(
+            422, "Esta prestación exige documentación digital: adjuntá al menos un archivo.",
+        )
+
     ctx = Contexto(
         db=db,
         medico=medico,
@@ -62,24 +67,31 @@ async def crear_prestacion(
     )
     resultado = await obra.validar(ctx, entrada)
 
-    fila = await grabar_prestacion(
-        db,
-        medico=medico,
-        obra_social_id=obra.nro,
-        periodo=periodo,
-        codigo=resultado.codigo,
-        precio=resultado.precio,
-        cantidad=entrada.cantidad,
-        coseguro=resultado.coseguro,
-        nro_afiliado=resultado.nro_afiliado,
-        nombre_afiliado=resultado.nombre_afiliado,
-        nro_autorizacion=resultado.nro_autorizacion,
-        validacion_estado=resultado.estado,
-        validacion_detalle=resultado.detalle,
-        validacion_respuesta=resultado.traza,
-        fecha=ctx.fecha,
-        usuario_carga=usuario_carga,
-    )
+    escritos = await documentacion.escribir(infos, medico.NRO_SOCIO) if infos else []
+    try:
+        fila = await grabar_prestacion(
+            db,
+            medico=medico,
+            obra_social_id=obra.nro,
+            periodo=periodo,
+            codigo=resultado.codigo,
+            precio=resultado.precio,
+            cantidad=entrada.cantidad,
+            coseguro=resultado.coseguro,
+            nro_afiliado=resultado.nro_afiliado,
+            nombre_afiliado=resultado.nombre_afiliado,
+            nro_autorizacion=resultado.nro_autorizacion,
+            validacion_estado=resultado.estado,
+            validacion_detalle=resultado.detalle,
+            validacion_respuesta=resultado.traza,
+            fecha=ctx.fecha,
+            usuario_carga=usuario_carga,
+            documentos=escritos,
+        )
+    except Exception:
+        await db.rollback()
+        documentacion.borrar_archivos(e.path for e in escritos)
+        raise
 
     # TEMPORAL — puente con el sistema viejo. Corre después del commit de
     # `grabar_prestacion` y falla abierto: si no puede espejar, la prestación
@@ -87,7 +99,9 @@ async def crear_prestacion(
     # `eliminar_prestacion` y la carpeta `validaciones/legacy/`.
     await espejo_legacy.replicar_alta(db, fila, medico)
 
-    return to_dict(fila, resultado.precio.descripcion or "")
+    salida = to_dict(fila, resultado.precio.descripcion or "")
+    await enriquecer(db, [fila], [salida])
+    return salida
 
 
 async def _prestacion_del_socio(
@@ -101,34 +115,57 @@ async def _prestacion_del_socio(
     return fila
 
 
-async def adjuntar_orden(
-    db: AsyncSession, prestacion_id: int, nro_socio: int, archivo: UploadFile
-) -> dict:
-    """Guarda la orden/receta en PDF y deja la ruta en `orden_path`."""
-    fila = await _prestacion_del_socio(db, prestacion_id, nro_socio)
-
-    # El chequeo anterior era sobre `content_type`, que lo declara el cliente:
-    # bastaba mandar el header correcto para guardar cualquier cosa como PDF.
-    # `validate_upload` lo decide por magic bytes y además limita el tamaño.
-    info = await validate_upload(archivo, _SOLO_PDF)
-
-    destino_dir = os.path.join(UPLOAD_ROOT, "validaciones", str(nro_socio))
-    os.makedirs(destino_dir, exist_ok=True)
-
-    nombre = f"{uuid.uuid4().hex}{info.extension}"
-    destino = os.path.join(destino_dir, nombre)
-
-    def _escribir() -> None:
-        with open(destino, "wb") as f:
-            f.write(info.data)
-
-    await run_in_threadpool(_escribir)
-
-    fila.orden_path = destino.replace("\\", "/")
-    await db.commit()
-    await db.refresh(fila)
+async def _salida(db: AsyncSession, fila: DetalleFacturacionCMC) -> dict:
     descripciones = await _descripciones(db, [fila])
-    return to_dict(fila, descripciones.get(fila.id_detalle_prestaciones, ""))
+    salida = to_dict(fila, descripciones.get(fila.id_detalle_prestaciones, ""))
+    await enriquecer(db, [fila], [salida])
+    return salida
+
+
+async def listar_documentos(db: AsyncSession, prestacion_id: int, nro_socio: int) -> list[dict]:
+    fila = await _prestacion_del_socio(db, prestacion_id, nro_socio)
+    return [documentacion.doc_out(d) for d in await documentacion.listar(db, fila.id_detalle_prestaciones)]
+
+
+async def agregar_documentos(
+    db: AsyncSession, prestacion_id: int, nro_socio: int, archivos: Sequence[UploadFile],
+    origen: str, subido_por,
+) -> dict:
+    """Suma archivos a la documentación de la prestación (PDF, JPG o PNG, por su contenido real)."""
+    fila = await _prestacion_del_socio(db, prestacion_id, nro_socio)
+    await documentacion.agregar(db, fila, archivos, origen, subido_por)
+    await db.refresh(fila)
+    return await _salida(db, fila)
+
+
+async def adjuntar_orden(
+    db: AsyncSession, prestacion_id: int, nro_socio: int, archivo: UploadFile,
+    origen: str = "medico", subido_por=None,
+) -> dict:
+    """Alias de `agregar_documentos` para un solo archivo (el endpoint `/orden` anterior)."""
+    return await agregar_documentos(
+        db, prestacion_id, nro_socio, [archivo], origen, subido_por if subido_por is not None else nro_socio,
+    )
+
+
+async def reemplazar_documento(
+    db: AsyncSession, prestacion_id: int, nro_socio: int, doc_id: int, archivo: UploadFile,
+    origen: str, subido_por,
+) -> dict:
+    fila = await _prestacion_del_socio(db, prestacion_id, nro_socio)
+    await documentacion.reemplazar(db, fila, doc_id, archivo, origen, subido_por)
+    await db.refresh(fila)
+    return await _salida(db, fila)
+
+
+async def eliminar_documento(
+    db: AsyncSession, prestacion_id: int, nro_socio: int, doc_id: int,
+) -> dict:
+    """El médico no puede dejar la prestación sin documentos si los exige (409)."""
+    fila = await _prestacion_del_socio(db, prestacion_id, nro_socio)
+    await documentacion.eliminar(db, fila, doc_id, es_medico=True)
+    await db.refresh(fila)
+    return await _salida(db, fila)
 
 
 async def eliminar_prestacion(

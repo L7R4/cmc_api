@@ -12,6 +12,8 @@ from app.auth.deps import get_current_user
 from app.db.database import get_db
 from app.modules.nomenclador import alta_os, service
 from app.modules.nomenclador.schemas import (
+    AccionCodigosIn,
+    AccionCodigosOut,
     AltaCodigosIn,
     AltaCodigosOut,
     CodigoObraSocialOut,
@@ -31,6 +33,8 @@ async def listar_codigos_por_os(
     tipo: Optional[Literal[service.TIPOS_FILTRO]] = Query(
         None, description="Consulta / Practica / Honorarios individuales, por la categoría del código en la O.S.",
     ),
+    codigo_desde: Optional[int] = Query(None, ge=0, description="Rango de códigos: desde (inclusive)"),
+    codigo_hasta: Optional[int] = Query(None, ge=0, description="Rango de códigos: hasta (inclusive)"),
     page: int = Query(1, ge=1),
     size: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
@@ -39,6 +43,7 @@ async def listar_codigos_por_os(
     sin precio / con precio / suspendido, más los conteos por estado."""
     return await alta_os.listar_por_os(
         db, obra_social_nro, estado=estado, q=q, tipo=tipo, page=page, size=size,
+        codigo_desde=codigo_desde, codigo_hasta=codigo_hasta,
     )
 
 
@@ -54,6 +59,15 @@ async def dar_de_alta(
     resultados = await alta_os.dar_de_alta(db, body, str(user.get("nro_socio", "")) or None)
     await db.commit()
     return AltaCodigosOut(resultados=resultados)
+
+
+@router.post("/acciones", response_model=AccionCodigosOut)
+async def acciones_en_bloque(body: AccionCodigosIn, db: AsyncSession = Depends(get_db)):
+    """La barra de acciones de la tabla: suspender, reactivar, o activar/desactivar la
+    documentación digital en varios códigos de una obra social. Un resultado por código."""
+    out = await alta_os.aplicar_accion(db, body)
+    await db.commit()
+    return out
 
 
 @router.get("/{obra_social_nro}/{nomenclador_id}", response_model=CodigoObraSocialOut)

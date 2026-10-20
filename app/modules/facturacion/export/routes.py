@@ -20,9 +20,11 @@ from app.auth.deps import get_current_user
 from app.auth.ownership import socio_objetivo
 from app.db.database import get_db
 from app.db.models import ExportPreset
+from app.modules.facturacion import documentacion as documentacion_mod
 from app.modules.facturacion.export import armado as armado_mod
 from app.modules.facturacion.export import caratula as caratula_mod
 from app.modules.facturacion.export import datos as datos_mod
+from app.modules.facturacion.export import documentacion as documentacion_pdf
 from app.modules.facturacion.export import encabezado as encabezado_mod
 from app.modules.facturacion.export import excel as excel_mod
 from app.modules.facturacion.export import pdf as pdf_mod
@@ -36,6 +38,7 @@ from app.modules.facturacion.export.schemas import (
     AgrupacionExport,
     ColumnaExport,
     DireccionExport,
+    DocumentacionExport,
     ExportOpciones,
     OrdenAlfabeticoExport,
     OrdenExport,
@@ -63,6 +66,7 @@ async def _resolver_opciones(
     cod_medicos: Optional[list[str]] = Query(None),
     revisado: Optional[bool] = Query(None),
     tipos: Optional[list[TipoPrestacion]] = Query(None),
+    documentacion: Optional[DocumentacionExport] = Query(None),
     db: AsyncSession = Depends(get_db),
     user=Depends(get_current_user),
 ) -> ExportOpciones:
@@ -78,7 +82,7 @@ async def _resolver_opciones(
         orden=orden, direccion=direccion, agrupar_equipo=agrupar_equipo,
         orden_honorarios=orden_honorarios, orden_sanatorio=orden_sanatorio, agrupacion=agrupacion, columnas=columnas or list(COLUMNAS_DEFAULT),
         fecha_desde=fecha_desde, fecha_hasta=fecha_hasta, id_especialidad=id_especialidad,
-        cod_medicos=cod_medicos, revisado=revisado, tipos=tipos,
+        cod_medicos=cod_medicos, revisado=revisado, tipos=tipos, documentacion=documentacion,
     )
 
 
@@ -97,6 +101,7 @@ async def _resolver_opciones_medico(
     cod_medicos: Optional[list[str]] = Query(None),
     revisado: Optional[bool] = Query(None),
     tipos: Optional[list[TipoPrestacion]] = Query(None),
+    documentacion: Optional[DocumentacionExport] = Query(None),
     db: AsyncSession = Depends(get_db),
     user=Depends(get_current_user),
 ) -> ExportOpciones:
@@ -117,7 +122,7 @@ async def _resolver_opciones_medico(
         orden=orden, direccion=direccion, agrupar_equipo=agrupar_equipo,
         orden_honorarios=orden_honorarios, orden_sanatorio=orden_sanatorio, agrupacion=agrupacion, columnas=columnas or list(COLUMNAS_DEFAULT_POR_MEDICO),
         fecha_desde=fecha_desde, fecha_hasta=fecha_hasta, id_especialidad=id_especialidad,
-        cod_medicos=cod_medicos, revisado=revisado, tipos=tipos,
+        cod_medicos=cod_medicos, revisado=revisado, tipos=tipos, documentacion=documentacion,
     )
 
 
@@ -139,6 +144,53 @@ async def export_detalle_pdf(
     return Response(
         content=contenido, media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="detalle_factura_{id}.pdf"'},
+    )
+
+
+@router.get("/facturas/{id}/export/documentacion.pdf")
+async def export_documentacion_pdf(
+    id: int, opciones: ExportOpciones = Depends(_resolver_opciones), db: AsyncSession = Depends(get_db),
+):
+    """Un PDF con la documentación digital de la factura: los médicos de la A a la Z y, de cada
+    uno, sus documentos en el mismo orden que el detalle. Usa sólo las opciones de ORDEN de la
+    vista: los filtros no cuentan, es la documentación de toda la factura.
+
+    Mientras haya prestaciones que exigen documentación y no la tienen, o no están auditadas,
+    responde 409 con los contadores y no genera nada."""
+    t0 = time.perf_counter()
+    factura = await datos_mod.obtener_factura(db, id)
+    if not await documentacion_mod.obra_social_con_documentacion(db, factura.cod_obr):
+        raise HTTPException(409, "La obra social de esta factura no tiene la documentación digital habilitada.")
+
+    sin_filtros = opciones.model_copy(update={
+        "fecha_desde": None, "fecha_hasta": None, "id_especialidad": None, "cod_medicos": None,
+        "revisado": None, "tipos": None, "documentacion": None,
+    })
+    filas = await datos_mod.obtener_filas_export(db, factura, sin_filtros)
+
+    pendientes = documentacion_pdf.pendientes_de(filas)
+    if pendientes:
+        raise HTTPException(409, {
+            "mensaje": "Todavía hay prestaciones sin su documentación o sin auditar.",
+            "sin_documentos": pendientes.sin_documentos,
+            "sin_auditar": pendientes.sin_auditar,
+        })
+
+    ordenadas = documentacion_pdf.filas_en_orden_del_detalle(filas, sin_filtros)
+    docs = await documentacion_mod.por_detalle(db, [f.id for f in ordenadas if documentacion_pdf.entran_al_pdf(f)])
+    grupos = documentacion_pdf.agrupar_por_medico(ordenadas, docs)
+    if not grupos:
+        raise HTTPException(409, "La factura no tiene documentos para exportar.")
+    try:
+        contenido = await run_in_threadpool(documentacion_pdf.build_pdf_documentacion, grupos)
+    except documentacion_pdf.DocumentoIlegible as e:
+        raise HTTPException(422, f"No se pudo armar el PDF: {e}")
+    logger.info(
+        "export documentacion.pdf factura=%s medicos=%s tiempo=%.2fs", id, len(grupos), time.perf_counter() - t0,
+    )
+    return Response(
+        content=contenido, media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="documentacion_factura_{id}.pdf"'},
     )
 
 

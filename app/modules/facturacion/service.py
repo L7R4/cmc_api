@@ -36,6 +36,7 @@ from app.db.models import (
 )
 from app.modules.medicos.helpers import parse_conceps_espec
 from app.modules.nomenclador import service as service_nm
+from app.modules.facturacion import documentacion
 from app.modules.nomenclador import alta_os, service_vias
 from app.modules.nomenclador.service import LookupError as PrecioLookupError
 
@@ -2094,6 +2095,14 @@ async def obtener_factura_detalle(db: AsyncSession, factura_id: int) -> dict:
     )
     rows = list((await db.execute(stmt)).scalars().all())
 
+    # Documentación digital: sólo se calcula si la obra social la tiene habilitada.
+    doc_digital = await documentacion.obra_social_con_documentacion(db, factura.cod_obr)
+    exigen: set[int] = set()
+    cuentan: dict[int, int] = {}
+    if doc_digital:
+        exigen = await documentacion.exigen_en_bloque(db, rows)
+        cuentan = await documentacion.contar(db, [r.id_detalle_prestaciones for r in rows])
+
     # Batch de médicos (socio/matrícula) para todos los cod_med (el médico que cobra),
     # las cod_clinica (organizaciones, para mostrar su nombre) y los cod_med_ejecutor
     # legacy que quedaron persistidos — un solo IN para los tres.
@@ -2211,6 +2220,8 @@ async def obtener_factura_detalle(db: AsyncSession, factura_id: int) -> dict:
             "grupo_equipo_id": r.grupo_equipo_id,
             "id_especialidad": r.id_especialidad or None,
             "especialidad_nombre": especialidades.get(r.id_especialidad),
+            "requiere_documentacion": r.id_detalle_prestaciones in exigen,
+            "documentos_count": cuentan.get(r.id_detalle_prestaciones, 0),
         })
 
     # Orden final de grupos: por nombre del médico, fallback cod_medico.
@@ -2218,6 +2229,10 @@ async def obtener_factura_detalle(db: AsyncSession, factura_id: int) -> dict:
     prestadores = [grupos[c] for c in orden_grupos]
 
     cabecera = await _datos_cabecera_factura(db, factura)
+    total_importe = sum((g["total_subtotal"] for g in prestadores), Decimal("0"))
+    total_auditado = (
+        sum((_dec(r.importe_total) for r in rows if r.revisado), Decimal("0")) if doc_digital else total_importe
+    )
 
     return {
         "id_factura": factura.id_prestaciones,
@@ -2232,7 +2247,13 @@ async def obtener_factura_detalle(db: AsyncSession, factura_id: int) -> dict:
         # Unidades facturadas, no filas: una prestación con cantidad=2 y sesion=3 cuenta 6
         # (mismo criterio que el importe: cantidad * sesion).
         "total_prestaciones": sum((r.cantidad or 1) * (r.sesion or 1) for r in rows),
-        "total_importe": sum((g["total_subtotal"] for g in prestadores), Decimal("0")),
+        "total_importe": total_importe,
+        "documentacion_digital": doc_digital,
+        "total_auditado": total_auditado,
+        "total_proyectado": total_importe,
+        "sin_auditar": sum(1 for r in rows if not r.revisado) if doc_digital else 0,
+        "requieren_documentos": len(exigen),
+        "con_documentos": sum(1 for i in exigen if cuentan.get(i, 0) > 0),
         "prestadores": prestadores,
     }
 
@@ -3030,6 +3051,17 @@ async def marcar_revisado(
     if faltantes:
         raise HTTPException(404, {"mensaje": "Prestación no encontrada", "ids": faltantes})
 
+    # Con documentación digital, «auditado y controlado» significa que la documentación está y
+    # se revisó: una prestación que la exige no se puede auditar sin archivos.
+    exigen = await documentacion.exigen_en_bloque(db, [rows_por_id[i] for i in marcados])
+    con_docs = await documentacion.contar(db, list(exigen))
+    sin_documentos = [i for i in marcados if i in exigen and con_docs.get(i, 0) == 0]
+    if sin_documentos:
+        raise HTTPException(409, {
+            "mensaje": "No se pueden auditar prestaciones que exigen documentación y no la tienen",
+            "ids": sin_documentos,
+        })
+
     for prestacion_id in marcados:
         rows_por_id[prestacion_id].revisado = True
     for prestacion_id in desmarcados:
@@ -3318,6 +3350,16 @@ async def preview_cierre(db: AsyncSession, cod_obra: str, periodo: str) -> dict:
             M.version == version_actual, M.estado == "A",
         )
     )).one()
+    # Obra social con documentación digital: no se cierra con prestaciones sin auditar.
+    doc_digital = await documentacion.obra_social_con_documentacion(db, cod_obra)
+    sin_auditar = 0
+    if doc_digital:
+        sin_auditar = int((await db.execute(
+            select(func.count()).where(
+                M.cod_obr == cod_obra, M.periodo == periodo, M.version == version_actual,
+                M.estado == "A", M.revisado.is_(False),
+            )
+        )).scalar() or 0)
     return {
         "cod_obra": cod_obra,
         "periodo": periodo,
@@ -3326,6 +3368,8 @@ async def preview_cierre(db: AsyncSession, cod_obra: str, periodo: str) -> dict:
         "cerrado": await _periodo_cerrado(db, cod_obra, periodo),
         # Cargadas en $0 por falta de precio (ver revalorizar.py): el cierre avisa.
         "sin_valorizar": int(sin_valorizar or 0),
+        "documentacion_digital": doc_digital,
+        "sin_auditar": sin_auditar,
     }
 
 
@@ -3360,6 +3404,21 @@ async def cerrar_periodo(
     )).scalars().all())
     if not rows:
         raise HTTPException(422, "No hay prestaciones abiertas para cerrar en esta OS+período")
+
+    # Obra social con documentación digital: no se cierra con prestaciones sin auditar (la
+    # auditoría exige además que tengan sus documentos, si el código los pide).
+    if await documentacion.obra_social_con_documentacion(db, cod_obra):
+        sin_auditar = [r.id_detalle_prestaciones for r in rows if not r.revisado]
+        if sin_auditar:
+            raise HTTPException(409, {
+                "mensaje": (
+                    f"No se puede cerrar la factura: hay {len(sin_auditar)} "
+                    f"prestaci{'ón' if len(sin_auditar) == 1 else 'ones'} sin auditar."
+                ),
+                "tipo": "sin_auditar",
+                "cantidad": len(sin_auditar),
+                "ids": sin_auditar[:50],
+            })
 
     # importe_total puede volver como float en filas legacy → coercionar a Decimal
     total = sum((Decimal(str(r.importe_total or 0)) for r in rows), Decimal("0"))

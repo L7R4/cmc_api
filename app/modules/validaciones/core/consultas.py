@@ -13,9 +13,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.common.money import quantize_money
 from app.db.models import DetalleFacturacionCMC
 from app.db.models.nomenclador_cmc import NomencladorCMC, Valor
+from app.modules.facturacion import documentacion
 from app.modules.facturacion.service import resolver_precio
 from app.modules.nomenclador import service as service_nm
 from app.modules.validaciones.core.contrato import factura_en_cero
+from app.modules.validaciones.core.documentos import enriquecer
 from app.modules.validaciones.core.grabado import to_dict
 from app.modules.validaciones.core.medicos import get_medico
 from app.modules.validaciones.core.periodos import ORIGEN_MEDICO, partes_periodo, periodo_cerrado
@@ -149,7 +151,9 @@ async def listar_prestaciones(
         .all()
     )
     descripciones = await _descripciones(db, filas)
-    return [to_dict(f, descripciones.get(f.id_detalle_prestaciones, "")) for f in filas]
+    salida = [to_dict(f, descripciones.get(f.id_detalle_prestaciones, "")) for f in filas]
+    await enriquecer(db, filas, salida)
+    return salida
 
 
 async def listar_periodos(
@@ -295,4 +299,8 @@ async def buscar_codigos(
                 "motivo": precio.motivo,
             }
         )
+    # Un solo chequeo para todo lo devuelto: qué códigos exigen documentación en esta obra social.
+    exigen = await documentacion.codigos_que_requieren(db, obra_social_id, [s["codigo"] for s in salida])
+    for s in salida:
+        s["requiere_documentacion"] = s["codigo"] in exigen
     return salida

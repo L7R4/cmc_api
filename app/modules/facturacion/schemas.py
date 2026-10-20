@@ -368,6 +368,8 @@ class PrecioResponse(BaseModel):
     # `CARGA_SIN_PRECIO` deja cargarlo en $0: la prestación queda "sin valorizar"
     # hasta que se cargue el precio y se revalorice (ver revalorizar.py).
     sin_precio: bool = False
+    # True → el código exige documentación digital en esta obra social (ver `documentacion.py`).
+    requiere_documentacion: bool = False
     # De dónde sale el precio, para la etiqueta del cotizador: origen de la variante
     # ('NN' | 'NE') y cómo se calculan los honorarios — 'fijo' o 'calculable' con
     # su galeno (nombre y nivel, si es nivelado).
@@ -512,6 +514,9 @@ class CierrePreviewResponse(BaseModel):
     importe_total: Decimal
     cerrado: bool   # True si la última versión ya está cerrada para esa OS+período
     sin_valorizar: int = 0  # prestaciones cargadas en $0 por falta de precio
+    # Con documentación digital no se cierra con prestaciones sin auditar.
+    documentacion_digital: bool = False
+    sin_auditar: int = 0
 
 
 class CierreResponse(BaseModel):
@@ -707,6 +712,10 @@ class PrestacionFacturaDetalleOut(BaseModel):
     grupo_equipo_id: Optional[int] = None
     id_especialidad: Optional[int] = None
     especialidad_nombre: Optional[str] = None
+    # Documentación digital (sólo con la obra social habilitada): si el código la exige y
+    # cuántos archivos tiene. El detalle de cada archivo se pide aparte.
+    requiere_documentacion: bool = False
+    documentos_count: int = 0
 
     # codigo/nro_afiliado son columnas enteras en filas legacy → coercionar a string.
     @field_validator("codigo", "nro_afiliado", mode="before")
@@ -721,6 +730,24 @@ class PrestacionFacturaDetalleOut(BaseModel):
         if isinstance(v, str) and v.startswith("0000-00-00"):
             return None
         return v
+
+
+class DocumentoPrestacionOut(BaseModel):
+    """Un archivo de la documentación digital de una prestación."""
+    id: int
+    nombre: str
+    # Pide token: se abre con `abrirAdjunto()`.
+    url: Optional[str] = None
+    content_type: str
+    size: int
+    origen: Literal["medico", "colegio"]
+    posicion: int = 0
+    created_at: Optional[datetime.datetime] = None
+
+
+class DocumentosOrdenIn(BaseModel):
+    """El orden nuevo: los ids de TODOS los documentos de la prestación."""
+    ids: list[int] = Field(..., min_length=1)
 
 
 class PrestadorFacturaGrupoOut(BaseModel):
@@ -765,7 +792,17 @@ class FacturaDetalleOut(BaseModel):
     afip: Optional[str] = None
     otras_versiones: list[dict] = []   # [{id_factura, version}] del mismo período y OS
     total_prestaciones: int
+    # Suma de TODAS las prestaciones (auditadas y no): la «proyección a facturar».
     total_importe: Decimal
+    # Documentación digital (sólo con la obra social habilitada). Ahí «Total a facturar» suma
+    # únicamente lo auditado (`total_auditado`) y no se cierra con prestaciones sin auditar.
+    # Sin ella, `total_auditado` es igual a `total_importe` y no se bloquea nada.
+    documentacion_digital: bool = False
+    total_auditado: Decimal = Decimal("0")
+    total_proyectado: Decimal = Decimal("0")
+    sin_auditar: int = 0
+    requieren_documentos: int = 0
+    con_documentos: int = 0
     prestadores: list[PrestadorFacturaGrupoOut]
 
     @field_validator("cod_obra", mode="before")

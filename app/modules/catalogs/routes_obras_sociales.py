@@ -126,6 +126,7 @@ def _build_out(
         fecha_alta_convenio=obj.fecha_alta_convenio,
         obra_social_principal_id=obj.obra_social_principal_id,
         dia_corte=obj.dia_corte,
+        documentacion_digital=bool(obj.documentacion_digital),
         emails=emails,
         telefonos=telefonos,
         obra_social_principal=_simple_out(principal) if principal else None,
@@ -359,6 +360,7 @@ async def create_obra_social(
         fecha_alta_convenio=payload.fecha_alta_convenio,
         obra_social_principal_id=payload.obra_social_principal_id,
         dia_corte=payload.dia_corte,
+        documentacion_digital=payload.documentacion_digital,
         contactos=[c.model_dump() for c in payload.contactos],
         direcciones=[d.model_dump() for d in payload.direcciones],
     )
@@ -487,6 +489,7 @@ async def update_obra_social(
         "fecha_alta_convenio": "fecha_alta_convenio",
         "obra_social_principal_id": "obra_social_principal_id",
         "dia_corte": "dia_corte",
+        "documentacion_digital": "documentacion_digital",
     }
     changes = payload.model_dump(exclude_unset=True, exclude={"contactos", "direcciones"})
     if "cuit" in changes and not changes["cuit"]:

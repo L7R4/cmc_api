@@ -1575,6 +1575,8 @@ class CodigoObraSocialUpdate(BaseModel):
     categoria: Optional[str] = Field(None, max_length=100)
     complejidad: Optional[Complejidad] = None
     requiere_autorizacion: Optional[bool] = None
+    # El código exige documentación digital en esta obra social (sólo si ella la tiene habilitada).
+    requiere_documentacion: Optional[bool] = None
     cantidad_ayudantes: Optional[int] = Field(None, ge=0)
     observacion: Optional[str] = None
     sin_restriccion_especialidad: Optional[bool] = None
@@ -1594,6 +1596,9 @@ class CodigoObraSocialOut(BaseModel):
     categoria: Optional[str] = None
     complejidad: Optional[str] = None
     requiere_autorizacion: Optional[bool] = None
+    requiere_documentacion: bool = False
+    # La obra social tiene la documentación digital habilitada (el modal deshabilita el check si no).
+    documentacion_digital: bool = False
     cantidad_ayudantes: Optional[int] = None
     observacion: Optional[str] = None
     sin_restriccion_especialidad: bool = False
@@ -1613,15 +1618,42 @@ class CodigoPorOSItem(BaseModel):
     especialidades_os: int = 0
     especialidades_plantilla: int = 0
     plantilla_sin_restriccion: bool = False
+    requiere_documentacion: bool = False
 
 
 class CodigosPorOSOut(BaseModel):
     obra_social_nro: int
+    documentacion_digital: bool = False
     total: int
     page: int
     size: int
     conteos: dict[str, int]
     items: List[CodigoPorOSItem]
+
+
+AccionCodigosOS = Literal[
+    "suspender", "reactivar", "activar_documentacion", "desactivar_documentacion",
+]
+
+
+class AccionCodigosIn(BaseModel):
+    """Una acción sobre varios códigos de una obra social (la barra de acciones de la tabla)."""
+    obra_social_nro: int
+    nomenclador_ids: List[int] = Field(..., min_length=1, max_length=1000)
+    accion: AccionCodigosOS
+
+
+class AccionCodigoResultado(BaseModel):
+    nomenclador_id: int
+    codigo: str
+    estado: Literal["aplicado", "no_aplica"]
+    motivo: Optional[str] = None
+
+
+class AccionCodigosOut(BaseModel):
+    accion: AccionCodigosOS
+    aplicados: int
+    resultados: List[AccionCodigoResultado]
 
 
 class FichaObraSocialItem(BaseModel):

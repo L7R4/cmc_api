@@ -48,7 +48,11 @@ def buscar(monkeypatch):
             descripcion=f"desc {codigo}", fuente="nm", admitido=True,
         )
 
+    async def _exigen_documentacion(_db, _os, codigos):
+        return {"070660"} & set(codigos)  # sólo la escleroterapia exige documentación digital
+
     monkeypatch.setattr(consultas, "get_medico", _medico)
+    monkeypatch.setattr(consultas.documentacion, "codigos_que_requieren", _exigen_documentacion)
     monkeypatch.setattr(consultas.service_nm, "listar_codigos_habilitados", _habilitados)
     monkeypatch.setattr(consultas, "resolver_precio", _precio)
 
@@ -74,6 +78,12 @@ async def test_busca_por_codigo_y_por_varias_palabras(buscar):
     assert await buscar("070660") == ["070660"]
     assert await buscar("0706") == ["070660"]
     assert await buscar("consulta especializada") == ["420351"]
+
+
+async def test_marca_los_codigos_que_exigen_documentacion_digital(monkeypatch, buscar):
+    db = _DbFalsa({"070660", "420351"})
+    filas = await consultas.buscar_codigos(db, 411, 55, "", 20)
+    assert {r["codigo"]: r["requiere_documentacion"] for r in filas} == {"070660": True, "420351": False}
 
 
 async def test_respeta_el_limite(buscar):

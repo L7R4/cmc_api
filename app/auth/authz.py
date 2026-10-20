@@ -131,6 +131,8 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     ("GET", "/api/auditoria/"): Scope.AUDITORIA_LEER,
     ("GET", "/api/auditoria/{audit_id}"): Scope.AUDITORIA_LEER,
     ("DELETE", "/api/auditoria/purge"): Scope.AUDITORIA_PURGAR,
+    # Purga diaria con la retención configurada; auth propia por `X-Cron-Secret`.
+    ("POST", "/api/auditoria/purge-cron"): MAQUINA,
 
     # ── Sistema: exports ─────────────────────────────────────────────────────
     # Este no lee nada de la base: recibe el JSON que el front ya tiene en
@@ -498,6 +500,12 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     # `medico` ya no lleva `facturacion:cargar`, que además habilitaba editar
     # y borrar prestaciones de cualquiera.
     ("POST", "/api/facturacion/medico/prestaciones"): Scope.VALIDACION_CARGAR,
+    # Export del detalle de UN médico: el handler (`_export_detalle_medico`) acota
+    # con `socio_objetivo`, así que el médico solo baja lo suyo y quien pide otro
+    # socio necesita `medico:leer`. Por eso `LECTURA_FACTURACION` y no `EXPORT_GENERAR`,
+    # que el rol `medico` no lleva.
+    ("GET", "/api/facturacion/medico/{nro_socio}/export/detalle.pdf"): LECTURA_FACTURACION,
+    ("GET", "/api/facturacion/medico/{nro_socio}/export/detalle.xlsx"): LECTURA_FACTURACION,
     ("GET", "/api/facturacion/facturas"): Scope.FACTURACION_LEER,
     ("GET", "/api/facturacion/facturas/{id}/detalle"): Scope.FACTURACION_LEER,
     ("POST", "/api/facturacion/facturas/complemento"): Scope.FACTURACION_COMPLEMENTAR,
@@ -505,6 +513,7 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     # export ya existente de deducciones/cobranzas (`TODOS(..., EXPORT_GENERAR)`).
     ("GET", "/api/facturacion/facturas/{id}/export/detalle.pdf"): TODOS(Scope.FACTURACION_LEER, Scope.EXPORT_GENERAR),
     ("GET", "/api/facturacion/facturas/{id}/export/detalle.xlsx"): TODOS(Scope.FACTURACION_LEER, Scope.EXPORT_GENERAR),
+    ("GET", "/api/facturacion/facturas/{id}/export/documentacion.pdf"): TODOS(Scope.FACTURACION_LEER, Scope.EXPORT_GENERAR),
     ("GET", "/api/facturacion/facturas/{id}/export/boreal.xlsx"): TODOS(Scope.FACTURACION_LEER, Scope.EXPORT_GENERAR),
     ("GET", "/api/facturacion/facturas/{id}/export/unne.txt"): TODOS(Scope.FACTURACION_LEER, Scope.EXPORT_GENERAR),
     ("GET", "/api/facturacion/facturas/{id}/export/omint.xlsx"): TODOS(Scope.FACTURACION_LEER, Scope.EXPORT_GENERAR),
@@ -521,6 +530,11 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     ("POST", "/api/facturacion/prestaciones"): Scope.FACTURACION_CARGAR,
     ("GET", "/api/facturacion/prestaciones/recientes"): Scope.FACTURACION_LEER,
     ("PATCH", "/api/facturacion/prestaciones/revisado"): Scope.FACTURACION_CARGAR,
+    ("GET", "/api/facturacion/prestaciones/{prestacion_id}/documentos"): Scope.FACTURACION_CARGAR,
+    ("POST", "/api/facturacion/prestaciones/{prestacion_id}/documentos"): Scope.FACTURACION_CARGAR,
+    ("PUT", "/api/facturacion/prestaciones/{prestacion_id}/documentos/{doc_id}"): Scope.FACTURACION_CARGAR,
+    ("DELETE", "/api/facturacion/prestaciones/{prestacion_id}/documentos/{doc_id}"): Scope.FACTURACION_CARGAR,
+    ("PATCH", "/api/facturacion/prestaciones/{prestacion_id}/documentos/orden"): Scope.FACTURACION_CARGAR,
     ("GET", "/api/facturacion/prestaciones/{id}"): Scope.FACTURACION_LEER,
     # Ficha completa de una prestación (pantalla de consulta, solo lectura).
     # `facturacion:leer` a secas y NO `LECTURA_FACTURACION`: la ficha es MÁS sensible
@@ -569,7 +583,13 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     ("POST", "/api/validaciones/prestaciones"): Scope.VALIDACION_CARGAR,
     ("DELETE", "/api/validaciones/prestaciones/{prestacion_id}"): Scope.VALIDACION_CARGAR,
     ("POST", "/api/validaciones/prestaciones/{prestacion_id}/orden"): Scope.VALIDACION_CARGAR,
+    ("POST", "/api/validaciones/prestaciones/documentada"): Scope.VALIDACION_CARGAR,
+    ("GET", "/api/validaciones/prestaciones/{prestacion_id}/documentos"): Scope.VALIDACION_CARGAR,
+    ("POST", "/api/validaciones/prestaciones/{prestacion_id}/documentos"): Scope.VALIDACION_CARGAR,
+    ("PUT", "/api/validaciones/prestaciones/{prestacion_id}/documentos/{doc_id}"): Scope.VALIDACION_CARGAR,
+    ("DELETE", "/api/validaciones/prestaciones/{prestacion_id}/documentos/{doc_id}"): Scope.VALIDACION_CARGAR,
     ("GET", "/api/validaciones/sancor/estado"): Scope.VALIDACION_CARGAR,
+    ("GET", "/api/validaciones/ospjn/estado"): Scope.VALIDACION_CARGAR,
     ("GET", "/api/validaciones/medicus/estado"): Scope.VALIDACION_CARGAR,
     ("GET", "/api/validaciones/medicus/elegibilidad"): Scope.VALIDACION_CARGAR,
     ("GET", "/api/validaciones/nobis/afiliado"): Scope.VALIDACION_CARGAR,
@@ -634,6 +654,7 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     # Etapa 3 — códigos por obra social (alta sin precio)
     ("GET", "/api/codigos_os/"): Scope.NOMENCLADOR_LEER,
     ("POST", "/api/codigos_os/alta"): Scope.NOMENCLADOR_EDITAR,
+    ("POST", "/api/codigos_os/acciones"): Scope.NOMENCLADOR_EDITAR,
     ("GET", "/api/codigos_os/{obra_social_nro}/{nomenclador_id}"): Scope.NOMENCLADOR_LEER,
     ("PATCH", "/api/codigos_os/{obra_social_nro}/{nomenclador_id}"): Scope.NOMENCLADOR_EDITAR,
     ("POST", "/api/codigos_os/{obra_social_nro}/{nomenclador_id}/suspender"): Scope.NOMENCLADOR_EDITAR,

@@ -1,7 +1,7 @@
 """Schemas del módulo de validaciones con obras sociales."""
 import datetime
 from decimal import Decimal
-from typing import Literal, Optional
+from typing import List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -13,6 +13,19 @@ from pydantic import BaseModel, ConfigDict, Field
 # adelante (ver `core/grabado.py`). Se conserva en el Literal porque hay filas
 # grabadas antes del cambio y el listado las tiene que poder devolver.
 EstadoPrestacion = Literal["autorizada", "rechazada", "pendiente", "cargada"]
+
+
+class DocumentoOut(BaseModel):
+    """Un archivo de la documentación digital de la prestación."""
+    id: int
+    nombre: str
+    # Pide token: se abre con `abrirAdjunto()`.
+    url: Optional[str] = None
+    content_type: str
+    size: int
+    origen: Literal["medico", "colegio"]
+    posicion: int = 0
+    created_at: Optional[datetime.datetime] = None
 
 
 class PrestacionOut(BaseModel):
@@ -36,8 +49,11 @@ class PrestacionOut(BaseModel):
     mes: int
     anio: int
     obra_social: int
-    # Ruta de la orden/receta adjunta (columna NOMBRE_ARCHIVO), si tiene.
+    # Primer documento adjunto, para el front anterior. El detalle está en `documentos`.
     orden: Optional[str] = None
+    # Documentación digital: los archivos y si la prestación la exige y la tiene.
+    documentos: List[DocumentoOut] = Field(default_factory=list)
+    documentacion: Literal["no_aplica", "falta", "completa"] = "no_aplica"
 
 
 class EntradaBase(BaseModel):
@@ -119,6 +135,8 @@ class CodigoOut(BaseModel):
     # precio vigente para esa obra social; `motivo` explica por qué.
     admitido: bool = True
     motivo: Optional[str] = None
+    # El código exige documentación digital en esa obra social: el formulario pide los archivos.
+    requiere_documentacion: bool = False
 
 
 class PrestadorOut(BaseModel):

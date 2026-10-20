@@ -41,7 +41,7 @@ from app.db.models.dispositivos_push import DispositivoPush
 # Padrón de OSPM: es `clientes_ospm`, la tabla del legacy (padrón único).
 from app.db.models.padron_ospm import ClientesOspm
 from app.db.models.cmc_facturacion import (
-    DetalleFacturacionCMC, FacturacionCMC, Afiliado, PeriodoMedicoActual, ExportPreset,
+    DetalleFacturacionCMC, DetalleDocumento, FacturacionCMC, Afiliado, PeriodoMedicoActual, ExportPreset,
 )
 from app.db.models.nomenclador_cmc import (
     NomencladorCMC, MedicoCodigoHabilitado,
@@ -104,7 +104,7 @@ __all__ = [
     "DispositivoPush",
     "ClientesOspm",
     # cmc_facturacion (detalle/facturacion CMC + padrón afiliado + período médico)
-    "DetalleFacturacionCMC", "FacturacionCMC", "Afiliado", "PeriodoMedicoActual", "ExportPreset",
+    "DetalleFacturacionCMC", "DetalleDocumento", "FacturacionCMC", "Afiliado", "PeriodoMedicoActual", "ExportPreset",
     # nomenclador / valores (sistema nuevo)
     "NomencladorCMC", "MedicoCodigoHabilitado",
     "Homologador", "Galeno", "GalenoPlantilla", "Valor", "ValorComponente",

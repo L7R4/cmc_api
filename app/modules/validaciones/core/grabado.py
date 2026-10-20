@@ -4,7 +4,7 @@ las obras sociales: cualquiera sea el validador, todas embudan acá.
 """
 import datetime
 from decimal import Decimal
-from typing import Optional
+from typing import Optional, Sequence
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,6 +19,7 @@ from app.modules.facturacion.service import (
     derivar_tipo,
     tpo_funcion_derivado,
 )
+from app.modules.facturacion import documentacion
 from app.modules.nomenclador import service as service_nm
 from app.modules.validaciones.core.periodos import partes_periodo
 
@@ -98,8 +99,12 @@ async def grabar_prestacion(
     validacion_respuesta: Optional[dict],
     fecha: datetime.date,
     usuario_carga: int,
+    documentos: Sequence[documentacion.ArchivoEscrito] = (),
 ) -> DetalleFacturacionCMC:
     """Graba la prestación validada en `detalle_facturacion`.
+
+    `documentos` son archivos ya escritos en disco: sus filas entran en la misma transacción
+    que la prestación. Si el commit falla, el que llama los borra.
 
     Mapeo de campos (el resto de las columnas son legacy y quedan en NULL):
 
@@ -178,6 +183,11 @@ async def grabar_prestacion(
     # único) — se deja igual al PK sólo para no dejar NULL una columna NOT NULL
     # legacy que liquidación (`nro_orden_cmc`) y lotes todavía leen para mostrar.
     fila.nro_orden = str(fila.id_detalle_prestaciones)
+
+    if documentos:
+        # Si el Colegio carga en nombre del médico, el documento es del Colegio.
+        origen = "medico" if int(usuario_carga) == int(medico.NRO_SOCIO) else "colegio"
+        await documentacion.registrar(db, fila.id_detalle_prestaciones, documentos, origen, usuario_carga)
 
     if factura:
         # Cabecera abierta para la OS+período; la crea si es la primera del período.

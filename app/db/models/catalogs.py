@@ -55,7 +55,8 @@ class ObrasSociales(Base):
     )
     plazo_vencimiento: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     # Día de corte de la ventana del período: 1 = mes completo (1 al último día del
-    # mes); 20 = del 20 al 20. Define a qué período pertenece una prestación según su
+    # mes); 20 = del 20 al 20; 31 = el último día de cada mes (se recorta al largo del
+    # mes, ver `service._dia_efectivo`). Define a qué período pertenece una prestación según su
     # fecha_practica y el plazo operativo de carga/cierre. Default 20 (la mayoría).
     dia_corte: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default=text("'20'")

@@ -183,9 +183,10 @@ class ObraSocialCreate(BaseModel):
     obra_social_principal_id: Optional[int] = None
     # Solo con cabecera: qué copiar de ella. Sin cabecera se rechaza.
     replicar: Optional[ReplicarAltaIn] = None
-    # Ventana del período: 1 = mes completo, 20 = del 20 al 20. El front envía 1 cuando
-    # el check "A mes completo" está marcado; default 20.
-    dia_corte: int = Field(20, ge=1, le=28)
+    # Ventana del período: 1 = mes completo, 20 = del 20 al 20, 31 = último día del mes
+    # (se recorta al largo de cada mes). El front envía 31 cuando el check "Último día del
+    # mes" está marcado; default 20.
+    dia_corte: int = Field(20, ge=1, le=31)
     # Habilita la documentación digital de las prestaciones (ver `documentacion.py`).
     documentacion_digital: bool = False
     contactos: List[ContactoIn] = Field(default_factory=list)
@@ -202,7 +203,7 @@ class ObraSocialUpdate(BaseModel):
     plazo_vencimiento: Optional[int] = None
     fecha_alta_convenio: Optional[date] = None
     obra_social_principal_id: Optional[int] = None
-    dia_corte: Optional[int] = Field(None, ge=1, le=28)
+    dia_corte: Optional[int] = Field(None, ge=1, le=31)
     documentacion_digital: Optional[bool] = None
     # Si se provee, reemplaza la lista completa
     contactos: Optional[List[ContactoIn]] = None

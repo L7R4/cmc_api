@@ -1,3 +1,4 @@
+import calendar
 import datetime
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -126,6 +127,8 @@ def tipo_de_categoria(categoria: Optional[str]) -> str:
 
 # Ventana por defecto cuando la OS no define `dia_corte` (20 = del 20 al 20).
 DIA_CORTE_DEFAULT = 20
+# `dia_corte` = 31 es "el último día del mes": se recorta al largo de cada mes (28/29/30/31).
+DIA_CORTE_ULTIMO = 31
 
 UPLOAD_ROOT_FACTURAS = os.path.join("uploads", "facturas")
 
@@ -489,6 +492,12 @@ def _add_month(year: int, month: int, delta: int) -> tuple[int, int]:
 
 
 # ── Ventana por OS (dia_corte) ───────────────────────────────────────────────
+def _dia_efectivo(dia_corte: int, year: int, month: int) -> int:
+    """`dia_corte` recortado al largo del mes: con 31 (o 30 en febrero) el corte cae
+    siempre en el último día real, sin desbordar a un día inexistente."""
+    return min(dia_corte, calendar.monthrange(year, month)[1])
+
+
 def fecha_a_periodo(fecha: datetime.date, dia_corte: int) -> str:
     """Período "YYYYMM" al que pertenece una fecha de servicio según la ventana de
     la OS.
@@ -500,7 +509,7 @@ def fecha_a_periodo(fecha: datetime.date, dia_corte: int) -> str:
       202607; 10/jun → 202606. La ventana de 202607 es [20/jun, 20/jul).
     """
     y, m = fecha.year, fecha.month
-    if dia_corte > 1 and fecha.day >= dia_corte:
+    if dia_corte > 1 and fecha.day >= _dia_efectivo(dia_corte, y, m):
         y, m = _add_month(y, m, 1)
     return f"{y}{m:02d}"
 
@@ -516,8 +525,8 @@ def ventana_periodo(periodo: str, dia_corte: int) -> tuple[datetime.date, dateti
         fin = datetime.date(fy, fm, 1)
     else:
         py, pm = _add_month(y, m, -1)
-        inicio = datetime.date(py, pm, dia_corte)
-        fin = datetime.date(y, m, dia_corte)
+        inicio = datetime.date(py, pm, _dia_efectivo(dia_corte, py, pm))
+        fin = datetime.date(y, m, _dia_efectivo(dia_corte, y, m))
     return inicio, fin
 
 
@@ -543,7 +552,7 @@ def periodo_medico_por_fecha(hoy: datetime.date, dia_corte: int) -> str:
     if dia_corte <= 1:
         return f"{hoy.year}{hoy.month:02d}"
     y, m = hoy.year, hoy.month
-    if hoy.day >= dia_corte + 1:
+    if hoy.day >= _dia_efectivo(dia_corte, y, m) + 1:
         y, m = _add_month(y, m, 1)
     return f"{y}{m:02d}"
 

@@ -7,10 +7,12 @@ from pydantic import BaseModel, Field
 
 
 class LoteAjusteCreate(BaseModel):
-    """Para obtener_o_crear un lote normal."""
+    """Para obtener_o_crear un lote normal: cuelga de una factura (original o complementaria).
+
+    El período sale de la propia factura, no se manda.
+    """
     obra_social_id: int
-    mes_periodo: int = Field(..., ge=1, le=12)
-    anio_periodo: int = Field(..., ge=1900, le=3000)
+    factura_id: int = Field(..., description="facturacion.id_prestaciones")
 
 
 class LoteCambiarEstadoPayload(BaseModel):
@@ -100,6 +102,7 @@ class LoteListaRow(BaseModel):
     pago_id: Optional[int] = None
     obra_social_id: int
     obra_social_nombre: str
+    factura_id: Optional[int] = None
     nro_factura: Optional[str] = None
     total_debitos: Decimal
     total_creditos: Decimal
@@ -112,6 +115,10 @@ class LoteAjusteRead(BaseModel):
     anio_periodo: int
     tipo: str
     snap_origen_id: Optional[int] = None
+    obra_social_nombre: Optional[str] = None
+    factura_id: Optional[int] = None
+    nro_factura: Optional[str] = None
+    factura_version: Optional[int] = None
     estado: str
     pago_id: Optional[int] = None
     total_debitos: Decimal

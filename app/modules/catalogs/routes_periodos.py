@@ -11,27 +11,31 @@ router = APIRouter()
 
 
 @router.get("/disponibles_lotes_ajustes")
-async def periodos_disponibles_lotes(
+async def facturas_disponibles_lotes(
     obra_social_id: int = Query(..., alias="obra_social_id"),
     anio: Optional[int] = Query(None),
     db: AsyncSession = Depends(get_db),
 ):
-    """Períodos con facturación CMC cerrada que aún no tienen lote 'normal' creado."""
+    """Facturas cerradas de la obra social que aún no tienen lote 'normal'.
+
+    Una por factura: la original y cada complementaria del mismo período aparecen
+    por separado, con su número, porque el lote cuelga de la factura.
+    """
     subq = (
         select(LoteAjuste.id)
         .where(
-            LoteAjuste.obra_social_id == obra_social_id,
-            LoteAjuste.anio_periodo == FacturacionCMC.periodo.op("DIV")(100),
-            LoteAjuste.mes_periodo == FacturacionCMC.periodo.op("%")(100),
+            LoteAjuste.factura_id == FacturacionCMC.id_prestaciones,
             LoteAjuste.tipo == "normal",
         )
         .limit(1)
     )
     stmt = (
         select(
+            FacturacionCMC.id_prestaciones,
             FacturacionCMC.periodo,
             FacturacionCMC.nro_factura,
             FacturacionCMC.tipo_factura,
+            FacturacionCMC.version,
             FacturacionCMC.estado,
         )
         .where(
@@ -39,18 +43,19 @@ async def periodos_disponibles_lotes(
             FacturacionCMC.estado.in_(["C", "L", "LC"]),
             not_(subq.exists()),
         )
-        .distinct()
-        .order_by(FacturacionCMC.periodo.desc())
+        .order_by(FacturacionCMC.periodo.desc(), FacturacionCMC.version)
     )
     if anio is not None:
         stmt = stmt.where(FacturacionCMC.periodo.startswith(str(anio)))
     rows = (await db.execute(stmt)).mappings().all()
     return [
         {
+            "FACTURA_ID": r["id_prestaciones"],
             "ANIO": int(r["periodo"][:4]),
             "MES": int(r["periodo"][4:]),
             "NRO_FACTURA": r["nro_factura"],
             "TIPO_FACTURA": r["tipo_factura"],
+            "VERSION": r["version"],
             "ESTADO": r["estado"],
             "PERIODO": r["periodo"],
         }

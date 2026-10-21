@@ -31,6 +31,11 @@ class LoteAjuste(AuditMixin, Base):
         server_default="normal",
     )
 
+    # Factura de la que cuelga el lote: facturacion.id_prestaciones (sin FK, tabla de CMC).
+    # Una OS+período puede tener la original y complementarias; NULL en los lotes
+    # anteriores a esta columna y en los sin_factura.
+    factura_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+
     # Para refacturaciones: qué lote está siendo corregido por este
     snap_origen_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("lote_ajuste.id"),

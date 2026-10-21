@@ -76,7 +76,12 @@ def _build_ajuste_read(ajuste: Ajuste, cmc_det=None, medico=None) -> AjusteRead:
     )
 
 
-def _lote_with_ajustes(lote: LoteAjuste, ajuste_rows=None) -> LoteAjusteRead:
+def _lote_with_ajustes(
+    lote: LoteAjuste,
+    ajuste_rows=None,
+    obra_social_nombre: Optional[str] = None,
+    factura: Optional[FacturacionCMC] = None,
+) -> LoteAjusteRead:
     if ajuste_rows is not None:
         ajustes = [_build_ajuste_read(a, cmc, med) for a, cmc, med in ajuste_rows]
     else:
@@ -84,6 +89,10 @@ def _lote_with_ajustes(lote: LoteAjuste, ajuste_rows=None) -> LoteAjusteRead:
     return LoteAjusteRead(
         id=lote.id,
         obra_social_id=lote.obra_social_id,
+        obra_social_nombre=obra_social_nombre,
+        factura_id=lote.factura_id,
+        nro_factura=factura.nro_factura if factura else None,
+        factura_version=factura.version if factura else None,
         mes_periodo=lote.mes_periodo,
         anio_periodo=lote.anio_periodo,
         tipo=lote.tipo,
@@ -108,6 +117,20 @@ async def _get_enriched_ajuste_rows(db: AsyncSession, lote_id: int):
     return (await db.execute(stmt)).all()
 
 
+async def _nombre_obra_social(db: AsyncSession, obra_social_id: int) -> Optional[str]:
+    return (await db.execute(
+        select(ObrasSociales.OBRA_SOCIAL).where(ObrasSociales.NRO_OBRASOCIAL == obra_social_id)
+    )).scalar_one_or_none()
+
+
+async def _respuesta_lote(db: AsyncSession, lote: LoteAjuste, rows=None) -> LoteAjusteRead:
+    """El lote con el nombre de su obra social y los datos de su factura."""
+    factura = await db.get(FacturacionCMC, lote.factura_id) if lote.factura_id else None
+    return _lote_with_ajustes(
+        lote, rows, await _nombre_obra_social(db, lote.obra_social_id), factura
+    )
+
+
 async def _get_lote_with_ajustes(db: AsyncSession, lote_id: int) -> LoteAjuste:
     stmt = (
         select(LoteAjuste)
@@ -128,16 +151,24 @@ async def obtener_o_crear_lote(
     payload: LoteAjusteCreate,
     db: AsyncSession = Depends(get_db),
 ):
-    """Devuelve el lote tipo='normal' existente para ese OS+período (en cualquier estado). Si no existe, crea uno en estado='A'. Solo puede haber un lote normal por OS+período."""
+    """Devuelve el lote tipo='normal' de esa factura; si no existe lo crea en estado 'A'.
+
+    Un lote normal por factura: la original y cada complementaria de un mismo
+    período tienen el suyo. El período del lote sale de la factura.
+    """
+    factura = await db.get(FacturacionCMC, payload.factura_id)
+    if not factura or str(factura.cod_obr) != str(payload.obra_social_id):
+        raise HTTPException(404, "La factura no existe o no es de esa obra social")
+    if factura.estado not in ("C", "L", "LC"):
+        raise HTTPException(409, "La factura todavía no está cerrada")
+    periodo = str(factura.periodo or "")
+    if len(periodo) != 6 or not periodo.isdigit():
+        raise HTTPException(422, f"La factura tiene un período inválido: '{periodo}'")
+
     stmt = (
         select(LoteAjuste)
         .options(selectinload(LoteAjuste.ajustes))
-        .where(
-            LoteAjuste.obra_social_id == payload.obra_social_id,
-            LoteAjuste.mes_periodo == payload.mes_periodo,
-            LoteAjuste.anio_periodo == payload.anio_periodo,
-            LoteAjuste.tipo == "normal",
-        )
+        .where(LoteAjuste.factura_id == factura.id_prestaciones, LoteAjuste.tipo == "normal")
         .limit(1)
     )
     lote = (await db.execute(stmt)).scalars().first()
@@ -145,8 +176,9 @@ async def obtener_o_crear_lote(
     if not lote:
         lote = LoteAjuste(
             obra_social_id=payload.obra_social_id,
-            mes_periodo=payload.mes_periodo,
-            anio_periodo=payload.anio_periodo,
+            factura_id=factura.id_prestaciones,
+            mes_periodo=int(periodo[4:]),
+            anio_periodo=int(periodo[:4]),
             tipo="normal",
             estado="A",
             total_debitos=Decimal("0"),
@@ -157,7 +189,7 @@ async def obtener_o_crear_lote(
         await db.refresh(lote)
 
     rows = await _get_enriched_ajuste_rows(db, lote.id)
-    return _lote_with_ajustes(lote, rows)
+    return await _respuesta_lote(db, lote, rows)
 
 
 # ================================================
@@ -268,6 +300,7 @@ async def listar_lotes_enriquecidos(
             LoteAjuste.mes_periodo,
             LoteAjuste.anio_periodo,
             LoteAjuste.pago_id,
+            LoteAjuste.factura_id,
             LoteAjuste.obra_social_id,
             LoteAjuste.total_debitos,
             LoteAjuste.total_creditos,
@@ -277,9 +310,14 @@ async def listar_lotes_enriquecidos(
         .join(ObrasSociales, ObrasSociales.NRO_OBRASOCIAL == LoteAjuste.obra_social_id)
         .outerjoin(
             FacturacionCMC,
-            (cast(FacturacionCMC.cod_obr, String) == cast(LoteAjuste.obra_social_id, String))
-            & (FacturacionCMC.periodo == periodo_expr)
-            & (FacturacionCMC.estado.in_(["C", "L", "LC"])),
+            or_(
+                FacturacionCMC.id_prestaciones == LoteAjuste.factura_id,
+                # Lotes anteriores a factura_id: se muestran todas las facturas del período.
+                (LoteAjuste.factura_id.is_(None))
+                & (cast(FacturacionCMC.cod_obr, String) == cast(LoteAjuste.obra_social_id, String))
+                & (FacturacionCMC.periodo == periodo_expr)
+                & (FacturacionCMC.estado.in_(["C", "L", "LC"])),
+            ),
         )
     )
 
@@ -302,22 +340,34 @@ async def listar_lotes_enriquecidos(
 
     rows = (await db.execute(stmt)).all()
 
-    return [
-        LoteListaRow(
-            id=row.id,
-            tipo=row.tipo,
-            estado=row.estado,
-            mes_periodo=row.mes_periodo,
-            anio_periodo=row.anio_periodo,
-            pago_id=row.pago_id,
-            obra_social_id=row.obra_social_id,
-            obra_social_nombre=row.obra_social_nombre,
-            nro_factura=row.nro_factura,
-            total_debitos=row.total_debitos,
-            total_creditos=row.total_creditos,
-        )
-        for row in rows
-    ]
+    # Un lote con factura_id trae una sola fila. Los lotes viejos (sin factura_id)
+    # traían una por cada factura del período: se juntan en una fila por lote y
+    # los números de factura se muestran juntos.
+    por_lote: dict[int, LoteListaRow] = {}
+    facturas: dict[int, list[str]] = {}
+    for row in rows:
+        if row.id not in por_lote:
+            por_lote[row.id] = LoteListaRow(
+                id=row.id,
+                tipo=row.tipo,
+                estado=row.estado,
+                mes_periodo=row.mes_periodo,
+                anio_periodo=row.anio_periodo,
+                pago_id=row.pago_id,
+                factura_id=row.factura_id,
+                obra_social_id=row.obra_social_id,
+                obra_social_nombre=row.obra_social_nombre,
+                nro_factura=None,
+                total_debitos=row.total_debitos,
+                total_creditos=row.total_creditos,
+            )
+            facturas[row.id] = []
+        nro = (row.nro_factura or "").strip()
+        if nro and nro not in facturas[row.id]:
+            facturas[row.id].append(nro)
+    for lote_id, lote_row in por_lote.items():
+        lote_row.nro_factura = " / ".join(facturas[lote_id]) or None
+    return list(por_lote.values())
 
 
 # ================================================
@@ -328,11 +378,24 @@ async def buscar_atenciones(
     obra_social_id: int = Query(...),
     mes_periodo: int = Query(..., ge=1, le=12),
     anio_periodo: int = Query(..., ge=1900, le=3000),
-    q: Optional[str] = Query(None, description="Buscar por cod_med, nom_ape_p o cod_nom"),
+    q: Optional[str] = Query(
+        None,
+        description="Número: id_detalle_prestaciones, nro_orden o nro de socio exactos. "
+                    "Texto: nombre del médico o del afiliado, o código de prestación.",
+    ),
+    factura_id: Optional[int] = Query(
+        None, description="Si se manda, sólo las prestaciones de esa factura (su versión)."
+    ),
     limit: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
 ):
-    """Busca prestaciones en detalle_facturacion (CMC) por OS + período."""
+    """Busca prestaciones en detalle_facturacion (CMC) por OS + período.
+
+    El identificador de la prestación que maneja el Colegio es
+    id_detalle_prestaciones (es el que queda en Ajuste.id_atencion), así que un
+    número se busca primero por ahí; nro_orden y nro de socio van exactos para
+    que "12" no traiga todo lo que contenga un 12.
+    """
     periodo = f"{anio_periodo}{mes_periodo:02d}"
     cod_obr = str(obra_social_id)
 
@@ -349,11 +412,27 @@ async def buscar_atenciones(
         )
     )
 
-    if q and q.strip():
-        term = f"%{q.strip()}%"
+    if factura_id is not None:
+        factura = await db.get(FacturacionCMC, factura_id)
+        if not factura or str(factura.cod_obr) != cod_obr:
+            raise HTTPException(404, "La factura no existe o no es de esa obra social")
+        stmt = stmt.where(DetalleFacturacionCMC.version == factura.version)
+
+    texto = (q or "").strip()
+    if texto.isdigit():
         stmt = stmt.where(
             or_(
-                DetalleFacturacionCMC.cod_med.like(term),
+                DetalleFacturacionCMC.id_detalle_prestaciones == int(texto),
+                DetalleFacturacionCMC.nro_orden == texto,
+                DetalleFacturacionCMC.cod_med == texto,
+                DetalleFacturacionCMC.cod_nom.like(f"{texto}%"),
+            )
+        )
+    elif texto:
+        term = f"%{texto}%"
+        stmt = stmt.where(
+            or_(
+                ListadoMedico.NOMBRE.ilike(term),
                 DetalleFacturacionCMC.nom_ape_p.ilike(term),
                 DetalleFacturacionCMC.cod_nom.like(term),
             )
@@ -362,22 +441,25 @@ async def buscar_atenciones(
     stmt = stmt.order_by(DetalleFacturacionCMC.fecha_practica.desc()).limit(limit)
     rows = (await db.execute(stmt)).all()
 
+    # cod_med, nro_orden y cod_obr son BIGINT/SMALLINT en la tabla aunque el
+    # modelo los declare String: el driver los devuelve como int y el schema
+    # (str) rechazaba cualquier búsqueda con resultados con un 500.
     return [
         PrestacionCMCSearchRow(
             id=r.DetalleFacturacionCMC.id_detalle_prestaciones,
-            cod_med=r.DetalleFacturacionCMC.cod_med,
+            cod_med=str(r.DetalleFacturacionCMC.cod_med),
             medico_nombre=r.medico_nombre,
             nom_ape_p=r.DetalleFacturacionCMC.nom_ape_p,
             cod_nom=r.DetalleFacturacionCMC.cod_nom,
             tpo_funcion=r.DetalleFacturacionCMC.tpo_funcion,
             fecha_practica=str(r.DetalleFacturacionCMC.fecha_practica) if r.DetalleFacturacionCMC.fecha_practica else None,
-            nro_orden=r.DetalleFacturacionCMC.nro_orden,
+            nro_orden=str(r.DetalleFacturacionCMC.nro_orden) if r.DetalleFacturacionCMC.nro_orden is not None else None,
             honorarios=r.DetalleFacturacionCMC.honorarios,
             gastos=r.DetalleFacturacionCMC.gastos,
             ayudante=r.DetalleFacturacionCMC.ayudante,
             importe_total=r.DetalleFacturacionCMC.importe_total,
             periodo=r.DetalleFacturacionCMC.periodo,
-            cod_obr=r.DetalleFacturacionCMC.cod_obr,
+            cod_obr=str(r.DetalleFacturacionCMC.cod_obr),
         )
         for r in rows
     ]
@@ -390,7 +472,7 @@ async def buscar_atenciones(
 async def obtener_lote(lote_id: int, db: AsyncSession = Depends(get_db)):
     lote = await _get_lote_with_ajustes(db, lote_id)
     rows = await _get_enriched_ajuste_rows(db, lote_id)
-    return _lote_with_ajustes(lote, rows)
+    return await _respuesta_lote(db, lote, rows)
 
 
 # ================================================
@@ -471,7 +553,7 @@ async def cambiar_estado_lote(
     await db.commit()
     lote_ret = await _get_lote_with_ajustes(db, lote_id)
     rows = await _get_enriched_ajuste_rows(db, lote_id)
-    return _lote_with_ajustes(lote_ret, rows)
+    return await _respuesta_lote(db, lote_ret, rows)
 
 
 # ================================================

@@ -123,6 +123,21 @@ async def _nombre_obra_social(db: AsyncSession, obra_social_id: int) -> Optional
     )).scalar_one_or_none()
 
 
+async def _factura_cerrada(
+    db: AsyncSession, obra_social_id: int, factura_id: int
+) -> tuple[FacturacionCMC, int, int]:
+    """La factura (de esa obra social, cerrada) y su (mes, año). 404/409/422 si no sirve."""
+    factura = await db.get(FacturacionCMC, factura_id)
+    if not factura or str(factura.cod_obr) != str(obra_social_id):
+        raise HTTPException(404, "La factura no existe o no es de esa obra social")
+    if factura.estado not in ("C", "L", "LC"):
+        raise HTTPException(409, "La factura todavía no está cerrada")
+    periodo = str(factura.periodo or "")
+    if len(periodo) != 6 or not periodo.isdigit():
+        raise HTTPException(422, f"La factura tiene un período inválido: '{periodo}'")
+    return factura, int(periodo[4:]), int(periodo[:4])
+
+
 async def _respuesta_lote(db: AsyncSession, lote: LoteAjuste, rows=None) -> LoteAjusteRead:
     """El lote con el nombre de su obra social y los datos de su factura."""
     factura = await db.get(FacturacionCMC, lote.factura_id) if lote.factura_id else None
@@ -156,14 +171,7 @@ async def obtener_o_crear_lote(
     Un lote normal por factura: la original y cada complementaria de un mismo
     período tienen el suyo. El período del lote sale de la factura.
     """
-    factura = await db.get(FacturacionCMC, payload.factura_id)
-    if not factura or str(factura.cod_obr) != str(payload.obra_social_id):
-        raise HTTPException(404, "La factura no existe o no es de esa obra social")
-    if factura.estado not in ("C", "L", "LC"):
-        raise HTTPException(409, "La factura todavía no está cerrada")
-    periodo = str(factura.periodo or "")
-    if len(periodo) != 6 or not periodo.isdigit():
-        raise HTTPException(422, f"La factura tiene un período inválido: '{periodo}'")
+    factura, mes, anio = await _factura_cerrada(db, payload.obra_social_id, payload.factura_id)
 
     stmt = (
         select(LoteAjuste)
@@ -177,8 +185,8 @@ async def obtener_o_crear_lote(
         lote = LoteAjuste(
             obra_social_id=payload.obra_social_id,
             factura_id=factura.id_prestaciones,
-            mes_periodo=int(periodo[4:]),
-            anio_periodo=int(periodo[:4]),
+            mes_periodo=mes,
+            anio_periodo=anio,
             tipo="normal",
             estado="A",
             total_debitos=Decimal("0"),
@@ -201,27 +209,40 @@ async def crear_lote_refacturacion(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Crea un lote tipo='refacturacion'. Sin restricción de cantidad por OS+período
-    ni por lote origen — antes existía uq_lote_origen (un solo lote de
-    refacturación por snap_origen_id), que este mismo docstring ya decía que
-    no existía; se sacó la constraint para que el código y el comentario
-    dejen de contradecirse (ver diagnóstico M6).
+    Crea un lote tipo='refacturacion' que corrige una factura. Sin restricción de
+    cantidad por factura: cada nueva refacturación toma como origen la anterior
+    (la cadena evita chocar con uq_lote_origen, que en las bases donde sigue
+    creada permite un solo lote por snap_origen_id; ver diagnóstico M6).
     """
+    factura, mes, anio = await _factura_cerrada(db, payload.obra_social_id, payload.factura_id)
+
+    origen_id = payload.snap_origen_id
+    if origen_id is None:
+        origen_id = (await db.execute(
+            select(LoteAjuste.id)
+            .where(
+                LoteAjuste.factura_id == factura.id_prestaciones,
+                LoteAjuste.tipo.in_(["normal", "refacturacion"]),
+            )
+            # La última refacturación; si no hay, el lote normal.
+            .order_by((LoteAjuste.tipo == "refacturacion").desc(), LoteAjuste.id.desc())
+            .limit(1)
+        )).scalar_one_or_none()
+
     lote = LoteAjuste(
         obra_social_id=payload.obra_social_id,
-        mes_periodo=payload.mes_periodo,
-        anio_periodo=payload.anio_periodo,
+        factura_id=factura.id_prestaciones,
+        mes_periodo=mes,
+        anio_periodo=anio,
         tipo="refacturacion",
-        snap_origen_id=payload.snap_origen_id,
+        snap_origen_id=origen_id,
         estado="A",
         total_debitos=Decimal("0"),
         total_creditos=Decimal("0"),
     )
     db.add(lote)
-    await db.flush()
     await db.commit()
-    await db.refresh(lote)
-    return _lote_with_ajustes(lote)
+    return await _respuesta_lote(db, await _get_lote_with_ajustes(db, lote.id), [])
 
 
 # ================================================
@@ -244,8 +265,7 @@ async def crear_lote_sin_factura(
     )
     db.add(lote)
     await db.commit()
-    await db.refresh(lote)
-    return _lote_with_ajustes(lote)
+    return await _respuesta_lote(db, await _get_lote_with_ajustes(db, lote.id), [])
 
 
 # ================================================
@@ -282,6 +302,9 @@ async def listar_lotes_por_os_periodo(
 @router.get("/snaps/lista", response_model=List[LoteListaRow])
 async def listar_lotes_enriquecidos(
     tipo: Optional[str] = Query(None, description="normal | refacturacion | sin_factura"),
+    excluir_tipo: Optional[str] = Query(
+        None, description="Todos menos este tipo (Débitos y créditos no lista las refacturaciones)."
+    ),
     mes: Optional[int] = Query(None, ge=1, le=12),
     anio: Optional[int] = Query(None, ge=1900),
     obra_social_id: Optional[int] = Query(None),
@@ -301,6 +324,7 @@ async def listar_lotes_enriquecidos(
             LoteAjuste.anio_periodo,
             LoteAjuste.pago_id,
             LoteAjuste.factura_id,
+            LoteAjuste.snap_origen_id,
             LoteAjuste.obra_social_id,
             LoteAjuste.total_debitos,
             LoteAjuste.total_creditos,
@@ -323,6 +347,8 @@ async def listar_lotes_enriquecidos(
 
     if tipo:
         stmt = stmt.where(LoteAjuste.tipo == tipo)
+    if excluir_tipo:
+        stmt = stmt.where(LoteAjuste.tipo != excluir_tipo)
     if mes is not None:
         stmt = stmt.where(LoteAjuste.mes_periodo == mes)
     if anio is not None:
@@ -355,6 +381,7 @@ async def listar_lotes_enriquecidos(
                 anio_periodo=row.anio_periodo,
                 pago_id=row.pago_id,
                 factura_id=row.factura_id,
+                snap_origen_id=row.snap_origen_id,
                 obra_social_id=row.obra_social_id,
                 obra_social_nombre=row.obra_social_nombre,
                 nro_factura=None,

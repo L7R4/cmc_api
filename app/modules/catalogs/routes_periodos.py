@@ -14,9 +14,14 @@ router = APIRouter()
 async def facturas_disponibles_lotes(
     obra_social_id: int = Query(..., alias="obra_social_id"),
     anio: Optional[int] = Query(None),
+    incluir_con_lote: bool = Query(
+        False,
+        description="Incluye también las facturas que ya tienen lote (para refacturar, "
+                    "que se puede hacer varias veces sobre la misma factura).",
+    ),
     db: AsyncSession = Depends(get_db),
 ):
-    """Facturas cerradas de la obra social que aún no tienen lote 'normal'.
+    """Facturas cerradas de la obra social; por defecto, las que aún no tienen lote 'normal'.
 
     Una por factura: la original y cada complementaria del mismo período aparecen
     por separado, con su número, porque el lote cuelga de la factura.
@@ -41,10 +46,11 @@ async def facturas_disponibles_lotes(
         .where(
             FacturacionCMC.cod_obr == str(obra_social_id),
             FacturacionCMC.estado.in_(["C", "L", "LC"]),
-            not_(subq.exists()),
         )
         .order_by(FacturacionCMC.periodo.desc(), FacturacionCMC.version)
     )
+    if not incluir_con_lote:
+        stmt = stmt.where(not_(subq.exists()))
     if anio is not None:
         stmt = stmt.where(FacturacionCMC.periodo.startswith(str(anio)))
     rows = (await db.execute(stmt)).mappings().all()

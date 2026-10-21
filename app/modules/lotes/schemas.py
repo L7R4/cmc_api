@@ -20,10 +20,13 @@ class LoteCambiarEstadoPayload(BaseModel):
 
 
 class LoteRefacturacionCreate(BaseModel):
-    """Para crear un lote de refacturación."""
+    """Para crear un lote de refacturación: corrige una factura (original o complementaria).
+
+    El período sale de la factura. Si no se manda `snap_origen_id`, el origen es el
+    último lote de esa factura (la última refacturación, o el lote normal).
+    """
     obra_social_id: int
-    mes_periodo: int = Field(..., ge=1, le=12)
-    anio_periodo: int = Field(..., ge=1900, le=3000)
+    factura_id: int = Field(..., description="facturacion.id_prestaciones")
     snap_origen_id: Optional[int] = None
 
 
@@ -103,6 +106,7 @@ class LoteListaRow(BaseModel):
     obra_social_id: int
     obra_social_nombre: str
     factura_id: Optional[int] = None
+    snap_origen_id: Optional[int] = None
     nro_factura: Optional[str] = None
     total_debitos: Decimal
     total_creditos: Decimal

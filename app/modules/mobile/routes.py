@@ -24,13 +24,14 @@ from sqlalchemy import and_, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import sessions
-from app.auth.deps import get_current_user_with_scopes_and_role, get_user_role
-from app.auth.permissions import get_effective_permission_codes
+from app.auth.deps import get_current_user_with_scopes_and_role
 from app.core import ratelimit
 from app.core.passwords import verify_and_upgrade
 from app.core.security import create_access_token, decode_token
 from app.db.database import get_db
 from app.db.models import Especialidad, ListadoMedico
+from app.auth.identidad import SinAcceso, construir_usuario
+from app.db.models.medico import ESTADO_ACTIVO
 from app.db.models.catalogs import ObrasSociales
 from app.db.models.legacy import MedicoObraSocial
 from app.modules.catalogs.familia_padron import mapa_codigo_a_raiz
@@ -359,7 +360,8 @@ async def perfil(
         codigo_postal=_clean(getattr(user, "CODIGO_POSTAL", None)),
         sexo=(user.SEXO if getattr(user, "SEXO", None) in ("M", "F") else None),
         fecha_nac=getattr(user, "FECHA_NAC", None),
-        existe=getattr(user, "EXISTE", "N") or "N",
+        estado_cuenta=user.estado_cuenta,
+        existe="S" if user.estado_cuenta == ESTADO_ACTIVO else "N",
         categoria=(str(getattr(user, "CATEGORIA", "") or "").strip() or None),
         condicion_impositiva=_clean(getattr(user, "condicion_impositiva", None)),
         monotributista=(
@@ -475,7 +477,7 @@ async def credencial(
         titulo=("Dra." if getattr(user, "SEXO", None) == "F" else "Dr."),
         documento=_to_int(getattr(user, "DOCUMENTO", None)),
         especialidad_principal=(especialidades[0].nombre if especialidades else None),
-        activo=(getattr(user, "EXISTE", "N") == "S"),
+        activo=(user.estado_cuenta == ESTADO_ACTIVO),
         emitida=datetime.date.today(),
     )
 
@@ -743,9 +745,18 @@ class MobileRefreshIn(BaseModel):
     refresh_token: str
 
 
-async def _issue_session(
+async def _usuario_o_403(db: AsyncSession, medico: ListadoMedico, *, status: int) -> tuple[dict, list[str], str]:
+    try:
+        return await construir_usuario(db, medico)
+    except SinAcceso as e:
+        raise HTTPException(status, e.mensaje)
+
+
+def _issue_session(
     medico: ListadoMedico,
-    db: AsyncSession,
+    usuario: dict,
+    scopes: list[str],
+    role: str,
     *,
     refresh: str,
 ) -> dict:
@@ -756,8 +767,6 @@ async def _issue_session(
     existente y tiene que revocar la anterior en la misma operación. Ver
     app/auth/sessions.py.
     """
-    scopes = await get_effective_permission_codes(db, medico.ID)
-    role = await get_user_role(db, medico.ID)
     access = create_access_token(
         sub=str(medico.NRO_SOCIO), uid=medico.ID, scopes=scopes, role=role
     )
@@ -765,19 +774,7 @@ async def _issue_session(
         "access_token": access,
         "refresh_token": refresh,
         "token_type": "bearer",
-        "user": {
-            "id": medico.ID,
-            "nro_socio": medico.NRO_SOCIO,
-            "nombre": getattr(medico, "NOMBRE", None),
-            "scopes": scopes,
-            "role": role,
-            "ingresar": getattr(medico, "INGRESAR", None),
-            "especialidades": _especialidades_medico(medico),
-            "es_organizacion": getattr(medico, "es_organizacion", False),
-            # El app manda a la pantalla de cambio de contraseña antes de
-            # mostrar nada: la cuenta todavía tiene la clave inicial pública.
-            "must_change_password": bool(getattr(medico, "must_change_password", False)),
-        },
+        "user": usuario,
     }
 
 
@@ -798,15 +795,15 @@ async def mobile_login(
     if not medico:
         ratelimit.registrar_fallo(req, body.nro_socio)
         raise HTTPException(401, "Usuario inválido")
-    if getattr(medico, "EXISTE", "N") != "S":
-        raise HTTPException(403, "Tu registro está pendiente de aprobación")
     if not await verify_and_upgrade(db, medico, body.password):
         ratelimit.registrar_fallo(req, body.nro_socio)
         raise HTTPException(401, "Credenciales inválidas")
 
     ratelimit.registrar_exito(req, body.nro_socio)
+    # Con la contraseña ya verificada, igual que el login web.
+    usuario, scopes, role = await _usuario_o_403(db, medico, status=403)
     refresh = await sessions.emitir_refresh(db, medico, origen="mobile", request=req)
-    return await _issue_session(medico, db, refresh=refresh)
+    return _issue_session(medico, usuario, scopes, role, refresh=refresh)
 
 
 @router.post("/auth/refresh")
@@ -839,6 +836,8 @@ async def mobile_refresh(
     if not medico:
         raise HTTPException(401, "Usuario no encontrado")
 
+    # Antes de rotar: una cuenta inactiva o sin rol no recibe un refresh nuevo.
+    usuario, scopes, role = await _usuario_o_403(db, medico, status=401)
     try:
         refresh = await sessions.rotar_refresh(
             db, medico, payload.get("jti"), origen="mobile", request=req
@@ -846,7 +845,7 @@ async def mobile_refresh(
     except sessions.SesionInvalida as e:
         raise HTTPException(401, e.codigo)
 
-    return await _issue_session(medico, db, refresh=refresh)
+    return _issue_session(medico, usuario, scopes, role, refresh=refresh)
 
 
 @router.post("/auth/logout")

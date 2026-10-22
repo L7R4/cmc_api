@@ -64,7 +64,7 @@ CAMPOS_NUNCA_EDITABLES: frozenset[str] = frozenset(
         "matricula_prov",
         "matricula_nac",
         "categoria",
-        "existe",
+        "estado_cuenta",
         "fecha_ingreso",
         "anssal",
     }

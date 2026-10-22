@@ -449,7 +449,7 @@ async def _medico(db):
 
     return (await db.execute(
         select(ListadoMedico).where(
-            ListadoMedico.EXISTE == "S", ListadoMedico.es_organizacion == 0, ListadoMedico.MATRICULA_PROV > 0,
+            ListadoMedico.estado_cuenta == "activo", ListadoMedico.es_organizacion == 0, ListadoMedico.MATRICULA_PROV > 0,
         ).limit(1)
     )).scalars().first()
 

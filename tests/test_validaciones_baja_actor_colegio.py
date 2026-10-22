@@ -107,3 +107,38 @@ def test_actor_para_distingue_medico_de_colegio():
     assert actor_para({"nro_socio": "123"}, 123) == ORIGEN_MEDICO
     assert actor_para({"nro_socio": "123"}, 456) == ORIGEN_COLEGIO
     assert actor_para({"nro_socio": None}, 456) == ORIGEN_COLEGIO
+
+
+# ── Documentos: mismo criterio de cierre que la baja ─────────────────────────
+# Agregar, reemplazar o quitar documentos también modifica la prestación: con la
+# fase médico cerrada, el médico no puede (el gate corre antes de tocar archivos).
+@pytest.mark.asyncio
+async def test_medico_no_puede_agregar_documentos_con_su_fase_cerrada(db, cabecera_medico_cerrado):
+    prestacion_id = _insertar_prestacion()
+    with pytest.raises(HTTPException) as exc:
+        await pipeline.agregar_documentos(db, prestacion_id, NRO_MEDICO, [], ORIGEN_MEDICO, NRO_MEDICO)
+    assert exc.value.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_medico_no_puede_reemplazar_ni_quitar_documentos_con_su_fase_cerrada(
+    db, cabecera_medico_cerrado
+):
+    prestacion_id = _insertar_prestacion()
+    with pytest.raises(HTTPException) as exc:
+        await pipeline.reemplazar_documento(
+            db, prestacion_id, NRO_MEDICO, 1, None, ORIGEN_MEDICO, NRO_MEDICO,
+        )
+    assert exc.value.status_code == 409
+    with pytest.raises(HTTPException) as exc:
+        await pipeline.eliminar_documento(db, prestacion_id, NRO_MEDICO, 1, ORIGEN_MEDICO)
+    assert exc.value.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_colegio_pasa_el_gate_de_documentos_con_la_fase_medico_cerrada(
+    db, cabecera_medico_cerrado
+):
+    prestacion_id = _insertar_prestacion()
+    fila = await pipeline._prestacion_del_socio(db, prestacion_id, NRO_MEDICO)
+    await pipeline._exigir_periodo_abierto(db, fila, ORIGEN_COLEGIO, "agregar documentación")  # no levanta

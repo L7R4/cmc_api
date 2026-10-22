@@ -115,6 +115,16 @@ async def _prestacion_del_socio(
     return fila
 
 
+async def _exigir_periodo_abierto(
+    db: AsyncSession, fila: DetalleFacturacionCMC, actor: str, accion: str,
+) -> None:
+    """409 si `actor` ya no puede operar el período de la prestación — mismo criterio
+    que la baja (`periodo_cerrado`): la fase médico cerrada bloquea al médico, y el
+    Colegio sigue pudiendo mientras su propia fase siga abierta."""
+    if await periodo_cerrado(db, int(fila.cod_obr), fila.periodo, actor):
+        raise HTTPException(409, f"El período ya está cerrado: no se puede {accion}.")
+
+
 async def _salida(db: AsyncSession, fila: DetalleFacturacionCMC) -> dict:
     descripciones = await _descripciones(db, [fila])
     salida = to_dict(fila, descripciones.get(fila.id_detalle_prestaciones, ""))
@@ -133,6 +143,7 @@ async def agregar_documentos(
 ) -> dict:
     """Suma archivos a la documentación de la prestación (PDF, JPG o PNG, por su contenido real)."""
     fila = await _prestacion_del_socio(db, prestacion_id, nro_socio)
+    await _exigir_periodo_abierto(db, fila, origen, "agregar documentación")
     await documentacion.agregar(db, fila, archivos, origen, subido_por)
     await db.refresh(fila)
     return await _salida(db, fila)
@@ -153,16 +164,18 @@ async def reemplazar_documento(
     origen: str, subido_por,
 ) -> dict:
     fila = await _prestacion_del_socio(db, prestacion_id, nro_socio)
+    await _exigir_periodo_abierto(db, fila, origen, "reemplazar documentación")
     await documentacion.reemplazar(db, fila, doc_id, archivo, origen, subido_por)
     await db.refresh(fila)
     return await _salida(db, fila)
 
 
 async def eliminar_documento(
-    db: AsyncSession, prestacion_id: int, nro_socio: int, doc_id: int,
+    db: AsyncSession, prestacion_id: int, nro_socio: int, doc_id: int, actor: str = ORIGEN_MEDICO,
 ) -> dict:
     """El médico no puede dejar la prestación sin documentos si los exige (409)."""
     fila = await _prestacion_del_socio(db, prestacion_id, nro_socio)
+    await _exigir_periodo_abierto(db, fila, actor, "eliminar documentación")
     await documentacion.eliminar(db, fila, doc_id, es_medico=True)
     await db.refresh(fila)
     return await _salida(db, fila)

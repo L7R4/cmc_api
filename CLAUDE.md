@@ -109,6 +109,8 @@ app/
 - **Scopes en JWT**: los códigos de permiso se inyectan en el token al hacer login; `require_scope("codigo")` los valida como dependencia FastAPI.
 - **Override de permiso**: `UserPermission.allow=True` concede aunque el rol no lo tenga; `allow=False` deniega aunque el rol sí lo tenga.
 - **Todos los endpoints requieren** scope `rbac:gestionar`.
+- **Quién entra y quién es médico** (`app/auth/identidad.py`): sólo inicia sesión una cuenta con `listado_medico.estado_cuenta='activo'` y al menos un rol. Con varios roles manda el de más alcance (`JERARQUIA_ROLES`). "Es médico" = rol `medico`. `EXISTE` e `INGRESAR` quedaron en la tabla del sistema viejo y **no se usan**. `construir_usuario()` arma el usuario de login, refresh, `/me` y el app móvil: un campo nuevo va ahí y en ningún otro lado.
+- **Estado de la cuenta**: se cambia sólo con `cambiar_estado_cuenta()` (`modules/medicos/service.py`), que corta las sesiones al salir de `activo` y asigna el rol base si falta al activar.
 
 #### Solicitudes
 

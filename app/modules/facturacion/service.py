@@ -36,6 +36,8 @@ from app.db.models import (
     PeriodoMedicoActual,
     Valor,
 )
+from app.auth.identidad import asignar_rol_base_si_falta
+from app.db.models.medico import ESTADO_ACTIVO
 from app.modules.medicos.helpers import parse_conceps_espec
 from app.modules.nomenclador import service as service_nm
 from app.modules.facturacion import documentacion
@@ -387,15 +389,16 @@ async def crear_clinica(db: AsyncSession, payload: ClinicaCreate) -> dict:
         # su NRO_SOCIO, así queda identificable donde el resto del panel busca por
         # MATRICULA_PROV (ver `buscar_medicos`, más arriba).
         MATRICULA_PROV=nuevo_cod,
-        # `ListadoMedico.EXISTE` tiene server_default 'N' (pensado para médicos que
-        # se dan de alta por el flujo de solicitud/aprobación); acá se fuerza a 'S'
-        # porque el alta rápida de clínica queda operativa de inmediato.
-        EXISTE="S",
+        # `estado_cuenta` nace en 'pendiente' (el flujo de solicitud/aprobación);
+        # el alta rápida de clínica queda operativa de inmediato.
+        estado_cuenta=ESTADO_ACTIVO,
         es_organizacion=True,
         # Única columna de la tabla sin server_default — sin esto el INSERT falla.
         hashed_password=hash_password_inicial(),
     )
     db.add(clinica)
+    await db.flush()
+    await asignar_rol_base_si_falta(db, clinica.ID)
     await db.commit()
     await db.refresh(clinica)
     return {
@@ -941,7 +944,7 @@ async def check_medico_activo(db: AsyncSession, cod_medico: str) -> ListadoMedic
         raise HTTPException(422, f"Código de médico '{cod_medico}' inválido")
     stmt = select(ListadoMedico).where(ListadoMedico.NRO_SOCIO == nro)
     medico = (await db.execute(stmt)).scalar_one_or_none()
-    if not medico or medico.EXISTE != "S":
+    if not medico or medico.estado_cuenta != ESTADO_ACTIVO:
         raise HTTPException(422, f"Médico {cod_medico} inexistente o inactivo")
     return medico
 

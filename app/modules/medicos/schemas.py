@@ -4,6 +4,9 @@ from typing import Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+# `listado_medico.estado_cuenta`. Reemplaza al `EXISTE` ('S'/'N') del sistema viejo.
+EstadoCuenta = Literal["pendiente", "activo", "baja"]
+
 # ---------------------------------------------------------------------------
 # User-facing helpers (used in medicos routes)
 # ---------------------------------------------------------------------------
@@ -16,7 +19,6 @@ FIELD_MAP = {
     "documento": "DOCUMENTO",
     "cuit": "CUIT",
     "fecha_nac": "FECHA_NAC",
-    "existe": "EXISTE",
     "provincia": "PROVINCIA",
     "localidad": "localidad",
     "codigo_postal": "CODIGO_POSTAL",
@@ -49,15 +51,6 @@ DATE_KEYS = {
     "fecha_ingreso",
     "vencimiento_anssal", "vencimiento_malapraxis", "vencimiento_cobertura",
 }
-
-
-def _coerce_existe(v):
-    if v is None:
-        return None
-    s = str(v).strip().upper()
-    if s in ("S", "N"):
-        return s
-    return "S" if s in ("1", "TRUE", "T", "SI", "SÍ", "Y", "YES", "ON") else "N"
 
 
 def _coerce_sexo(v):
@@ -97,10 +90,9 @@ class UserOut(BaseModel):
     nro_socio: int
     nombre: Optional[str] = None
     scopes: List[str] = []
+    # Rol principal (app/auth/identidad.py). El front decide con él nav, home y
+    # recorte de rutas: `role == "medico"` es un socio.
     role: Optional[str] = None
-    # `listado_medico.INGRESAR` — 'D' = médico, 'E'/'A' = personal del Colegio.
-    # El front lo usa para elegir nav y home dentro de /panel (isMedico()).
-    ingresar: Optional[str] = None
     es_organizacion: bool = False
     adherente: bool = False
     # Especialidades del médico (ID_COLEGIO_ESPE) en orden de prioridad: principal
@@ -159,14 +151,13 @@ class MedicoBase(BaseModel):
     fecha_vitalicio: Optional[date] = Field(None)
     observacion: Optional[str] = Field(None)
     categoria: Optional[str] = Field(None)
-    existe: Optional[str] = Field(None)
+    estado_cuenta: Optional[EstadoCuenta] = Field(None)
     excep_desde: Optional[str] = Field(None)
     excep_hasta: Optional[str] = Field(None)
     excep_desde2: Optional[str] = Field(None)
     excep_hasta2: Optional[str] = Field(None)
     excep_desde3: Optional[str] = Field(None)
     excep_hasta3: Optional[str] = Field(None)
-    ingresar: Optional[str] = Field(None)
     cbu: Optional[str] = Field(None)
     nro_resolucion: Optional[str] = Field(None)
     fecha_resolucion: Optional[date] = Field(None)
@@ -210,7 +201,7 @@ class MedicoListRow(BaseModel):
     fecha_ingreso: Optional[str] = None
     documento: Optional[str] = None
     activo: bool = False
-    existe: Optional[str] = None
+    estado_cuenta: Optional[EstadoCuenta] = None
 
     @field_validator("nro_socio", mode="before")
     @classmethod
@@ -278,7 +269,7 @@ class MedicoDetailOut(BaseModel):
     provincia: Optional[str] = None
     codigo_postal: Optional[str] = None
     categoria: Optional[str] = None
-    existe: Optional[str] = None
+    estado_cuenta: Optional[EstadoCuenta] = None
     fecha_nac: Optional[date] = None
     localidad: Optional[str] = None
     domicilio_particular: Optional[str] = None
@@ -301,9 +292,9 @@ class MedicoDetailOut(BaseModel):
     cbu: Optional[str] = None
     observacion: Optional[str] = None
     es_organizacion: Optional[bool] = None
-    # `listado_medico.INGRESAR` — 'D' = médico, 'E'/'A' = personal del Colegio.
-    # La credencial lo usa para no titular "Dr./Dra." a quien no es médico.
-    ingresar: Optional[str] = None
+    # Rol principal del legajo. La credencial lo usa para no titular "Dr./Dra."
+    # a quien no es médico (`rol != "medico"`).
+    rol: Optional[str] = None
     adherente: Optional[bool] = None
     interior: Optional[bool] = None
     attach_titulo: Optional[str] = None
@@ -321,7 +312,7 @@ class MedicoDetailOut(BaseModel):
     @field_validator(
         "telefono_consulta", "domicilio_consulta", "mail_particular",
         "sexo", "tipo_doc", "documento", "cuit", "provincia",
-        "codigo_postal", "categoria", "existe",
+        "codigo_postal", "categoria",
         "localidad", "domicilio_particular", "tele_particular",
         "celular_particular", "titulo", "nro_resolucion",
         mode="before",
@@ -364,7 +355,6 @@ class MedicoUpdateIn(BaseModel):
     documento: Optional[str] = None
     cuit: Optional[str] = None
     fecha_nac: Optional[str] = None
-    existe: Optional[str] = None
     provincia: Optional[str] = None
     localidad: Optional[str] = None
     codigo_postal: Optional[str] = None
@@ -398,7 +388,7 @@ class MedicoUpdateIn(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     @field_validator(
-        "name", "nombre_", "apellido", "sexo", "documento", "cuit", "existe", "provincia",
+        "name", "nombre_", "apellido", "sexo", "documento", "cuit", "provincia",
         "localidad", "codigo_postal", "domicilio_particular", "tele_particular",
         "celular_particular", "mail_particular", "categoria", "titulo",
         "domicilio_consulta", "telefono_consulta", "condicion_impositiva",
@@ -563,8 +553,8 @@ class SaveContinueOut(BaseModel):
     ok: bool = True
 
 
-class ExisteIn(BaseModel):
-    existe: Literal["S", "N"]
+class EstadoCuentaIn(BaseModel):
+    estado_cuenta: EstadoCuenta
 
 
 class OrganizacionIn(BaseModel):

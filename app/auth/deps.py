@@ -5,7 +5,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import decode_token
 from app.db.database import get_db
-from app.db.models import ListadoMedico, Role, UserRole
+from app.db.models import ListadoMedico
+from app.auth.identidad import SinAcceso, exigir_acceso, rol_principal
 from app.auth.permissions import get_effective_permission_codes
 
 
@@ -90,18 +91,8 @@ def require_scope(scope: str):
 
 
 async def get_user_role(db: AsyncSession, user_id: int) -> str | None:
-    """
-    Devuelve el nombre del rol (Role.name) del usuario.
-    Si el usuario tuviera más de un rol, devuelve el primero encontrado.
-    """
-    q = (
-        select(Role.name)
-        .select_from(UserRole)
-        .join(Role, Role.id == UserRole.role_id)
-        .where(UserRole.user_id == user_id)
-        .limit(1)
-    )
-    return (await db.execute(q)).scalar_one_or_none()
+    """Rol principal del usuario: con varios, el de más alcance (ver `identidad.JERARQUIA_ROLES`)."""
+    return await rol_principal(db, user_id)
 
 
 async def get_current_user_with_scopes_and_role(
@@ -127,7 +118,7 @@ async def get_current_user_with_scopes_and_role(
         raise HTTPException(status_code=401, detail="Token inválido (sub)")
 
     # `sub` es SIEMPRE el NRO_SOCIO — lo emiten así los tres puntos que crean
-    # access tokens (/auth/login, /auth/legacy-sso-accept y el login móvil).
+    # access tokens (/auth/login, /auth/refresh y el login y refresh móviles).
     # Acá había una segunda consulta idéntica como supuesto "fallback por ID",
     # que consultaba la misma columna y por lo tanto no podía encontrar nada que
     # la primera no hubiera encontrado ya. Ver A10.
@@ -141,11 +132,15 @@ async def get_current_user_with_scopes_and_role(
     if not user:
         raise HTTPException(status_code=401, detail="Usuario no encontrado")
 
+    # El rol se lee de la base y no del claim del token, igual que los scopes: un
+    # cambio de rol hecho por SQL no tiene que esperar a que venza el access.
+    role = await rol_principal(db, user.ID)
+    try:
+        exigir_acceso(user, role)
+    except SinAcceso as e:
+        # 401 para la cuenta inactiva: el front intenta /auth/refresh, que también
+        # la rechaza, y termina en el login con el motivo. Sin rol es 403.
+        raise HTTPException(401 if e.codigo == "cuenta_inactiva" else 403, e.mensaje)
+
     scopes = await get_effective_permission_codes(db, user.ID)
-
-    # ① Preferimos el claim del token si viene; ② sino, lo leemos de DB
-    role = payload.get("role") or await get_user_role(db, user.ID)
-    if not role:
-        raise HTTPException(status_code=409, detail="El usuario no tiene rol asignado")
-
     return user, scopes, role

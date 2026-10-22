@@ -1,12 +1,24 @@
 import datetime
 from typing import Optional
 
-from sqlalchemy import JSON, Boolean, Column, Date, DateTime, ForeignKey, Index, Integer, String, text
+from sqlalchemy import JSON, Boolean, Column, Date, DateTime, Enum, ForeignKey, Index, Integer, String, text
 from sqlalchemy.dialects.mysql import INTEGER
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
 
 from app.db.base import Base
+
+ESTADO_PENDIENTE = "pendiente"
+ESTADO_ACTIVO = "activo"
+ESTADO_BAJA = "baja"
+ESTADOS_CUENTA = (ESTADO_PENDIENTE, ESTADO_ACTIVO, ESTADO_BAJA)
+
+
+def mensaje_cuenta_inactiva(estado: str) -> str:
+    """Lo que ve en el login quien no tiene la cuenta `activo`."""
+    if estado == ESTADO_BAJA:
+        return "Tu cuenta está dada de baja. Comunicate con el Colegio."
+    return "Tu registro está pendiente de aprobación"
 
 
 class ListadoMedico(Base):
@@ -52,7 +64,7 @@ class ListadoMedico(Base):
     VITALICIO: Mapped[str] = mapped_column(String(1, 'utf8_spanish2_ci'), nullable=False, server_default=text("'N'"))
     OBSERVACION: Mapped[str] = mapped_column(String(200, 'utf8_spanish2_ci'), nullable=False, server_default=text("'A'"))
     CATEGORIA: Mapped[str] = mapped_column(String(1, 'utf8_spanish2_ci'), nullable=False, server_default=text("'A'"))
-    EXISTE: Mapped[str] = mapped_column(String(1, 'utf8_spanish2_ci'), nullable=False, server_default=text("'N'"))
+    # `EXISTE` sigue en la tabla pero ya no se mapea: lo reemplaza `estado_cuenta`.
     NRO_ESPECIALIDAD6: Mapped[int] = mapped_column(INTEGER(11), nullable=False, server_default=text("'0'"))
     EXCEP_DESDE: Mapped[str] = mapped_column(String(6, 'utf8_spanish2_ci'), nullable=False, server_default=text("'0'"))
     EXCEP_HASTA: Mapped[str] = mapped_column(String(6, 'utf8_spanish2_ci'), nullable=False, server_default=text("'0'"))
@@ -60,7 +72,7 @@ class ListadoMedico(Base):
     EXCEP_HASTA2: Mapped[str] = mapped_column(String(6, 'utf8_spanish2_ci'), nullable=False, server_default=text("'0'"))
     EXCEP_DESDE3: Mapped[str] = mapped_column(String(6, 'utf8_spanish2_ci'), nullable=False, server_default=text("'0'"))
     EXCEP_HASTA3: Mapped[str] = mapped_column(String(6, 'utf8_spanish2_ci'), nullable=False, server_default=text("'0'"))
-    INGRESAR: Mapped[str] = mapped_column(String(1, 'utf8_spanish2_ci'), nullable=False, server_default=text("'D'"), comment='D=DOCTOR / E=EMPLEADOS DEL COLEGIO / A ADMINISTRADOR')
+    # `INGRESAR` sigue en la tabla pero ya no se mapea: quién es médico lo dice el rol RBAC.
     FECHA_RECIBIDO: Mapped[Optional[datetime.date]] = mapped_column(Date)
     FECHA_MATRICULA: Mapped[Optional[datetime.date]] = mapped_column(Date)
     FECHA_INGRESO: Mapped[Optional[datetime.date]] = mapped_column(Date)
@@ -108,6 +120,15 @@ class ListadoMedico(Base):
     must_change_password: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="0"
     )
+
+    # Reemplaza a `EXISTE`, que usaba 'N' tanto para "pendiente" como para "baja".
+    # Sólo `activo` puede iniciar sesión. Se cambia con `cambiar_estado_cuenta()`
+    # (app/modules/medicos/service.py), que además corta las sesiones al dar de baja.
+    estado_cuenta: Mapped[str] = mapped_column(
+        Enum(*ESTADOS_CUENTA, name="estado_cuenta_enum"),
+        nullable=False, default=ESTADO_PENDIENTE, server_default=ESTADO_PENDIENTE, index=True,
+    )
+    estado_cuenta_at: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime, nullable=True)
 
     # Corte de sesiones (A7/A12). Todo access token emitido ANTES de esta marca
     # queda inválido, aunque no haya vencido. Se pisa con NOW() al cambiar la

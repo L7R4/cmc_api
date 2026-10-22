@@ -57,7 +57,7 @@ class Scope(StrEnum):
     # La contracara de LIQUIDACION_LEER para el socio: su propia liquidación en
     # "Mi perfil". **Todavía no gatea ningún endpoint** — la API no tiene hoy un
     # "mi liquidación"; se da de alta para que el front lo tenga disponible
-    # cuando exista, igual que se hizo con PANEL_INGRESAR. Cuando ese endpoint
+    # cuando exista. Cuando ese endpoint
     # se escriba, va a la matriz como tupla junto a LIQUIDACION_LEER y el
     # handler acota con ownership, no la matriz.
     LIQUIDACION_LEER_PROPIO = "liquidacion:leer_propio"
@@ -175,22 +175,6 @@ class Scope(StrEnum):
     AUDITORIA_LEER = "auditoria:leer"
     AUDITORIA_PURGAR = "auditoria:purgar"
     EXPORT_GENERAR = "export:generar"
-
-    # TEMPORAL — habilita a un médico puntual a quedarse en el panel nuevo
-    # después del login en vez de ir al legacy. No gatea ningún endpoint: la
-    # API ya autoriza por rol `medico`. Se otorga nominalmente vía
-    # `UserPermission.allow`, nunca por rol. Borrar al cerrar la prueba.
-    PANEL_INGRESAR = "panel:ingresar"
-
-    # No gatea ningún endpoint de esta API: **lo consume el front legacy**, que
-    # con `cmc_has('system_new:access')` decide si muestra el link "INGRESAR
-    # NUEVO SISTEMA" (legacy_cmc_php/src/{principal,principal3,
-    # calcular_valores_colegio}.php). Estuvo listado como obsoleto por error —
-    # ningún `require_scope` lo nombraba, y de ahí la conclusión equivocada de
-    # que nadie lo usaba. Borrarlo le saca la puerta de entrada al panel nuevo
-    # a los 19 admins de producción. Va por rol (`admin`), a diferencia de
-    # PANEL_INGRESAR.
-    SYSTEM_NEW_ACCESS = "system_new:access"
 
 
 # ── Las cuatro operaciones más peligrosas ────────────────────────────────────
@@ -375,12 +359,7 @@ ROLES: dict[str, set[Scope]] = {
     # la versión acotada de otros que `admin` ya tiene enteros: dárselos no
     # agregaría ningún acceso y sí ensuciaría el token con scopes que en un
     # admin no significan nada.
-    #
-    # PANEL_INGRESAR también queda afuera: es la bandera temporal de la prueba
-    # controlada del panel nuevo, y si `admin` la llevara, los administradores
-    # dejarían de ir al legacy tras el login, que es donde hacen su trabajo real.
     "admin": set(Scope) - {
-        Scope.PANEL_INGRESAR,
         Scope.MEDICO_LEER_PROPIO,
         Scope.FACTURACION_LEER_PROPIO,
         Scope.LIQUIDACION_LEER_PROPIO,
@@ -430,12 +409,11 @@ CODIGOS_OBSOLETOS: frozenset[str] = frozenset({
     "solicitudes:gestionar",        # → solicitud:resolver
     "solicitudes_cambio:gestionar",  # → solicitud:resolver
     "web:editor",
+    # Sólo servían para elegir entre el legacy y el panel nuevo tras el login.
+    # El legacy se apagó (2026-10-21): todos entran al panel.
+    "panel:ingresar",
+    "system_new:access",
 })
-
-# `system_new:access` estuvo en esta lista y **no correspondía**: no lo usa
-# ningún endpoint, pero sí el front legacy. Ver `Scope.SYSTEM_NEW_ACCESS`. El
-# criterio para dar de baja un código pasa a ser "no lo nombra ni la API ni el
-# legacy ni el panel", no sólo "no lo nombra la API".
 
 # Roles que se borran de la base. `contador` es A14: ver la nota en ROLES.
 # El test `test_el_rol_contador_no_existe` verifica que no vuelva.
@@ -507,6 +485,4 @@ DESCRIPCIONES: dict[Scope, str] = {
     Scope.AUDITORIA_LEER: "Consultar el registro de auditoría",
     Scope.AUDITORIA_PURGAR: "Purgar el registro de auditoría",
     Scope.EXPORT_GENERAR: "Generar exportaciones a Excel",
-    Scope.PANEL_INGRESAR: "Ingreso al panel nuevo (prueba controlada, temporal)",
-    Scope.SYSTEM_NEW_ACCESS: "Ingreso al nuevo sistema (link en el menú del legacy)",
 }

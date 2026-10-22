@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.common.money import quantize_money
 from app.db.models import DetalleFacturacionCMC, FacturacionCMC, ListadoMedico
+from app.db.models.medico import ESTADO_ACTIVO
 from app.modules.facturacion.service import FACTURA_ESTADOS_CERRADOS
 from app.modules.importaciones.schemas import (
     CandidatoSocio,
@@ -147,7 +148,7 @@ def sugerir_socio(
     """Entre varios socios con la misma matrícula, el único activo que ya facturó a la O.S."""
     activos = [
         c for c in candidatos
-        if (c.EXISTE or "").upper() == "S" and c.NRO_SOCIO in ya_facturan
+        if c.estado_cuenta == ESTADO_ACTIVO and c.NRO_SOCIO in ya_facturan
     ]
     return activos[0] if len(activos) == 1 else None
 

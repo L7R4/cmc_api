@@ -219,7 +219,7 @@ CHEQUEOS: tuple[Chequeo, ...] = (
             "revisar si corresponde darlos de baja o reactivarlos."
         ),
         severidad="info",
-        where="EXISTE <> 'S' OR EXISTE IS NULL",
+        where="estado_cuenta <> 'activo'",
     ),
 )
 
@@ -229,7 +229,7 @@ POR_ID = {c.id: c for c in CHEQUEOS}
 # identificar el legajo y entender el problema, nada más.
 _COLS = (
     "ID, NRO_SOCIO, NOMBRE, DOCUMENTO, MATRICULA_PROV, "
-    "FECHA_NAC, MAIL_PARTICULAR, EXISTE"
+    "FECHA_NAC, MAIL_PARTICULAR, estado_cuenta"
 )
 
 
@@ -303,7 +303,7 @@ async def detalle(db: AsyncSession, chequeo_id: str, limit: int = 50) -> list[di
             # columna y la configuración: se contemplan los dos.
             "fecha_nac": _fecha(f["FECHA_NAC"]),
             "email": f["MAIL_PARTICULAR"],
-            "activo": (f["EXISTE"] or "").upper() == "S",
+            "activo": f["estado_cuenta"] == "activo",
         }
         for f in filas
     ]

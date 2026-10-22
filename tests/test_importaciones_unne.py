@@ -43,9 +43,9 @@ def test_especialista_va_todo_a_honorarios_y_solo_avisa_si_difiere():
 
 
 def test_sugiere_el_unico_activo_que_ya_factura_unne():
-    a = SimpleNamespace(NRO_SOCIO=1, EXISTE="S")
-    b = SimpleNamespace(NRO_SOCIO=2, EXISTE="N")
-    c = SimpleNamespace(NRO_SOCIO=3, EXISTE="S")
+    a = SimpleNamespace(NRO_SOCIO=1, estado_cuenta="activo")
+    b = SimpleNamespace(NRO_SOCIO=2, estado_cuenta="baja")
+    c = SimpleNamespace(NRO_SOCIO=3, estado_cuenta="activo")
     assert sugerir_socio([a, b], {1, 2}) is a
     assert sugerir_socio([a, c], {1, 3}) is None  # dos activos: que elija la persona
     assert sugerir_socio([a, c], set()) is None

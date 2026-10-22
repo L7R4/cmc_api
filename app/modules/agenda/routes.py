@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.deps import get_current_user
 from app.db.database import get_db
 from app.db.models import AgendaEvento, ListadoMedico, Role, UserRole
+from app.db.models.medico import ESTADO_ACTIVO
 from app.modules.agenda.schemas import EventoIn, EventoOut, OcurrenciaOut, ResponsableOut
 
 router = APIRouter()  # El scope lo declara app/auth/authz.py::SCOPES_POR_RUTA (fuente unica de autorizacion).
@@ -180,7 +181,7 @@ async def listar_responsables(
         select(ListadoMedico.ID, ListadoMedico.NOMBRE, ListadoMedico.NRO_SOCIO, Role.name)
         .join(UserRole, UserRole.user_id == ListadoMedico.ID)
         .join(Role, Role.id == UserRole.role_id)
-        .where(Role.name != "medico", ListadoMedico.EXISTE == "S")
+        .where(Role.name != "medico", ListadoMedico.estado_cuenta == ESTADO_ACTIVO)
     )
 
     # Se agrupa en Python porque una persona puede tener más de un rol y la

@@ -24,7 +24,6 @@ PUBLIC_ROUTES: set[tuple[str, str]] = {
     ("POST", "/auth/login"),
     ("POST", "/auth/refresh"),      # se autentica con la cookie + CSRF, no con Bearer
     ("POST", "/auth/logout"),       # tiene que funcionar con el access ya vencido
-    ("GET", "/auth/legacy-sso-accept"),  # entrada desde el legacy, validada por HMAC
 
     # ── Autenticación del app móvil ──────────────────────────────────────────
     ("POST", "/api/mobile/auth/login"),

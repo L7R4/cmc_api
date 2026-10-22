@@ -39,15 +39,17 @@ from app.db.models import (
 from app.modules.medicos.schemas import (
     DATE_KEYS, FIELD_MAP, AdminSaveContinueIn, AsignarEspecialidadIn, AsociarConceptoIn,
     CEAppOut, CEBundleOut, CEBundlePatchIn, CEStoreOut, ConceptRecordOut, ConceptoAplicacionOut,
-    DoctorStatsPointOut, ExisteIn, MedicoBase, MedicoConceptoOut, MedicoDebtOut, MedicoDocOut,
+    DoctorStatsPointOut, EstadoCuentaIn, MedicoBase, MedicoConceptoOut, MedicoDebtOut, MedicoDocOut,
     MedicoEspecialidadOut, MedicoListRow, MedicoDetailOut, MedicoPartialIn, MedicoUpdateIn,
     NuevaDeudaIn, OrganizacionIn, PatchCEIn, RegisterIn, RegisterOut, ResetPasswordIn,
     SaveContinueOut,
-    _coerce_existe, _coerce_sexo,
+    _coerce_sexo,
 )
 from app.services.email import send_email_resend
 from app.core.config import settings
-from app.modules.medicos.service import create_medico_and_solicitud, save_medico_admin_draft
+from app.auth.identidad import rol_principal
+from app.db.models.medico import ESTADO_ACTIVO
+from app.modules.medicos.service import cambiar_estado_cuenta, create_medico_and_solicitud, save_medico_admin_draft
 
 router = APIRouter()
 
@@ -100,9 +102,9 @@ MEDICO_ALL_FIELDS = [
     "fecha_nac", "cuit", "condicion_impositiva", "anssal", "vencimiento_anssal",
     "malapraxis", "vencimiento_malapraxis", "monotributista", "factura",
     "cobertura", "vencimiento_cobertura", "provincia", "localidad", "codigo_postal",
-    "vitalicio", "fecha_vitalicio", "observacion", "categoria", "existe",
+    "vitalicio", "fecha_vitalicio", "observacion", "categoria", "estado_cuenta",
     "excep_desde", "excep_hasta", "excep_desde2", "excep_hasta2",
-    "excep_desde3", "excep_hasta3", "ingresar", "cbu", "nro_resolucion",
+    "excep_desde3", "excep_hasta3", "cbu", "nro_resolucion",
     "fecha_resolucion", "es_organizacion", "adherente", "interior",
     "conceps_espec", "attach_titulo", "attach_matricula_nac",
     "attach_matricula_prov", "attach_resolucion", "attach_habilitacion_municipal",
@@ -138,7 +140,7 @@ MEDICO_DATE_FIELDS = {
 MEDICO_TEXT_DATE_FIELDS: set = set()
 
 MEDICO_EXACT_STRING_FIELDS = {
-    "existe", "sexo", "categoria", "ingresar", "vitalicio",
+    "estado_cuenta", "sexo", "categoria", "vitalicio",
     "monotributista", "factura", "tipo_doc", "condicion_impositiva",
 }
 
@@ -166,11 +168,10 @@ async def listar_medicos(
     doc_str = cast(ListadoMedico.DOCUMENTO, String).label("documento")
 
     activo_expr = case(
-        (func.upper(func.trim(ListadoMedico.EXISTE)) == literal("S"), literal(1)),
+        (ListadoMedico.estado_cuenta == literal(ESTADO_ACTIVO), literal(1)),
         else_=literal(0),
     ).label("activo")
     nro_expr = func.nullif(ListadoMedico.NRO_SOCIO, 0).label("nro_socio")
-    existe_raw = func.trim(ListadoMedico.EXISTE).label("existe")
 
     stmt = (
         select(
@@ -183,7 +184,7 @@ async def listar_medicos(
             ListadoMedico.TELE_PARTICULAR.label("tele_particular"),
             fecha_str,
             activo_expr,
-            existe_raw,
+            ListadoMedico.estado_cuenta.label("estado_cuenta"),
         )
         .order_by(ListadoMedico.NOMBRE.asc())
         .offset(skip)
@@ -191,9 +192,9 @@ async def listar_medicos(
     )
 
     if estado == "activos":
-        stmt = stmt.where(func.upper(func.trim(ListadoMedico.EXISTE)) == "S")
+        stmt = stmt.where(ListadoMedico.estado_cuenta == ESTADO_ACTIVO)
     elif estado == "inactivos":
-        stmt = stmt.where(func.upper(func.trim(ListadoMedico.EXISTE)) != "S")
+        stmt = stmt.where(ListadoMedico.estado_cuenta != ESTADO_ACTIVO)
 
     if q:
         pattern = f"%{q}%"
@@ -301,9 +302,9 @@ async def listar_medicos_full(
 
     if estado:
         if estado == "activos":
-            filters.append(func.upper(func.trim(ListadoMedico.EXISTE)) == "S")
+            filters.append(ListadoMedico.estado_cuenta == ESTADO_ACTIVO)
         elif estado == "inactivos":
-            filters.append(func.upper(func.trim(ListadoMedico.EXISTE)) != "S")
+            filters.append(ListadoMedico.estado_cuenta != ESTADO_ACTIVO)
 
     if tiene_malapraxis is True:
         filters.append(
@@ -468,7 +469,7 @@ async def contar_medicos(
     db: AsyncSession = Depends(get_db),
 ):
     M = ListadoMedico
-    stmt = select(func.count()).select_from(M).where(M.EXISTE == "S")
+    stmt = select(func.count()).select_from(M).where(M.estado_cuenta == ESTADO_ACTIVO)
     if q:
         like = f"%{q}%"
         stmt = stmt.where(
@@ -485,13 +486,13 @@ async def contar_medicos(
 
 @router.post("/register", response_model=RegisterOut)
 async def public_register_medico(body: RegisterIn, db: AsyncSession = Depends(get_db)):
-    med, sol = await create_medico_and_solicitud(db, body, existe="N")
+    med, sol = await create_medico_and_solicitud(db, body)
     return {"medico_id": med.ID, "solicitud_id": sol.id, "ok": True}
 
 
 @router.post("/admin/register", response_model=RegisterOut)
 async def admin_register_medico(body: RegisterIn, db: AsyncSession = Depends(get_db)):
-    med, sol = await create_medico_and_solicitud(db, body, existe="N")
+    med, sol = await create_medico_and_solicitud(db, body)
     return {"medico_id": med.ID, "solicitud_id": sol.id, "ok": True}
 
 
@@ -529,7 +530,7 @@ async def obtener_medico(
             ListadoMedico.PROVINCIA.label("provincia"),
             ListadoMedico.CODIGO_POSTAL.label("codigo_postal"),
             ListadoMedico.CATEGORIA.label("categoria"),
-            ListadoMedico.EXISTE.label("existe"),
+            ListadoMedico.estado_cuenta.label("estado_cuenta"),
             ListadoMedico.FECHA_NAC.label("fecha_nac"),
             ListadoMedico.localidad.label("localidad"),
             ListadoMedico.DOMICILIO_PARTICULAR.label("domicilio_particular"),
@@ -563,7 +564,6 @@ async def obtener_medico(
             ListadoMedico.attach_cbu.label("attach_cbu"),
             ListadoMedico.attach_dni.label("attach_dni"),
             ListadoMedico.es_organizacion.label("es_organizacion"),
-            ListadoMedico.INGRESAR.label("ingresar"),
             ListadoMedico.adherente.label("adherente"),
             ListadoMedico.interior.label("interior"),
         )
@@ -576,6 +576,7 @@ async def obtener_medico(
         raise HTTPException(status_code=404, detail="Médico no encontrado")
 
     d = dict(row)
+    d["rol"] = await rol_principal(db, medico_id)
 
     # Antes esto solo le pegaba una barra adelante y devolvía `/uploads/...`,
     # que Caddy servía sin autenticación. Ahora delega en el único lugar donde
@@ -683,8 +684,6 @@ async def update_medico(
         raise HTTPException(404, "Médico no encontrado")
 
     data = payload.model_dump(exclude_unset=True)
-    if "existe" in data:
-        data["existe"] = _coerce_existe(data["existe"])
     if "sexo" in data:
         data["sexo"] = _coerce_sexo(data["sexo"])
 
@@ -1426,15 +1425,15 @@ async def admin_save_continue(body: AdminSaveContinueIn, db: AsyncSession = Depe
     return {"medico_id": int(med.ID), "ok": True}
 
 
-@router.patch("/{medico_id}/existe")
-async def set_existe(medico_id: int, body: ExisteIn, db: AsyncSession = Depends(get_db)):
+@router.patch("/{medico_id}/estado")
+async def set_estado_cuenta(medico_id: int, body: EstadoCuentaIn, db: AsyncSession = Depends(get_db)):
+    """Activa, da de baja o vuelve a pendiente una cuenta. Fuera de `activo`, la
+    persona pierde sus sesiones en el acto (ver `cambiar_estado_cuenta`)."""
     med = await db.get(ListadoMedico, medico_id)
     if not med:
         raise HTTPException(404, "Médico no encontrado")
-    med.EXISTE = body.existe
-    await db.flush()
-    await db.commit()
-    return {"ok": True, "medico_id": medico_id, "EXISTE": med.EXISTE}
+    await cambiar_estado_cuenta(db, med, body.estado_cuenta)
+    return {"ok": True, "medico_id": medico_id, "estado_cuenta": med.estado_cuenta}
 
 
 @router.patch("/{medico_id}/organizacion")
@@ -1447,7 +1446,7 @@ async def set_organizacion(
     `GET /api/medicos/all?es_organizacion=1`. El endpoint faltaba: el front ya
     lo llamaba y recibía 404, así que el toggle no guardaba nada.
 
-    Va como PATCH de un solo campo —mismo criterio que `/{medico_id}/existe`— y
+    Va como PATCH de un solo campo —mismo criterio que `/{medico_id}/estado`— y
     no reusando `PUT /{medico_id}`: ese espera el legajo y pisaría con `None`
     cualquier campo que no venga, que es justo lo que no se quiere para un
     toggle de una casilla.

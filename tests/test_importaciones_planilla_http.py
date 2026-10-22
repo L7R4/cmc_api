@@ -48,7 +48,7 @@ def _medico():
         with con.cursor() as cur:
             cur.execute(
                 "SELECT NRO_SOCIO, MATRICULA_PROV FROM listado_medico "
-                "WHERE EXISTE='S' AND es_organizacion=0 AND MATRICULA_PROV>0 ORDER BY NRO_SOCIO LIMIT 1"
+                "WHERE estado_cuenta='activo' AND es_organizacion=0 AND MATRICULA_PROV>0 ORDER BY NRO_SOCIO LIMIT 1"
             )
             return cur.fetchone()
     finally:

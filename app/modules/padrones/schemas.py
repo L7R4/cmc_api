@@ -60,6 +60,40 @@ class PageMedicoOS(BaseModel):
     size: int = Field(ge=1, le=200)
 
 
+class CandidatoPadronOut(BaseModel):
+    """Un socio activo, con si ya figura en el padrón de la obra social pedida."""
+    ID: int
+    NRO_SOCIO: int
+    NOMBRE: str | None = None
+    MATRICULA_PROV: int | None = None
+    ESPECIALIDADES: list[str] = Field(default_factory=list)
+    ADHERIDO: bool
+
+
+class PageCandidatosPadron(BaseModel):
+    items: list[CandidatoPadronOut]
+    total: int = Field(ge=0)
+    page: int = Field(ge=1)
+    size: int = Field(ge=1, le=200)
+    # Sobre todos los socios activos, sin importar búsqueda ni vista.
+    adheridos: int = Field(ge=0)
+    sin_adherir: int = Field(ge=0)
+
+
+class AltaBajaMasivaIn(BaseModel):
+    """IDs de `listado_medico` (no N° de socio)."""
+    medico_ids: list[int] = Field(min_length=1, max_length=500)
+
+
+class AltaBajaMasivaOut(BaseModel):
+    # Socios a los que se les cambió algo.
+    procesados: int
+    # Adhesión: ya figuraban en todos los planes. Baja: no figuraban en ninguno.
+    sin_cambios: int
+    # IDs que no son socios activos o no existen: no se tocaron.
+    omitidos: list[int] = Field(default_factory=list)
+
+
 class AsignacionesOut(BaseModel):
     conceps: list[int] = Field(default_factory=list)
     espec: list[int] = Field(default_factory=list)

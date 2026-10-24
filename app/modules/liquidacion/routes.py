@@ -21,7 +21,6 @@ from app.modules.liquidacion.schemas import (
     DetalleVistaRow,
     LiquidacionCreate,
     LiquidacionRead,
-    ReciboAnularPayload,
     ReciboRead,
 )
 from app.modules.liquidacion.service import (
@@ -37,48 +36,43 @@ router = APIRouter()
 
 
 # ================================================
-# POST: Crear una liquidación por obra social
+# POST: Agregar una factura al pago
 # ================================================
 @router.post("/liquidaciones_por_os/crear", response_model=LiquidacionRead, status_code=201)
 async def crear_liquidacion(payload: LiquidacionCreate, db: AsyncSession = Depends(get_db)):
-    # Verificar pago existe y estado='A'
+    """Agrega al pago una factura (original o complementaria) con sus prestaciones cerradas."""
     pago = await db.get(Pago, payload.pago_id)
     if not pago:
         raise HTTPException(400, "pago_id inválido")
     if pago.estado != "A":
         raise HTTPException(409, "No se puede crear una liquidación en un pago cerrado")
 
-    # Verificar unicidad antes de crear
+    factura = await db.get(FacturacionCMC, payload.factura_id)
+    if not factura or str(factura.cod_obr) != str(payload.obra_social_id):
+        raise HTTPException(404, "La factura no existe o no es de esa obra social")
+    if factura.estado not in ("C", "L", "LC"):
+        raise HTTPException(409, "La factura todavía no está cerrada")
+    periodo = str(factura.periodo or "")
+    if len(periodo) != 6 or not periodo.isdigit():
+        raise HTTPException(422, f"La factura tiene un período inválido: '{periodo}'")
+
     existing = (await db.execute(
         select(Liquidacion.id).where(
             Liquidacion.pago_id == payload.pago_id,
-            Liquidacion.obra_social_id == payload.obra_social_id,
-            Liquidacion.mes_periodo == payload.mes_periodo,
-            Liquidacion.anio_periodo == payload.anio_periodo,
+            Liquidacion.factura_id == factura.id_prestaciones,
         ).limit(1)
     )).first()
     if existing:
-        raise HTTPException(409, "Ya existe una liquidación con esos datos en el pago")
-    else:
-        print("Creando nueva liquidación", payload)
-
-    periodo = f"{payload.anio_periodo}{payload.mes_periodo:02d}"
-
-    fac_cmc = (await db.execute(
-        select(FacturacionCMC).where(
-            FacturacionCMC.cod_obr == str(payload.obra_social_id),
-            FacturacionCMC.periodo == periodo,
-            FacturacionCMC.estado.in_(["C", "L", "LC"]),
-        ).order_by(FacturacionCMC.id_prestaciones.desc()).limit(1)
-    )).scalars().first()
-    nro_factura = fac_cmc.nro_factura if fac_cmc else None
+        raise HTTPException(409, "Esa factura ya está en el pago")
 
     liq = Liquidacion(
         pago_id=payload.pago_id,
         obra_social_id=payload.obra_social_id,
-        mes_periodo=payload.mes_periodo,
-        anio_periodo=payload.anio_periodo,
-        nro_factura=nro_factura,
+        mes_periodo=int(periodo[4:]),
+        anio_periodo=int(periodo[:4]),
+        nro_factura=factura.nro_factura,
+        factura_id=factura.id_prestaciones,
+        factura_version=factura.version,
         total_honorarios=Decimal("0"),
         total_gastos=Decimal("0"),
         total_bruto=Decimal("0"),
@@ -89,14 +83,29 @@ async def crear_liquidacion(payload: LiquidacionCreate, db: AsyncSession = Depen
     db.add(liq)
     await db.flush()
 
-    await build_detalles_from_cmc(db, liq.id)
+    resumen = await build_detalles_from_cmc(db, liq.id)
+    if not resumen["cargadas"]:
+        await db.rollback()
+        motivos = []
+        if resumen["sin_medico"]:
+            motivos.append(f"{resumen['sin_medico_cantidad']} sin médico en el padrón (socios {', '.join(map(str, resumen['sin_medico'][:10]))})")
+        if resumen["importe_cero"]:
+            motivos.append(f"{resumen['importe_cero']} con importe en 0")
+        if resumen["ya_liquidadas"]:
+            motivos.append(f"{resumen['ya_liquidadas']} ya liquidadas en otro pago")
+        raise HTTPException(
+            409,
+            "La factura no tiene prestaciones para liquidar"
+            + (f": {'; '.join(motivos)}." if motivos else "."),
+        )
+
     await recalcular_totales_de_liquidacion(db, liq.id)
     await db.flush()
     await generar_y_recalcular_porcentuales(db, payload.pago_id)
 
     await db.commit()
     await db.refresh(liq)
-    return liq
+    return LiquidacionRead.model_validate(liq).model_copy(update={"resumen_carga": resumen})
 
 
 # ================================================
@@ -142,22 +151,8 @@ async def eliminar_liquidacion(liquidacion_id: int, db: AsyncSession = Depends(g
     if pago and pago.estado != "A":
         raise HTTPException(409, "No se puede eliminar una liquidación de un pago cerrado")
 
-    # 409 si hay lotes en estado 'L' para esta OS+período en el mismo pago
-    # lote_activo = (await db.execute(
-    #     select(LoteAjuste.id).where(
-    #         LoteAjuste.pago_id == obj.pago_id,
-    #         LoteAjuste.obra_social_id == obj.obra_social_id,
-    #         LoteAjuste.mes_periodo == obj.mes_periodo,
-    #         LoteAjuste.anio_periodo == obj.anio_periodo,
-    #         LoteAjuste.estado == "L",
-    #     ).limit(1)
-    # )).first()
-    # if lote_activo:
-    #     raise HTTPException(
-    #         409,
-    #         "Hay un lote de ajustes en estado 'En liquidaciones' para esta factura. "
-    #         "Quitá el lote del pago antes de eliminar la liquidación."
-    #     )
+    # Un lote de esta factura que ya está en liquidación NO impide quitarla: los lotes pueden
+    # estar en el pago sin su factura (decisión del Colegio); sus ajustes siguen contando.
 
     # Médicos con detalle en esta liquidación: sin esto su PagoMedico/Recibo
     # queda con montos viejos hasta que alguien vuelva a abrir su vista a mano
@@ -264,26 +259,3 @@ async def detalle_recibo_endpoint(recibo_id: int, db: AsyncSession = Depends(get
         raise HTTPException(404, "Recibo no encontrado")
     return await detalle_recibo_medico(db, recibo.pago_id, recibo.medico_id, recibo)
 
-
-# ================================================
-# PUT: Anular un recibo
-# ================================================
-@router.put("/recibos/{recibo_id}/anular", response_model=ReciboRead)
-async def anular_recibo(
-    recibo_id: int,
-    payload: ReciboAnularPayload,
-    db: AsyncSession = Depends(get_db),
-):
-    """Solo se puede anular un recibo en estado 'emitido'."""
-    recibo = (await db.execute(select(Recibo).where(Recibo.id == recibo_id))).scalars().first()
-    if not recibo:
-        raise HTTPException(404, "Recibo no encontrado")
-    if recibo.estado == "anulado":
-        raise HTTPException(409, "El recibo ya está anulado")
-    if recibo.estado == "pagado":
-        raise HTTPException(409, "No se puede anular un recibo ya pagado")
-
-    recibo.estado = "anulado"
-    await db.commit()
-    await db.refresh(recibo)
-    return recibo

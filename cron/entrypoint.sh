@@ -17,7 +17,7 @@ ENDPOINT_AUDIT="${API_URL}/api/auditoria/purge-cron"
 
 cat > /etc/crontabs/root <<EOF
 ${CRON_SCHEDULE} curl -fsS -X POST -H "X-Cron-Secret: ${CRON_SECRET}" "${ENDPOINT}" >> /var/log/cron.log 2>&1
-# Retención de audit_log (AUDIT_RETENCION_MESES en la API), una vez por día a las 03:30.
+# Retención de audit_log_general (AUDIT_RETENCION_MESES en la API), una vez por día a las 03:30.
 30 3 * * * curl -fsS -X POST -H "X-Cron-Secret: ${CRON_SECRET}" "${ENDPOINT_AUDIT}" >> /var/log/cron.log 2>&1
 EOF
 

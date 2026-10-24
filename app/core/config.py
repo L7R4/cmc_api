@@ -90,7 +90,7 @@ class Settings(BaseSettings):
     # Secreto de máquina para endpoints llamados por el cron (no un JWT de usuario).
     CRON_SECRET: str | None = None
 
-    # Cuánto se conserva `audit_log` (guarda cuerpos de request, aunque tapados).
+    # Cuánto se conserva `audit_log_general` (guarda cuerpos de request, aunque tapados).
     # El cron diario borra lo más viejo; ver `POST /api/auditoria/purge-cron`.
     AUDIT_RETENCION_MESES: int = 12
 

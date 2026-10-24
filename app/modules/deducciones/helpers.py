@@ -30,6 +30,9 @@ TWOPLACES = Decimal("0.01")
 # nro_colegio de descuentos con base de cálculo especial
 NRO_COLEGIO_CONTRIB_HONORARIOS = 100  # base = suma de honorarios del médico
 NRO_COLEGIO_CONTRIB_GASTOS = 101      # base = suma de gastos del médico
+# Deuda de un médico que cobra menos de lo que debe (débitos > producción): la crea el
+# cierre del pago como deducción pendiente. Va en `cuota_nro` el id del pago que la originó.
+NRO_COLEGIO_SALDO_DEUDOR = 9900
 NRO_COLEGIO_IMPUESTO_LEY = 102        # Imp. Ley 25413
 
 # nro_colegio (no descuento_id/PK) con prioridad fija de cobro cuando el
@@ -154,6 +157,26 @@ async def _gastos_por_medico_en_pago(
     return {int(med_id): Decimal(suma or 0) for med_id, suma in q}
 
 
+async def _medicos_en_pago(db: AsyncSession, pago_id: int) -> set[int]:
+    """Médicos que participan en el pago: con prestaciones (detalle) o con algún ajuste en
+    un lote del pago. Un médico con sólo un crédito de un lote sin factura participa igual."""
+    con_detalle = (await db.execute(
+        select(DetalleLiquidacion.medico_id)
+        .select_from(DetalleLiquidacion)
+        .join(Liquidacion, Liquidacion.id == DetalleLiquidacion.liquidacion_id)
+        .where(Liquidacion.pago_id == pago_id)
+        .distinct()
+    )).scalars().all()
+    con_ajuste = (await db.execute(
+        select(Ajuste.medico_id)
+        .select_from(Ajuste)
+        .join(LoteAjuste, LoteAjuste.id == Ajuste.lote_id)
+        .where(LoteAjuste.pago_id == pago_id, LoteAjuste.estado.in_(["L", "AP"]))
+        .distinct()
+    )).scalars().all()
+    return {int(m) for m in con_detalle} | {int(m) for m in con_ajuste}
+
+
 async def _ajustes_por_medico_en_pago(
     db: AsyncSession, pago_id: int
 ) -> tuple[dict[int, Decimal], dict[int, Decimal]]:
@@ -232,6 +255,19 @@ async def _medicos_para_descuento(db: AsyncSession, desc_id: int) -> list[tuple[
         )
     )
     return list({(m, bool(p)) for m, p in res.all()})
+
+
+async def _pagadores_de_descuento(db: AsyncSession, desc_id: int) -> dict[int, int]:
+    """{medico_id: pagador_medico_id} de las asignaciones activas del descuento que tienen
+    pagador (otro médico, de cuya liquidación sale el descuento). Las demás no figuran."""
+    res = await db.execute(
+        select(SocioDescuento.medico_id, SocioDescuento.pagador_medico_id).where(
+            SocioDescuento.descuento_id == desc_id,
+            SocioDescuento.fecha_baja.is_(None),
+            SocioDescuento.pagador_medico_id.is_not(None),
+        )
+    )
+    return {int(m): int(p) for m, p in res.all()}
 
 
 def _calc_monto(
@@ -431,6 +467,12 @@ _ERRORES_ITEM = {
 def _handle_item_error(exc: ValueError) -> None:
     """Convierte un ValueError del service layer en HTTPException con código apropiado."""
     msg = str(exc)
+    if msg.startswith("pago_cerrado:"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Esta deducción ya se descontó en el pago {msg.split(':', 1)[1]}, que está cerrado: "
+                   "no se puede editar ni eliminar. Para corregirla, cargá un crédito o una deducción nueva.",
+        )
     entry = _ERRORES_ITEM.get(msg)
     if entry is None:
         for key, val in _ERRORES_ITEM.items():

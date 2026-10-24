@@ -219,6 +219,7 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     ("PATCH", "/api/especialidades/{id}"): Scope.CATALOGO_EDITAR,
     ("GET", "/api/periodos/disponibles"): Scope.CATALOGO_LEER,
     ("GET", "/api/periodos/disponibles_lotes_ajustes"): Scope.CATALOGO_LEER,
+    ("GET", "/api/periodos/facturas_para_pago"): Scope.CATALOGO_LEER,
 
     # ── Catálogos: valores boletín y éticos ──────────────────────────────────
     ("GET", "/api/valores/boletin"): Scope.CATALOGO_LEER,
@@ -417,7 +418,6 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     ("GET", "/api/liquidacion/liquidaciones_por_os/{liquidacion_id}/detalles_vista"): Scope.LIQUIDACION_LEER,
     ("GET", "/api/liquidacion/recibos/{recibo_id}"): Scope.RECIBO_LEER,
     ("GET", "/api/liquidacion/recibos/{recibo_id}/detalle"): Scope.RECIBO_LEER,
-    ("PUT", "/api/liquidacion/recibos/{recibo_id}/anular"): Scope.RECIBO_ANULAR,
 
     # ── Lotes de ajuste ──────────────────────────────────────────────────────
     ("GET", "/api/lotes/snaps/lista"): Scope.LOTE_LEER,
@@ -541,7 +541,7 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     ("GET", "/api/facturacion/prestaciones/{id}"): Scope.FACTURACION_LEER,
     # Ficha completa de una prestación (pantalla de consulta, solo lectura).
     # `facturacion:leer` a secas y NO `LECTURA_FACTURACION`: la ficha es MÁS sensible
-    # que `/prestaciones/{id}` — expone `usuario`, `calculo_snapshot` y el audit_log
+    # que `/prestaciones/{id}` — expone `usuario`, `calculo_snapshot` y el audit_log_general
     # con IPs y bodies. Mismo criterio de acceso administrativo que ese endpoint.
     ("GET", "/api/facturacion/prestaciones/{id}/ficha"): Scope.FACTURACION_LEER,
     ("PATCH", "/api/facturacion/prestaciones/{id}"): Scope.FACTURACION_CARGAR,

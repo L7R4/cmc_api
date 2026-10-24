@@ -20,6 +20,7 @@ from app.db.models import (
     Conceptos,
     DetalleLiquidacion,
     DetalleFacturacionCMC,
+    FacturacionCMC,
     ListadoMedico,
     Liquidacion,
     LoteAjuste,
@@ -64,32 +65,75 @@ _REPARTO_POR_FUNCION: dict[str, tuple[Optional[str], Optional[str]]] = {
 }
 
 
+def condicion_ajustes_de_liquidacion(liq: Liquidacion) -> list:
+    """Condiciones sobre LoteAjuste: los ajustes que le tocan a esta liquidación.
+
+    Los ajustes pertenecen al pago por `pago_id` (el operador pasa el lote a L y queda
+    en el pago abierto). Dentro del pago, un lote con factura se muestra en la
+    liquidación de esa factura; si esa factura no está en el pago, o el lote no tiene
+    factura (sin_factura), no se atribuye a ninguna liquidación, pero igual cuenta en
+    los totales del pago y de cada médico. Una liquidación anterior a `factura_id`
+    (NULL) conserva el criterio viejo: obra social + período, sólo lotes sin factura.
+    """
+    conds = [LoteAjuste.pago_id == liq.pago_id]
+    if liq.factura_id is not None:
+        conds.append(LoteAjuste.factura_id == liq.factura_id)
+    else:
+        conds += [
+            LoteAjuste.factura_id.is_(None),
+            LoteAjuste.obra_social_id == liq.obra_social_id,
+            LoteAjuste.mes_periodo == liq.mes_periodo,
+            LoteAjuste.anio_periodo == liq.anio_periodo,
+        ]
+    return conds
+
+
 # ================================================
 # Poblar detalles de liquidación desde detalle_facturacion (CMC)
 # ================================================
-async def build_detalles_from_cmc(db: AsyncSession, liquidacion_id: int) -> None:
+async def build_detalles_from_cmc(db: AsyncSession, liquidacion_id: int) -> dict:
+    """Copia las prestaciones cerradas de la factura al detalle de la liquidación.
+
+    Devuelve el resumen de la carga para mostrárselo al operador:
+    `total` (prestaciones cerradas de la factura), `cargadas`, `ya_liquidadas` (estaban en
+    otra liquidación), `sin_medico` (socios que no están en el padrón, descartadas),
+    `importe_cero` (descartadas) y `funcion_desconocida` (se cargaron igual como 'H').
+    """
+    resumen: dict = {
+        "total": 0, "cargadas": 0, "ya_liquidadas": 0,
+        "importe_cero": 0, "sin_medico": [], "funcion_desconocida": 0,
+    }
     liq = (await db.execute(
         select(Liquidacion).where(Liquidacion.id == liquidacion_id)
     )).scalars().first()
     if not liq:
-        return
+        return resumen
 
     anio, mes, os_id = int(liq.anio_periodo), int(liq.mes_periodo), int(liq.obra_social_id)
     periodo = f"{anio}{mes:02d}"
     cod_obr = str(os_id)
 
-    cmc_rows = (await db.execute(
-        select(DetalleFacturacionCMC).where(
-            DetalleFacturacionCMC.cod_obr == cod_obr,
-            DetalleFacturacionCMC.periodo == periodo,
-            # Prestaciones del Colegio cerradas (A→C). Los 'L' históricos de CMC
-            # quedan como histórico ya liquidado (decisión del negocio).
-            DetalleFacturacionCMC.estado == "C",
-        )
-    )).scalars().all()
+    filtros = [
+        DetalleFacturacionCMC.cod_obr == cod_obr,
+        DetalleFacturacionCMC.periodo == periodo,
+        # Prestaciones del Colegio cerradas (A→C). Los 'L' históricos de CMC
+        # quedan como histórico ya liquidado (decisión del negocio).
+        DetalleFacturacionCMC.estado == "C",
+    ]
+    if liq.factura_id is not None:
+        # Sólo las prestaciones de ESTA factura: la versión de la prestación es la de
+        # la factura (original = 1, complementarias = 2, 3…).
+        version = (await db.execute(
+            select(FacturacionCMC.version).where(FacturacionCMC.id_prestaciones == liq.factura_id)
+        )).scalar_one_or_none()
+        if version is not None:
+            filtros.append(DetalleFacturacionCMC.version == version)
 
+    cmc_rows = (await db.execute(select(DetalleFacturacionCMC).where(*filtros))).scalars().all()
+
+    resumen["total"] = len(cmc_rows)
     if not cmc_rows:
-        return
+        return resumen
 
     # Cargar de una vez todos los médicos involucrados para evitar N+1
     cod_meds = {r.cod_med for r in cmc_rows}
@@ -117,9 +161,13 @@ async def build_detalles_from_cmc(db: AsyncSession, liquidacion_id: int) -> None
 
     for df in cmc_rows:
         if df.id_detalle_prestaciones in existing_cmc:
+            resumen["ya_liquidadas"] += 1
             continue
 
-        medico_id = medico_map.get(df.cod_med)
+        # cod_med es BIGINT en detalle_facturacion: el driver lo devuelve int aunque el modelo
+        # diga String, y medico_map se arma con claves str. Sin el str() ninguna fila
+        # encontraba a su médico y la factura entraba al pago vacía.
+        medico_id = medico_map.get(str(df.cod_med))
         if medico_id is None:
             observados.append({
                 "cmc_detalle_id": df.id_detalle_prestaciones,
@@ -179,11 +227,18 @@ async def build_detalles_from_cmc(db: AsyncSession, liquidacion_id: int) -> None
         )
         db.add(detalle_item)
         existing_cmc.add(df.id_detalle_prestaciones)
+        resumen["cargadas"] += 1
 
     await db.flush()
 
     if observados:
         print(f"[build_detalles_from_cmc] Observaciones en liq {liquidacion_id}: {json.dumps(observados)}")
+
+    resumen["sin_medico"] = sorted({int(o["cod_med"]) for o in observados if o["razon"] == "medico_no_encontrado"})
+    resumen["sin_medico_cantidad"] = sum(1 for o in observados if o["razon"] == "medico_no_encontrado")
+    resumen["importe_cero"] = sum(1 for o in observados if o["razon"] == "importe_cero_o_negativo")
+    resumen["funcion_desconocida"] = sum(1 for o in observados if o["razon"] == "tpo_funcion_desconocido")
+    return resumen
 
 
 # ================================================
@@ -223,10 +278,7 @@ async def recalcular_totales_de_liquidacion(db: AsyncSession, liquidacion_id: in
         .select_from(Ajuste)
         .join(LoteAjuste, LoteAjuste.id == Ajuste.lote_id)
         .where(
-            LoteAjuste.pago_id == liq.pago_id,
-            LoteAjuste.obra_social_id == liq.obra_social_id,
-            LoteAjuste.mes_periodo == liq.mes_periodo,
-            LoteAjuste.anio_periodo == liq.anio_periodo,
+            *condicion_ajustes_de_liquidacion(liq),
             # AP = mismo lote, ya con el pago cerrado — sigue siendo "de este pago".
             LoteAjuste.estado.in_(["L", "AP"]),
         )
@@ -318,7 +370,7 @@ async def vista_detalles_liquidacion(
         select(Liquidacion).where(Liquidacion.id == liquidacion_id)
     )).scalars().first()
 
-    # Ajustes de lotes en estado 'L' o 'C' del pago para ese OS+período
+    # Ajustes de los lotes del pago (L, o AP con el pago cerrado) que le tocan a esta factura
     ajuste_map: dict[int, list[dict[str, Any]]] = {}
     if liq and liq.pago_id:
         stmt_aj = (
@@ -334,11 +386,8 @@ async def vista_detalles_liquidacion(
             .select_from(Ajuste)
             .join(LoteAjuste, LoteAjuste.id == Ajuste.lote_id)
             .where(
-                LoteAjuste.pago_id == liq.pago_id,
-                LoteAjuste.obra_social_id == liq.obra_social_id,
-                LoteAjuste.mes_periodo == liq.mes_periodo,
-                LoteAjuste.anio_periodo == liq.anio_periodo,
-                LoteAjuste.estado.in_(["L", "C"]),
+                *condicion_ajustes_de_liquidacion(liq),
+                LoteAjuste.estado.in_(["L", "AP"]),
             )
             .order_by(Ajuste.id)
         )

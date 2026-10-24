@@ -13,7 +13,7 @@ Formato de salida:
 
 El `rid` sale de `request.state.request_id` (ver
 `app/middleware/request_context.py`) y es lo que permite cruzar una línea de log
-con su fila de `audit_log`.
+con su fila de `audit_log_general`.
 """
 import contextvars
 import logging

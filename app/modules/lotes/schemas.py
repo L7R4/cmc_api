@@ -62,6 +62,8 @@ class PrestacionCMCSearchRow(BaseModel):
     importe_total: Optional[Decimal] = None
     periodo: str
     cod_obr: str
+    # Débitos menos créditos ya cargados sobre esta prestación (en cualquier lote).
+    ya_debitado: Decimal = Decimal("0")
 
 
 class AjusteUpdate(BaseModel):
@@ -123,6 +125,8 @@ class LoteAjusteRead(BaseModel):
     factura_id: Optional[int] = None
     nro_factura: Optional[str] = None
     factura_version: Optional[int] = None
+    # False = la factura del lote todavía no está en el pago; sólo informativo.
+    factura_en_pago: Optional[bool] = None
     estado: str
     pago_id: Optional[int] = None
     total_debitos: Decimal

@@ -2,16 +2,16 @@
 
 Es la pieza que hace cruzables la auditoría y el log. Antes el `request_id` se
 generaba dentro de `AuditMiddleware`, al final de la petición y solo para armar
-la fila de `audit_log`: identificaba la fila, no la petición, y no aparecía en
+la fila de `audit_log_general`: identificaba la fila, no la petición, y no aparecía en
 ningún otro lado.
 
 Ahora se genera al principio y queda en tres lugares a la vez:
 
   - `request.state.request_id` — accesible desde cualquier endpoint o handler
   - el header `X-Request-ID` de la respuesta — el cliente lo puede mostrar
-  - la columna `audit_log.request_id` — lo escribe `AuditMiddleware`
+  - la columna `audit_log_general.request_id` — lo escribe `AuditMiddleware`
 
-Con eso, "me dio error a3f91c2b" se busca en `audit_log` (quién, cuándo, qué
+Con eso, "me dio error a3f91c2b" se busca en `audit_log_general` (quién, cuándo, qué
 mandó) y en el log de la aplicación (el traceback).
 
 Va como el middleware más externo para que el header salga en toda respuesta,

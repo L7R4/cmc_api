@@ -41,6 +41,31 @@ from sqlalchemy.pool import NullPool  # noqa: E402
 from app.core.config import settings  # noqa: E402
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _limpiar_historial_huerfano():
+    """Los tests que cargan prestaciones sintéticas las borran de `detalle_facturacion` al
+    terminar, pero su historial (`audit_log_facturacion`, sin FK a propósito) quedaría.
+    La app nunca borra prestaciones (las elimina con estado X), así que todo evento sin
+    su fila es de un test."""
+    yield
+    import pymysql
+
+    con = pymysql.connect(
+        host=settings.MYSQL_HOST, port=settings.MYSQL_PORT or 3306,
+        user=settings.MYSQL_USER, password=settings.MYSQL_PASS, database=settings.MYSQL_DB,
+        autocommit=True,
+    )
+    try:
+        with con.cursor() as cur:
+            cur.execute(
+                "DELETE e FROM audit_log_facturacion e "
+                "LEFT JOIN detalle_facturacion d ON d.id_detalle_prestaciones = e.prestacion_id "
+                "WHERE d.id_detalle_prestaciones IS NULL"
+            )
+    finally:
+        con.close()
+
+
 @pytest.fixture(scope="session")
 def app():
     from app.main import app as fastapi_app

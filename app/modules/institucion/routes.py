@@ -248,7 +248,7 @@ async def borrar_telefono(
 ) -> Response:
     """Borrado real, no lógico: un teléfono viejo en la lista es peor que
     ninguno — alguien lo llama y no atiende nadie. No hay nada que auditar en
-    el número en sí, y el registro de quién lo borró queda en `audit_log`."""
+    el número en sí, y el registro de quién lo borró queda en `audit_log_general`."""
     tel = await db.get(InstitucionTelefono, telefono_id)
     if not tel:
         raise HTTPException(404, "Teléfono no encontrado")
@@ -368,7 +368,7 @@ async def revelar_password(
     **Es un `POST` aunque no modifique nada**, y eso es a propósito:
     `app/middleware/audit.py` sólo audita métodos mutantes, así que un `GET`
     dejaría las lecturas de credenciales sin rastro. Con `POST`, cada vez que
-    alguien mira una clave queda la fila en `audit_log` con usuario, IP y hora.
+    alguien mira una clave queda la fila en `audit_log_general` con usuario, IP y hora.
 
     El cuerpo de la respuesta no pasa por auditoría —el middleware guarda el
     request, no el response—, así que la clave no termina escrita en la tabla.

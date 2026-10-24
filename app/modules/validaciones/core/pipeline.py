@@ -10,8 +10,8 @@ from fastapi import HTTPException, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import DetalleFacturacionCMC
-from app.modules.facturacion import documentacion
-from app.modules.facturacion.service import _cleanup_factura_si_vacia
+from app.modules.facturacion import documentacion, historial
+from app.modules.facturacion.service import VALIDACION_RECHAZOS, _cleanup_factura_si_vacia
 from app.modules.validaciones import obras
 from app.modules.validaciones.core.consultas import _descripciones
 from app.modules.validaciones.core.contrato import Contexto
@@ -109,6 +109,10 @@ async def _prestacion_del_socio(
 ) -> DetalleFacturacionCMC:
     fila = await db.get(DetalleFacturacionCMC, prestacion_id)
     if fila is None or fila.validacion_estado is None or fila.validacion_anulada:
+        raise HTTPException(404, "La prestación no existe o ya fue eliminada.")
+    # La que eliminó el Colegio desde facturación tampoco es del panel: el médico ve las
+    # rechazadas (también en X), no las eliminadas.
+    if fila.estado == DETALLE_FUERA_DE_FACTURA and fila.validacion_estado not in VALIDACION_RECHAZOS:
         raise HTTPException(404, "La prestación no existe o ya fue eliminada.")
     if str(fila.cod_med) != str(nro_socio):
         raise HTTPException(403, "La prestación pertenece a otro prestador.")
@@ -221,8 +225,14 @@ async def eliminar_prestacion(
                 fila.validacion_detalle = anulacion.detalle[:255]
 
     facturaba = fila.estado == DETALLE_ACTIVO
+    estado_antes = fila.estado
     fila.validacion_anulada = True
     fila.estado = DETALLE_FUERA_DE_FACTURA
+    # Sin motivo: el médico no lo carga. Si la eliminó una rechazada, el estado ya era X.
+    await historial.registrar(db, [historial.evento(
+        fila, historial.ELIMINADA, estado_antes=estado_antes, estado_despues=DETALLE_FUERA_DE_FACTURA,
+        contexto=historial.contexto_de(fila, origen="validaciones"),
+    )])
     await db.flush()
     if facturaba:
         # Si era la última prestación abierta del período, se elimina la cabecera

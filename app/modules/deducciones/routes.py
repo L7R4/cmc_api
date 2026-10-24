@@ -28,6 +28,7 @@ from app.modules.deducciones.helpers import (
     _handle_item_error,
     _honorarios_por_medico_en_pago,
     _medicos_para_descuento,
+    _pagadores_de_descuento,
 )
 from app.modules.deducciones.schemas import (
     DeduccionCreate,
@@ -110,13 +111,20 @@ async def bulk_generar_descuento(
     if not med_tuples:
         return {"enrolados": 0, "generados": 0, "omitidos": 0, "cargado_total": 0}
 
+    # Quién paga cada asignación: el pagador si lo hay, si no el propio médico. Entra al pago
+    # (y se descuenta) en la liquidación de quien paga.
+    pagadores = {} if getattr(desc, "aplica_a_todos", False) else await _pagadores_de_descuento(db, desc_id)
+
     precio = Decimal(str(getattr(desc, "precio", 0) or 0))
     porcentaje = Decimal(str(getattr(desc, "porcentaje", 0) or 0))
 
     # ── Paso 1: Enrolar pendientes con period <= pago — solo médicos en el pago ──
     enrolados = 0
     if not getattr(desc, "aplica_a_todos", False):
-        med_ids_false_en_pago = [mid for mid, paga_caja in med_tuples if not paga_caja and mid in base_por_med]
+        med_ids_false_en_pago = [
+            mid for mid, paga_caja in med_tuples
+            if not paga_caja and pagadores.get(mid, mid) in base_por_med
+        ]
         if med_ids_false_en_pago:
             rows_a_enrolar = (await db.execute(
                 select(Deduccion).where(
@@ -154,7 +162,7 @@ async def bulk_generar_descuento(
         if monto <= 0:
             continue
 
-        en_pago_ahora = not paga_caja and mid in base_por_med
+        en_pago_ahora = not paga_caja and pagadores.get(mid, mid) in base_por_med
         porc_ap = (porc_usado if porc_usado else Decimal("0")).quantize(
             TWOPLACES, rounding=ROUND_HALF_UP
         )
@@ -166,6 +174,7 @@ async def bulk_generar_descuento(
             "monto_aplicado": Decimal("0.00"),
             "origen": "automatico",
             "paga_por_caja": paga_caja,
+            "pagador_medico_id": pagadores.get(mid),
             "estado": "en_pago" if en_pago_ahora else "pendiente",
             "cuota_nro": 0,
             "mes_aplicar": pago.mes,

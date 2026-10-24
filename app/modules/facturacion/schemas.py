@@ -943,7 +943,7 @@ class AfiliadoRefOut(BaseModel):
 
 
 class AuditoriaEventoOut(BaseModel):
-    """Evento de `audit_log` sobre esta prestación.
+    """Evento de `audit_log_general` sobre esta prestación.
 
     Cobertura real, para no prometer de más en la pantalla: el middleware sólo
     audita MUTACIONES (POST/PUT/PATCH/DELETE), nunca GETs — no hay "quién la
@@ -963,8 +963,51 @@ class AuditoriaEventoOut(BaseModel):
     request_body: Optional[str] = None
 
 
+class HistorialEventoOut(BaseModel):
+    """Evento de `audit_log_facturacion` (ver `facturacion/historial.py`)."""
+    id: int
+    ocurrido_en: datetime.datetime
+    tipo: str
+    estado_antes: Optional[str] = None
+    estado_despues: Optional[str] = None
+    actor_tipo: str
+    actor_socio: Optional[int] = None
+    actor_nombre: Optional[str] = None      # resuelto contra listado_medico
+    motivo_codigo: Optional[str] = None
+    motivo_texto: Optional[str] = None
+    cambios: Optional[dict] = None
+    contexto: Optional[dict] = None
+    fuente: str = "en_vivo"
+
+
+class EstadoFichaOut(BaseModel):
+    """Lo que dice la franja de estado de la ficha. `clase`:
+
+    * `vigente` / `cerrada` / `liquidada`: estado A / C / L.
+    * `eliminada_colegio` / `eliminada_medico`: la sacó una persona (estado X).
+    * `rechazada_os`: la obra social no la autorizó al validar (estado X).
+    * `eliminada`: está en X y no hay forma de saber quién ni por qué (filas
+      anteriores al historial que no vienen de una validación).
+
+    Quién, cuándo y por qué salen del último evento de eliminación o rechazo; sin
+    historial quedan vacíos. `respuesta_os` es el texto que devolvió la obra social.
+    """
+    clase: Literal[
+        "vigente", "cerrada", "liquidada",
+        "eliminada_colegio", "eliminada_medico", "eliminada", "rechazada_os",
+    ]
+    motivo_codigo: Optional[str] = None
+    motivo_texto: Optional[str] = None
+    actor_tipo: Optional[str] = None
+    actor_socio: Optional[int] = None
+    actor_nombre: Optional[str] = None
+    ocurrido_en: Optional[datetime.datetime] = None
+    respuesta_os: Optional[str] = None
+
+
 class PrestacionFichaOut(BaseModel):
     prestacion: PrestacionCrudaOut
+    estado: EstadoFichaOut
     medico: Optional[SocioRefOut] = None
     clinica: Optional[SocioRefOut] = None
     cargado_por: Optional[SocioRefOut] = None   # `usuario` resuelto a nombre
@@ -973,6 +1016,10 @@ class PrestacionFichaOut(BaseModel):
     paciente: Optional[AfiliadoRefOut] = None
     factura: Optional[FacturaRead] = None
     equipo: list[PrestacionRead] = Field(default_factory=list)
+    # Historial de la prestación, el más reciente primero.
+    historial: list[HistorialEventoOut] = Field(default_factory=list)
+    # Peticiones de la auditoría general sobre esta prestación: lo único que hay de las
+    # ediciones y eliminaciones anteriores al historial.
     auditoria: list[AuditoriaEventoOut] = Field(default_factory=list)
 
 

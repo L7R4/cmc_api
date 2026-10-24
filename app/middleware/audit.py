@@ -4,6 +4,7 @@ import re
 import time
 import uuid
 
+from app.core.contexto import usuario_ctx
 from app.core.security import decode_token
 from app.db.database import AsyncSessionLocal
 from app.db.models import AuditLog
@@ -152,7 +153,7 @@ async def _persist(entry: dict) -> None:
 
 
 class AuditMiddleware:
-    """Registra en `audit_log` las peticiones mutadoras (POST/PUT/PATCH/DELETE)
+    """Registra en `audit_log_general` las peticiones mutadoras (POST/PUT/PATCH/DELETE)
     de /api/* y todo /auth/*. Ver docs/api/auditoria.md."""
 
     def __init__(self, app):
@@ -188,6 +189,10 @@ class AuditMiddleware:
                 error_chunks.append(message.get("body", b""))
             await send(message)
 
+        # Antes de llamar al endpoint: el historial de facturación lee quién es de acá.
+        nro_socio, role = _decode_user(authorization)
+        token_usuario = usuario_ctx.set((nro_socio, role))
+
         start = time.perf_counter()
         excepcion: BaseException | None = None
         try:
@@ -200,8 +205,8 @@ class AuditMiddleware:
             excepcion = exc
             raise
         finally:
+            usuario_ctx.reset(token_usuario)
             duration_ms = int((time.perf_counter() - start) * 1000)
-            nro_socio, role = _decode_user(authorization)
             personal = path.startswith(_SIN_CONTENIDO_PREFIXES)
 
             error_detail = None

@@ -239,7 +239,7 @@ async def borrar_pago(
     Borrado real y no lógico: acá no hay historia que preservar como en un
     feriado o una planilla. Una deuda cargada mal es un error de tipeo, y
     dejarla marcada de baja sólo ensuciaría el total. Quién la borró queda en
-    `audit_log`.
+    `audit_log_general`.
     """
     fila = await _pago_o_404(obra_id, pago_id, db)
 

@@ -30,7 +30,7 @@ from app.db.models.catalogs import (
 )
 from app.db.models.rbac import Role, Permission, UserRole, RolePermission, UserPermission
 from app.db.models.sesiones import RefreshToken
-from app.db.models.auditoria import AuditLog
+from app.db.models.auditoria import AuditLog, AuditLogFacturacion
 from app.db.models.contenido import Noticia, DocumentoNoticias, NoticiaObraSocial, PublicidadMedico
 from app.db.models.solicitud import SolicitudRegistro
 from app.db.models.solicitud_cambio import SolicitudCambioMedico

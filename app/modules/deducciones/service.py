@@ -2,6 +2,7 @@ from collections import defaultdict
 from decimal import ROUND_DOWN, Decimal
 from typing import List, Optional
 
+from fastapi import HTTPException
 from sqlalchemy import and_, case, delete, func, or_, select, update
 from sqlalchemy.dialects.mysql import insert as mysql_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,6 +17,7 @@ from app.db.models import (
     ListadoMedico,
     LoteAjuste,
     Pago,
+    PagoMedico,
     SocioDescuento,
 )
 from app.modules.deducciones.schemas import (
@@ -42,12 +44,15 @@ from app.modules.deducciones.helpers import (
     _gastos_por_medico_en_pago,
     _get_open_pago,
     _honorarios_por_medico_en_pago,
+    _medicos_en_pago,
     _medicos_para_descuento,
     _nro_colegio_map_de_deducciones,
+    _pagadores_de_descuento,
     enrich_many,
     marcar_deducciones_dirty,
     NRO_COLEGIO_CONTRIB_GASTOS,
     NRO_COLEGIO_CONTRIB_HONORARIOS,
+    NRO_COLEGIO_SALDO_DEUDOR,
     ordenar_deducciones_por_prioridad,
 )
 
@@ -68,15 +73,7 @@ async def auto_enrolar_pendientes(db: AsyncSession, pago: Pago) -> dict:
     - Desenrola (en_pago → pendiente): generado_en_pago_id IS NULL,
       paga_por_caja=False, ni medico_id ni pagador_medico_id está en el pago.
     """
-    medicos_en_pago: set[int] = set(
-        (await db.execute(
-            select(DetalleLiquidacion.medico_id)
-            .select_from(DetalleLiquidacion)
-            .join(Liquidacion, Liquidacion.id == DetalleLiquidacion.liquidacion_id)
-            .where(Liquidacion.pago_id == pago.id)
-            .distinct()
-        )).scalars().all()
-    )
+    medicos_en_pago: set[int] = await _medicos_en_pago(db, pago.id)
 
     # Desenrolar auto-enroladas cuyo médico/pagador ya no participa en el pago
     if medicos_en_pago:
@@ -229,6 +226,7 @@ async def _auto_generar_deducciones_porcentuales(db: AsyncSession, pago: Pago) -
             continue
 
         med_ids = [m for m, _ in med_tuples]
+        pagadores = {} if getattr(desc, "aplica_a_todos", False) else await _pagadores_de_descuento(db, desc.id)
 
         ya_existen: set[int] = set(
             (await db.execute(
@@ -253,6 +251,7 @@ async def _auto_generar_deducciones_porcentuales(db: AsyncSession, pago: Pago) -
                 monto_aplicado=Decimal("0.00"),
                 origen="automatico",
                 paga_por_caja=paga_caja,
+                pagador_medico_id=pagadores.get(mid),
                 estado="pendiente" if paga_caja else "en_pago",
                 cuota_nro=0,
                 mes_aplicar=pago.mes,
@@ -357,6 +356,11 @@ async def generar_y_recalcular_porcentuales(db: AsyncSession, pago_id: int) -> d
     # sean visibles al calcular el bruto en recalcular_automaticas_porcentuales.
     await db.flush()
 
+    # Las cuotas y deudas pendientes de los médicos que participan entran al pago
+    # solas; antes sólo lo hacía el botón «Refrescar», que no existía en la pantalla.
+    await auto_enrolar_pendientes(db, pago)
+    await db.flush()
+
     generadas = await _auto_generar_deducciones_porcentuales(db, pago)
 
     # Flush explícito para que las Deduccion recién creadas con calculado_total=0
@@ -401,6 +405,96 @@ async def refrescar_deducciones_pago(db: AsyncSession, pago: Pago) -> dict:
         "manuales_enroladas": enroladas["cantidad"],
         "manuales_enroladas_ids": enroladas["ids"],
     }
+
+
+# =============================================================================
+# Saldo deudor: lo que un médico debe cuando sus débitos superan lo que cobra
+# =============================================================================
+
+async def _concepto_saldo_deudor(db: AsyncSession) -> Optional[Conceptos]:
+    return await db.scalar(
+        select(Conceptos).where(Conceptos.nro_colegio == NRO_COLEGIO_SALDO_DEUDOR)
+    )
+
+
+async def quitar_saldos_deudores_del_pago(db: AsyncSession, pago_id: int) -> int:
+    """
+    Borra las deudas que generó el cierre de este pago (al reabrirlo o eliminarlo).
+
+    La deuda se reconoce por su concepto y por `cuota_nro` = id del pago de origen. Si
+    alguna ya se descontó (total o parcialmente) en otro pago, no se puede deshacer en
+    silencio: 409. Las que el Colegio canceló o eliminó a mano no se tocan.
+    Sin commit: lo hace el llamador.
+    """
+    concepto = await _concepto_saldo_deudor(db)
+    if concepto is None:
+        return 0
+    consumida = (await db.execute(
+        select(Deduccion.id).where(
+            Deduccion.descuento_id == concepto.id,
+            Deduccion.cuota_nro == pago_id,
+            or_(Deduccion.estado == "aplicado", Deduccion.monto_aplicado > 0),
+        ).limit(1)
+    )).first()
+    if consumida:
+        raise HTTPException(
+            409,
+            "La deuda de algún médico generada por este pago ya se descontó en otro pago: "
+            "no se puede reabrir ni eliminar.",
+        )
+    res = await db.execute(
+        delete(Deduccion).where(
+            Deduccion.descuento_id == concepto.id,
+            Deduccion.cuota_nro == pago_id,
+            Deduccion.estado.in_(["pendiente", "en_pago"]),
+        )
+    )
+    await db.flush()
+    return res.rowcount or 0
+
+
+async def crear_saldos_deudores(db: AsyncSession, pago: Pago) -> dict:
+    """
+    Al cerrar el pago: por cada médico cuyo reconocido (bruto - débitos + créditos) es
+    negativo, deja la diferencia como deducción pendiente. Entra sola al próximo pago donde
+    ese médico participe y se descuenta con la prioridad de las demás deducciones.
+    Idempotente: antes quita lo que este mismo pago hubiera creado. Sin commit.
+    """
+    concepto = await _concepto_saldo_deudor(db)
+    if concepto is None:
+        raise HTTPException(
+            409,
+            f"Falta el concepto «Saldo deudor de débitos» (nro. {NRO_COLEGIO_SALDO_DEUDOR}) en el "
+            "catálogo de conceptos. Sin él, la deuda de los médicos que cobran menos de lo que "
+            "deben se perdería al cerrar. Aplicá la migración saldodeu01 y volvé a cerrar.",
+        )
+    await quitar_saldos_deudores_del_pago(db, pago.id)
+
+    filas = (await db.execute(
+        select(PagoMedico.medico_id, PagoMedico.reconocido).where(
+            PagoMedico.pago_id == pago.id, PagoMedico.reconocido < 0
+        )
+    )).all()
+    total = Decimal("0")
+    for medico_id, reconocido in filas:
+        monto = (-Decimal(reconocido)).quantize(TWOPLACES)
+        total += monto
+        db.add(Deduccion(
+            medico_id=medico_id,
+            descuento_id=concepto.id,
+            origen="manual",
+            estado="pendiente",
+            calculado_total=monto,
+            monto_total=monto,
+            monto_cuota=monto,
+            cuotas_total=1,
+            cuota_nro=pago.id,
+            mes_aplicar=pago.mes,
+            anio_aplicar=pago.anio,
+            paga_por_caja=False,
+        ))
+    await db.flush()
+    return {"medicos": len(filas), "monto_total": str(total.quantize(TWOPLACES))}
 
 
 # =============================================================================
@@ -903,12 +997,28 @@ async def pagar_deduccion(db: AsyncSession, id: int) -> DeduccionHistorialItem:
     return await _ded_to_historial(db, ded)
 
 
+async def _pago_cerrado_donde_se_descontó(db: AsyncSession, deduccion_id: int) -> Optional[str]:
+    """«mm/aaaa» del pago cerrado en el que se descontó (total o parcialmente) esta deducción,
+    o None si no está en ningún pago cerrado (pendiente, en el pago abierto o cobrada en caja)."""
+    pago = await db.scalar(
+        select(Pago)
+        .join(DeduccionAplicacion, DeduccionAplicacion.pago_id == Pago.id)
+        .where(DeduccionAplicacion.deduccion_id == deduccion_id, Pago.estado != "A")
+        .limit(1)
+    )
+    return f"{pago.mes:02d}/{pago.anio}" if pago else None
+
+
 async def cambiar_monto_item(db: AsyncSession, id: int, monto: Decimal) -> DeduccionHistorialItem:
     ded = await db.get(Deduccion, id)
     if not ded:
         raise ValueError("not_found")
     if ded.estado in ("aplicado", "cancelado"):
         raise ValueError(f"no_editable:{ded.estado}")
+    # Se edita sólo si no está en un pago cerrado: un pago cerrado no se reescribe.
+    cerrado = await _pago_cerrado_donde_se_descontó(db, ded.id)
+    if cerrado:
+        raise ValueError(f"pago_cerrado:{cerrado}")
 
     monto = monto.quantize(TWOPLACES)
     ded.calculado_total = monto
@@ -929,6 +1039,10 @@ async def eliminar_item(db: AsyncSession, id: int) -> DeduccionItemEliminarRespo
     ded = await db.get(Deduccion, id)
     if not ded:
         raise ValueError("not_found")
+    # Se elimina sólo si el pago donde está está abierto o si no está en ningún pago.
+    cerrado = await _pago_cerrado_donde_se_descontó(db, ded.id)
+    if cerrado:
+        raise ValueError(f"pago_cerrado:{cerrado}")
     if ded.estado == "aplicado":
         # Aplicado solo se puede eliminar si el pago sigue abierto
         pago = await _get_open_pago(db)

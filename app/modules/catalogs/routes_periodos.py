@@ -1,11 +1,11 @@
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import not_, select
+from sqlalchemy import and_, func, not_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.database import get_db
-from app.db.models import DetalleFacturacionCMC, FacturacionCMC, LoteAjuste
+from app.db.models import DetalleFacturacionCMC, FacturacionCMC, Liquidacion, LoteAjuste
 
 router = APIRouter()
 
@@ -64,6 +64,84 @@ async def facturas_disponibles_lotes(
             "VERSION": r["version"],
             "ESTADO": r["estado"],
             "PERIODO": r["periodo"],
+        }
+        for r in rows
+    ]
+
+
+@router.get("/facturas_para_pago")
+async def facturas_para_pago(
+    obra_social_id: int = Query(..., alias="obra_social_id"),
+    pago_id: Optional[int] = Query(
+        None, description="Si se manda, deja afuera las facturas que ya están en ese pago."
+    ),
+    db: AsyncSession = Depends(get_db),
+):
+    """Facturas de la obra social con prestaciones cerradas todavía sin liquidar.
+
+    Una fila por factura (la original y cada complementaria), con su número, para
+    que el operador vea qué va a pagar. La cantidad y el importe son de las
+    prestaciones cerradas ('C') de esa factura, que son las que entran al pago.
+    """
+    cod_obr = str(obra_social_id)
+    pendientes = (
+        select(
+            DetalleFacturacionCMC.periodo.label("periodo"),
+            DetalleFacturacionCMC.version.label("version"),
+            func.count().label("cantidad"),
+            func.coalesce(func.sum(DetalleFacturacionCMC.importe_total), 0).label("importe"),
+        )
+        .where(DetalleFacturacionCMC.cod_obr == cod_obr, DetalleFacturacionCMC.estado == "C")
+        .group_by(DetalleFacturacionCMC.periodo, DetalleFacturacionCMC.version)
+        .subquery()
+    )
+    stmt = (
+        select(
+            FacturacionCMC.id_prestaciones,
+            FacturacionCMC.periodo,
+            FacturacionCMC.nro_factura,
+            FacturacionCMC.tipo_factura,
+            FacturacionCMC.version,
+            FacturacionCMC.estado,
+            pendientes.c.cantidad,
+            pendientes.c.importe,
+        )
+        .join(
+            pendientes,
+            and_(
+                pendientes.c.periodo == FacturacionCMC.periodo,
+                pendientes.c.version == FacturacionCMC.version,
+            ),
+        )
+        .where(
+            FacturacionCMC.cod_obr == cod_obr,
+            FacturacionCMC.estado.in_(["C", "L", "LC"]),
+        )
+        .order_by(FacturacionCMC.periodo.desc(), FacturacionCMC.version)
+    )
+    if pago_id is not None:
+        ya_en_el_pago = (
+            select(Liquidacion.id)
+            .where(
+                Liquidacion.pago_id == pago_id,
+                Liquidacion.factura_id == FacturacionCMC.id_prestaciones,
+            )
+            .exists()
+        )
+        stmt = stmt.where(not_(ya_en_el_pago))
+    rows = (await db.execute(stmt)).mappings().all()
+    return [
+        {
+            "FACTURA_ID": r["id_prestaciones"],
+            "ANIO": int(r["periodo"][:4]),
+            "MES": int(r["periodo"][4:]),
+            "NRO_FACTURA": r["nro_factura"],
+            "TIPO_FACTURA": r["tipo_factura"],
+            "VERSION": r["version"],
+            "ESTADO": r["estado"],
+            "PERIODO": r["periodo"],
+            "CANTIDAD": int(r["cantidad"]),
+            "IMPORTE": float(r["importe"] or 0),
         }
         for r in rows
     ]

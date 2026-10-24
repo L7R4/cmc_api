@@ -14,11 +14,11 @@ from app.common.money import quantize_money
 from app.db.models import DetalleFacturacionCMC
 from app.db.models.nomenclador_cmc import NomencladorCMC, Valor
 from app.modules.facturacion import documentacion
-from app.modules.facturacion.service import resolver_precio
+from app.modules.facturacion.service import VALIDACION_RECHAZOS, resolver_precio
 from app.modules.nomenclador import service as service_nm
 from app.modules.validaciones.core.contrato import factura_en_cero
 from app.modules.validaciones.core.documentos import enriquecer
-from app.modules.validaciones.core.grabado import to_dict
+from app.modules.validaciones.core.grabado import DETALLE_FUERA_DE_FACTURA, to_dict
 from app.modules.validaciones.core.medicos import get_medico
 from app.modules.validaciones.core.periodos import ORIGEN_MEDICO, partes_periodo, periodo_cerrado
 
@@ -124,13 +124,17 @@ async def _descripciones(
 
 def _filtro_validaciones(nro_socio: int, obra_social_id: int):
     """Filas de `detalle_facturacion` que salieron del módulo de validaciones para
-    ese prestador y esa obra social, sin las que el prestador dio de baja."""
+    ese prestador y esa obra social, sin las eliminadas: ni las que dio de baja el
+    prestador (`validacion_anulada`) ni las que eliminó el Colegio desde facturación
+    (X sin rechazo de la O.S.). Las rechazadas por la O.S. también están en X y sí se
+    muestran."""
     M = DetalleFacturacionCMC
     return (
         M.cod_med == str(nro_socio),
         M.cod_obr == str(obra_social_id),
         M.validacion_estado.is_not(None),
         M.validacion_anulada.is_(False),
+        or_(M.estado != DETALLE_FUERA_DE_FACTURA, M.validacion_estado.in_(VALIDACION_RECHAZOS)),
     )
 
 

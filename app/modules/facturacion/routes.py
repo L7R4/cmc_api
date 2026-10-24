@@ -864,7 +864,8 @@ async def obtener_prestacion_ficha(id: int, db: AsyncSession = Depends(get_db)):
     """Ficha completa de una prestación: la fila cruda de `detalle_facturacion` (sin
     los recortes de `PrestacionRead`) más los bloques resueltos — médico, clínica,
     obra social, nomenclador, paciente, cabecera de factura, quién la cargó, el
-    equipo quirúrgico y el historial de auditoría.
+    equipo quirúrgico, el resumen del estado (quién la eliminó y por qué, o qué
+    respondió la O.S.) y el historial.
 
     Pantalla de consulta/soporte, **solo lectura** — no toca nada. Es una vista
     distinta de `GET /prestaciones/{id}` (que existe para precargar el formulario de
@@ -888,7 +889,17 @@ async def editar_prestacion(
 async def anular_prestacion(
     id: int,
     con_equipo: bool = Query(False, description="Si es la cabecera de un equipo, anula también a sus integrantes."),
+    motivo: Optional[str] = Query(
+        None,
+        description="Por qué se elimina: duplicado · error_carga · sin_documentacion · "
+                    "sin_autorizacion · otro. `equipo_editado` lo usa sólo la carga, al quitar "
+                    "o reemplazar un integrante del equipo. Obligatorio (422 si falta).",
+    ),
+    detalle: Optional[str] = Query(None, max_length=255, description="Obligatorio con `otro`."),
     user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    await service.anular_prestacion(db, id, con_equipo=con_equipo)
+    """Elimina la prestación (estado X) y deja el motivo en su historial. Sólo el
+    personal del Colegio llega acá (`facturacion:cargar`); el médico elimina desde el
+    panel de validaciones, sin motivo."""
+    await service.anular_prestacion(db, id, con_equipo=con_equipo, motivo=motivo, detalle=detalle)

@@ -28,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.common.files import UPLOAD_ROOT
 from app.common.uploads import UploadInfo, validate_upload
 from app.db.models import CodigoObraSocial, DetalleDocumento, DetalleFacturacionCMC, ObrasSociales
+from app.modules.facturacion import historial
 
 # Formatos que entran al PDF de la factura: las fotos se convierten en página.
 EXTENSIONES = frozenset({".pdf", ".jpg", ".png"})
@@ -197,6 +198,13 @@ async def agregar(
     escritos = await escribir(infos, detalle.cod_med)
     try:
         filas = await registrar(db, detalle.id_detalle_prestaciones, escritos, origen, subido_por)
+        await historial.registrar(db, [
+            historial.evento(
+                detalle, historial.DOCUMENTO_AGREGADO,
+                contexto=historial.contexto_de(detalle, documento_id=f.id, archivo=f.nombre_original),
+            )
+            for f in filas
+        ])
         await db.commit()
     except Exception:
         await db.rollback()
@@ -221,6 +229,11 @@ async def reemplazar(
     (escrito,) = await escribir([info], detalle.cod_med)
     anterior = doc.path
     try:
+        await historial.registrar(db, [historial.evento(
+            detalle, historial.DOCUMENTO_REEMPLAZADO,
+            cambios={"archivo": [doc.nombre_original, escrito.nombre_original]},
+            contexto=historial.contexto_de(detalle, documento_id=doc.id),
+        )])
         doc.path, doc.nombre_original = escrito.path, escrito.nombre_original
         doc.content_type, doc.size = escrito.content_type, escrito.size
         doc.origen = origen
@@ -246,10 +259,19 @@ async def eliminar(
     doc = await _documento(db, detalle.id_detalle_prestaciones, doc_id)
     restantes = len(await listar(db, detalle.id_detalle_prestaciones)) - 1
     exigida = await exige(db, detalle)
+    eventos = [historial.evento(
+        detalle, historial.DOCUMENTO_QUITADO,
+        contexto=historial.contexto_de(detalle, documento_id=doc.id, archivo=doc.nombre_original),
+    )]
     if exigida and restantes == 0:
         if es_medico:
             raise HTTPException(409, "Tiene que quedar al menos un documento.")
+        if detalle.revisado:
+            eventos.append(historial.evento(
+                detalle, historial.DESAUDITADA, motivo_texto="Se quitó el último documento.",
+            ))
         detalle.revisado = False
+    await historial.registrar(db, eventos)
     path = doc.path
     await db.delete(doc)
     await db.commit()

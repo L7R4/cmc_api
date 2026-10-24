@@ -11,12 +11,15 @@ Solo se marcan/revierten las filas fuente='cmc' que efectivamente se copiaron
 a detalle_liquidacion para este pago (vía cmc_detalle_id). Las de fuente='ga'
 (GuardarAtencion, flujo legacy) no usan detalle_facturacion y quedan afuera.
 
+Cada fila que cambia deja su evento en el historial (`audit_log_facturacion`).
+
 Estas funciones SOLO hacen flush — el commit queda a cargo del llamador.
 """
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import DetalleFacturacionCMC, DetalleLiquidacion, Liquidacion
+from app.modules.facturacion import historial
 
 
 async def _cmc_detalle_ids_del_pago(db: AsyncSession, pago_id: int) -> list[int]:
@@ -32,6 +35,31 @@ async def _cmc_detalle_ids_del_pago(db: AsyncSession, pago_id: int) -> list[int]
     return list(rows)
 
 
+async def _pasar_estado(
+    db: AsyncSession, pago_id: int, desde: str, hasta: str, tipo_evento: str,
+) -> int:
+    ids = await _cmc_detalle_ids_del_pago(db, pago_id)
+    if not ids:
+        return 0
+    D = DetalleFacturacionCMC
+    filtro = (D.id_detalle_prestaciones.in_(ids), D.estado == desde)
+    # Las filas que van a cambiar, antes del UPDATE: sólo lo que el historial necesita.
+    filas = (await db.execute(
+        select(D.id_detalle_prestaciones, D.cod_obr, D.periodo, D.version, D.grupo_equipo_id)
+        .where(*filtro)
+    )).all()
+    result = await db.execute(update(D).where(*filtro).values(estado=hasta))
+    await historial.registrar(db, [
+        historial.evento(
+            f, tipo_evento, estado_antes=desde, estado_despues=hasta,
+            contexto=historial.contexto_de(f, pago_id=pago_id),
+        )
+        for f in filas
+    ])
+    await db.flush()
+    return result.rowcount
+
+
 async def marcar_prestaciones_liquidadas(db: AsyncSession, pago_id: int) -> int:
     """
     Al CERRAR un pago: C → L en detalle_facturacion para toda prestación CMC
@@ -39,19 +67,7 @@ async def marcar_prestaciones_liquidadas(db: AsyncSession, pago_id: int) -> int:
 
     Devuelve la cantidad de filas actualizadas.
     """
-    ids = await _cmc_detalle_ids_del_pago(db, pago_id)
-    if not ids:
-        return 0
-    result = await db.execute(
-        update(DetalleFacturacionCMC)
-        .where(
-            DetalleFacturacionCMC.id_detalle_prestaciones.in_(ids),
-            DetalleFacturacionCMC.estado == "C",
-        )
-        .values(estado="L")
-    )
-    await db.flush()
-    return result.rowcount
+    return await _pasar_estado(db, pago_id, "C", "L", historial.LIQUIDADA)
 
 
 async def revertir_prestaciones_liquidadas(db: AsyncSession, pago_id: int) -> int:
@@ -61,16 +77,4 @@ async def revertir_prestaciones_liquidadas(db: AsyncSession, pago_id: int) -> in
 
     Devuelve la cantidad de filas actualizadas.
     """
-    ids = await _cmc_detalle_ids_del_pago(db, pago_id)
-    if not ids:
-        return 0
-    result = await db.execute(
-        update(DetalleFacturacionCMC)
-        .where(
-            DetalleFacturacionCMC.id_detalle_prestaciones.in_(ids),
-            DetalleFacturacionCMC.estado == "L",
-        )
-        .values(estado="C")
-    )
-    await db.flush()
-    return result.rowcount
+    return await _pasar_estado(db, pago_id, "L", "C", historial.LIQUIDACION_REVERTIDA)

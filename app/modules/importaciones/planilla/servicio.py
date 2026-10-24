@@ -48,7 +48,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.common.money import quantize_money
 from app.db.models import Afiliado, DetalleFacturacionCMC, ListadoMedico, NomencladorCMC, ObrasSociales
-from app.modules.facturacion import service as fact
+from app.modules.facturacion import historial, service as fact
 from app.modules.facturacion.schemas import PrestacionItem
 from app.modules.importaciones import nucleo
 from app.modules.importaciones.planilla.columnas import CALCULOS, ROLES, TIPOS, VIAS
@@ -716,7 +716,10 @@ async def _grabar(
         if lote:
             for x, row in zip(g.filas, g.prep.filas):
                 row.validacion_detalle = f"{PREFIJO_LOTE}{lote} · fila {x.r.fila}"[:255]
-        g.ids = await fact.persistir_equipo(db, g.prep)
+        g.ids = await fact.persistir_equipo(
+            db, g.prep, tipo_evento=historial.IMPORTADA, actor_tipo=historial.ACTOR_IMPORTACION,
+            contexto_evento={"importador": "planilla", "lote": lote},
+        )
         hecho += len(g.filas)
         if progreso is not None:
             progreso("grabando", hecho, total)

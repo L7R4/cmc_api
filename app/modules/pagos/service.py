@@ -6,9 +6,10 @@ from decimal import Decimal
 from typing import Optional
 
 from fastapi import HTTPException
-from sqlalchemy import case, func, select
+from sqlalchemy import case, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.modules.deducciones.helpers import _medicos_en_pago
 from app.db.models import (
     Ajuste,
     DeduccionAplicacion,
@@ -112,6 +113,8 @@ async def vista_previa_pago(db: AsyncSession, pago_id: int) -> dict:
             Liquidacion.obra_social_id,
             ObrasSociales.OBRA_SOCIAL.label("obra_social_nombre"),
             Liquidacion.nro_factura,
+            Liquidacion.factura_id,
+            Liquidacion.factura_version,
             Liquidacion.mes_periodo,
             Liquidacion.anio_periodo,
             Liquidacion.total_honorarios,
@@ -123,7 +126,7 @@ async def vista_previa_pago(db: AsyncSession, pago_id: int) -> dict:
         )
         .join(ObrasSociales, ObrasSociales.NRO_OBRASOCIAL == Liquidacion.obra_social_id)
         .where(Liquidacion.pago_id == pago_id)
-        .order_by(Liquidacion.obra_social_id)
+        .order_by(Liquidacion.obra_social_id, Liquidacion.anio_periodo, Liquidacion.mes_periodo, Liquidacion.factura_version)
     )).mappings().all()
 
     liq_items = []
@@ -142,6 +145,8 @@ async def vista_previa_pago(db: AsyncSession, pago_id: int) -> dict:
             "obra_social_id":     r["obra_social_id"],
             "obra_social_nombre": r["obra_social_nombre"],
             "nro_factura":        r["nro_factura"],
+            "factura_id":         r["factura_id"],
+            "factura_version":    r["factura_version"],
             "mes_periodo":        r["mes_periodo"],
             "anio_periodo":       r["anio_periodo"],
             "total_honorarios":   honorarios,
@@ -272,9 +277,11 @@ async def refrescar_detalle_medico(
     pago_id: int,
     medico_db_id: int,
     pago: Optional[Pago] = None,
+    guardar: bool = True,
 ) -> dict:
     """
     Recalcula y persiste PagoMedico + Recibo para un médico en un pago.
+    Con `guardar=False` sólo calcula y devuelve (lo usa la consulta de lectura).
     Devuelve {medico_db_id: {info_medico, resumen, detalle}}.
 
     Nota: medico_db_id es ListadoMedico.ID (PK interna), no NRO_SOCIO.
@@ -301,6 +308,9 @@ async def refrescar_detalle_medico(
         select(
             Liquidacion.id.label("liq_id"),
             Liquidacion.obra_social_id,
+            Liquidacion.factura_id,
+            Liquidacion.nro_factura,
+            Liquidacion.factura_version,
             ObrasSociales.OBRA_SOCIAL.label("obra_social_nombre"),
             Liquidacion.mes_periodo,
             Liquidacion.anio_periodo,
@@ -318,6 +328,9 @@ async def refrescar_detalle_medico(
         .group_by(
             Liquidacion.id,
             Liquidacion.obra_social_id,
+            Liquidacion.factura_id,
+            Liquidacion.nro_factura,
+            Liquidacion.factura_version,
             ObrasSociales.OBRA_SOCIAL,
             Liquidacion.mes_periodo,
             Liquidacion.anio_periodo,
@@ -334,6 +347,7 @@ async def refrescar_detalle_medico(
             Ajuste.gastos,
             Ajuste.observacion,
             LoteAjuste.id.label("lote_id"),
+            LoteAjuste.factura_id,
             LoteAjuste.obra_social_id,
             LoteAjuste.mes_periodo,
             LoteAjuste.anio_periodo,
@@ -349,6 +363,7 @@ async def refrescar_detalle_medico(
 
     # ── 3. Construir mapa de liquidaciones ────────────────────────────────────
     liq_map: dict[int, dict] = {}
+    factura_to_liq: dict[int, int] = {}
     os_per_to_liq: dict[tuple, int] = {}
     total_liq_honorarios = Decimal("0")
     total_liq_gastos = Decimal("0")
@@ -364,24 +379,32 @@ async def refrescar_detalle_medico(
             "obra_social_id":   r.obra_social_id,
             "obra_social":      r.obra_social_nombre,
             "periodo":          f"{r.mes_periodo:02d}/{r.anio_periodo}",
+            "nro_factura":      r.nro_factura,
+            "factura_version":  r.factura_version,
             "total_honorarios": h,
             "total_gastos":     g,
             "total_bruto":      _to_dec(r.total_bruto),
             "debitos":          {"total": Decimal("0"), "detalle": []},
             "creditos":         {"total": Decimal("0"), "detalle": []},
         }
-        os_per_to_liq[(r.obra_social_id, r.mes_periodo, r.anio_periodo)] = r.liq_id
+        if r.factura_id is not None:
+            factura_to_liq[r.factura_id] = r.liq_id
+        else:
+            os_per_to_liq[(r.obra_social_id, r.mes_periodo, r.anio_periodo)] = r.liq_id
 
-    # Distribuir cada ajuste individual en su liquidación correspondiente.
-    # Un ajuste cuya OS+período no tiene Liquidacion en este pago (p. ej. un
-    # lote sin_factura o una refacturación sobre un período ya facturado en
-    # otro pago) no se descarta: cuenta igual en los totales del médico y se
-    # lista aparte en "otros_ajustes", para que el recibo cuadre con lo que
-    # ya se le restó del disponible a la hora de calcular deducciones.
+    # Distribuir cada ajuste individual en la liquidación de su factura.
+    # Un ajuste cuya factura no está en este pago (p. ej. un lote sin_factura o
+    # el de una complementaria que se paga en otra corrida) no se descarta:
+    # cuenta igual en los totales del médico y se lista aparte en
+    # "otros_ajustes", para que el recibo cuadre con lo que ya se le restó del
+    # disponible a la hora de calcular deducciones.
     otros_ajustes: list[dict] = []
     otros_os_ids: set[int] = set()
     for r in ajuste_rows:
-        liq_id = os_per_to_liq.get((r.obra_social_id, r.mes_periodo, r.anio_periodo))
+        if r.factura_id is not None:
+            liq_id = factura_to_liq.get(r.factura_id)
+        else:
+            liq_id = os_per_to_liq.get((r.obra_social_id, r.mes_periodo, r.anio_periodo))
         h = _to_dec(r.honorarios)
         g = _to_dec(r.gastos)
         if liq_id is None:
@@ -455,6 +478,7 @@ async def refrescar_detalle_medico(
             select(
                 Conceptos.nro_colegio.label("nro_deduccion"),
                 Conceptos.nombre.label("nombre_deduccion"),
+                Deduccion.medico_id.label("titular_id"),
                 Deduccion.mes_aplicar,
                 Deduccion.anio_aplicar,
                 func.coalesce(func.sum(DeduccionAplicacion.aplicado), 0).label("total"),
@@ -464,11 +488,13 @@ async def refrescar_detalle_medico(
             .outerjoin(Conceptos, Conceptos.id == Deduccion.descuento_id)
             .where(
                 DeduccionAplicacion.pago_id == pago_id,
-                Deduccion.medico_id == medico_db_id,
+                # Lo descuenta quien paga (el pagador, si lo hay): es de quien sale la plata.
+                func.coalesce(Deduccion.pagador_medico_id, Deduccion.medico_id) == medico_db_id,
             )
             .group_by(
                 Conceptos.nro_colegio,
                 Conceptos.nombre,
+                Deduccion.medico_id,
                 Deduccion.mes_aplicar,
                 Deduccion.anio_aplicar,
             )
@@ -480,6 +506,7 @@ async def refrescar_detalle_medico(
             select(
                 Conceptos.nro_colegio.label("nro_deduccion"),
                 Conceptos.nombre.label("nombre_deduccion"),
+                Deduccion.medico_id.label("titular_id"),
                 Deduccion.mes_aplicar,
                 Deduccion.anio_aplicar,
                 func.coalesce(func.sum(Deduccion.monto_aplicado_preview), 0).label("total"),
@@ -487,18 +514,31 @@ async def refrescar_detalle_medico(
             .select_from(Deduccion)
             .outerjoin(Conceptos, Conceptos.id == Deduccion.descuento_id)
             .where(
-                Deduccion.generado_en_pago_id == pago_id,
-                Deduccion.medico_id == medico_db_id,
+                # Todas las en_pago de este médico, no sólo las generadas en este pago: las
+                # cuotas y deudas pendientes que entran solas tienen generado_en_pago_id NULL
+                # y quedaban fuera de la vista previa (el neto salía más alto que el real).
+                func.coalesce(Deduccion.pagador_medico_id, Deduccion.medico_id) == medico_db_id,
                 Deduccion.estado == "en_pago",
             )
             .group_by(
                 Conceptos.nro_colegio,
                 Conceptos.nombre,
+                Deduccion.medico_id,
                 Deduccion.mes_aplicar,
                 Deduccion.anio_aplicar,
             )
             .order_by(Deduccion.anio_aplicar, Deduccion.mes_aplicar)
         )).all()
+
+    # Deducciones de otro médico que este paga (el pagador): el recibo aclara por quién.
+    titulares_ajenos = {r.titular_id for r in ded_rows if r.titular_id != medico_db_id}
+    titular_info: dict[int, dict] = {}
+    if titulares_ajenos:
+        for tid, nro, nombre in (await db.execute(
+            select(ListadoMedico.ID, ListadoMedico.NRO_SOCIO, ListadoMedico.NOMBRE)
+            .where(ListadoMedico.ID.in_(titulares_ajenos))
+        )).all():
+            titular_info[tid] = {"nro_socio": nro, "nombre": nombre}
 
     total_deducciones = Decimal("0")
     ded_detalle = []
@@ -507,12 +547,15 @@ async def refrescar_detalle_medico(
         total_deducciones += t
         mes  = r.mes_aplicar
         anio = r.anio_aplicar
-        ded_detalle.append({
+        item = {
             "nro_deduccion":    r.nro_deduccion,
             "nombre_deduccion": r.nombre_deduccion or "Manual",
             "periodo_a_aplicar": f"{mes:02d}/{anio}" if mes and anio else None,
             "total": float(t),
-        })
+        }
+        if r.titular_id != medico_db_id:
+            item["por_cuenta_de"] = titular_info.get(r.titular_id, {"nro_socio": None, "nombre": None})
+        ded_detalle.append(item)
 
     deducciones_out = {
         "total":   float(total_deducciones),
@@ -554,6 +597,9 @@ async def refrescar_detalle_medico(
             "otros_ajustes":  otros_ajustes_out,
         },
     }
+
+    if not guardar:
+        return {medico_db_id: full_doc}
 
     # ── 6. Upsert PagoMedico ──────────────────────────────────────────────────
     existing_pm = (await db.execute(
@@ -616,6 +662,10 @@ async def generar_recibo_medico(
         select(Recibo).where(Recibo.pago_medico_id == pm.id)
     )).scalars().first()
 
+    if existing and existing.estado == "emitido":
+        # Un recibo emitido es el punto de no retorno: no se vuelve a tocar.
+        return existing
+
     if existing:
         existing.total_neto        = pm.neto_a_pagar
         existing.detalle_json      = pm.detalle_json
@@ -641,17 +691,11 @@ async def generar_recibo_medico(
 
 async def refrescar_todos_medicos(db: AsyncSession, pago_id: int, pago: Pago) -> dict:
     """
-    Llama a refrescar_detalle_medico para cada médico con detalles en el pago.
+    Llama a refrescar_detalle_medico para cada médico que participa en el pago: con
+    prestaciones o con algún ajuste (un crédito de un lote sin factura, por ejemplo).
     Devuelve {medico_db_id: {info_medico, resumen, detalle}, ...}.
     """
-    medico_ids_q = await db.execute(
-        select(DetalleLiquidacion.medico_id.label("medico_db_id"))
-        .select_from(DetalleLiquidacion)
-        .join(Liquidacion, Liquidacion.id == DetalleLiquidacion.liquidacion_id)
-        .where(Liquidacion.pago_id == pago_id)
-        .distinct()
-    )
-    medico_ids = [r.medico_db_id for r in medico_ids_q.all()]
+    medico_ids = sorted(await _medicos_en_pago(db, pago_id))
 
     result: dict = {}
     for mid in medico_ids:
@@ -736,11 +780,21 @@ async def generar_todos_recibos(
     """
     Genera/actualiza recibos para los médicos indicados (o todos si medico_ids es None).
     Copia el detalle_json desde PagoMedico al Recibo.
+
+    Antes recalcula el resumen de cada médico, así el recibo nunca sale con montos viejos.
+    No se genera recibo a un médico que no tiene prestaciones en el pago y no tiene nada
+    para cobrar (por ejemplo, sólo débitos): su deuda no es un recibo.
     """
     if pago is None:
         pago = await db.get(Pago, pago_id)
         if not pago:
             raise HTTPException(404, "Pago no encontrado")
+
+    if medico_ids:
+        for mid in medico_ids:
+            await refrescar_detalle_medico(db, pago_id, mid, pago=pago)
+    else:
+        await refrescar_todos_medicos(db, pago_id, pago)
 
     if medico_ids:
         stmt = select(PagoMedico).where(
@@ -756,6 +810,13 @@ async def generar_todos_recibos(
 
     recibos = []
     for pm in pm_rows:
+        if _to_dec(pm.bruto) == 0 and _to_dec(pm.neto_a_pagar) <= 0:
+            # Sin prestaciones ni nada para cobrar: si había un recibo sin emitir, se retira.
+            await db.execute(
+                delete(Recibo).where(Recibo.pago_medico_id == pm.id, Recibo.estado != "emitido")
+            )
+            continue
         recibo = await generar_recibo_medico(db, pago_id, pm.medico_id, pago=pago)
         recibos.append(recibo)
+    await db.flush()
     return recibos

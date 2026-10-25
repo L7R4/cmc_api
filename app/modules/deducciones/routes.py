@@ -58,7 +58,6 @@ from app.modules.deducciones.service import (
     get_historial_deducciones,
     get_historial_export,
     get_top_deudores,
-    marcar_deducciones_dirty,
     pagar_deduccion,
     refrescar_deducciones_pago,
     verificar_deducciones_por_pago,
@@ -211,7 +210,8 @@ async def bulk_generar_descuento(
 
     await db.flush()
     await _recalcular_montos_aplicados_en_pago(db, pago_id)
-    await marcar_deducciones_dirty(db, pago_id)
+    # La vista previa se acaba de recalcular entera (todas las en_pago del pago): no queda vieja.
+    pago.deducciones_dirty = False
     await db.commit()
 
     return {
@@ -418,13 +418,14 @@ async def listar_deducciones(
     size: int = Query(50, ge=1, le=50),
     medico_id: Optional[int] = Query(None),
     descuento_id: Optional[int] = Query(None),
-    estado: Optional[str] = Query(None, description="pendiente|en_pago|aplicado|cancelado|vencida"),
+    estado: Optional[str] = Query(None, description="pendiente|en_pago|aplicado|cancelado|vencida; varios separados por coma"),
     origen: Optional[str] = Query(None, description="manual|automatico"),
     paga_por_caja: Optional[bool] = Query(None, description="true=solo caja | false=solo liquidación"),
     mes_desde: Optional[int] = Query(None, ge=1, le=12),
     anio_desde: Optional[int] = Query(None, ge=2000),
     mes_hasta: Optional[int] = Query(None, ge=1, le=12),
     anio_hasta: Optional[int] = Query(None, ge=2000),
+    solo_en_pago: bool = Query(False, description="solo deducciones de médicos que participan en el pago abierto"),
     db: AsyncSession = Depends(get_db),
 ):
     """Lista paginada de deducciones (manual + automático). Incluye monto_total agregado."""
@@ -441,6 +442,7 @@ async def listar_deducciones(
         anio_desde=anio_desde,
         mes_hasta=mes_hasta,
         anio_hasta=anio_hasta,
+        solo_en_pago=solo_en_pago,
     )
 
 
@@ -448,13 +450,14 @@ async def listar_deducciones(
 async def exportar_deducciones(
     medico_id: Optional[int] = Query(None),
     descuento_id: Optional[int] = Query(None),
-    estado: Optional[str] = Query(None, description="pendiente|en_pago|aplicado|cancelado|vencida"),
+    estado: Optional[str] = Query(None, description="pendiente|en_pago|aplicado|cancelado|vencida; varios separados por coma"),
     origen: Optional[str] = Query(None, description="manual|automatico"),
     paga_por_caja: Optional[bool] = Query(None, description="true=solo caja | false=solo liquidación"),
     mes_desde: Optional[int] = Query(None, ge=1, le=12),
     anio_desde: Optional[int] = Query(None, ge=2000),
     mes_hasta: Optional[int] = Query(None, ge=1, le=12),
     anio_hasta: Optional[int] = Query(None, ge=2000),
+    solo_en_pago: bool = Query(False, description="solo deducciones de médicos que participan en el pago abierto"),
     db: AsyncSession = Depends(get_db),
 ):
     """Sin paginación — para exportar a Excel/PDF."""
@@ -469,6 +472,7 @@ async def exportar_deducciones(
         anio_desde=anio_desde,
         mes_hasta=mes_hasta,
         anio_hasta=anio_hasta,
+        solo_en_pago=solo_en_pago,
     )
 
 

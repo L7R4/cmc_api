@@ -93,6 +93,9 @@ async def crear_liquidacion(payload: LiquidacionCreate, db: AsyncSession = Depen
             motivos.append(f"{resumen['importe_cero']} con importe en 0")
         if resumen["ya_liquidadas"]:
             motivos.append(f"{resumen['ya_liquidadas']} ya liquidadas en otro pago")
+        if resumen["reservadas"]:
+            adelantos = ", ".join(f"#{a}" for a in resumen["adelantos_reservantes"])
+            motivos.append(f"{resumen['reservadas']} reservadas en adelantos ({adelantos})")
         raise HTTPException(
             409,
             "La factura no tiene prestaciones para liquidar"

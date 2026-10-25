@@ -17,6 +17,8 @@ from app.db.models import (
     SocioDescuento,
 )
 from app.db.models.liquidacion import Pago
+from app.modules.adelantos.queries import adelantos_por_medico_en_pago
+from app.modules.compensaciones.queries import compensaciones_por_medico_en_pago
 from app.modules.deducciones.schemas import (
     DeduccionHistorialItem,
     DeduccionRead,
@@ -99,7 +101,7 @@ async def _base_bruto_por_medico_en_pago(
     db: AsyncSession, pago_id: int
 ) -> dict[int, Decimal]:
     """
-    Suma de DetalleLiquidacion.importe_total 
+    Suma de DetalleLiquidacion.importe_total más los adelantos del pago
     por médico (listado_medico.ID) de un pago específico.
     """
 
@@ -113,7 +115,11 @@ async def _base_bruto_por_medico_en_pago(
         .where(Liquidacion.pago_id == pago_id)
         .group_by(DetalleLiquidacion.medico_id)
     )
-    return {int(med_id): Decimal(suma or 0) for med_id, suma in q}
+    out = {int(med_id): Decimal(suma or 0) for med_id, suma in q}
+    # El adelanto es producción del médico: suma a todas las bases como una factura.
+    for med_id, a in (await adelantos_por_medico_en_pago(db, pago_id)).items():
+        out[med_id] = out.get(med_id, Decimal("0")) + a["importe"]
+    return out
 
 
 async def _honorarios_por_medico_en_pago(
@@ -134,7 +140,10 @@ async def _honorarios_por_medico_en_pago(
         .where(Liquidacion.pago_id == pago_id)
         .group_by(DetalleLiquidacion.medico_id)
     )
-    return {int(med_id): Decimal(suma or 0) for med_id, suma in q}
+    out = {int(med_id): Decimal(suma or 0) for med_id, suma in q}
+    for med_id, a in (await adelantos_por_medico_en_pago(db, pago_id)).items():
+        out[med_id] = out.get(med_id, Decimal("0")) + a["honorarios"]
+    return out
 
 
 async def _gastos_por_medico_en_pago(
@@ -154,12 +163,16 @@ async def _gastos_por_medico_en_pago(
         .where(Liquidacion.pago_id == pago_id)
         .group_by(DetalleLiquidacion.medico_id)
     )
-    return {int(med_id): Decimal(suma or 0) for med_id, suma in q}
+    out = {int(med_id): Decimal(suma or 0) for med_id, suma in q}
+    for med_id, a in (await adelantos_por_medico_en_pago(db, pago_id)).items():
+        out[med_id] = out.get(med_id, Decimal("0")) + a["gastos"]
+    return out
 
 
 async def _medicos_en_pago(db: AsyncSession, pago_id: int) -> set[int]:
-    """Médicos que participan en el pago: con prestaciones (detalle) o con algún ajuste en
-    un lote del pago. Un médico con sólo un crédito de un lote sin factura participa igual."""
+    """Médicos que participan en el pago: con prestaciones (detalle), con algún ajuste en
+    un lote del pago o con un adelanto. Un médico con sólo un crédito de un lote sin factura
+    participa igual."""
     con_detalle = (await db.execute(
         select(DetalleLiquidacion.medico_id)
         .select_from(DetalleLiquidacion)
@@ -174,7 +187,9 @@ async def _medicos_en_pago(db: AsyncSession, pago_id: int) -> set[int]:
         .where(LoteAjuste.pago_id == pago_id, LoteAjuste.estado.in_(["L", "AP"]))
         .distinct()
     )).scalars().all()
-    return {int(m) for m in con_detalle} | {int(m) for m in con_ajuste}
+    con_adelanto = await adelantos_por_medico_en_pago(db, pago_id)
+    con_compensacion = await compensaciones_por_medico_en_pago(db, pago_id)
+    return {int(m) for m in con_detalle} | {int(m) for m in con_ajuste} | set(con_adelanto) | set(con_compensacion)
 
 
 async def _ajustes_por_medico_en_pago(
@@ -205,6 +220,14 @@ async def _ajustes_por_medico_en_pago(
     for med, deb, cred in qaj:
         deb_map[int(med)] = Decimal(deb or 0)
         cred_map[int(med)] = Decimal(cred or 0)
+    # Las compensaciones del pago pesan en el disponible igual que un crédito (+) o un débito (−):
+    # una a favor sirve para pagar las deudas y cuotas del socio. NO suben el bruto, así que no
+    # pagan contribuciones ni impuestos.
+    for med, neto in (await compensaciones_por_medico_en_pago(db, pago_id)).items():
+        if neto >= 0:
+            cred_map[med] = cred_map.get(med, Decimal("0")) + neto
+        else:
+            deb_map[med] = deb_map.get(med, Decimal("0")) - neto
     return deb_map, cred_map
 
 

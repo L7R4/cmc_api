@@ -53,6 +53,16 @@ from app.services.detalle_facturacion_update import (
     revertir_prestaciones_liquidadas,
 )
 from app.services.deducciones_rollback import rollback_deducciones_pago
+from app.services.adelanto_update import (
+    marcar_adelantos_aplicados,
+    revertir_adelantos_al_reabrir,
+    rollback_adelantos_pago,
+)
+from app.services.compensacion_update import (
+    marcar_compensaciones_pagadas,
+    revertir_compensaciones_al_reabrir,
+    rollback_compensaciones_pago,
+)
 from app.services.lote_ajuste_rollback import rollback_lotes_pago
 from app.services.liquidaciones_rollback import rollback_liquidaciones_pago, rollback_recibos_pago
 
@@ -73,6 +83,8 @@ def _enrich_pago(pago: Pago, totales: dict) -> PagoRead:
         total_creditos=totales["total_creditos"],
         total_neto=totales["total_neto"],
         total_deduccion=totales["total_deduccion"],
+        total_adelantos=totales.get("total_adelantos", 0),
+        total_compensaciones=totales.get("total_compensaciones", 0),
     )
 
 
@@ -210,6 +222,12 @@ async def eliminar_pago(pago_id: int, db: AsyncSession = Depends(get_db)):
     #    liquidaciones/detalles, porque lee detalle_liquidacion para saber cuáles.
     await revertir_prestaciones_liquidadas(db, pago_id)
 
+    # 3b. Adelantos del pago: vuelven a «cerrado» y sin pago (después del paso 3, que los lee por pago_id)
+    await rollback_adelantos_pago(db, pago_id)
+
+    # 3c. Compensaciones del pago: vuelven a pendientes y sin pago
+    await rollback_compensaciones_pago(db, pago_id)
+
     # 4. Recibos (emitidos/pendientes): eliminar antes que Liquidacion por FK RESTRICT
     await rollback_recibos_pago(db, pago_id)
 
@@ -245,6 +263,8 @@ async def cerrar_pago(pago_id: int, db: AsyncSession = Depends(get_db)):
 
     # 3. Marcar lotes: L → AP (Aplicado — inmutables desde ahora)
     lotes_info = await marcar_lotes_aplicados(db, pago_id)
+    lotes_info["adelantos_aplicados"] = await marcar_adelantos_aplicados(db, pago_id)
+    lotes_info["compensaciones_pagadas"] = await marcar_compensaciones_pagadas(db, pago_id)
 
     # 4. Marcar como liquidadas (C → L) las prestaciones CMC que este pago
     #    efectivamente liquidó — ver diagnóstico C3/A7.
@@ -318,6 +338,12 @@ async def reabrir_pago(pago_id: int, db: AsyncSession = Depends(get_db)):
 
     # Revertir lotes: AP → L (vuelven a "En liquidaciones")
     await revertir_lotes_al_reabrir(db, pago_id)
+
+    # Revertir adelantos: AP → L
+    await revertir_adelantos_al_reabrir(db, pago_id)
+
+    # Revertir compensaciones: pagada → en_pago
+    await revertir_compensaciones_al_reabrir(db, pago_id)
 
     # Revertir prestaciones CMC liquidadas: L → C (ver diagnóstico C3/A7)
     await revertir_prestaciones_liquidadas(db, pago_id)

@@ -22,7 +22,7 @@ from app.modules.medicos.helpers import (
 from typing import Any, DefaultDict, Literal, Optional, Dict, List
 from fastapi import APIRouter, Body, Depends, File, Form, Query, HTTPException, Request, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import case, delete, desc, func, literal, select, or_, cast, String, Integer, text, update
+from sqlalchemy import and_, case, delete, desc, func, literal, select, or_, cast, String, Integer, text, update
 
 from app.modules.medicos import auditoria
 from app.core.passwords import hash_password, validate_new_password
@@ -40,7 +40,7 @@ from app.modules.medicos.schemas import (
     DATE_KEYS, FIELD_MAP, AdminSaveContinueIn, AsignarEspecialidadIn, AsociarConceptoIn,
     CEAppOut, CEBundleOut, CEBundlePatchIn, CEStoreOut, ConceptRecordOut, ConceptoAplicacionOut,
     DoctorStatsPointOut, EstadoCuentaIn, MedicoBase, MedicoConceptoOut, MedicoDebtOut, MedicoDocOut,
-    MedicoEspecialidadOut, MedicoListRow, MedicoDetailOut, MedicoPartialIn, MedicoUpdateIn,
+    MedicoEspecialidadOut, MedicoListRow, MedicoDetailOut, MedicoPartialIn, MedicoSelectorOut, MedicoUpdateIn,
     NuevaDeudaIn, OrganizacionIn, PatchCEIn, RegisterIn, RegisterOut, ResetPasswordIn,
     SaveContinueOut,
     _coerce_sexo,
@@ -461,6 +461,60 @@ async def listar_medicos_full(
 
     rows = (await db.execute(stmt)).mappings().all()
     return [dict(r) for r in rows]
+
+
+@router.get("/selector", response_model=List[MedicoSelectorOut])
+async def selector_medicos(
+    q: Optional[str] = Query(None, description="Nombre, N° de socio, matrícula o documento"),
+    limit: int = Query(50, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+):
+    """Médicos para un select, livianos y ya ordenados: de la A a la Z y, al buscar, por cercanía.
+
+    Orden al buscar: primero el N° de socio igual a lo tipeado (buscar «36» trae primero al 36),
+    después el nombre igual, los N° de socio que empiezan así, los nombres que empiezan así, los que
+    tienen una palabra que empieza así y, al final, el resto de las coincidencias (dentro del nombre,
+    la matrícula o el documento). A igual cercanía, alfabético. El orden se resuelve antes del límite:
+    la coincidencia exacta nunca queda afuera.
+    """
+    nro = cast(ListadoMedico.NRO_SOCIO, String)
+    nombre = ListadoMedico.NOMBRE
+    stmt = select(ListadoMedico.ID.label("id"), ListadoMedico.NRO_SOCIO.label("nro_socio"), nombre.label("nombre"))
+
+    texto = (q or "").strip()
+    if not texto:
+        # Sin búsqueda, los registros sin nombre (hay tres con «0») no se ofrecen: quedarían primeros.
+        stmt = stmt.where(func.trim(nombre).notin_(["", "0"])).order_by(nombre.asc())
+    else:
+        palabras = texto.split()
+        en_nombre = and_(*[nombre.contains(p, autoescape=True) for p in palabras])
+        stmt = stmt.where(or_(
+            en_nombre,
+            nro.contains(texto, autoescape=True),
+            cast(ListadoMedico.MATRICULA_PROV, String).contains(texto, autoescape=True),
+            cast(ListadoMedico.DOCUMENTO, String).contains(texto, autoescape=True),
+        ))
+        cercania = case(
+            (nro == texto, 0),
+            (nombre == texto, 1),
+            (nro.startswith(texto, autoescape=True), 2),
+            (nombre.startswith(texto, autoescape=True), 3),
+            (nombre.contains(" " + texto, autoescape=True), 4),
+            (en_nombre, 5),
+            else_=6,
+        )
+        stmt = stmt.order_by(
+            cercania.asc(),
+            # Entre los N° de socio que empiezan igual, el más chico primero (36, 360, 361…).
+            case((nro.startswith(texto, autoescape=True), ListadoMedico.NRO_SOCIO), else_=0).asc(),
+            nombre.asc(),
+        )
+
+    rows = (await db.execute(stmt.limit(limit))).mappings().all()
+    return [
+        MedicoSelectorOut(id=r["id"], nro_socio=r["nro_socio"], nombre=(r["nombre"] or "").strip())
+        for r in rows
+    ]
 
 
 @router.get("/count")

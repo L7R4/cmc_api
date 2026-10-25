@@ -23,6 +23,7 @@ from app.db.models import (
     FacturacionCMC,
     ListadoMedico,
     Liquidacion,
+    LiquidacionAdelantoItem,
     LoteAjuste,
     ObrasSociales,
     Pago,
@@ -65,6 +66,29 @@ _REPARTO_POR_FUNCION: dict[str, tuple[Optional[str], Optional[str]]] = {
 }
 
 
+def repartir_honorarios_gastos(
+    df: DetalleFacturacionCMC,
+    reparto: Optional[tuple[Optional[str], Optional[str]]] = None,
+) -> tuple[Decimal, Decimal]:
+    """(honorarios, gastos) que le tocan a quien cobra esta fila de `detalle_facturacion`.
+
+    Lo usan las facturas (`detalle_liquidacion`) y los adelantos: tiene que dar lo mismo.
+    En `detalle_facturacion` honorarios/gastos/ayudante son el valor de UNA unidad y
+    importe_total = (h + g + a − coseguro) × cantidad × sesión. El desglose del pago
+    tiene que escalar igual: si no, la suma de honorarios + gastos queda por debajo
+    del bruto (factura 1091: $29,0 M contra $39,0 M) y las deducciones que se calculan
+    sobre honorarios o sobre gastos toman una base más chica que la real.
+    Una función que no se conoce se reparte como 'H' (ver `build_detalles_from_cmc`).
+    """
+    if reparto is None:
+        reparto = _REPARTO_POR_FUNCION.get((df.tpo_funcion or "H").upper(), _REPARTO_POR_FUNCION["H"])
+    col_hon, col_gas = reparto
+    multiplicador = Decimal(df.cantidad or 1) * Decimal(df.sesion or 1)
+    honorarios = to_dec(getattr(df, col_hon)) * multiplicador if col_hon else Decimal("0")
+    gastos = to_dec(getattr(df, col_gas)) * multiplicador if col_gas else Decimal("0")
+    return honorarios, gastos
+
+
 def condicion_ajustes_de_liquidacion(liq: Liquidacion) -> list:
     """Condiciones sobre LoteAjuste: los ajustes que le tocan a esta liquidación.
 
@@ -97,11 +121,13 @@ async def build_detalles_from_cmc(db: AsyncSession, liquidacion_id: int) -> dict
     Devuelve el resumen de la carga para mostrárselo al operador:
     `total` (prestaciones cerradas de la factura), `cargadas`, `ya_liquidadas` (estaban en
     otra liquidación), `sin_medico` (socios que no están en el padrón, descartadas),
-    `importe_cero` (descartadas) y `funcion_desconocida` (se cargaron igual como 'H').
+    `importe_cero` (descartadas), `reservadas` (están en un adelanto y las paga ese adelanto) y
+    `funcion_desconocida` (se cargaron igual como 'H').
     """
     resumen: dict = {
         "total": 0, "cargadas": 0, "ya_liquidadas": 0,
         "importe_cero": 0, "sin_medico": [], "funcion_desconocida": 0,
+        "reservadas": 0, "importe_reservado": "0.00", "adelantos_reservantes": [],
     }
     liq = (await db.execute(
         select(Liquidacion).where(Liquidacion.id == liquidacion_id)
@@ -157,11 +183,26 @@ async def build_detalles_from_cmc(db: AsyncSession, liquidacion_id: int) -> dict
         .where(DetalleLiquidacion.cmc_detalle_id.in_(candidate_ids))
     )).scalars().all())
 
+    # Prestaciones reservadas por un adelanto (en cualquier estado): las paga el adelanto,
+    # la factura entra sin ellas. Si el adelanto se elimina, quedan libres otra vez.
+    reservadas = {
+        int(det_id): int(adel_id)
+        for det_id, adel_id in (await db.execute(
+            select(LiquidacionAdelantoItem.detalle_facturacion_id, LiquidacionAdelantoItem.adelanto_id)
+            .where(LiquidacionAdelantoItem.detalle_facturacion_id.in_(candidate_ids))
+        )).all()
+    }
+    importe_reservado = Decimal("0")
+
     observados: list[dict] = []
 
     for df in cmc_rows:
         if df.id_detalle_prestaciones in existing_cmc:
             resumen["ya_liquidadas"] += 1
+            continue
+        if df.id_detalle_prestaciones in reservadas:
+            resumen["reservadas"] += 1
+            importe_reservado += to_dec(df.importe_total)
             continue
 
         # cod_med es BIGINT en detalle_facturacion: el driver lo devuelve int aunque el modelo
@@ -192,9 +233,7 @@ async def build_detalles_from_cmc(db: AsyncSession, liquidacion_id: int) -> dict
                 "tpo_funcion": df.tpo_funcion,
             })
             reparto = _REPARTO_POR_FUNCION["H"]
-        col_hon, col_gas = reparto
-        honorarios = to_dec(getattr(df, col_hon)) if col_hon else Decimal("0")
-        gastos = to_dec(getattr(df, col_gas)) if col_gas else Decimal("0")
+        honorarios, gastos = repartir_honorarios_gastos(df, reparto)
 
         importe_total = to_dec(df.importe_total)
         if importe_total <= 0:
@@ -234,6 +273,8 @@ async def build_detalles_from_cmc(db: AsyncSession, liquidacion_id: int) -> dict
     if observados:
         print(f"[build_detalles_from_cmc] Observaciones en liq {liquidacion_id}: {json.dumps(observados)}")
 
+    resumen["importe_reservado"] = str(importe_reservado)
+    resumen["adelantos_reservantes"] = sorted(set(reservadas.values()))
     resumen["sin_medico"] = sorted({int(o["cod_med"]) for o in observados if o["razon"] == "medico_no_encontrado"})
     resumen["sin_medico_cantidad"] = sum(1 for o in observados if o["razon"] == "medico_no_encontrado")
     resumen["importe_cero"] = sum(1 for o in observados if o["razon"] == "importe_cero_o_negativo")

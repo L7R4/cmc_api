@@ -1,11 +1,11 @@
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import and_, func, not_, select
+from sqlalchemy import and_, exists, func, not_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.database import get_db
-from app.db.models import DetalleFacturacionCMC, FacturacionCMC, Liquidacion, LoteAjuste
+from app.db.models import DetalleFacturacionCMC, FacturacionCMC, Liquidacion, LiquidacionAdelantoItem, LoteAjuste
 
 router = APIRouter()
 
@@ -81,15 +81,24 @@ async def facturas_para_pago(
 
     Una fila por factura (la original y cada complementaria), con su número, para
     que el operador vea qué va a pagar. La cantidad y el importe son de las
-    prestaciones cerradas ('C') de esa factura, que son las que entran al pago.
+    prestaciones cerradas ('C') de esa factura que entran al pago. Las que están reservadas en
+    un adelanto no entran (las paga el adelanto): se informan aparte en RESERVADAS.
     """
     cod_obr = str(obra_social_id)
+    D = DetalleFacturacionCMC
+    reservada = (
+        exists()
+        .where(LiquidacionAdelantoItem.detalle_facturacion_id == D.id_detalle_prestaciones)
+        .correlate(D)
+    )
     pendientes = (
         select(
-            DetalleFacturacionCMC.periodo.label("periodo"),
-            DetalleFacturacionCMC.version.label("version"),
-            func.count().label("cantidad"),
-            func.coalesce(func.sum(DetalleFacturacionCMC.importe_total), 0).label("importe"),
+            D.periodo.label("periodo"),
+            D.version.label("version"),
+            func.sum(func.IF(reservada, 0, 1)).label("cantidad"),
+            func.coalesce(func.sum(func.IF(reservada, 0, D.importe_total)), 0).label("importe"),
+            func.sum(func.IF(reservada, 1, 0)).label("reservadas"),
+            func.coalesce(func.sum(func.IF(reservada, D.importe_total, 0)), 0).label("importe_reservado"),
         )
         .where(DetalleFacturacionCMC.cod_obr == cod_obr, DetalleFacturacionCMC.estado == "C")
         .group_by(DetalleFacturacionCMC.periodo, DetalleFacturacionCMC.version)
@@ -105,6 +114,8 @@ async def facturas_para_pago(
             FacturacionCMC.estado,
             pendientes.c.cantidad,
             pendientes.c.importe,
+            pendientes.c.reservadas,
+            pendientes.c.importe_reservado,
         )
         .join(
             pendientes,
@@ -116,6 +127,8 @@ async def facturas_para_pago(
         .where(
             FacturacionCMC.cod_obr == cod_obr,
             FacturacionCMC.estado.in_(["C", "L", "LC"]),
+            # Una factura con todo reservado en adelantos no tiene nada para este pago.
+            pendientes.c.cantidad > 0,
         )
         .order_by(FacturacionCMC.periodo.desc(), FacturacionCMC.version)
     )
@@ -142,6 +155,8 @@ async def facturas_para_pago(
             "PERIODO": r["periodo"],
             "CANTIDAD": int(r["cantidad"]),
             "IMPORTE": float(r["importe"] or 0),
+            "RESERVADAS": int(r["reservadas"] or 0),
+            "IMPORTE_RESERVADO": float(r["importe_reservado"] or 0),
         }
         for r in rows
     ]

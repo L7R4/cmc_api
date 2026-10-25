@@ -199,9 +199,17 @@ class DeduccionHistorialItem(BaseModel):
     cuotas_total: Optional[int] = None
     generado_en_pago_id: Optional[int] = None
     created_at: datetime.datetime
+    # Cuándo se aplicó (la última vez que se descontó o se cobró en caja); None si todavía no se aplicó.
+    fecha_aplicacion: Optional[datetime.datetime] = None
 
     class Config:
         from_attributes = True
+
+
+class ConteoEstado(BaseModel):
+    estado: str
+    cantidad: int
+    monto: Decimal
 
 
 class DeduccionHistorialPage(BaseModel):
@@ -210,6 +218,8 @@ class DeduccionHistorialPage(BaseModel):
     size: int
     monto_total: Decimal
     items: List[DeduccionHistorialItem]
+    # Cantidad y monto por estado (pendiente, vencida, en_pago, aplicado…) con los filtros de médico, concepto y período.
+    conteos: List[ConteoEstado] = []
 
 
 # ---- Top deudores ----

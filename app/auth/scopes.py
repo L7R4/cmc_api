@@ -87,6 +87,12 @@ class Scope(StrEnum):
     LOTE_ELIMINAR = "lote:eliminar"
     LOTE_REFACTURAR = "lote:refacturar"
 
+    # ── Financiero: compensaciones (plata a favor o en contra de un socio, sin concepto) ──
+    COMPENSACION_LEER = "compensacion:leer"
+    COMPENSACION_CREAR = "compensacion:crear"
+    COMPENSACION_EDITAR = "compensacion:editar"
+    COMPENSACION_ANULAR = "compensacion:anular"
+
     # ── Facturación ───────────────────────────────────────────────────────────
     FACTURACION_LEER = "facturacion:leer"
     FACTURACION_CARGAR = "facturacion:cargar"
@@ -295,6 +301,10 @@ ROLES: dict[str, set[Scope]] = {
         Scope.LOTE_EDITAR,
         Scope.LOTE_ELIMINAR,
         Scope.LOTE_REFACTURAR,
+        Scope.COMPENSACION_LEER,
+        Scope.COMPENSACION_CREAR,
+        Scope.COMPENSACION_EDITAR,
+        Scope.COMPENSACION_ANULAR,
         Scope.DEDUCCION_LEER,
         Scope.DEDUCCION_CREAR,
         Scope.DEDUCCION_EDITAR,
@@ -451,6 +461,10 @@ DESCRIPCIONES: dict[Scope, str] = {
     Scope.LOTE_EDITAR: "Editar lotes de ajuste y su estado",
     Scope.LOTE_ELIMINAR: "Eliminar lotes de ajuste e ítems",
     Scope.LOTE_REFACTURAR: "Crear lotes de refacturación y sin factura",
+    Scope.COMPENSACION_LEER: "Ver compensaciones (movimientos a favor o en contra de un socio)",
+    Scope.COMPENSACION_CREAR: "Cargar compensaciones",
+    Scope.COMPENSACION_EDITAR: "Editar compensaciones pendientes, pasarlas o quitarlas de un pago y pagarlas en caja",
+    Scope.COMPENSACION_ANULAR: "Anular compensaciones pendientes",
     Scope.FACTURACION_LEER: "Ver facturación, prestaciones y facturas",
     Scope.FACTURACION_CARGAR: "Cargar, editar y borrar prestaciones",
     Scope.FACTURACION_CERRAR: "Cerrar el período de facturación",

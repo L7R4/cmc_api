@@ -9,14 +9,20 @@ from fastapi import HTTPException
 from sqlalchemy import case, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.modules.adelantos.queries import ESTADOS_EN_PAGO, total_adelantos_del_pago
+from app.modules.compensaciones.queries import ESTADOS_EN_PAGO as COMP_EN_PAGO, totales_compensaciones_del_pago
 from app.modules.deducciones.helpers import _medicos_en_pago
 from app.db.models import (
     Ajuste,
     DeduccionAplicacion,
     Conceptos,
     DetalleLiquidacion,
+    Compensacion,
     Deduccion,
+    FacturacionCMC,
     Liquidacion,
+    LiquidacionAdelanto,
+    LiquidacionAdelantoItem,
     ListadoMedico,
     LoteAjuste,
     ObrasSociales,
@@ -38,7 +44,8 @@ def _to_dec(v) -> Decimal:
 async def recalcular_totales_pago(db: AsyncSession, pago_id: int) -> dict:
     """
     Recalcula los totales globales de un pago:
-    - total_bruto: suma de brutos de todas las liquidaciones del pago
+    - total_bruto: suma de brutos de todas las liquidaciones del pago, más los adelantos
+    - total_adelantos: la parte de total_bruto que viene de adelantos
     - total_debitos / total_creditos: suma de ajustes de lotes en estado='L' con pago_id dado
     - total_deduccion: suma de deducciones aplicadas al pago
     - total_neto: total_bruto - total_debitos + total_creditos - total_deduccion
@@ -48,7 +55,8 @@ async def recalcular_totales_pago(db: AsyncSession, pago_id: int) -> dict:
         select(func.coalesce(func.sum(Liquidacion.total_bruto), 0))
         .where(Liquidacion.pago_id == pago_id)
     )
-    total_bruto = _to_dec(bruto_res.scalar_one())
+    total_adelantos = _to_dec(await total_adelantos_del_pago(db, pago_id))
+    total_bruto = _to_dec(bruto_res.scalar_one()) + total_adelantos
 
     # Débitos y créditos de ajustes en lotes liquidados (estado='L') de este pago
     dc_res = await db.execute(
@@ -84,10 +92,18 @@ async def recalcular_totales_pago(db: AsyncSession, pago_id: int) -> dict:
 
     total_deduccion = _to_dec(ded_res.scalar_one())
 
-    total_neto = (total_bruto - total_debitos + total_creditos - total_deduccion).quantize(Decimal("0.01"))
+    # Las compensaciones no son producción (no están en total_bruto) pero sí suman al neto.
+    comp_favor, comp_contra = await totales_compensaciones_del_pago(db, pago_id)
+    total_compensaciones = _to_dec(comp_favor - comp_contra)
+
+    total_neto = (
+        total_bruto - total_debitos + total_creditos + total_compensaciones - total_deduccion
+    ).quantize(Decimal("0.01"))
 
     return {
         "total_bruto": total_bruto,
+        "total_adelantos": total_adelantos,
+        "total_compensaciones": total_compensaciones,
         "total_debitos": total_debitos,
         "total_creditos": total_creditos,
         "total_deduccion": total_deduccion,
@@ -168,22 +184,38 @@ async def vista_previa_pago(db: AsyncSession, pago_id: int) -> dict:
 
     # ── 2. Deducciones agrupadas por concepto ────────────────────────────────
     pago_cerrado = pago.estado in ("C", "P")
-    estado_ded = "aplicado" if pago_cerrado else "en_pago"
-    # Cerrado (C o P): monto_aplicado es el ledger real (DeduccionAplicacion).
-    # Abierto: todavía no se cobró nada, se muestra la preview (monto_aplicado_preview).
-    col_monto = Deduccion.monto_aplicado if pago_cerrado else Deduccion.monto_aplicado_preview
-
-    ded_rows = (await db.execute(
-        select(
-            Deduccion.descuento_id,
-            Conceptos.nombre.label("descuento_nombre"),
-            func.count(Deduccion.id).label("cantidad_socios"),
-            func.coalesce(func.sum(col_monto), 0).label("total_monto"),
+    # Mismo criterio que recalcular_totales_pago (la tira de arriba) y que el cierre:
+    #  - Cerrado (C o P): lo realmente descontado en ESTE pago, según el ledger
+    #    (DeduccionAplicacion), venga la deducción de donde venga.
+    #  - Abierto: todas las que están en_pago —las generadas en este pago y también las
+    #    enroladas (pendientes que entraron por «Refrescar»)—, con su preview. Filtrar por
+    #    generado_en_pago_id dejaba afuera las enroladas y el total no coincidía con la tira.
+    if pago_cerrado:
+        ded_query = (
+            select(
+                Deduccion.descuento_id,
+                Conceptos.nombre.label("descuento_nombre"),
+                func.count(func.distinct(Deduccion.id)).label("cantidad_socios"),
+                func.coalesce(func.sum(DeduccionAplicacion.aplicado), 0).label("total_monto"),
+            )
+            .select_from(DeduccionAplicacion)
+            .join(Deduccion, Deduccion.id == DeduccionAplicacion.deduccion_id)
+            .outerjoin(Conceptos, Conceptos.id == Deduccion.descuento_id)
+            .where(DeduccionAplicacion.pago_id == pago_id)
         )
-        .outerjoin(Conceptos, Conceptos.id == Deduccion.descuento_id)
-        .where(Deduccion.generado_en_pago_id == pago_id, Deduccion.estado == estado_ded)
-        .group_by(Deduccion.descuento_id, Conceptos.nombre)
-        .order_by(Conceptos.nombre)
+    else:
+        ded_query = (
+            select(
+                Deduccion.descuento_id,
+                Conceptos.nombre.label("descuento_nombre"),
+                func.count(Deduccion.id).label("cantidad_socios"),
+                func.coalesce(func.sum(Deduccion.monto_aplicado_preview), 0).label("total_monto"),
+            )
+            .outerjoin(Conceptos, Conceptos.id == Deduccion.descuento_id)
+            .where(Deduccion.estado == "en_pago")
+        )
+    ded_rows = (await db.execute(
+        ded_query.group_by(Deduccion.descuento_id, Conceptos.nombre).order_by(Conceptos.nombre)
     )).mappings().all()
 
     ded_items = []
@@ -235,6 +267,68 @@ async def vista_previa_pago(db: AsyncSession, pago_id: int) -> dict:
         lote_tot_deb  += deb
         lote_tot_cred += cred
 
+    # ── 4. Adelantos ──────────────────────────────────────────────────────────
+    A, I = LiquidacionAdelanto, LiquidacionAdelantoItem
+    adel_rows = (await db.execute(
+        select(
+            A.id.label("adelanto_id"), A.estado, A.obra_social_id,
+            ObrasSociales.OBRA_SOCIAL.label("obra_social_nombre"),
+            FacturacionCMC.nro_factura, A.mes_periodo, A.anio_periodo,
+            func.count(I.id).label("prestaciones"),
+            func.count(func.distinct(I.medico_id)).label("medicos"),
+            func.coalesce(func.sum(I.honorarios), 0).label("total_honorarios"),
+            func.coalesce(func.sum(I.gastos), 0).label("total_gastos"),
+            func.coalesce(func.sum(I.importe_total), 0).label("total_bruto"),
+        )
+        .select_from(A)
+        .join(I, I.adelanto_id == A.id)
+        .join(ObrasSociales, ObrasSociales.NRO_OBRASOCIAL == A.obra_social_id)
+        .outerjoin(FacturacionCMC, FacturacionCMC.id_prestaciones == A.factura_id)
+        .where(A.pago_id == pago_id, A.estado.in_(ESTADOS_EN_PAGO))
+        .group_by(A.id, A.estado, A.obra_social_id, ObrasSociales.OBRA_SOCIAL,
+                  FacturacionCMC.nro_factura, A.mes_periodo, A.anio_periodo)
+        .order_by(A.id)
+    )).mappings().all()
+    adel_items = [
+        {
+            "adelanto_id":        r["adelanto_id"],
+            "estado":             r["estado"],
+            "obra_social_id":     r["obra_social_id"],
+            "obra_social_nombre": r["obra_social_nombre"],
+            "nro_factura":        r["nro_factura"],
+            "mes_periodo":        r["mes_periodo"],
+            "anio_periodo":       r["anio_periodo"],
+            "prestaciones":       r["prestaciones"],
+            "medicos":            r["medicos"],
+            "total_honorarios":   _to_dec(r["total_honorarios"]),
+            "total_gastos":       _to_dec(r["total_gastos"]),
+            "total_bruto":        _to_dec(r["total_bruto"]),
+        }
+        for r in adel_rows
+    ]
+    adel_tot = sum((a["total_bruto"] for a in adel_items), Decimal("0")).quantize(Decimal("0.01"))
+
+    # ── 5. Compensaciones ─────────────────────────────────────────────────────
+    comp_rows = (await db.execute(
+        select(Compensacion, ListadoMedico.NOMBRE.label("medico_nombre"))
+        .join(ListadoMedico, ListadoMedico.ID == Compensacion.medico_id)
+        .where(Compensacion.pago_id == pago_id, Compensacion.estado.in_(COMP_EN_PAGO))
+        .order_by(Compensacion.id)
+    )).all()
+    comp_items = [
+        {
+            "compensacion_id": r[0].id,
+            "estado":          r[0].estado,
+            "medico_id":       r[0].medico_id,
+            "medico_nombre":   (r.medico_nombre or "").strip(),
+            "leyenda":         r[0].leyenda,
+            "importe":         _to_dec(r[0].importe),
+        }
+        for r in comp_rows
+    ]
+    comp_favor = sum((c["importe"] for c in comp_items if c["importe"] > 0), Decimal("0"))
+    comp_contra = sum((-c["importe"] for c in comp_items if c["importe"] < 0), Decimal("0"))
+
     return {
         "pago_id":     pago.id,
         "mes":         pago.mes,
@@ -264,6 +358,18 @@ async def vista_previa_pago(db: AsyncSession, pago_id: int) -> dict:
             "totales": {
                 "total_debitos":  lote_tot_deb.quantize(Decimal("0.01")),
                 "total_creditos": lote_tot_cred.quantize(Decimal("0.01")),
+            },
+        },
+        "adelantos": {
+            "items": adel_items,
+            "totales": {"total_bruto": adel_tot},
+        },
+        "compensaciones": {
+            "items": comp_items,
+            "totales": {
+                "a_favor":   comp_favor.quantize(Decimal("0.01")),
+                "en_contra": comp_contra.quantize(Decimal("0.01")),
+                "neto":      (comp_favor - comp_contra).quantize(Decimal("0.01")),
             },
         },
     }
@@ -361,6 +467,33 @@ async def refrescar_detalle_medico(
         .order_by(LoteAjuste.id, Ajuste.id)
     )).all()
 
+    # ── 2b. Adelantos del médico en este pago (una fila por adelanto) ─────────
+    A, I = LiquidacionAdelanto, LiquidacionAdelantoItem
+    adelanto_rows = (await db.execute(
+        select(
+            A.id.label("adelanto_id"), A.obra_social_id,
+            ObrasSociales.OBRA_SOCIAL.label("obra_social_nombre"),
+            FacturacionCMC.nro_factura, FacturacionCMC.version.label("factura_version"),
+            A.mes_periodo, A.anio_periodo,
+            func.count(I.id).label("prestaciones"),
+            func.coalesce(func.sum(I.honorarios), 0).label("honorarios"),
+            func.coalesce(func.sum(I.gastos), 0).label("gastos"),
+            func.coalesce(func.sum(I.importe_total), 0).label("importe"),
+        )
+        .select_from(I)
+        .join(A, A.id == I.adelanto_id)
+        .join(ObrasSociales, ObrasSociales.NRO_OBRASOCIAL == A.obra_social_id)
+        .outerjoin(FacturacionCMC, FacturacionCMC.id_prestaciones == A.factura_id)
+        .where(
+            A.pago_id == pago_id,
+            A.estado.in_(ESTADOS_EN_PAGO),
+            I.medico_id == medico_db_id,
+        )
+        .group_by(A.id, A.obra_social_id, ObrasSociales.OBRA_SOCIAL, FacturacionCMC.nro_factura,
+                  FacturacionCMC.version, A.mes_periodo, A.anio_periodo)
+        .order_by(A.id)
+    )).all()
+
     # ── 3. Construir mapa de liquidaciones ────────────────────────────────────
     liq_map: dict[int, dict] = {}
     factura_to_liq: dict[int, int] = {}
@@ -391,6 +524,45 @@ async def refrescar_detalle_medico(
             factura_to_liq[r.factura_id] = r.liq_id
         else:
             os_per_to_liq[(r.obra_social_id, r.mes_periodo, r.anio_periodo)] = r.liq_id
+
+    # El adelanto es producción del médico: suma al bruto, a los honorarios y a los gastos.
+    adelantos_out: list[dict] = []
+    total_adelantos = Decimal("0")
+    for r in adelanto_rows:
+        h, g, imp = _to_dec(r.honorarios), _to_dec(r.gastos), _to_dec(r.importe)
+        total_liq_honorarios += h
+        total_liq_gastos += g
+        total_liq_bruto += imp
+        total_adelantos += imp
+        adelantos_out.append({
+            "adelanto_id":      r.adelanto_id,
+            "obra_social_id":   r.obra_social_id,
+            "obra_social":      r.obra_social_nombre,
+            "nro_factura":      r.nro_factura,
+            "factura_version":  r.factura_version,
+            "periodo":          f"{r.mes_periodo:02d}/{r.anio_periodo}",
+            "prestaciones":     r.prestaciones,
+            "total_honorarios": float(h),
+            "total_gastos":     float(g),
+            "total":            float(imp),
+        })
+
+    # Compensaciones del médico en este pago: no son producción (no tocan bruto, honorarios ni
+    # gastos, así que no pagan porcentuales); suman o restan al reconocido.
+    comp_rows_med = (await db.execute(
+        select(Compensacion)
+        .where(
+            Compensacion.pago_id == pago_id,
+            Compensacion.estado.in_(COMP_EN_PAGO),
+            Compensacion.medico_id == medico_db_id,
+        )
+        .order_by(Compensacion.id)
+    )).scalars().all()
+    compensaciones_out = [
+        {"compensacion_id": c.id, "leyenda": c.leyenda, "importe": float(_to_dec(c.importe))}
+        for c in comp_rows_med
+    ]
+    total_compensaciones = sum((_to_dec(c.importe) for c in comp_rows_med), Decimal("0"))
 
     # Distribuir cada ajuste individual en la liquidación de su factura.
     # Un ajuste cuya factura no está en este pago (p. ej. un lote sin_factura o
@@ -510,6 +682,11 @@ async def refrescar_detalle_medico(
                 Deduccion.mes_aplicar,
                 Deduccion.anio_aplicar,
                 func.coalesce(func.sum(Deduccion.monto_aplicado_preview), 0).label("total"),
+                # Para «Quitar del pago»: sólo los porcentuales automáticos (las cuotas no se quitan).
+                func.group_concat(Deduccion.id).label("ids"),
+                func.max(case(
+                    ((Deduccion.origen == "automatico") & (Deduccion.porcentaje_aplicado > 0), 1), else_=0
+                )).label("quitable"),
             )
             .select_from(Deduccion)
             .outerjoin(Conceptos, Conceptos.id == Deduccion.descuento_id)
@@ -555,6 +732,10 @@ async def refrescar_detalle_medico(
         }
         if r.titular_id != medico_db_id:
             item["por_cuenta_de"] = titular_info.get(r.titular_id, {"nro_socio": None, "nombre": None})
+        ids = getattr(r, "ids", None)
+        if ids:
+            item["ids"] = [int(i) for i in str(ids).split(",") if i]
+            item["quitable"] = bool(getattr(r, "quitable", 0))
         ded_detalle.append(item)
 
     deducciones_out = {
@@ -568,7 +749,7 @@ async def refrescar_detalle_medico(
     # honorarios+gastos, que puede diferir por coseguro u otros ajustes al
     # desglose que no tocan el importe ya facturado por CMC (ver diagnóstico M4).
     total_bruto  = total_liq_bruto
-    reconocido   = (total_bruto + total_creditos - total_debitos).quantize(Decimal("0.01"))
+    reconocido   = (total_bruto + total_creditos - total_debitos + total_compensaciones).quantize(Decimal("0.01"))
     neto_a_pagar = max(reconocido - total_deducciones, Decimal("0")).quantize(Decimal("0.01"))
 
     resumen = {
@@ -577,6 +758,7 @@ async def refrescar_detalle_medico(
         "bruto":       float(total_bruto.quantize(Decimal("0.01"))),
         "debitos":     float(total_debitos.quantize(Decimal("0.01"))),
         "creditos":    float(total_creditos.quantize(Decimal("0.01"))),
+        "compensaciones": float(total_compensaciones.quantize(Decimal("0.01"))),
         "reconocido":  float(reconocido),
         "deducciones": float(total_deducciones.quantize(Decimal("0.01"))),
         "neto_a_pagar": float(neto_a_pagar),
@@ -593,6 +775,8 @@ async def refrescar_detalle_medico(
         "resumen":     resumen,
         "detalle": {
             "liquidaciones":  liquidaciones_out,
+            "adelantos":      {"total": float(total_adelantos.quantize(Decimal("0.01"))), "detalle": adelantos_out},
+            "compensaciones": {"total": float(total_compensaciones.quantize(Decimal("0.01"))), "detalle": compensaciones_out},
             "deducciones":    deducciones_out,
             "otros_ajustes":  otros_ajustes_out,
         },

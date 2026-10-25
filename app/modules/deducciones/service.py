@@ -1,9 +1,10 @@
+import datetime
 from collections import defaultdict
 from decimal import ROUND_DOWN, Decimal
 from typing import List, Optional
 
 from fastapi import HTTPException
-from sqlalchemy import and_, case, delete, func, or_, select, update
+from sqlalchemy import and_, case, delete, false, func, not_, or_, select, update
 from sqlalchemy.dialects.mysql import insert as mysql_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,6 +22,7 @@ from app.db.models import (
     SocioDescuento,
 )
 from app.modules.deducciones.schemas import (
+    ConteoEstado,
     DeduccionCreate,
     DeduccionHistorialItem,
     DeduccionHistorialPage,
@@ -228,14 +230,26 @@ async def _auto_generar_deducciones_porcentuales(db: AsyncSession, pago: Pago) -
         med_ids = [m for m, _ in med_tuples]
         pagadores = {} if getattr(desc, "aplica_a_todos", False) else await _pagadores_de_descuento(db, desc.id)
 
+        # Los porcentuales se descuentan en CADA pago (un segundo pago del mes, por ejemplo uno
+        # que lleva solo un adelanto, también paga sus contribuciones). Ya existe la de este pago
+        # si está marcada con su id, esté como esté: si el operador la quitó (cancelada o
+        # eliminada) no vuelve a aparecer en este pago.
         ya_existen: set[int] = set(
             (await db.execute(
                 select(Deduccion.medico_id).where(
                     Deduccion.descuento_id == desc.id,
-                    Deduccion.mes_aplicar == pago.mes,
-                    Deduccion.anio_aplicar == pago.anio,
                     Deduccion.medico_id.in_(med_ids),
-                    Deduccion.estado != "eliminado",
+                    or_(
+                        and_(Deduccion.origen == "automatico", Deduccion.cuota_nro == pago.id),
+                        Deduccion.generado_en_pago_id == pago.id,
+                        # Anteriores a esta regla (cuota_nro 0, una por mes) y todavía sin cerrar.
+                        and_(
+                            Deduccion.cuota_nro == 0,
+                            Deduccion.mes_aplicar == pago.mes,
+                            Deduccion.anio_aplicar == pago.anio,
+                            Deduccion.estado.in_(["pendiente", "en_pago", "cancelado"]),
+                        ),
+                    ),
                 )
             )).scalars().all()
         )
@@ -253,7 +267,9 @@ async def _auto_generar_deducciones_porcentuales(db: AsyncSession, pago: Pago) -
                 paga_por_caja=paga_caja,
                 pagador_medico_id=pagadores.get(mid),
                 estado="pendiente" if paga_caja else "en_pago",
-                cuota_nro=0,
+                # Id del pago: marca de a qué pago pertenece (ver ya_existen) y mantiene única la
+                # clave (médico, concepto, mes, año, cuota, estado) cuando hay dos pagos en un mes.
+                cuota_nro=pago.id,
                 mes_aplicar=pago.mes,
                 anio_aplicar=pago.anio,
                 generado_en_pago_id=None if paga_caja else pago.id,
@@ -572,6 +588,151 @@ async def crear_programa(db: AsyncSession, payload: DeduccionCreate) -> List[Ded
 # Historial unificado
 # =============================================================================
 
+def _condicion_vencida():
+    """SQL equivalente a `_es_vencida` para una deducción manual pendiente: período anterior al mes en curso."""
+    hoy = datetime.date.today()
+    return and_(
+        Deduccion.origen == "manual",
+        Deduccion.estado == "pendiente",
+        Deduccion.mes_aplicar.is_not(None),
+        Deduccion.anio_aplicar.is_not(None),
+        Deduccion.anio_aplicar * 12 + Deduccion.mes_aplicar < hoy.year * 12 + hoy.month,
+    )
+
+
+def _condicion_estado(estado: Optional[str]):
+    """Estados separados por coma: «pendiente,vencida». «pendiente» deja afuera las vencidas, como siempre."""
+    if not estado:
+        return None
+    vencida = _condicion_vencida()
+    partes = []
+    for e in (x.strip() for x in estado.split(",")):
+        if not e:
+            continue
+        if e == "vencida":
+            partes.append(vencida)
+        elif e == "pendiente":
+            partes.append(and_(Deduccion.estado == "pendiente", not_(vencida)))
+        else:
+            partes.append(Deduccion.estado == e)
+    return or_(*partes) if partes else None
+
+
+async def _filtros_historial(
+    db: AsyncSession,
+    *,
+    medico_id: Optional[int] = None,
+    descuento_id: Optional[int] = None,
+    estado: Optional[str] = None,
+    origen: Optional[str] = None,
+    paga_por_caja: Optional[bool] = None,
+    mes_desde: Optional[int] = None,
+    anio_desde: Optional[int] = None,
+    mes_hasta: Optional[int] = None,
+    anio_hasta: Optional[int] = None,
+    solo_en_pago: bool = False,
+) -> list:
+    """Condiciones SQL del listado. Todo se filtra en la base: antes se traían todas las
+    deducciones a memoria y se filtraban y paginaban en Python (148 mil filas por pedido)."""
+    filtros = [Deduccion.estado != "eliminado"]
+    if medico_id is not None:
+        filtros.append(Deduccion.medico_id == medico_id)
+    if descuento_id is not None:
+        filtros.append(Deduccion.descuento_id == descuento_id)
+    if origen:
+        filtros.append(Deduccion.origen == origen)
+    if paga_por_caja is not None:
+        filtros.append(Deduccion.paga_por_caja == paga_por_caja)
+
+    periodo = Deduccion.anio_aplicar * 12 + Deduccion.mes_aplicar
+    if anio_desde and mes_desde:
+        filtros += [Deduccion.mes_aplicar.is_not(None), Deduccion.anio_aplicar.is_not(None),
+                    periodo >= anio_desde * 12 + mes_desde]
+    if anio_hasta and mes_hasta:
+        filtros += [Deduccion.mes_aplicar.is_not(None), Deduccion.anio_aplicar.is_not(None),
+                    periodo <= anio_hasta * 12 + mes_hasta]
+
+    if solo_en_pago:
+        pago = await _get_open_pago(db)
+        if pago:
+            ids = await _medicos_en_pago(db, pago.id)
+            filtros.append(
+                or_(Deduccion.medico_id.in_(ids), Deduccion.pagador_medico_id.in_(ids)) if ids else false()
+            )
+
+    cond_estado = _condicion_estado(estado)
+    if cond_estado is not None:
+        filtros.append(cond_estado)
+    return filtros
+
+
+def _a_item_historial(
+    ded: Deduccion, desc_nombre: str, med_nombre: str, fecha_aplicacion: Optional[datetime.datetime] = None
+) -> DeduccionHistorialItem:
+    est = ded.estado
+    if (
+        ded.origen == "manual"
+        and est == "pendiente"
+        and ded.mes_aplicar is not None
+        and ded.anio_aplicar is not None
+        and _es_vencida(ded.mes_aplicar, ded.anio_aplicar)
+    ):
+        est = "vencida"
+    return DeduccionHistorialItem(
+        id=ded.id,
+        origen=ded.origen,
+        paga_por_caja=bool(ded.paga_por_caja),
+        medico_id=ded.medico_id,
+        medico_nombre=med_nombre or "",
+        descuento_id=ded.descuento_id,
+        descuento_nombre=desc_nombre or "",
+        monto=ded.calculado_total,
+        saldo_pendiente=ded.calculado_total - ded.monto_aplicado,
+        monto_aplicado_preview=ded.monto_aplicado_preview,
+        mes_periodo=ded.mes_aplicar,
+        anio_periodo=ded.anio_aplicar,
+        estado=est,
+        cuota_nro=ded.cuota_nro,
+        cuotas_total=ded.cuotas_total,
+        generado_en_pago_id=ded.generado_en_pago_id,
+        created_at=ded.created_at,
+        fecha_aplicacion=fecha_aplicacion,
+    )
+
+
+def _solo_aplicadas(estado: Optional[str]) -> bool:
+    return bool(estado) and {e.strip() for e in estado.split(",") if e.strip()} == {"aplicado"}
+
+
+def _select_historial(por_aplicacion: bool = False):
+    """Del más reciente al más antiguo: por fecha de creación y, en las aplicadas, por fecha de aplicación.
+    A igual fecha (el histórico migrado comparte día), por período y, al final, por id."""
+    # La última vez que se descontó (en un pago) o se cobró (en caja): una cuota puede aplicarse en partes.
+    fecha_aplicacion = (
+        select(func.max(DeduccionAplicacion.created_at))
+        .where(DeduccionAplicacion.deduccion_id == Deduccion.id)
+        .correlate(Deduccion)
+        .scalar_subquery()
+    )
+    stmt = (
+        select(
+            Deduccion,
+            Conceptos.nombre.label("desc_nombre"),
+            ListadoMedico.NOMBRE.label("med_nombre"),
+            fecha_aplicacion.label("fecha_aplicacion"),
+        )
+        .outerjoin(Conceptos, Conceptos.id == Deduccion.descuento_id)
+        .join(ListadoMedico, ListadoMedico.ID == Deduccion.medico_id)
+    )
+    principal = fecha_aplicacion.desc() if por_aplicacion else Deduccion.created_at.desc()
+    return stmt.order_by(
+        principal,
+        Deduccion.anio_aplicar.desc(),
+        Deduccion.mes_aplicar.desc(),
+        Deduccion.id.desc(),
+    )
+
+
 async def fetch_deducciones_item(
     db: AsyncSession,
     medico_id: Optional[int] = None,
@@ -583,89 +744,20 @@ async def fetch_deducciones_item(
     anio_desde: Optional[int] = None,
     mes_hasta: Optional[int] = None,
     anio_hasta: Optional[int] = None,
+    solo_en_pago: bool = False,
 ) -> list[DeduccionHistorialItem]:
-    stmt = (
-        select(
-            Deduccion,
-            Conceptos.nombre.label("desc_nombre"),
-            ListadoMedico.NOMBRE.label("med_nombre"),
-        )
-        .outerjoin(Conceptos, Conceptos.id == Deduccion.descuento_id)
-        .join(ListadoMedico, ListadoMedico.ID == Deduccion.medico_id)
-        .where(Deduccion.estado != "eliminado")
+    filtros = await _filtros_historial(
+        db, medico_id=medico_id, descuento_id=descuento_id, estado=estado, origen=origen,
+        paga_por_caja=paga_por_caja, mes_desde=mes_desde, anio_desde=anio_desde,
+        mes_hasta=mes_hasta, anio_hasta=anio_hasta, solo_en_pago=solo_en_pago,
     )
-
-    if medico_id is not None:
-        stmt = stmt.where(Deduccion.medico_id == medico_id)
-    if descuento_id is not None:
-        stmt = stmt.where(Deduccion.descuento_id == descuento_id)
-    if origen:
-        stmt = stmt.where(Deduccion.origen == origen)
-    if paga_por_caja is not None:
-        stmt = stmt.where(Deduccion.paga_por_caja == paga_por_caja)
-
-    rows = (await db.execute(stmt)).all()
-
-    periodo_desde = anio_desde * 12 + mes_desde if anio_desde and mes_desde else None
-    periodo_hasta = anio_hasta * 12 + mes_hasta if anio_hasta and mes_hasta else None
-
-    items: list[DeduccionHistorialItem] = []
-
-    for row in rows:
-        ded: Deduccion = row[0]
-        desc_nombre: str = row[1] or ""
-        med_nombre: str = row[2] or ""
-        paga_caja: bool = bool(ded.paga_por_caja)
-
-        est = ded.estado
-        if (
-            ded.origen == "manual"
-            and est == "pendiente"
-            and ded.mes_aplicar is not None
-            and ded.anio_aplicar is not None
-            and _es_vencida(ded.mes_aplicar, ded.anio_aplicar)
-        ):
-            est = "vencida"
-
-        if estado and est != estado:
-            continue
-
-        mes_periodo = ded.mes_aplicar
-        anio_periodo = ded.anio_aplicar
-
-        if periodo_desde is not None or periodo_hasta is not None:
-            if mes_periodo is None or anio_periodo is None:
-                continue
-            p = anio_periodo * 12 + mes_periodo
-            if periodo_desde is not None and p < periodo_desde:
-                continue
-            if periodo_hasta is not None and p > periodo_hasta:
-                continue
-
-        items.append(DeduccionHistorialItem(
-            id=ded.id,
-            origen=ded.origen,
-            paga_por_caja=paga_caja,
-            medico_id=ded.medico_id,
-            medico_nombre=med_nombre,
-            descuento_id=ded.descuento_id,
-            descuento_nombre=desc_nombre,
-            monto=ded.calculado_total,
-            saldo_pendiente=ded.calculado_total - ded.monto_aplicado,
-            monto_aplicado_preview=ded.monto_aplicado_preview,
-            mes_periodo=mes_periodo,
-            anio_periodo=anio_periodo,
-            estado=est,
-            cuota_nro=ded.cuota_nro,
-            cuotas_total=ded.cuotas_total,
-            generado_en_pago_id=ded.generado_en_pago_id,
-            created_at=ded.created_at,
-        ))
-
-    items.sort(key=lambda x: x.created_at, reverse=True)
-    return items
+    rows = (await db.execute(_select_historial(_solo_aplicadas(estado)).where(*filtros))).all()
+    return [_a_item_historial(r[0], r[1], r[2], r[3]) for r in rows]
 
 
+# =============================================================================
+# Historial unificado
+# =============================================================================
 async def get_historial_deducciones(
     db: AsyncSession,
     page: int = 1,
@@ -679,26 +771,40 @@ async def get_historial_deducciones(
     anio_desde: Optional[int] = None,
     mes_hasta: Optional[int] = None,
     anio_hasta: Optional[int] = None,
+    solo_en_pago: bool = False,
 ) -> DeduccionHistorialPage:
-    items = await fetch_deducciones_item(
-        db,
-        medico_id=medico_id,
-        descuento_id=descuento_id,
-        estado=estado,
-        origen=origen,
-        paga_por_caja=paga_por_caja,
-        mes_desde=mes_desde,
-        anio_desde=anio_desde,
-        mes_hasta=mes_hasta,
-        anio_hasta=anio_hasta,
+    comunes = dict(
+        medico_id=medico_id, descuento_id=descuento_id, origen=origen, paga_por_caja=paga_por_caja,
+        mes_desde=mes_desde, anio_desde=anio_desde, mes_hasta=mes_hasta, anio_hasta=anio_hasta,
     )
+    filtros = await _filtros_historial(db, estado=estado, solo_en_pago=solo_en_pago, **comunes)
 
-    total = len(items)
-    monto_total = sum((i.monto for i in items), Decimal("0.00"))
-    offset = (page - 1) * size
-    page_items = items[offset: offset + size]
+    total, monto_total = (await db.execute(
+        select(func.count(Deduccion.id), func.coalesce(func.sum(Deduccion.calculado_total), 0)).where(*filtros)
+    )).one()
 
-    return DeduccionHistorialPage(total=total, page=page, size=size, monto_total=monto_total, items=page_items)
+    rows = (await db.execute(
+        _select_historial(_solo_aplicadas(estado)).where(*filtros).limit(size).offset((page - 1) * size)
+    )).all()
+
+    # Conteos por estado para las pestañas: respetan médico, concepto y período, pero no el
+    # estado elegido ni «solo los que participan» (esa es una vista de la pestaña Pendientes).
+    filtros_conteo = await _filtros_historial(db, **comunes)
+    estado_visible = case((_condicion_vencida(), "vencida"), else_=Deduccion.estado)
+    conteo_rows = (await db.execute(
+        select(estado_visible.label("est"), func.count(Deduccion.id), func.coalesce(func.sum(Deduccion.calculado_total), 0))
+        .where(*filtros_conteo)
+        .group_by(estado_visible)
+    )).all()
+
+    return DeduccionHistorialPage(
+        total=int(total or 0),
+        page=page,
+        size=size,
+        monto_total=Decimal(monto_total or 0),
+        items=[_a_item_historial(r[0], r[1], r[2], r[3]) for r in rows],
+        conteos=[ConteoEstado(estado=e, cantidad=int(c), monto=Decimal(m or 0)) for e, c, m in conteo_rows],
+    )
 
 
 async def get_historial_export(
@@ -712,6 +818,7 @@ async def get_historial_export(
     anio_desde: Optional[int] = None,
     mes_hasta: Optional[int] = None,
     anio_hasta: Optional[int] = None,
+    solo_en_pago: bool = False,
 ) -> list[DeduccionHistorialItem]:
     return await fetch_deducciones_item(
         db,
@@ -724,6 +831,7 @@ async def get_historial_export(
         anio_desde=anio_desde,
         mes_hasta=mes_hasta,
         anio_hasta=anio_hasta,
+        solo_en_pago=solo_en_pago,
     )
 
 
@@ -1054,10 +1162,15 @@ async def eliminar_item(db: AsyncSession, id: int) -> DeduccionItemEliminarRespo
         if pago:
             await marcar_deducciones_dirty(db, pago.id)
 
-    if ded.origen == "manual":
+    # Un porcentual generado para un pago (cuota_nro = id del pago) se marca eliminado en lugar
+    # de borrarse: así no se vuelve a generar en ese pago.
+    porcentual_de_pago = (
+        ded.origen == "automatico" and (ded.porcentaje_aplicado or 0) > 0 and (ded.cuota_nro or 0) > 0
+    )
+    if ded.origen == "manual" or porcentual_de_pago:
         ded.estado = "eliminado"
         await db.commit()
-        return DeduccionItemEliminarResponse(id=id, origen="manual", estado="eliminado")
+        return DeduccionItemEliminarResponse(id=id, origen=ded.origen, estado="eliminado")
     else:
         await db.delete(ded)
         await db.commit()
@@ -1286,7 +1399,11 @@ async def deshacer_descuentos_generados(
         .where(*filtro_enroladas)
         .values(estado="pendiente")
     )
+    await db.flush()
 
+    # Al quitar deducciones cambia lo que le queda disponible a cada médico para las demás:
+    # se recalcula la vista previa antes de dar el aviso por apagado.
+    await _recalcular_montos_aplicados_en_pago(db, pago_id)
     pago.deducciones_dirty = False
     await db.commit()
 

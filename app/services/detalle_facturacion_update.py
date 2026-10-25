@@ -19,6 +19,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import DetalleFacturacionCMC, DetalleLiquidacion, Liquidacion
+from app.modules.adelantos.queries import detalle_ids_de_adelantos_del_pago
 from app.modules.facturacion import historial
 
 
@@ -32,7 +33,8 @@ async def _cmc_detalle_ids_del_pago(db: AsyncSession, pago_id: int) -> list[int]
             DetalleLiquidacion.cmc_detalle_id.isnot(None),
         )
     )).scalars().all()
-    return list(rows)
+    # Las prestaciones que paga un adelanto del pago pasan igual que las de sus facturas.
+    return list(rows) + await detalle_ids_de_adelantos_del_pago(db, pago_id)
 
 
 async def _pasar_estado(
@@ -63,7 +65,8 @@ async def _pasar_estado(
 async def marcar_prestaciones_liquidadas(db: AsyncSession, pago_id: int) -> int:
     """
     Al CERRAR un pago: C → L en detalle_facturacion para toda prestación CMC
-    que se copió a detalle_liquidacion en alguna liquidación de este pago.
+    que se copió a detalle_liquidacion en alguna liquidación de este pago, o que paga un
+    adelanto de este pago.
 
     Devuelve la cantidad de filas actualizadas.
     """

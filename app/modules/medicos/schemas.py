@@ -107,6 +107,13 @@ class UserOut(BaseModel):
 class UserEnvelope(BaseModel):
     user: UserOut
 
+class MedicoSelectorOut(BaseModel):
+    """Lo mínimo para elegir un médico en un select: quién es y cómo se lo busca."""
+    id: int
+    nro_socio: Optional[int] = None
+    nombre: str
+
+
 class MedicoBase(BaseModel):
     id: Optional[int] = Field(None)
     nro_especialidad: Optional[int] = Field(None)

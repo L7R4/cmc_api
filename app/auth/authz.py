@@ -328,6 +328,7 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     # ── Médicos ──────────────────────────────────────────────────────────────
     ("GET", "/api/medicos"): Scope.MEDICO_LEER,
     ("GET", "/api/medicos/all"): Scope.MEDICO_LEER,
+    ("GET", "/api/medicos/selector"): Scope.MEDICO_LEER,
     ("GET", "/api/medicos/count"): Scope.MEDICO_LEER,
     ("GET", "/api/medicos/{medico_id}"): LECTURA_MEDICO,
     ("PUT", "/api/medicos/{medico_id}"): Scope.MEDICO_EDITAR,
@@ -432,6 +433,24 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     ("DELETE", "/api/lotes/snaps/{lote_id}/items/{ajuste_id}"): Scope.LOTE_ELIMINAR,
     ("POST", "/api/lotes/snaps/crear_refacturacion"): Scope.LOTE_REFACTURAR,
     ("POST", "/api/lotes/snaps/crear_sin_factura"): Scope.LOTE_REFACTURAR,
+    # Adelantos: se manejan como los lotes de débitos y créditos, con sus mismos permisos.
+    ("GET", "/api/adelantos/lista"): Scope.LOTE_LEER,
+    ("GET", "/api/adelantos/facturas_disponibles"): Scope.LOTE_LEER,
+    ("GET", "/api/adelantos/{adelanto_id}"): Scope.LOTE_LEER,
+    ("GET", "/api/adelantos/{adelanto_id}/prestaciones"): Scope.LOTE_LEER,
+    ("POST", "/api/adelantos/"): Scope.LOTE_CREAR,
+    ("POST", "/api/adelantos/{adelanto_id}/items"): Scope.LOTE_CREAR,
+    ("PATCH", "/api/adelantos/{adelanto_id}"): Scope.LOTE_EDITAR,
+    ("PATCH", "/api/adelantos/{adelanto_id}/estado"): Scope.LOTE_EDITAR,
+    ("DELETE", "/api/adelantos/{adelanto_id}"): Scope.LOTE_ELIMINAR,
+    ("DELETE", "/api/adelantos/{adelanto_id}/items/{item_id}"): Scope.LOTE_ELIMINAR,
+    # Compensaciones: plata a favor o en contra de un socio, sin concepto. Permisos propios.
+    ("GET", "/api/compensaciones/lista"): Scope.COMPENSACION_LEER,
+    ("GET", "/api/compensaciones/{compensacion_id}"): Scope.COMPENSACION_LEER,
+    ("POST", "/api/compensaciones/"): Scope.COMPENSACION_CREAR,
+    ("PATCH", "/api/compensaciones/{compensacion_id}"): Scope.COMPENSACION_EDITAR,
+    ("PATCH", "/api/compensaciones/{compensacion_id}/estado"): Scope.COMPENSACION_EDITAR,
+    ("POST", "/api/compensaciones/{compensacion_id}/anular"): Scope.COMPENSACION_ANULAR,
 
     # ── Deducciones ──────────────────────────────────────────────────────────
     ("GET", "/api/deducciones/"): Scope.DEDUCCION_LEER,

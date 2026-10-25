@@ -204,7 +204,7 @@ def test_convencion_de_nombres():
     acciones_validas = {
         "leer", "crear", "editar", "eliminar",
         # específicas: operaciones irreversibles o con efecto financiero
-        "cerrar", "reabrir", "emitir", "anular", "aplicar", "cargar",
+        "cerrar", "reabrir", "marcar_pagado", "emitir", "anular", "aplicar", "cargar",
         "refacturar", "periodo", "complementar", "masivo", "gestionar",
         "purgar", "generar", "resolver", "documento", "leer_sensible",
         "leer_propio", "editar_bancario",

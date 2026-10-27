@@ -6,7 +6,7 @@ app can flip a repo from mock → live with no UI change. Kept intentionally sli
 (only the fields the app renders) versus the richer website schemas.
 """
 import datetime
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -81,6 +81,9 @@ class MedicoProfileItem(BaseModel):
     codigo_postal: Optional[str] = None
     sexo: Optional[str] = None
     fecha_nac: Optional[datetime.date] = None
+    estado_cuenta: Literal["pendiente", "activo", "baja"]
+    # Compatibilidad con la app ya instalada: 'S' si `estado_cuenta` es 'activo'.
+    # Ya no sale de la columna `EXISTE`. Sacarlo cuando la app lea `estado_cuenta`.
     existe: str
     categoria: Optional[str] = None
     condicion_impositiva: Optional[str] = None

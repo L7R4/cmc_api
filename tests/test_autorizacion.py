@@ -198,26 +198,16 @@ def test_contenido_leer_en_todos_los_roles():
 
 
 def test_convencion_de_nombres():
-    """`<recurso>:<accion>`, recurso en singular y acción del conjunto cerrado.
-
-    Se exceptúan los códigos que **no son nuestros**: los lee el front legacy
-    por su nombre literal, así que renombrarlos para que entren en la
-    convención rompe PHP que no está en este repo. Ver `Scope.SYSTEM_NEW_ACCESS`.
-    """
-    # Códigos heredados que el front legacy consume por nombre. La lista sólo
-    # debería achicarse, y sólo cuando el legacy deje de mirarlos.
-    exentos = {Scope.SYSTEM_NEW_ACCESS}
+    """`<recurso>:<accion>`, recurso en singular y acción del conjunto cerrado."""
+    exentos: set[Scope] = set()
 
     acciones_validas = {
         "leer", "crear", "editar", "eliminar",
         # específicas: operaciones irreversibles o con efecto financiero
-        "cerrar", "reabrir", "emitir", "anular", "aplicar", "cargar",
+        "cerrar", "reabrir", "marcar_pagado", "emitir", "anular", "aplicar", "cargar",
         "refacturar", "periodo", "complementar", "masivo", "gestionar",
         "purgar", "generar", "resolver", "documento", "leer_sensible",
         "leer_propio", "editar_bancario",
-        # `ingresar` es de panel:ingresar, la bandera temporal de la prueba
-        # controlada del panel nuevo (ver Scope.PANEL_INGRESAR).
-        "ingresar",
     }
     malos = []
     for s in Scope:

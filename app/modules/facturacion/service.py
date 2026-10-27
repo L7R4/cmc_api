@@ -1,3 +1,4 @@
+import calendar
 import datetime
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -16,11 +17,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.passwords import hash_password_inicial
 from app.common.money import quantize_money
+from app.common.dates import DIA_CORTE_ULTIMO, normalizar_dia_corte
 from app.common.files import url_archivo
 from app.common.uploads import DOCUMENTOS, validate_upload
 from app.db.models import (
     Afiliado,
     AuditLog,
+    AuditLogFacturacion,
     Clinicas,
     CodigoObraSocial,
     DetalleFacturacionCMC,
@@ -34,9 +37,11 @@ from app.db.models import (
     PeriodoMedicoActual,
     Valor,
 )
+from app.auth.identidad import asignar_rol_base_si_falta
+from app.db.models.medico import ESTADO_ACTIVO
 from app.modules.medicos.helpers import parse_conceps_espec
 from app.modules.nomenclador import service as service_nm
-from app.modules.facturacion import documentacion
+from app.modules.facturacion import documentacion, historial
 from app.modules.nomenclador import alta_os, service_vias
 from app.modules.nomenclador.service import LookupError as PrecioLookupError
 
@@ -47,8 +52,10 @@ from app.modules.facturacion.schemas import (
     AuditoriaEventoOut,
     ClinicaCreate,
     ClinicaUpdate,
+    EstadoFichaOut,
     FacturaRead,
     GuardadoResponse,
+    HistorialEventoOut,
     MoverPeriodoPayload,
     MoverPeriodoResponse,
     NomencladorRefOut,
@@ -385,15 +392,16 @@ async def crear_clinica(db: AsyncSession, payload: ClinicaCreate) -> dict:
         # su NRO_SOCIO, así queda identificable donde el resto del panel busca por
         # MATRICULA_PROV (ver `buscar_medicos`, más arriba).
         MATRICULA_PROV=nuevo_cod,
-        # `ListadoMedico.EXISTE` tiene server_default 'N' (pensado para médicos que
-        # se dan de alta por el flujo de solicitud/aprobación); acá se fuerza a 'S'
-        # porque el alta rápida de clínica queda operativa de inmediato.
-        EXISTE="S",
+        # `estado_cuenta` nace en 'pendiente' (el flujo de solicitud/aprobación);
+        # el alta rápida de clínica queda operativa de inmediato.
+        estado_cuenta=ESTADO_ACTIVO,
         es_organizacion=True,
         # Única columna de la tabla sin server_default — sin esto el INSERT falla.
         hashed_password=hash_password_inicial(),
     )
     db.add(clinica)
+    await db.flush()
+    await asignar_rol_base_si_falta(db, clinica.ID)
     await db.commit()
     await db.refresh(clinica)
     return {
@@ -489,18 +497,26 @@ def _add_month(year: int, month: int, delta: int) -> tuple[int, int]:
 
 
 # ── Ventana por OS (dia_corte) ───────────────────────────────────────────────
+def _dia_efectivo(dia_corte: int, year: int, month: int) -> int:
+    """Día de corte real del mes: desde el 28 es el último día (28/29/30/31 según el
+    mes), el resto se respeta tal cual."""
+    if normalizar_dia_corte(dia_corte) == DIA_CORTE_ULTIMO:
+        return calendar.monthrange(year, month)[1]
+    return dia_corte
+
+
 def fecha_a_periodo(fecha: datetime.date, dia_corte: int) -> str:
     """Período "YYYYMM" al que pertenece una fecha de servicio según la ventana de
     la OS.
 
-    - `dia_corte <= 1` (mes completo): el período es el mes calendario de la fecha.
-    - `dia_corte = D > 1` (del D al D, convención "hacia atrás"): el período del mes
-      M abarca ``[día D del mes M-1, día D del mes M)``. Por lo tanto una fecha con
-      día >= D pertenece al mes siguiente. Ej. (D=20): 10/jul → 202607; 25/jun →
-      202607; 10/jun → 202606. La ventana de 202607 es [20/jun, 20/jul).
+    `dia_corte = D` (del D al D, convención "hacia atrás"): el período del mes M abarca
+    ``[día D del mes M-1, día D del mes M)``. Por lo tanto una fecha con día >= D
+    pertenece al mes siguiente. Ej. (D=20): 10/jul → 202607; 25/jun → 202607; 10/jun →
+    202606. La ventana de 202607 es [20/jun, 20/jul). Con "último día del mes" D es el
+    último día real de cada mes.
     """
     y, m = fecha.year, fecha.month
-    if dia_corte > 1 and fecha.day >= dia_corte:
+    if fecha.day >= _dia_efectivo(dia_corte, y, m):
         y, m = _add_month(y, m, 1)
     return f"{y}{m:02d}"
 
@@ -510,14 +526,9 @@ def ventana_periodo(periodo: str, dia_corte: int) -> tuple[datetime.date, dateti
     Sirve tanto para ubicar la prestación como para el plazo operativo de carga/cierre."""
     y = int(periodo[:4])
     m = int(periodo[4:6])
-    if dia_corte <= 1:
-        inicio = datetime.date(y, m, 1)
-        fy, fm = _add_month(y, m, 1)
-        fin = datetime.date(fy, fm, 1)
-    else:
-        py, pm = _add_month(y, m, -1)
-        inicio = datetime.date(py, pm, dia_corte)
-        fin = datetime.date(y, m, dia_corte)
+    py, pm = _add_month(y, m, -1)
+    inicio = datetime.date(py, pm, _dia_efectivo(dia_corte, py, pm))
+    fin = datetime.date(y, m, _dia_efectivo(dia_corte, y, m))
     return inicio, fin
 
 
@@ -538,12 +549,10 @@ def periodo_medico_por_fecha(hoy: datetime.date, dia_corte: int) -> str:
     """Período que le toca cargar al médico HOY, según el `dia_corte` de la OS.
 
     El corte se evalúa en `dia_corte + 1`: el médico carga el período viejo TODO el
-    día de corte inclusive, y recién pasa al siguiente al día siguiente. Mes completo
-    (`dia_corte <= 1`) usa directamente el mes calendario de hoy."""
-    if dia_corte <= 1:
-        return f"{hoy.year}{hoy.month:02d}"
+    día de corte inclusive, y recién pasa al siguiente al día siguiente. Con "último día
+    del mes" eso es el 1.º del mes siguiente."""
     y, m = hoy.year, hoy.month
-    if hoy.day >= dia_corte + 1:
+    if hoy.day >= _dia_efectivo(dia_corte, y, m) + 1:
         y, m = _add_month(y, m, 1)
     return f"{y}{m:02d}"
 
@@ -938,7 +947,7 @@ async def check_medico_activo(db: AsyncSession, cod_medico: str) -> ListadoMedic
         raise HTTPException(422, f"Código de médico '{cod_medico}' inválido")
     stmt = select(ListadoMedico).where(ListadoMedico.NRO_SOCIO == nro)
     medico = (await db.execute(stmt)).scalar_one_or_none()
-    if not medico or medico.EXISTE != "S":
+    if not medico or medico.estado_cuenta != ESTADO_ACTIVO:
         raise HTTPException(422, f"Médico {cod_medico} inexistente o inactivo")
     return medico
 
@@ -1869,9 +1878,15 @@ async def preparar_equipo(
     return EquipoPreparado(filas=filas, cabeza_idx=cabeza_idx, importe_total=total_acum)
 
 
-async def persistir_equipo(db: AsyncSession, prep: EquipoPreparado) -> list[int]:
-    """Agrega a la sesión las filas de `preparar_equipo`, las enlaza como equipo y
-    devuelve sus ids. NO hace commit: lo decide quien llama."""
+async def persistir_equipo(
+    db: AsyncSession, prep: EquipoPreparado, *,
+    tipo_evento: str = historial.CARGADA, actor_tipo: Optional[str] = None,
+    contexto_evento: Optional[dict] = None,
+) -> list[int]:
+    """Agrega a la sesión las filas de `preparar_equipo`, las enlaza como equipo,
+    deja el evento de alta de cada una en el historial y devuelve sus ids. NO hace
+    commit: lo decide quien llama. La importación por planilla pasa `tipo_evento`
+    `importada` y en `contexto_evento` el archivo."""
     ids: list[int] = []
     for row in prep.filas:
         db.add(row)
@@ -1896,6 +1911,17 @@ async def persistir_equipo(db: AsyncSession, prep: EquipoPreparado) -> list[int]
             # resto se carga como médico y por su cuenta saldría por la categoría del código.
             if row.grupo_equipo_id == cabeza_id and row.id_detalle_prestaciones != cabeza_id and cabeza_row.tipo:
                 row.tipo = cabeza_row.tipo
+
+    await historial.registrar(db, [
+        historial.evento(
+            row, tipo_evento, estado_despues=row.estado, actor_tipo=actor_tipo,
+            contexto=historial.contexto_de(
+                row, origen=row.origen_carga, importe_total=row.importe_total,
+                **(contexto_evento or {}),
+            ),
+        )
+        for row in prep.filas
+    ])
     return ids
 
 
@@ -2295,6 +2321,10 @@ async def listar_prestaciones(
     # — el comportamiento de siempre para el listado administrativo.
     if publicado is not None:
         filtros.append(M.publicado == publicado)
+    # La recepción muestra sólo lo vigente: ni las eliminadas ni las que rechazó la O.S.
+    # (las dos en X). Publicar un período marca todas sus filas, en cualquier estado.
+    if publicado:
+        filtros.append(M.estado != "X")
     if cod_obra is not None:
         filtros.append(M.cod_obr == cod_obra)
     if periodo is not None:
@@ -2546,6 +2576,40 @@ async def obtener_prestacion(db: AsyncSession, prestacion_id: int) -> Prestacion
 
 
 # ── Ficha completa (pantalla de consulta, solo lectura) ──────────────────────
+# Lo que la O.S. devuelve cuando no autoriza. 'pendiente' es de filas viejas, y Nobis
+# graba su "P-Pendiente" como 'rechazada': las dos nacen en X sin que nadie las elimine.
+VALIDACION_RECHAZOS = ("rechazada", "pendiente")
+
+
+def estado_de_ficha(row: DetalleFacturacionCMC, eventos: Sequence[HistorialEventoOut]) -> EstadoFichaOut:
+    """La franja de estado de la ficha. `eventos` va del más reciente al más viejo."""
+    if row.estado != "X":
+        clase = {"A": "vigente", "C": "cerrada"}.get(row.estado or "", "liquidada")
+        return EstadoFichaOut(clase=clase)
+
+    rechazo_os = row.validacion_estado in VALIDACION_RECHAZOS
+    respuesta_os = row.validacion_detalle if rechazo_os else None
+    baja = next((e for e in eventos if e.tipo in (historial.ELIMINADA, historial.RECHAZADA_OS)), None)
+    if baja is not None:
+        if baja.tipo == historial.RECHAZADA_OS:
+            clase = "rechazada_os"
+        else:
+            clase = "eliminada_medico" if baja.actor_tipo == historial.ACTOR_MEDICO else "eliminada_colegio"
+        return EstadoFichaOut(
+            clase=clase, motivo_codigo=baja.motivo_codigo, motivo_texto=baja.motivo_texto,
+            actor_tipo=baja.actor_tipo, actor_socio=baja.actor_socio, actor_nombre=baja.actor_nombre,
+            ocurrido_en=baja.ocurrido_en, respuesta_os=respuesta_os,
+        )
+    # Sin historial: lo que se puede deducir de la fila.
+    if row.validacion_anulada:
+        clase = "eliminada_medico"
+    elif rechazo_os:
+        clase = "rechazada_os"
+    else:
+        clase = "eliminada"
+    return EstadoFichaOut(clase=clase, respuesta_os=respuesta_os)
+
+
 async def obtener_prestacion_ficha(
     db: AsyncSession, prestacion_id: int
 ) -> PrestacionFichaOut:
@@ -2554,7 +2618,7 @@ async def obtener_prestacion_ficha(
     cabecera de factura, quién la cargó, el equipo quirúrgico y el historial de
     auditoría. Pantalla de soporte/consulta — no modifica nada.
 
-    Diez consultas fijas, todas por PK o índice, sin N+1 (nada de resolver una a una
+    Once consultas fijas, todas por PK o índice, sin N+1 (nada de resolver una a una
     por fila de equipo o evento de auditoría)."""
     row = await db.get(DetalleFacturacionCMC, prestacion_id)
     if row is None:
@@ -2575,9 +2639,16 @@ async def obtener_prestacion_ficha(
         )).scalars().all()
         equipo = await _to_prestacion_read_list(db, siblings)
 
+    eventos_rows = (await db.execute(
+        select(AuditLogFacturacion)
+        .where(AuditLogFacturacion.prestacion_id == prestacion_id)
+        .order_by(AuditLogFacturacion.id.desc())
+        .limit(200)
+    )).scalars().all()
+
     # Un solo IN para todos los médicos que puede necesitar la ficha: quien cobra, la
-    # clínica, el ejecutor legacy y quien la cargó.
-    nros_socio: set[int] = set()
+    # clínica, el ejecutor legacy, quien la cargó y quienes aparecen en el historial.
+    nros_socio: set[int] = {e.actor_socio for e in eventos_rows if e.actor_socio}
     for cod in (row.cod_med, row.cod_clinica, row.cod_med_ejecutor, row.usuario):
         try:
             n = int(cod)
@@ -2678,9 +2749,9 @@ async def obtener_prestacion_ficha(
         .limit(50)
     )).scalars().all()
     auditoria: list[AuditoriaEventoOut] = []
+    nombres_audit: dict[int, str] = {}
     if audit_rows:
         nros_audit = {a.nro_socio for a in audit_rows if a.nro_socio}
-        nombres_audit: dict[int, str] = {}
         if nros_audit:
             rows_audit = (await db.execute(
                 select(ListadoMedico.NRO_SOCIO, ListadoMedico.NOMBRE)
@@ -2703,8 +2774,37 @@ async def obtener_prestacion_ficha(
     if row.orden_path:
         prestacion.orden_url = url_archivo(row.orden_path)
 
+    def _nombre(nro: Optional[int]) -> Optional[str]:
+        m = medicos_by_nro.get(nro) if nro else None
+        return m.NOMBRE if m is not None else None
+
+    historial_out = [
+        HistorialEventoOut(
+            id=e.id, ocurrido_en=e.ocurrido_en, tipo=e.tipo,
+            estado_antes=e.estado_antes, estado_despues=e.estado_despues,
+            actor_tipo=e.actor_tipo, actor_socio=e.actor_socio, actor_nombre=_nombre(e.actor_socio),
+            motivo_codigo=e.motivo_codigo, motivo_texto=e.motivo_texto,
+            cambios=e.cambios, contexto=e.contexto, fuente=e.fuente,
+        )
+        for e in eventos_rows
+    ]
+
+    estado = estado_de_ficha(row, historial_out)
+    if estado.clase == "eliminada":
+        # Anterior al historial: si la auditoría general tiene el DELETE que la eliminó, de
+        # ahí salen quién y cuándo (motivo no hay: el DELETE no lo pedía).
+        baja = next((a for a in audit_rows if a.method == "DELETE" and 200 <= a.status_code < 300), None)
+        if baja is not None:
+            estado = EstadoFichaOut(
+                clase="eliminada_colegio", actor_tipo=historial.ACTOR_COLEGIO,
+                actor_socio=baja.nro_socio, actor_nombre=nombres_audit.get(baja.nro_socio) if baja.nro_socio else None,
+                ocurrido_en=baja.timestamp,
+            )
+
     return PrestacionFichaOut(
         prestacion=prestacion,
+        estado=estado,
+        historial=historial_out,
         medico=medico,
         clinica=clinica,
         cargado_por=cargado_por,
@@ -2776,6 +2876,8 @@ async def editar_prestacion(
     # guardo -- sin el rollback explicito, mentia.
     try:
         data = payload.model_dump(exclude_unset=True)
+        foto_antes = historial.foto(row)
+        eventos_integrantes: list[dict] = []
 
         # Cambio de obra social y/o período: la fila se MUEVE a otra cabecera `facturacion`
         # (cod_obr+periodo+version la identifican) — no es un campo más. Mismo movimiento
@@ -2993,6 +3095,12 @@ async def editar_prestacion(
                 )
             )).scalars().all()
             for integrante in integrantes:
+                if integrante.tipo != row.tipo:
+                    eventos_integrantes.append(historial.evento(
+                        integrante, historial.EDITADA,
+                        cambios={"tipo": [integrante.tipo, row.tipo]},
+                        contexto=historial.contexto_de(integrante, arrastrada_por=row.id_detalle_prestaciones),
+                    ))
                 integrante.tipo = row.tipo
         coseguro_final = row.coseguro or Decimal("0")
         if coseguro_final > h_final + g_final + a_final:
@@ -3015,6 +3123,11 @@ async def editar_prestacion(
             await db.flush()
             await _ensure_factura_abierta(db, row.cod_obr, row.periodo, row.usuario)
             await _cleanup_factura_si_vacia(db, cod_obra_anterior, periodo_anterior)
+
+        # Un PATCH que no cambió nada (el front reenvía el formulario entero) no deja evento.
+        cambios = historial.diferencias(foto_antes, historial.foto(row))
+        eventos = [historial.evento(row, historial.EDITADA, cambios=cambios)] if cambios else []
+        await historial.registrar(db, eventos + eventos_integrantes)
 
         await db.commit()
         await db.refresh(row)
@@ -3062,10 +3175,19 @@ async def marcar_revisado(
             "ids": sin_documentos,
         })
 
+    # Sólo deja evento lo que de verdad cambia: re-tildar una ya auditada no es una auditoría.
+    eventos = [
+        historial.evento(rows_por_id[i], historial.AUDITADA)
+        for i in marcados if not rows_por_id[i].revisado
+    ] + [
+        historial.evento(rows_por_id[i], historial.DESAUDITADA)
+        for i in desmarcados if rows_por_id[i].revisado
+    ]
     for prestacion_id in marcados:
         rows_por_id[prestacion_id].revisado = True
     for prestacion_id in desmarcados:
         rows_por_id[prestacion_id].revisado = False
+    await historial.registrar(db, eventos)
 
     await db.commit()
     for row in rows:
@@ -3089,18 +3211,26 @@ async def publicar_periodo(
 
 
 async def listar_periodos_propios(db: AsyncSession, cod_medico: str) -> list[dict]:
-    """Períodos donde el médico tiene al menos una prestación publicada — selector
-    de "Mi recepción". Más reciente primero."""
+    """Períodos donde el médico tiene al menos una prestación publicada y vigente —
+    selector de "Mi recepción". Más reciente primero."""
     M = DetalleFacturacionCMC
     periodos = (await db.execute(
-        select(M.periodo).where(M.cod_med == cod_medico, M.publicado.is_(True))
+        select(M.periodo).where(M.cod_med == cod_medico, M.publicado.is_(True), M.estado != "X")
         .distinct().order_by(M.periodo.desc())
     )).scalars().all()
     return [{"periodo": p, "periodo_label": periodo_label(p)} for p in periodos]
 
 
 # ── Soft-delete ──────────────────────────────────────────────────────────────
-async def anular_prestacion(db: AsyncSession, prestacion_id: int, con_equipo: bool = False) -> None:
+async def anular_prestacion(
+    db: AsyncSession, prestacion_id: int, con_equipo: bool = False, *,
+    motivo: Optional[str] = None, detalle: Optional[str] = None,
+) -> None:
+    """Elimina (estado X) una prestación desde facturación. El Colegio dice por qué:
+    `motivo` es uno de `historial.MOTIVOS_ELIMINACION` (o `equipo_editado` cuando la
+    carga quita un integrante al editar un equipo) y `detalle` es obligatorio con
+    «otro». Cada fila eliminada, la arrastrada con el equipo incluida, deja su evento."""
+    motivo, detalle = historial.validar_motivo_eliminacion(motivo, detalle)
     row = await db.get(DetalleFacturacionCMC, prestacion_id)
     if row is None:
         raise HTTPException(404, "Prestación no encontrada")
@@ -3111,6 +3241,10 @@ async def anular_prestacion(db: AsyncSession, prestacion_id: int, con_equipo: bo
     _gate_edicion(await _get_factura(db, row.cod_obr, row.periodo))
     cod_obra, periodo = row.cod_obr, row.periodo
     row.estado = "X"
+    eventos = [historial.evento(
+        row, historial.ELIMINADA, estado_antes="A", estado_despues="X",
+        motivo_codigo=motivo, motivo_texto=detalle,
+    )]
     # Con `con_equipo`, anular a la cabecera (el médico) se lleva a todo su equipo; anular a
     # un integrante (ayudante, pediatra…) anula solo esa fila y el resto queda como estaba.
     if con_equipo and (row.grupo_equipo_id is None or row.grupo_equipo_id == prestacion_id):
@@ -3123,6 +3257,12 @@ async def anular_prestacion(db: AsyncSession, prestacion_id: int, con_equipo: bo
         )).scalars().all()
         for integrante in integrantes:
             integrante.estado = "X"
+            eventos.append(historial.evento(
+                integrante, historial.ELIMINADA, estado_antes="A", estado_despues="X",
+                motivo_codigo=motivo, motivo_texto=detalle,
+                contexto=historial.contexto_de(integrante, arrastrada_por=prestacion_id),
+            ))
+    await historial.registrar(db, eventos)
     await db.flush()
     # Si era la última prestación abierta del período, se elimina la cabecera abierta.
     await _cleanup_factura_si_vacia(db, cod_obra, periodo)
@@ -3317,9 +3457,15 @@ async def mover_prestaciones_periodo(
     # que no matchea su cabecera y quedaría fuera del cierre/detalle de ese período.
     cabecera_destino = await _get_factura(db, payload.cod_obra, periodo_destino)
     version_destino = cabecera_destino.version if cabecera_destino is not None else 1
+    eventos = []
     for r in rows:
+        cambios = {"periodo": [r.periodo, periodo_destino]}
+        if r.version != version_destino:
+            cambios["version"] = [r.version, version_destino]
         r.periodo = periodo_destino
         r.version = version_destino
+        eventos.append(historial.evento(r, historial.MOVIDA_PERIODO, cambios=cambios))
+    await historial.registrar(db, eventos)
     await db.flush()
 
     # Mantener el invariante cabecera ⟺ prestaciones abiertas: crear la del destino
@@ -3458,6 +3604,17 @@ async def cerrar_periodo(
     documento_url = await _guardar_documento_factura(cabecera.id_prestaciones, archivo)
     if documento_url:
         cabecera.documento_url = documento_url
+
+    await historial.registrar(db, [
+        historial.evento(
+            r, historial.PERIODO_CERRADO, estado_antes="A", estado_despues="C",
+            contexto=historial.contexto_de(
+                r, factura_id=cabecera.id_prestaciones,
+                nro_factura=cabecera.nro_factura or None, tipo_factura=cabecera.tipo_factura or None,
+            ),
+        )
+        for r in rows
+    ])
 
     try:
         await db.commit()

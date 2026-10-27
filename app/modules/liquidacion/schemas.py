@@ -11,10 +11,10 @@ from pydantic import BaseModel, Field
 # Liquidacion por obra social
 # ================================================
 class LiquidacionCreate(BaseModel):
+    """Agrega una factura al pago. El período sale de la factura."""
     pago_id: int
     obra_social_id: int
-    mes_periodo: int = Field(..., ge=1, le=12)
-    anio_periodo: int = Field(..., ge=1900)
+    factura_id: int = Field(..., description="facturacion.id_prestaciones")
 
 
 class LiquidacionRead(BaseModel):
@@ -24,12 +24,16 @@ class LiquidacionRead(BaseModel):
     mes_periodo: int
     anio_periodo: int
     nro_factura: Optional[str] = None
+    factura_id: Optional[int] = None
+    factura_version: Optional[int] = None
     total_honorarios: Decimal
     total_gastos: Decimal
     total_bruto: Decimal
     total_debitos: Decimal
     total_creditos: Decimal
     total_neto: Decimal
+    # Sólo al agregar la factura al pago: cuántas prestaciones entraron y cuáles no.
+    resumen_carga: Optional[dict] = None
 
     class Config:
         from_attributes = True
@@ -104,6 +108,3 @@ class ReciboRead(BaseModel):
     class Config:
         from_attributes = True
 
-
-class ReciboAnularPayload(BaseModel):
-    motivo: Optional[str] = None

@@ -12,6 +12,7 @@ from app.auth.deps import usuario_opcional
 from app.auth.scopes import Scope
 from app.db.database import get_db
 from app.db.models import ListadoMedico, PublicidadMedico
+from app.db.models.medico import ESTADO_ACTIVO
 from app.modules.contenido.schemas import PublicidadMedicoOut
 
 router = APIRouter()
@@ -111,7 +112,7 @@ async def buscar_medicos(
             LM.DOCUMENTO.label("documento"),
         )
         .where(
-            LM.EXISTE == "S",
+            LM.estado_cuenta == ESTADO_ACTIVO,
             or_(
                 LM.NOMBRE.like(term),
                 cast(LM.NRO_SOCIO, String).like(term),

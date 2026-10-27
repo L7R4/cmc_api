@@ -173,6 +173,14 @@ def normalizar_codigo(raw) -> str:
     return str(raw).strip()
 
 
+def _con_ceros(cod: str) -> list[str]:
+    """Formas con ceros a la izquierda que puede haber perdido un código numérico: los del
+    catálogo tienen 6 u 8 dígitos (`000002`, `01021001`) y Excel los guarda como número."""
+    if not cod.isdigit():
+        return []
+    return [c for c in dict.fromkeys(cod.zfill(n) for n in (6, 8)) if c != cod]
+
+
 def componentes_fijos(honorarios: Decimal, gastos: Decimal, ayudante: Decimal) -> list[dict]:
     """Un componente fijo por concepto, con su importe (por presupuesto, los tres en 0)."""
     return [
@@ -300,8 +308,7 @@ async def clasificar(
         parseadas.append((f, cod, montos[:3], montos[3], error))
         if cod:
             candidatos.add(cod)
-            if cod.isdigit() and len(cod) < 6:
-                candidatos.add(cod.zfill(6))
+            candidatos.update(_con_ceros(cod))
     ctx = await _contexto(db, obra_social_nro, candidatos)
     nombres = await service.nombres_de_especialidades(
         db, {e for vs in (*ctx.habilitadas.values(), *ctx.plantillas.values()) for e in vs}
@@ -313,9 +320,12 @@ async def clasificar(
         honorarios, gastos, ayudante = montos
         importe = None if presupuesto or error else sum(montos, Decimal("0"))
         avisos: list[str] = []
-        if cod and cod not in ctx.noms and cod.isdigit() and len(cod) < 6 and cod.zfill(6) in ctx.noms:
-            avisos.append(f"El código {cod} no existe; se tomó {cod.zfill(6)}")
-            cod = cod.zfill(6)
+        if cod and cod not in ctx.noms:
+            # Excel guarda los códigos numéricos sin el cero inicial (01021001 → 1021001).
+            existentes = [c for c in _con_ceros(cod) if c in ctx.noms]
+            if len(existentes) == 1:
+                avisos.append(f"El código {cod} no existe; se tomó {existentes[0]}")
+                cod = existentes[0]
         base = dict(
             fila=f.fila, codigo=cod, codigo_excel=normalizar_codigo(f.codigo) or None,
             descripcion_excel=(f.descripcion or "").strip() or None,

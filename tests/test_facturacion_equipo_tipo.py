@@ -53,9 +53,9 @@ def datos_sinteticos():
         with con.cursor() as cur:
             for nro, es_org in ((NRO_CLINICA, 1), (NRO_CIRUJANO, 0), (NRO_AYUDANTE, 0)):
                 cur.execute(
-                    "INSERT INTO listado_medico (NRO_SOCIO, EXISTE, hashed_password, conceps_espec, es_organizacion) "
+                    "INSERT INTO listado_medico (NRO_SOCIO, estado_cuenta, hashed_password, conceps_espec, es_organizacion) "
                     "VALUES (%s, %s, %s, %s, %s)",
-                    (nro, "S", "x", '{"conceps": [], "espec": []}', es_org),
+                    (nro, "activo", "x", '{"conceps": [], "espec": []}', es_org),
                 )
             cur.execute(
                 "INSERT INTO facturacion "

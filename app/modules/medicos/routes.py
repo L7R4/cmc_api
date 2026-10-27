@@ -22,7 +22,7 @@ from app.modules.medicos.helpers import (
 from typing import Any, DefaultDict, Literal, Optional, Dict, List
 from fastapi import APIRouter, Body, Depends, File, Form, Query, HTTPException, Request, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import case, delete, desc, func, literal, select, or_, cast, String, Integer, text, update
+from sqlalchemy import and_, case, delete, desc, func, literal, select, or_, cast, String, Integer, text, update
 
 from app.modules.medicos import auditoria
 from app.core.passwords import hash_password, validate_new_password
@@ -39,15 +39,17 @@ from app.db.models import (
 from app.modules.medicos.schemas import (
     DATE_KEYS, FIELD_MAP, AdminSaveContinueIn, AsignarEspecialidadIn, AsociarConceptoIn,
     CEAppOut, CEBundleOut, CEBundlePatchIn, CEStoreOut, ConceptRecordOut, ConceptoAplicacionOut,
-    DoctorStatsPointOut, ExisteIn, MedicoBase, MedicoConceptoOut, MedicoDebtOut, MedicoDocOut,
-    MedicoEspecialidadOut, MedicoListRow, MedicoDetailOut, MedicoPartialIn, MedicoUpdateIn,
+    DoctorStatsPointOut, EstadoCuentaIn, MedicoBase, MedicoConceptoOut, MedicoDebtOut, MedicoDocOut,
+    MedicoEspecialidadOut, MedicoListRow, MedicoDetailOut, MedicoPartialIn, MedicoSelectorOut, MedicoUpdateIn,
     NuevaDeudaIn, OrganizacionIn, PatchCEIn, RegisterIn, RegisterOut, ResetPasswordIn,
     SaveContinueOut,
-    _coerce_existe, _coerce_sexo,
+    _coerce_sexo,
 )
 from app.services.email import send_email_resend
 from app.core.config import settings
-from app.modules.medicos.service import create_medico_and_solicitud, save_medico_admin_draft
+from app.auth.identidad import rol_principal
+from app.db.models.medico import ESTADO_ACTIVO
+from app.modules.medicos.service import cambiar_estado_cuenta, create_medico_and_solicitud, save_medico_admin_draft
 
 router = APIRouter()
 
@@ -100,9 +102,9 @@ MEDICO_ALL_FIELDS = [
     "fecha_nac", "cuit", "condicion_impositiva", "anssal", "vencimiento_anssal",
     "malapraxis", "vencimiento_malapraxis", "monotributista", "factura",
     "cobertura", "vencimiento_cobertura", "provincia", "localidad", "codigo_postal",
-    "vitalicio", "fecha_vitalicio", "observacion", "categoria", "existe",
+    "vitalicio", "fecha_vitalicio", "observacion", "categoria", "estado_cuenta",
     "excep_desde", "excep_hasta", "excep_desde2", "excep_hasta2",
-    "excep_desde3", "excep_hasta3", "ingresar", "cbu", "nro_resolucion",
+    "excep_desde3", "excep_hasta3", "cbu", "nro_resolucion",
     "fecha_resolucion", "es_organizacion", "adherente", "interior",
     "conceps_espec", "attach_titulo", "attach_matricula_nac",
     "attach_matricula_prov", "attach_resolucion", "attach_habilitacion_municipal",
@@ -138,7 +140,7 @@ MEDICO_DATE_FIELDS = {
 MEDICO_TEXT_DATE_FIELDS: set = set()
 
 MEDICO_EXACT_STRING_FIELDS = {
-    "existe", "sexo", "categoria", "ingresar", "vitalicio",
+    "estado_cuenta", "sexo", "categoria", "vitalicio",
     "monotributista", "factura", "tipo_doc", "condicion_impositiva",
 }
 
@@ -166,11 +168,10 @@ async def listar_medicos(
     doc_str = cast(ListadoMedico.DOCUMENTO, String).label("documento")
 
     activo_expr = case(
-        (func.upper(func.trim(ListadoMedico.EXISTE)) == literal("S"), literal(1)),
+        (ListadoMedico.estado_cuenta == literal(ESTADO_ACTIVO), literal(1)),
         else_=literal(0),
     ).label("activo")
     nro_expr = func.nullif(ListadoMedico.NRO_SOCIO, 0).label("nro_socio")
-    existe_raw = func.trim(ListadoMedico.EXISTE).label("existe")
 
     stmt = (
         select(
@@ -183,7 +184,7 @@ async def listar_medicos(
             ListadoMedico.TELE_PARTICULAR.label("tele_particular"),
             fecha_str,
             activo_expr,
-            existe_raw,
+            ListadoMedico.estado_cuenta.label("estado_cuenta"),
         )
         .order_by(ListadoMedico.NOMBRE.asc())
         .offset(skip)
@@ -191,9 +192,9 @@ async def listar_medicos(
     )
 
     if estado == "activos":
-        stmt = stmt.where(func.upper(func.trim(ListadoMedico.EXISTE)) == "S")
+        stmt = stmt.where(ListadoMedico.estado_cuenta == ESTADO_ACTIVO)
     elif estado == "inactivos":
-        stmt = stmt.where(func.upper(func.trim(ListadoMedico.EXISTE)) != "S")
+        stmt = stmt.where(ListadoMedico.estado_cuenta != ESTADO_ACTIVO)
 
     if q:
         pattern = f"%{q}%"
@@ -301,9 +302,9 @@ async def listar_medicos_full(
 
     if estado:
         if estado == "activos":
-            filters.append(func.upper(func.trim(ListadoMedico.EXISTE)) == "S")
+            filters.append(ListadoMedico.estado_cuenta == ESTADO_ACTIVO)
         elif estado == "inactivos":
-            filters.append(func.upper(func.trim(ListadoMedico.EXISTE)) != "S")
+            filters.append(ListadoMedico.estado_cuenta != ESTADO_ACTIVO)
 
     if tiene_malapraxis is True:
         filters.append(
@@ -462,13 +463,67 @@ async def listar_medicos_full(
     return [dict(r) for r in rows]
 
 
+@router.get("/selector", response_model=List[MedicoSelectorOut])
+async def selector_medicos(
+    q: Optional[str] = Query(None, description="Nombre, N° de socio, matrícula o documento"),
+    limit: int = Query(50, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+):
+    """Médicos para un select, livianos y ya ordenados: de la A a la Z y, al buscar, por cercanía.
+
+    Orden al buscar: primero el N° de socio igual a lo tipeado (buscar «36» trae primero al 36),
+    después el nombre igual, los N° de socio que empiezan así, los nombres que empiezan así, los que
+    tienen una palabra que empieza así y, al final, el resto de las coincidencias (dentro del nombre,
+    la matrícula o el documento). A igual cercanía, alfabético. El orden se resuelve antes del límite:
+    la coincidencia exacta nunca queda afuera.
+    """
+    nro = cast(ListadoMedico.NRO_SOCIO, String)
+    nombre = ListadoMedico.NOMBRE
+    stmt = select(ListadoMedico.ID.label("id"), ListadoMedico.NRO_SOCIO.label("nro_socio"), nombre.label("nombre"))
+
+    texto = (q or "").strip()
+    if not texto:
+        # Sin búsqueda, los registros sin nombre (hay tres con «0») no se ofrecen: quedarían primeros.
+        stmt = stmt.where(func.trim(nombre).notin_(["", "0"])).order_by(nombre.asc())
+    else:
+        palabras = texto.split()
+        en_nombre = and_(*[nombre.contains(p, autoescape=True) for p in palabras])
+        stmt = stmt.where(or_(
+            en_nombre,
+            nro.contains(texto, autoescape=True),
+            cast(ListadoMedico.MATRICULA_PROV, String).contains(texto, autoescape=True),
+            cast(ListadoMedico.DOCUMENTO, String).contains(texto, autoescape=True),
+        ))
+        cercania = case(
+            (nro == texto, 0),
+            (nombre == texto, 1),
+            (nro.startswith(texto, autoescape=True), 2),
+            (nombre.startswith(texto, autoescape=True), 3),
+            (nombre.contains(" " + texto, autoescape=True), 4),
+            (en_nombre, 5),
+            else_=6,
+        )
+        stmt = stmt.order_by(
+            cercania.asc(),
+            # Entre los N° de socio que empiezan igual, el más chico primero (36, 360, 361…).
+            case((nro.startswith(texto, autoescape=True), ListadoMedico.NRO_SOCIO), else_=0).asc(),
+            nombre.asc(),
+        )
+
+    rows = (await db.execute(stmt.limit(limit))).mappings().all()
+    return [
+        MedicoSelectorOut(id=r["id"], nro_socio=r["nro_socio"], nombre=(r["nombre"] or "").strip())
+        for r in rows
+    ]
+
+
 @router.get("/count")
 async def contar_medicos(
     q: Optional[str] = Query(None),
     db: AsyncSession = Depends(get_db),
 ):
     M = ListadoMedico
-    stmt = select(func.count()).select_from(M).where(M.EXISTE == "S")
+    stmt = select(func.count()).select_from(M).where(M.estado_cuenta == ESTADO_ACTIVO)
     if q:
         like = f"%{q}%"
         stmt = stmt.where(
@@ -485,13 +540,13 @@ async def contar_medicos(
 
 @router.post("/register", response_model=RegisterOut)
 async def public_register_medico(body: RegisterIn, db: AsyncSession = Depends(get_db)):
-    med, sol = await create_medico_and_solicitud(db, body, existe="N")
+    med, sol = await create_medico_and_solicitud(db, body)
     return {"medico_id": med.ID, "solicitud_id": sol.id, "ok": True}
 
 
 @router.post("/admin/register", response_model=RegisterOut)
 async def admin_register_medico(body: RegisterIn, db: AsyncSession = Depends(get_db)):
-    med, sol = await create_medico_and_solicitud(db, body, existe="N")
+    med, sol = await create_medico_and_solicitud(db, body)
     return {"medico_id": med.ID, "solicitud_id": sol.id, "ok": True}
 
 
@@ -529,7 +584,7 @@ async def obtener_medico(
             ListadoMedico.PROVINCIA.label("provincia"),
             ListadoMedico.CODIGO_POSTAL.label("codigo_postal"),
             ListadoMedico.CATEGORIA.label("categoria"),
-            ListadoMedico.EXISTE.label("existe"),
+            ListadoMedico.estado_cuenta.label("estado_cuenta"),
             ListadoMedico.FECHA_NAC.label("fecha_nac"),
             ListadoMedico.localidad.label("localidad"),
             ListadoMedico.DOMICILIO_PARTICULAR.label("domicilio_particular"),
@@ -563,7 +618,6 @@ async def obtener_medico(
             ListadoMedico.attach_cbu.label("attach_cbu"),
             ListadoMedico.attach_dni.label("attach_dni"),
             ListadoMedico.es_organizacion.label("es_organizacion"),
-            ListadoMedico.INGRESAR.label("ingresar"),
             ListadoMedico.adherente.label("adherente"),
             ListadoMedico.interior.label("interior"),
         )
@@ -576,6 +630,7 @@ async def obtener_medico(
         raise HTTPException(status_code=404, detail="Médico no encontrado")
 
     d = dict(row)
+    d["rol"] = await rol_principal(db, medico_id)
 
     # Antes esto solo le pegaba una barra adelante y devolvía `/uploads/...`,
     # que Caddy servía sin autenticación. Ahora delega en el único lugar donde
@@ -683,8 +738,6 @@ async def update_medico(
         raise HTTPException(404, "Médico no encontrado")
 
     data = payload.model_dump(exclude_unset=True)
-    if "existe" in data:
-        data["existe"] = _coerce_existe(data["existe"])
     if "sexo" in data:
         data["sexo"] = _coerce_sexo(data["sexo"])
 
@@ -1426,15 +1479,15 @@ async def admin_save_continue(body: AdminSaveContinueIn, db: AsyncSession = Depe
     return {"medico_id": int(med.ID), "ok": True}
 
 
-@router.patch("/{medico_id}/existe")
-async def set_existe(medico_id: int, body: ExisteIn, db: AsyncSession = Depends(get_db)):
+@router.patch("/{medico_id}/estado")
+async def set_estado_cuenta(medico_id: int, body: EstadoCuentaIn, db: AsyncSession = Depends(get_db)):
+    """Activa, da de baja o vuelve a pendiente una cuenta. Fuera de `activo`, la
+    persona pierde sus sesiones en el acto (ver `cambiar_estado_cuenta`)."""
     med = await db.get(ListadoMedico, medico_id)
     if not med:
         raise HTTPException(404, "Médico no encontrado")
-    med.EXISTE = body.existe
-    await db.flush()
-    await db.commit()
-    return {"ok": True, "medico_id": medico_id, "EXISTE": med.EXISTE}
+    await cambiar_estado_cuenta(db, med, body.estado_cuenta)
+    return {"ok": True, "medico_id": medico_id, "estado_cuenta": med.estado_cuenta}
 
 
 @router.patch("/{medico_id}/organizacion")
@@ -1447,7 +1500,7 @@ async def set_organizacion(
     `GET /api/medicos/all?es_organizacion=1`. El endpoint faltaba: el front ya
     lo llamaba y recibía 404, así que el toggle no guardaba nada.
 
-    Va como PATCH de un solo campo —mismo criterio que `/{medico_id}/existe`— y
+    Va como PATCH de un solo campo —mismo criterio que `/{medico_id}/estado`— y
     no reusando `PUT /{medico_id}`: ese espera el legajo y pisaría con `None`
     cualquier campo que no venga, que es justo lo que no se quiere para un
     toggle de una casilla.

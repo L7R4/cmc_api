@@ -140,6 +140,11 @@ class Liquidacion(AuditMixin, Base):
     anio_periodo: Mapped[int] = mapped_column(Integer)
 
     nro_factura: Mapped[Optional[str]] = mapped_column(String(30))
+    # La liquidación es de UNA factura (original o complementaria): facturacion.id_prestaciones
+    # y su versión (1 = original, 2+ = complementaria N-1). Sin FK, como el resto de las
+    # referencias a las tablas de CMC. NULL sólo en liquidaciones anteriores a este cambio.
+    factura_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+    factura_version: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
     total_honorarios: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), default=0, server_default="0.00")
     total_gastos: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), default=0, server_default="0.00")
@@ -155,7 +160,9 @@ class Liquidacion(AuditMixin, Base):
     )
 
     __table_args__ = (
-        UniqueConstraint("pago_id", "obra_social_id", "mes_periodo", "anio_periodo", name="uq_liq_pago_os_per"),
+        # Una factura entra una sola vez en un pago; la original y las complementarias
+        # de un mismo período son filas distintas.
+        UniqueConstraint("pago_id", "factura_id", name="uq_liq_pago_factura"),
         Index("idx_liq_pago_os_per", "pago_id", "obra_social_id", "mes_periodo", "anio_periodo"),
     )
 

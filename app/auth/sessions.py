@@ -46,7 +46,8 @@ from app.db.models import ListadoMedico, RefreshToken
 log = logging.getLogger(__name__)
 
 Motivo = Literal[
-    "logout", "rotacion", "cambio_password", "cambio_permisos", "reuso_detectado"
+    "logout", "rotacion", "cambio_password", "cambio_permisos", "reuso_detectado",
+    "cuenta_inactiva",
 ]
 
 

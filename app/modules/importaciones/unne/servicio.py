@@ -40,6 +40,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.common.money import quantize_money
 from app.db.models import DetalleFacturacionCMC
 from app.db.models.nomenclador_cmc import HistorialPrecioCodigo
+from app.modules.facturacion import historial
 from app.modules.facturacion.service import (
     ORIGEN_COLEGIO,
     TIPO_SANATORIO,
@@ -294,6 +295,7 @@ async def procesar(
                 fila.nro_orden = str(fila.id_detalle_prestaciones)
                 r.id_detalle = fila.id_detalle_prestaciones
                 r.resultado = GRABADA
+            await historial.registrar(db, historial.eventos_importacion([f for _, f in a_grabar], "unne"))
             await _ensure_factura_abierta(db, str(NRO_UNNE), periodo_destino, usuario_carga[:15])
             await db.commit()
 

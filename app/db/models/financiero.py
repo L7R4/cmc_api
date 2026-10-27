@@ -2,7 +2,7 @@ import datetime
 from decimal import Decimal
 from typing import Literal, Optional
 
-from sqlalchemy import DECIMAL, Boolean, Date, Enum, ForeignKey, Index, Integer, String, UniqueConstraint
+from sqlalchemy import DECIMAL, BigInteger, Boolean, Date, DateTime, Enum, ForeignKey, Index, Integer, String, UniqueConstraint, func
 from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -30,6 +30,11 @@ class LoteAjuste(AuditMixin, Base):
         default="normal",
         server_default="normal",
     )
+
+    # Factura de la que cuelga el lote: facturacion.id_prestaciones (sin FK, tabla de CMC).
+    # Una OS+período puede tener la original y complementarias; NULL en los lotes
+    # anteriores a esta columna y en los sin_factura.
+    factura_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
 
     # Para refacturaciones: qué lote está siendo corregido por este
     snap_origen_id: Mapped[Optional[int]] = mapped_column(
@@ -292,3 +297,200 @@ class DeduccionAplicacion(AuditMixin, Base):
     )
 
 
+class LiquidacionAdelanto(AuditMixin, Base):
+    """Adelanto: prestaciones de UNA factura cerrada que se pagan antes que el resto.
+
+    Funciona como un lote de débitos y créditos: se arma (A), se cierra (C), se pasa al pago
+    abierto (L, asigna `pago_id`) y queda aplicado al cerrar el pago (AP). No crea
+    `liquidacion` ni `detalle_liquidacion`: sus importes suman a la producción del médico
+    en el pago por `pago_id`, como los ajustes.
+    """
+    __tablename__ = "liquidacion_adelanto"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    # facturacion.id_prestaciones (sin FK: tabla de CMC). Original o complementaria.
+    factura_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    # Copiados de la factura para filtrar y mostrar sin cruzar tablas.
+    obra_social_id: Mapped[int] = mapped_column(
+        ForeignKey("obras_sociales.NRO_OBRASOCIAL"), nullable=False, index=True
+    )
+    mes_periodo: Mapped[int] = mapped_column(Integer, nullable=False)
+    anio_periodo: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    estado: Mapped[Literal["A", "C", "L", "AP"]] = mapped_column(
+        Enum("A", "C", "L", "AP", name="adelanto_estado"),
+        nullable=False,
+        default="A",
+        server_default="A",
+    )
+    # Pago al que se pasó; NULL en A y C.
+    pago_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("pago.id"), nullable=True, index=True
+    )
+    observacion: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+
+    items: Mapped[list["LiquidacionAdelantoItem"]] = relationship(
+        back_populates="adelanto",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
+
+    __table_args__ = (
+        Index("idx_adel_os_per", "obra_social_id", "anio_periodo", "mes_periodo"),
+        Index("idx_adel_estado", "estado"),
+    )
+
+
+class LiquidacionAdelantoItem(AuditMixin, Base):
+    """Una prestación (fila de detalle_facturacion) dentro de un adelanto."""
+    __tablename__ = "liquidacion_adelanto_item"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    adelanto_id: Mapped[int] = mapped_column(
+        ForeignKey("liquidacion_adelanto.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    # detalle_facturacion.id_detalle_prestaciones. ÚNICO: una prestación no puede estar en
+    # dos adelantos. Sin FK: tabla compartida con CMC.
+    detalle_facturacion_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # Quien cobra esa fila (médico, ayudante o gastos): listado_medico.ID
+    medico_id: Mapped[int] = mapped_column(
+        ForeignKey("listado_medico.ID"), nullable=False, index=True
+    )
+    # Mismo reparto que `detalle_liquidacion` (según la función, × cantidad × sesión).
+    honorarios: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), nullable=False, default=Decimal("0.00"), server_default="0.00")
+    gastos: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), nullable=False, default=Decimal("0.00"), server_default="0.00")
+    importe_total: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), nullable=False, default=Decimal("0.00"), server_default="0.00")
+
+    adelanto: Mapped["LiquidacionAdelanto"] = relationship(back_populates="items")
+
+    __table_args__ = (
+        UniqueConstraint("detalle_facturacion_id", name="uq_adel_item_detalle"),
+    )
+
+
+class Compensacion(AuditMixin, Base):
+    """Movimiento de plata a favor (+) o en contra (−) de un socio, sin un concepto del catálogo:
+    un regalo de cumpleaños, un reintegro, una rotura. Un solo importe, sin cuotas.
+
+    No es producción: no entra en las bases de los porcentuales. Suma (o resta) al reconocido
+    del socio en el pago (`pago_id`, estado en_pago/pagada), como un crédito o un débito.
+    También puede pagarse en caja, fuera de cualquier pago (`en_caja`).
+    """
+    __tablename__ = "compensacion"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # Cualquier fila del padrón (médico, adherente u organización): listado_medico.ID
+    medico_id: Mapped[int] = mapped_column(ForeignKey("listado_medico.ID"), nullable=False, index=True)
+    # Con signo: positivo a favor del socio, negativo en contra. Nunca cero.
+    importe: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), nullable=False)
+    # Lo que dice el recibo (la ve el socio) y una nota solo para el Colegio.
+    leyenda: Mapped[str] = mapped_column(String(160), nullable=False)
+    nota_interna: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+
+    estado: Mapped[Literal["pendiente", "en_pago", "pagada", "en_caja", "anulada"]] = mapped_column(
+        Enum("pendiente", "en_pago", "pagada", "en_caja", "anulada", name="compensacion_estado"),
+        nullable=False,
+        default="pendiente",
+        server_default="pendiente",
+    )
+    pago_id: Mapped[Optional[int]] = mapped_column(ForeignKey("pago.id"), nullable=True, index=True)
+    fecha_caja: Mapped[Optional[datetime.date]] = mapped_column(Date, nullable=True)
+    motivo_anulacion: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+
+    __table_args__ = (
+        Index("idx_comp_estado", "estado"),
+    )
+
+
+class RetencionGananciasEscala(Base):
+    """Escala de la retención de Ganancias de un tipo de socio, vigente desde una fecha.
+
+    Los números los fija ARCA y cambian: cuando cambian se carga una escala nueva con su
+    `vigente_desde` y la vieja queda para los pagos anteriores. Cada pago usa la vigente al
+    primer día de su mes. Ver app/modules/retenciones/calculo.py.
+    """
+    __tablename__ = "retencion_ganancias_escala"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tipo_sujeto: Mapped[Literal["persona", "clinica", "juridica"]] = mapped_column(
+        Enum("persona", "clinica", "juridica", name="retencion_tipo_sujeto"), nullable=False
+    )
+    vigente_desde: Mapped[datetime.date] = mapped_column(Date, nullable=False)
+    minimo_no_imponible: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), nullable=False)
+    # Si la retención del mes no llega a esto, no se retiene nada.
+    retencion_minima: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), nullable=False, server_default="0.00")
+    observacion: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+
+    tramos: Mapped[list["RetencionGananciasTramo"]] = relationship(
+        back_populates="escala", cascade="all, delete-orphan", order_by="RetencionGananciasTramo.desde"
+    )
+
+    __table_args__ = (
+        UniqueConstraint("tipo_sujeto", "vigente_desde", name="uq_ret_gan_escala_tipo_vigencia"),
+    )
+
+
+class RetencionGananciasTramo(Base):
+    """Tramo sobre el excedente del mínimo no imponible: retención = fijo + (excedente − desde) × %."""
+    __tablename__ = "retencion_ganancias_tramo"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    escala_id: Mapped[int] = mapped_column(
+        ForeignKey("retencion_ganancias_escala.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    desde: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), nullable=False)
+    hasta: Mapped[Optional[Decimal]] = mapped_column(DECIMAL(14, 2), nullable=True)  # NULL = sin tope
+    importe_fijo: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), nullable=False, server_default="0.00")
+    porcentaje: Mapped[Decimal] = mapped_column(DECIMAL(6, 3), nullable=False)
+
+    escala: Mapped["RetencionGananciasEscala"] = relationship(back_populates="tramos")
+
+    __table_args__ = (
+        UniqueConstraint("escala_id", "desde", name="uq_ret_gan_tramo_desde"),
+    )
+
+
+class RetencionGanancias(Base):
+    """La cuenta de la retención de Ganancias de un socio en un pago (una fila por pago y socio).
+
+    Es lo que el sistema anterior guardaba en `afip_deducciones`: la base y lo retenido de cada
+    pago, para que el próximo pago del mismo mes acumule (el mínimo y los tramos son mensuales),
+    y de donde salen el listado mensual y los comprobantes. Mientras el pago está abierto se
+    recalcula; al cerrarse queda fija. Lo retenido de verdad es la deducción (`deduccion_id`).
+    """
+    __tablename__ = "retencion_ganancias"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    pago_id: Mapped[int] = mapped_column(ForeignKey("pago.id", ondelete="CASCADE"), nullable=False)
+    medico_id: Mapped[int] = mapped_column(ForeignKey("listado_medico.ID"), nullable=False, index=True)
+    # Mes del pago: es el mes en que se acumula y el de la declaración jurada.
+    mes: Mapped[int] = mapped_column(Integer, nullable=False)
+    anio: Mapped[int] = mapped_column(Integer, nullable=False)
+    tipo_sujeto: Mapped[Literal["persona", "clinica", "juridica"]] = mapped_column(
+        Enum("persona", "clinica", "juridica", name="retencion_tipo_sujeto"), nullable=False
+    )
+    escala_id: Mapped[int] = mapped_column(ForeignKey("retencion_ganancias_escala.id"), nullable=False)
+    # Base de este pago: lo producido (facturas + adelantos) menos débitos más créditos de los
+    # lotes. Las compensaciones no cuentan (no son producción).
+    honorarios: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), nullable=False, server_default="0.00")
+    gastos: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), nullable=False, server_default="0.00")
+    base_pago: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), nullable=False, server_default="0.00")
+    # La cuenta: base de todo el mes, retención del mes, lo ya retenido en otros pagos cerrados
+    # del mes y lo que toca en este.
+    base_mes: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), nullable=False, server_default="0.00")
+    retencion_mes: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), nullable=False, server_default="0.00")
+    retenido_otros_pagos: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), nullable=False, server_default="0.00")
+    retencion_pago: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), nullable=False, server_default="0.00")
+    deduccion_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("deducciones.id", ondelete="SET NULL"), nullable=True
+    )
+    actualizado_en: Mapped[datetime.datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint("pago_id", "medico_id", name="uq_ret_gan_pago_medico"),
+        Index("idx_ret_gan_periodo", "anio", "mes"),
+    )

@@ -7,10 +7,12 @@ from pydantic import BaseModel, Field
 
 
 class LoteAjusteCreate(BaseModel):
-    """Para obtener_o_crear un lote normal."""
+    """Para obtener_o_crear un lote normal: cuelga de una factura (original o complementaria).
+
+    El período sale de la propia factura, no se manda.
+    """
     obra_social_id: int
-    mes_periodo: int = Field(..., ge=1, le=12)
-    anio_periodo: int = Field(..., ge=1900, le=3000)
+    factura_id: int = Field(..., description="facturacion.id_prestaciones")
 
 
 class LoteCambiarEstadoPayload(BaseModel):
@@ -18,10 +20,13 @@ class LoteCambiarEstadoPayload(BaseModel):
 
 
 class LoteRefacturacionCreate(BaseModel):
-    """Para crear un lote de refacturación."""
+    """Para crear un lote de refacturación: corrige una factura (original o complementaria).
+
+    El período sale de la factura. Si no se manda `snap_origen_id`, el origen es el
+    último lote de esa factura (la última refacturación, o el lote normal).
+    """
     obra_social_id: int
-    mes_periodo: int = Field(..., ge=1, le=12)
-    anio_periodo: int = Field(..., ge=1900, le=3000)
+    factura_id: int = Field(..., description="facturacion.id_prestaciones")
     snap_origen_id: Optional[int] = None
 
 
@@ -57,6 +62,8 @@ class PrestacionCMCSearchRow(BaseModel):
     importe_total: Optional[Decimal] = None
     periodo: str
     cod_obr: str
+    # Débitos menos créditos ya cargados sobre esta prestación (en cualquier lote).
+    ya_debitado: Decimal = Decimal("0")
 
 
 class AjusteUpdate(BaseModel):
@@ -100,6 +107,8 @@ class LoteListaRow(BaseModel):
     pago_id: Optional[int] = None
     obra_social_id: int
     obra_social_nombre: str
+    factura_id: Optional[int] = None
+    snap_origen_id: Optional[int] = None
     nro_factura: Optional[str] = None
     total_debitos: Decimal
     total_creditos: Decimal
@@ -112,6 +121,12 @@ class LoteAjusteRead(BaseModel):
     anio_periodo: int
     tipo: str
     snap_origen_id: Optional[int] = None
+    obra_social_nombre: Optional[str] = None
+    factura_id: Optional[int] = None
+    nro_factura: Optional[str] = None
+    factura_version: Optional[int] = None
+    # False = la factura del lote todavía no está en el pago; sólo informativo.
+    factura_en_pago: Optional[bool] = None
     estado: str
     pago_id: Optional[int] = None
     total_debitos: Decimal

@@ -31,6 +31,10 @@ class PagoRead(BaseModel):
     total_creditos: Decimal = Decimal("0")
     total_neto: Decimal = Decimal("0")
     total_deduccion: Decimal = Decimal("0")
+    # La parte de total_bruto que viene de adelantos.
+    total_adelantos: Decimal = Decimal("0")
+    # Compensaciones del pago, con signo (+ a favor de socios, − en contra). Ya están en total_neto.
+    total_compensaciones: Decimal = Decimal("0")
 
     class Config:
         from_attributes = True
@@ -170,6 +174,50 @@ class VistaPreviewLoteSection(BaseModel):
     totales: VistaPreviewLoteTotales
 
 
+class VistaPreviewAdelantoItem(BaseModel):
+    adelanto_id: int
+    estado: str
+    obra_social_id: int
+    obra_social_nombre: str
+    nro_factura: Optional[str] = None
+    mes_periodo: int
+    anio_periodo: int
+    prestaciones: int
+    medicos: int
+    total_honorarios: Decimal
+    total_gastos: Decimal
+    total_bruto: Decimal
+
+
+class VistaPreviewAdelantoTotales(BaseModel):
+    total_bruto: Decimal = Decimal("0")
+
+
+class VistaPreviewAdelantoSection(BaseModel):
+    items: List[VistaPreviewAdelantoItem] = []
+    totales: VistaPreviewAdelantoTotales = VistaPreviewAdelantoTotales()
+
+
+class VistaPreviewCompensacionItem(BaseModel):
+    compensacion_id: int
+    estado: str
+    medico_id: int
+    medico_nombre: str
+    leyenda: str
+    importe: Decimal
+
+
+class VistaPreviewCompensacionTotales(BaseModel):
+    a_favor: Decimal = Decimal("0")
+    en_contra: Decimal = Decimal("0")
+    neto: Decimal = Decimal("0")
+
+
+class VistaPreviewCompensacionSection(BaseModel):
+    items: List[VistaPreviewCompensacionItem] = []
+    totales: VistaPreviewCompensacionTotales = VistaPreviewCompensacionTotales()
+
+
 class PagoVistaPreviaRead(BaseModel):
     pago_id: int
     mes: int
@@ -179,6 +227,8 @@ class PagoVistaPreviaRead(BaseModel):
     liquidaciones: VistaPreviaLiqSection
     deducciones: VistaPreviewDedSection
     lotes: VistaPreviewLoteSection
+    adelantos: VistaPreviewAdelantoSection = VistaPreviewAdelantoSection()
+    compensaciones: VistaPreviewCompensacionSection = VistaPreviewCompensacionSection()
 
 
 # ================================================

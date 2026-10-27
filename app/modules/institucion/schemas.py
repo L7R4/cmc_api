@@ -133,6 +133,7 @@ class InstitucionIn(BaseModel):
     cuit: Optional[str] = Field(None, max_length=13)
     condicion_iva: Optional[str] = Field(None, max_length=60)
     ingresos_brutos: Optional[str] = Field(None, max_length=40)
+    agente_retencion_ganancias: Optional[str] = Field(None, max_length=40)
 
     cbu: Optional[str] = Field(None, max_length=30)
     alias_cbu: Optional[str] = Field(None, max_length=60)
@@ -149,7 +150,7 @@ class InstitucionIn(BaseModel):
     notas: Optional[str] = None
 
     _limpiar = field_validator(
-        "razon_social", "condicion_iva", "ingresos_brutos", "alias_cbu", "banco",
+        "razon_social", "condicion_iva", "ingresos_brutos", "agente_retencion_ganancias", "alias_cbu", "banco",
         "titular_cuenta", "domicilio", "localidad", "provincia", "codigo_postal",
         "sitio_web", "horario_atencion", "notas",
     )(_vacio_es_none)
@@ -196,6 +197,7 @@ class InstitucionOut(BaseModel):
     cuit: Optional[str] = None
     condicion_iva: Optional[str] = None
     ingresos_brutos: Optional[str] = None
+    agente_retencion_ganancias: Optional[str] = None
 
     cbu: Optional[str] = None
     alias_cbu: Optional[str] = None

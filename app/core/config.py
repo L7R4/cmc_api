@@ -75,12 +75,9 @@ class Settings(BaseSettings):
     COOKIE_SECURE: bool = False  
     COOKIE_DOMAIN: str | None = None
 
-    FRONT_BASE_URL: str | None = None
-    ALLOWED_FRONT_HOSTS: str | None = None
-
-    LEGACY_BASE_URL: str | None = None 
-    LEGACY_SSO_PATH: str = "/sso_login.php"
-    LEGACY_SSO_SECRET: SecretStr | None = None
+    # Sólo para servir las planillas históricas que siguen en el host del sistema
+    # viejo (app/modules/planillas). El SSO con el legacy se sacó el 2026-10-21.
+    LEGACY_BASE_URL: str | None = None
     
     MEDIA_ROOT: str = "uploads"   
     MEDIA_URL: str = "uploads"        
@@ -93,7 +90,7 @@ class Settings(BaseSettings):
     # Secreto de máquina para endpoints llamados por el cron (no un JWT de usuario).
     CRON_SECRET: str | None = None
 
-    # Cuánto se conserva `audit_log` (guarda cuerpos de request, aunque tapados).
+    # Cuánto se conserva `audit_log_general` (guarda cuerpos de request, aunque tapados).
     # El cron diario borra lo más viejo; ver `POST /api/auditoria/purge-cron`.
     AUDIT_RETENCION_MESES: int = 12
 
@@ -357,9 +354,6 @@ class Settings(BaseSettings):
 # 
     def CORS_LIST(self) -> list[str]:
         return [o.strip() for o in self.CORS_ORIGINS.split(',') if o.strip()]
-
-    def ALLOWED_FRONT_HOSTS_LIST(self) -> list[str]:
-        return [o.strip() for o in self.ALLOWED_FRONT_HOSTS.split(',') if o.strip()]
 
 # Carga valores desde .env o .env.prod según entorno que se defina en docker-compose
 settings = Settings()

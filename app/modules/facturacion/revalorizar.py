@@ -22,7 +22,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.cmc_facturacion import DetalleFacturacionCMC
-from app.modules.facturacion import recotizar
+from app.modules.facturacion import historial, recotizar
 
 
 class RevalorizarIn(BaseModel):
@@ -76,9 +76,10 @@ async def contar_pendientes(db: AsyncSession, cod_obra: str, codigo: str) -> int
 async def _revalorizar_fila(
     db: AsyncSession, row: DetalleFacturacionCMC, aplicar: bool,
     cache: Optional[recotizar.CacheCotizacion] = None,
+    eventos: Optional[list[dict]] = None,
 ) -> Optional[RevalorizarItem]:
     """Mismo cálculo que el recálculo de factura (`recotizar.recotizar_fila`).
-    None = ya tiene ese precio."""
+    None = ya tiene ese precio. Si la aplica, suma su evento de historial a `eventos`."""
     base = dict(
         id=row.id_detalle_prestaciones, periodo=row.periodo, cod_med=str(row.cod_med),
         fecha_practica=row.fecha_practica, conceptos=recotizar.conceptos_de(row),
@@ -94,7 +95,9 @@ async def _revalorizar_fila(
     if r.estado == "igual" and not row.sin_valorizar:
         return None
     if aplicar:
-        recotizar.aplicar(row, r)
+        ev = recotizar.aplicar(row, r, recotizar.MOTIVO_EVENTO_REVALORIZACION)
+        if ev is not None and eventos is not None:
+            eventos.append(ev)
     return RevalorizarItem(
         **base, estado="revalorizada", honorarios=r.honorarios, gastos=r.gastos,
         ayudante=r.ayudante, coseguro=r.coseguro, importe_despues=r.importe_total,
@@ -112,11 +115,12 @@ async def _revalorizar(db: AsyncSession, body: RevalorizarIn) -> RevalorizarOut:
         pedidas = set(body.ids)
         filas = [f for f in filas if f.id_detalle_prestaciones in pedidas]
     items: list[RevalorizarItem] = []
+    eventos: list[dict] = []
     sin_cambios = 0
     cache = await recotizar.CacheCotizacion.para(db, body.cod_obra)
     for row in filas:
         try:
-            item = await _revalorizar_fila(db, row, aplicar=not body.dry_run, cache=cache)
+            item = await _revalorizar_fila(db, row, aplicar=not body.dry_run, cache=cache, eventos=eventos)
             if item is None:
                 sin_cambios += 1
             else:
@@ -131,6 +135,7 @@ async def _revalorizar(db: AsyncSession, body: RevalorizarIn) -> RevalorizarOut:
     if body.dry_run:
         await db.rollback()
     else:
+        await historial.registrar(db, eventos)
         await db.commit()
     return RevalorizarOut(
         dry_run=body.dry_run, cod_obra=body.cod_obra, codigo=body.codigo, total=len(items),

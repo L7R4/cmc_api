@@ -19,7 +19,7 @@ from app.modules.facturacion.service import (
     derivar_tipo,
     tpo_funcion_derivado,
 )
-from app.modules.facturacion import documentacion
+from app.modules.facturacion import documentacion, historial
 from app.modules.nomenclador import service as service_nm
 from app.modules.validaciones.core.periodos import partes_periodo
 
@@ -183,6 +183,21 @@ async def grabar_prestacion(
     # único) — se deja igual al PK sólo para no dejar NULL una columna NOT NULL
     # legacy que liquidación (`nro_orden_cmc`) y lotes todavía leen para mostrar.
     fila.nro_orden = str(fila.id_detalle_prestaciones)
+
+    # Quién la cargó, y si la O.S. no la autorizó, el rechazo como evento aparte: es la
+    # obra social la que la deja afuera, no quien la cargó.
+    contexto = historial.contexto_de(
+        fila, origen="validaciones", validacion_estado=validacion_estado, importe_total=total,
+    )
+    eventos = [historial.evento(
+        fila, historial.CARGADA, estado_despues=DETALLE_ACTIVO if factura else None, contexto=contexto,
+    )]
+    if not factura:
+        eventos.append(historial.evento(
+            fila, historial.RECHAZADA_OS, estado_despues=DETALLE_FUERA_DE_FACTURA,
+            actor_tipo=historial.ACTOR_OS, motivo_texto=validacion_detalle, contexto=contexto,
+        ))
+    await historial.registrar(db, eventos)
 
     if documentos:
         # Si el Colegio carga en nombre del médico, el documento es del Colegio.

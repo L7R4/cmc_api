@@ -41,28 +41,28 @@ def _equipo(cliente, headers):
 
 def test_anular_al_medico_con_equipo_anula_todo_el_grupo(cliente, headers, medicos_sinteticos):
     cabeza, ayudante, pediatra = _equipo(cliente, headers)
-    r = cliente.delete(f"/api/facturacion/prestaciones/{cabeza}?con_equipo=true", headers=headers)
+    r = cliente.delete(f"/api/facturacion/prestaciones/{cabeza}?con_equipo=true&motivo=duplicado", headers=headers)
     assert r.status_code == 204, r.text
     assert _estado([cabeza, ayudante, pediatra]) == {cabeza: "X", ayudante: "X", pediatra: "X"}
 
 
 def test_anular_al_ayudante_deja_el_resto_del_equipo(cliente, headers, medicos_sinteticos):
     cabeza, ayudante, pediatra = _equipo(cliente, headers)
-    r = cliente.delete(f"/api/facturacion/prestaciones/{ayudante}?con_equipo=false", headers=headers)
+    r = cliente.delete(f"/api/facturacion/prestaciones/{ayudante}?con_equipo=false&motivo=duplicado", headers=headers)
     assert r.status_code == 204, r.text
     assert _estado([cabeza, ayudante, pediatra]) == {cabeza: "A", ayudante: "X", pediatra: "A"}
 
 
 def test_anular_al_pediatra_con_la_bandera_tampoco_toca_al_resto(cliente, headers, medicos_sinteticos):
     cabeza, ayudante, pediatra = _equipo(cliente, headers)
-    r = cliente.delete(f"/api/facturacion/prestaciones/{pediatra}?con_equipo=true", headers=headers)
+    r = cliente.delete(f"/api/facturacion/prestaciones/{pediatra}?con_equipo=true&motivo=duplicado", headers=headers)
     assert r.status_code == 204, r.text
     assert _estado([cabeza, ayudante, pediatra]) == {cabeza: "A", ayudante: "A", pediatra: "X"}
 
 
 def test_sin_la_bandera_anular_a_la_cabecera_no_arrastra_al_equipo(cliente, headers, medicos_sinteticos):
     cabeza, ayudante, pediatra = _equipo(cliente, headers)
-    r = cliente.delete(f"/api/facturacion/prestaciones/{cabeza}", headers=headers)
+    r = cliente.delete(f"/api/facturacion/prestaciones/{cabeza}?motivo=duplicado", headers=headers)
     assert r.status_code == 204, r.text
     assert _estado([cabeza, ayudante, pediatra]) == {cabeza: "X", ayudante: "A", pediatra: "A"}
 
@@ -80,7 +80,7 @@ def test_cabecera_sin_grupo_cargado_trae_igual_a_su_equipo_y_lo_anula(cliente, h
     finally:
         con.close()
 
-    r = cliente.get(f"/api/facturacion/prestaciones/{cabeza}", headers=headers)
+    r = cliente.get(f"/api/facturacion/prestaciones/{cabeza}?motivo=duplicado", headers=headers)
     assert sorted(m["id"] for m in r.json()["grupo"]) == sorted([ayudante, pediatra])
 
     # Y desde un integrante, la cabecera también viene en su grupo.
@@ -97,6 +97,6 @@ def test_cabecera_sin_grupo_cargado_trae_igual_a_su_equipo_y_lo_anula(cliente, h
     )
     assert sorted(m["id"] for m in r.json()) == sorted([cabeza, ayudante, pediatra])
 
-    r = cliente.delete(f"/api/facturacion/prestaciones/{cabeza}?con_equipo=true", headers=headers)
+    r = cliente.delete(f"/api/facturacion/prestaciones/{cabeza}?con_equipo=true&motivo=duplicado", headers=headers)
     assert r.status_code == 204, r.text
     assert _estado([cabeza, ayudante, pediatra]) == {cabeza: "X", ayudante: "X", pediatra: "X"}

@@ -46,7 +46,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.common.money import quantize_money
 from app.db.models.cmc_facturacion import DetalleFacturacionCMC
 from app.db.models.nomenclador_cmc import HistorialPrecioCodigo, MedicoCodigoHabilitado
-from app.modules.facturacion import service
+from app.modules.facturacion import historial, service
 from app.modules.nomenclador import service as service_nm, service_vias
 
 CERO = Decimal("0")
@@ -300,16 +300,29 @@ async def recotizar_fila(
     )
 
 
-def aplicar(row: DetalleFacturacionCMC, r: Recotizacion) -> None:
-    """Escribe en la fila lo que dio `recotizar_fila` (sólo si cambia)."""
+MOTIVO_EVENTO_RECALCULO = "recalculo"
+MOTIVO_EVENTO_REVALORIZACION = "revalorizacion"
+
+
+def aplicar(row: DetalleFacturacionCMC, r: Recotizacion, motivo: str = MOTIVO_EVENTO_RECALCULO) -> Optional[dict]:
+    """Escribe en la fila lo que dio `recotizar_fila` (sólo si cambia) y devuelve su
+    evento de historial, para que quien llama lo registre antes del commit."""
     if r.estado != "cambia":
-        return
+        return None
+    antes = historial.foto(row)
     row.honorarios, row.gastos, row.ayudante = r.honorarios, r.gastos, r.ayudante
     row.coseguro = r.coseguro
     row.importe_total = r.importe_total
     row.tpo_funcion = r.tpo_funcion
     row.calculo_snapshot = r.snapshot
     row.sin_valorizar = None
+    cambios = historial.diferencias(antes, historial.foto(row))
+    if not cambios:
+        return None
+    return historial.evento(
+        row, historial.RECOTIZADA, motivo_codigo=motivo, cambios=cambios,
+        contexto=historial.contexto_de(row, fecha_cotizacion=r.fecha),
+    )
 
 
 # ── Recálculo de una factura ─────────────────────────────────────────────────
@@ -396,6 +409,7 @@ async def _recalcular_precios(db: AsyncSession, body: RecalculoIn) -> RecalculoO
 
     cambian: list[RecalculoFila] = []
     omitidas: list[RecalculoOmitida] = []
+    eventos: list[dict] = []
     sin_cambios = 0
     antes_total = despues_total = CERO
 
@@ -429,11 +443,14 @@ async def _recalcular_precios(db: AsyncSession, body: RecalculoIn) -> RecalculoO
             diferencia=r.importe_total - antes[4],
         ))
         if not body.dry_run:
-            aplicar(row, r)
+            ev = aplicar(row, r)
+            if ev is not None:
+                eventos.append(ev)
 
     if body.dry_run:
         await db.rollback()
     else:
+        await historial.registrar(db, eventos)
         await db.commit()
 
     return RecalculoOut(

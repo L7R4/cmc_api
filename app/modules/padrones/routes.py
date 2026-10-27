@@ -1,7 +1,7 @@
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Response, status
-from sqlalchemy import func, select, and_
+from sqlalchemy import func, select, and_, exists, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -9,9 +9,13 @@ from app.auth.deps import get_current_user
 from app.auth.ownership import medico_objetivo
 from app.db.database import get_db
 from app.db.models import Especialidad, MedicoObraSocial, ListadoMedico, ObrasSociales
+from app.db.models.medico import ESTADO_ACTIVO
 from app.modules.catalogs.familia_padron import codigos_de_familia
 from app.modules.padrones.schemas import (
+    AltaBajaMasivaIn,
+    AltaBajaMasivaOut,
     AsignacionesOut,
+    PageCandidatosPadron,
     MedicoOSItemOut,
     ObraSocialOut,
     PadronOut,
@@ -363,16 +367,8 @@ async def _armar_query_medicos_por_os(db: AsyncSession, nro_os: int, search: str
     return stmt, LM, esp_keys, total, obra_social_nombre
 
 
-async def _filas_a_items(
-    db: AsyncSession,
-    rows,
-    esp_keys: list[str],
-    obra_social_nombre: str | None,
-) -> list[dict]:
-    """Enriquece cada fila con nombres de especialidad y arma el dict que
-    espera `MedicoOSItemOut`. Compartido por el listado paginado y el
-    export: ambos parten del mismo `stmt` de `_armar_query_medicos_por_os`.
-    """
+async def _especialidades_de_filas(db: AsyncSession, rows, esp_keys: list[str]) -> list[list[str]]:
+    """Nombres de especialidad de cada fila, en el mismo orden que `rows`."""
     all_codes: set[int] = set()
     codes_per_row: list[list[int]] = []
 
@@ -403,10 +399,23 @@ async def _filas_a_items(
                 continue
             espec_map[int(code)] = (name or "").strip()
 
-    items: list[dict] = []
-    for r, codes in zip(rows, codes_per_row):
-        especialidades = [espec_map.get(c) for c in codes if espec_map.get(c)]
+    return [[espec_map[c] for c in codes if espec_map.get(c)] for codes in codes_per_row]
 
+
+async def _filas_a_items(
+    db: AsyncSession,
+    rows,
+    esp_keys: list[str],
+    obra_social_nombre: str | None,
+) -> list[dict]:
+    """Enriquece cada fila con nombres de especialidad y arma el dict que
+    espera `MedicoOSItemOut`. Compartido por el listado paginado y el
+    export: ambos parten del mismo `stmt` de `_armar_query_medicos_por_os`.
+    """
+    especialidades_por_fila = await _especialidades_de_filas(db, rows, esp_keys)
+
+    items: list[dict] = []
+    for r, especialidades in zip(rows, especialidades_por_fila):
         items.append({
             "ID": int(r["ID"]),
             "NRO_SOCIO": int(r["NRO_SOCIO"]),
@@ -474,6 +483,254 @@ async def list_medicos_por_obra_social_export(
     rows = result.mappings().all()
 
     return await _filas_a_items(db, rows, esp_keys, obra_social_nombre)
+
+
+# region Altas y bajas masivas
+# Pantalla "Actualizar padrones": se elige una obra social y se marcan varios
+# socios a la vez. Trabaja con `listado_medico.ID` (el mismo identificador que
+# `/{medico_id}/obras-sociales/{nro_os}`), siempre sobre la familia completa
+# de planes de la obra social.
+
+def _socios_elegibles():
+    """Un ID por NRO_SOCIO entre las cuentas activas que no son organizaciones.
+
+    `listado_medico` repite NRO_SOCIO (datos legacy, sin unique): se queda con
+    el menor ID *entre las elegibles*, así un duplicado dado de baja no tapa
+    a su gemelo activo.
+    """
+    return (
+        select(func.min(ListadoMedico.ID))
+        .where(
+            ListadoMedico.estado_cuenta == ESTADO_ACTIVO,
+            ListadoMedico.es_organizacion.is_(False),
+            ListadoMedico.NRO_SOCIO > 0,
+        )
+        .group_by(ListadoMedico.NRO_SOCIO)
+        .scalar_subquery()
+    )
+
+
+def _adherido_en(familia: list[int]):
+    """EXISTS: el socio de la fila figura con MARCA='S' en algún plan de la familia."""
+    return exists().where(
+        and_(
+            MedicoObraSocial.NRO_SOCIO == ListadoMedico.NRO_SOCIO,
+            MedicoObraSocial.NRO_OBRASOCIAL.in_(familia),
+            MedicoObraSocial.MARCA == "S",
+        )
+    )
+
+
+@router.get("/obras-sociales/{nro_os}/candidatos", response_model=PageCandidatosPadron)
+async def list_candidatos_padron(
+    nro_os: int = Path(..., ge=1),
+    search: str | None = Query(None, description="Palabras del nombre, o N° de socio / matrícula exactos"),
+    vista: Literal["todos", "sin", "ad"] = Query("todos", description="todos | sin adherir | ya adheridos"),
+    page: int = Query(1, ge=1),
+    size: int = Query(50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+):
+    """Socios activos con su estado frente al padrón de `nro_os` (toda su familia).
+
+    Alimenta la tabla de "Actualizar padrones". Los totales `adheridos` y
+    `sin_adherir` no dependen de `search` ni de `vista`.
+    """
+    familia = await codigos_de_familia(db, nro_os)
+    LM = ListadoMedico
+    adherido = _adherido_en(familia)
+    elegibles = LM.ID.in_(_socios_elegibles())
+
+    filtros = [elegibles]
+    texto = (search or "").strip()
+    if texto.isdigit():
+        filtros.append(or_(LM.NRO_SOCIO == int(texto), LM.MATRICULA_PROV == int(texto)))
+    else:
+        for palabra in texto.split():
+            filtros.append(LM.NOMBRE.like(f"%{palabra}%"))
+    if vista == "sin":
+        filtros.append(~adherido)
+    elif vista == "ad":
+        filtros.append(adherido)
+
+    esp_keys = ["ESP1", "ESP2", "ESP3", "ESP4", "ESP5", "ESP6"]
+    stmt = (
+        select(
+            LM.ID.label("ID"),
+            LM.NRO_SOCIO.label("NRO_SOCIO"),
+            LM.NOMBRE.label("NOMBRE"),
+            LM.MATRICULA_PROV.label("MATRICULA_PROV"),
+            LM.NRO_ESPECIALIDAD.label("ESP1"),
+            LM.NRO_ESPECIALIDAD2.label("ESP2"),
+            LM.NRO_ESPECIALIDAD3.label("ESP3"),
+            LM.NRO_ESPECIALIDAD4.label("ESP4"),
+            LM.NRO_ESPECIALIDAD5.label("ESP5"),
+            LM.NRO_ESPECIALIDAD6.label("ESP6"),
+            adherido.label("ADHERIDO"),
+        )
+        .where(*filtros)
+        .order_by(LM.NOMBRE.asc(), LM.ID.asc())
+        .offset((page - 1) * size)
+        .limit(size)
+    )
+    rows = (await db.execute(stmt)).mappings().all()
+    especialidades = await _especialidades_de_filas(db, rows, esp_keys)
+
+    total = (
+        await db.execute(select(func.count()).select_from(LM).where(*filtros))
+    ).scalar_one()
+    adheridos = (
+        await db.execute(select(func.count()).select_from(LM).where(elegibles, adherido))
+    ).scalar_one()
+    universo = (
+        await db.execute(select(func.count()).select_from(LM).where(elegibles))
+    ).scalar_one()
+
+    items = [
+        {
+            "ID": int(r["ID"]),
+            "NRO_SOCIO": int(r["NRO_SOCIO"]),
+            "NOMBRE": (r["NOMBRE"] or "").strip(),
+            "MATRICULA_PROV": r["MATRICULA_PROV"] or None,
+            "ESPECIALIDADES": esp,
+            "ADHERIDO": bool(r["ADHERIDO"]),
+        }
+        for r, esp in zip(rows, especialidades)
+    ]
+    return {
+        "items": items,
+        "total": total,
+        "page": page,
+        "size": size,
+        "adheridos": adheridos,
+        "sin_adherir": universo - adheridos,
+    }
+
+
+@router.post("/obras-sociales/{nro_os}/adherir", response_model=AltaBajaMasivaOut)
+async def adherir_socios(
+    body: AltaBajaMasivaIn,
+    nro_os: int = Path(..., ge=1),
+    db: AsyncSession = Depends(get_db),
+):
+    """Da de alta a varios socios en el padrón de `nro_os` y de toda su familia.
+
+    Deja `MARCA='S'` en cada plan de catálogo activo: crea la fila que falte y
+    reactiva la que estaba en 'N'. Sólo cuentas activas que no sean
+    organizaciones; el resto vuelve en `omitidos`. Idempotente.
+    """
+    familia = await codigos_de_familia(db, nro_os)
+    nro_col = _os_number_col()
+    planes = sorted(
+        (
+            await db.execute(
+                select(nro_col).where(nro_col.in_(familia), ObrasSociales.activo.is_(True))
+            )
+        ).scalars().all()
+    )
+    if nro_os not in planes:
+        raise HTTPException(status_code=404, detail="Obra social no encontrada o inactiva")
+
+    ids = list(dict.fromkeys(body.medico_ids))
+    medicos = (
+        await db.execute(select(ListadoMedico).where(ListadoMedico.ID.in_(ids)))
+    ).scalars().all()
+    validos = {
+        m.ID: m
+        for m in medicos
+        if m.estado_cuenta == ESTADO_ACTIVO and not m.es_organizacion and m.NRO_SOCIO
+    }
+    omitidos = [i for i in ids if i not in validos]
+
+    filas = (
+        await db.execute(
+            select(MedicoObraSocial).where(
+                MedicoObraSocial.NRO_SOCIO.in_({m.NRO_SOCIO for m in validos.values()}),
+                _padron_number_attr().in_(planes),
+            )
+        )
+    ).scalars().all() if validos else []
+    por_par: dict[tuple[int, int], list[MedicoObraSocial]] = {}
+    for f in filas:
+        por_par.setdefault((f.NRO_SOCIO, f.NRO_OBRASOCIAL), []).append(f)
+
+    procesados = 0
+    for m in validos.values():
+        cambio = False
+        for plan in planes:
+            existentes = por_par.get((m.NRO_SOCIO, plan))
+            if existentes:
+                for f in existentes:
+                    if f.MARCA != "S":
+                        f.MARCA = "S"
+                        cambio = True
+                continue
+            datos = {
+                "NOMBRE": (m.NOMBRE or "").strip()[:40] or None,
+                "MATRICULA_PROV": m.MATRICULA_PROV,
+                "MATRICULA_NAC": getattr(m, "MATRICULA_NAC", None),
+                "TELEFONO_CONSULTA": _clean_str(getattr(m, "TELEFONO_CONSULTA", None)),
+            }
+            if datos["TELEFONO_CONSULTA"]:
+                datos["TELEFONO_CONSULTA"] = datos["TELEFONO_CONSULTA"][:25]
+            db.add(
+                MedicoObraSocial(
+                    NRO_SOCIO=m.NRO_SOCIO,
+                    NRO_OBRASOCIAL=plan,
+                    MARCA="S",
+                    **{k: v for k, v in datos.items() if v is not None},
+                )
+            )
+            cambio = True
+        procesados += cambio
+
+    await db.commit()
+    log.info(
+        "padron: adhesión masiva a OS %s (planes %s): %s socios, %s sin cambios, %s omitidos",
+        nro_os, planes, procesados, len(validos) - procesados, len(omitidos),
+    )
+    return {"procesados": procesados, "sin_cambios": len(validos) - procesados, "omitidos": omitidos}
+
+
+@router.post("/obras-sociales/{nro_os}/quitar", response_model=AltaBajaMasivaOut)
+async def quitar_socios(
+    body: AltaBajaMasivaIn,
+    nro_os: int = Path(..., ge=1),
+    db: AsyncSession = Depends(get_db),
+):
+    """Saca a varios socios del padrón de `nro_os` y de toda su familia.
+
+    Igual que el destildado del legajo (`DELETE /{medico_id}/obras-sociales/{nro_os}`):
+    borra las filas de `medico_obra_social`. A diferencia de adherir, acepta
+    cuentas en cualquier estado, para poder limpiar el padrón de bajas.
+    """
+    familia = await codigos_de_familia(db, nro_os)
+    ids = list(dict.fromkeys(body.medico_ids))
+    medicos = (
+        await db.execute(select(ListadoMedico).where(ListadoMedico.ID.in_(ids)))
+    ).scalars().all()
+    validos = {m.ID: m for m in medicos if m.NRO_SOCIO}
+    omitidos = [i for i in ids if i not in validos]
+
+    filas = (
+        await db.execute(
+            select(MedicoObraSocial).where(
+                MedicoObraSocial.NRO_SOCIO.in_({m.NRO_SOCIO for m in validos.values()}),
+                _padron_number_attr().in_(familia),
+            )
+        )
+    ).scalars().all() if validos else []
+    afectados = {f.NRO_SOCIO for f in filas}
+    for f in filas:
+        await db.delete(f)
+
+    await db.commit()
+    nros = {m.NRO_SOCIO for m in validos.values()}
+    log.info(
+        "padron: baja masiva de OS %s: %s socios, %s sin cambios, %s omitidos",
+        nro_os, len(afectados), len(nros) - len(afectados), len(omitidos),
+    )
+    return {"procesados": len(afectados), "sin_cambios": len(nros) - len(afectados), "omitidos": omitidos}
+# endregion
 
 
 # region Asignaciones

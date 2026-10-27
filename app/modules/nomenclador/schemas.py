@@ -1968,6 +1968,9 @@ AccionFija = Literal[
 ]
 
 
+_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f\u200b-\u200d\ufeff]")
+
+
 class ImportarFijosFilaIn(BaseModel):
     """Una fila del Excel tal como la leyó el front. Los importes llegan crudos (número o
     texto: "$ 1.234.567"; HONORARIOS admite además "PRESUPUESTO") y los interpreta el back."""
@@ -1977,6 +1980,16 @@ class ImportarFijosFilaIn(BaseModel):
     honorarios: Optional[str | float | int] = None
     gastos: Optional[str | float | int] = None
     ayudante: Optional[str | float | int] = None
+
+    # Algunos Excel traen los textos rellenados con NUL (el código llega como "02010501" + byte nulo). MySQL (collation
+    # unicode_ci) los ignora al comparar y Python no: el código "no existía" en la vista previa
+    # y "ya existía" al crearlo. Se sacan acá, antes de que nadie los vea.
+    @field_validator("codigo", "descripcion", "honorarios", "gastos", "ayudante", mode="before")
+    @classmethod
+    def _sin_caracteres_de_control(cls, v):
+        if isinstance(v, str):
+            return _CONTROL.sub("", v)
+        return v
 
 
 class ImportarFijosIn(BaseModel):

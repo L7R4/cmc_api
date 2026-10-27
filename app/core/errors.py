@@ -10,7 +10,7 @@ Dos objetivos, y el segundo es el que importa para operar:
    misma línea de log lleva el traceback completo con ese mismo id. El usuario
    reporta "me dio error a3f91c2b" y eso alcanza para encontrar:
 
-       SELECT * FROM audit_log WHERE request_id = 'a3f91c2b...';   → quién y qué mandó
+       SELECT * FROM audit_log_general WHERE request_id = 'a3f91c2b...';   → quién y qué mandó
        grep a3f91c2b <log>                                          → por qué falló
 
 Sin el `request_id` en ambos lados, el log y la auditoría son dos islas.
@@ -33,7 +33,7 @@ def _rid(request: Request) -> str:
     está POR FUERA de RequestContextMiddleware. Cuando la excepción sube, el
     `finally` de ese middleware ya hizo `reset()` del ContextVar, así que sin
     esto la línea del error — justo la que importa — saldría con `rid=-` y no
-    se podría cruzar con `audit_log`.
+    se podría cruzar con `audit_log_general`.
     """
     rid = getattr(request.state, "request_id", "-")
     request_id_ctx.set(rid)

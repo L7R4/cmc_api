@@ -38,7 +38,7 @@ def s(db, monkeypatch):
 async def _medicos(db, n=3) -> list[ListadoMedico]:
     out = (await db.execute(
         select(ListadoMedico).where(
-            ListadoMedico.EXISTE == "S", ListadoMedico.es_organizacion == 0, ListadoMedico.MATRICULA_PROV > 0,
+            ListadoMedico.estado_cuenta == "activo", ListadoMedico.es_organizacion == 0, ListadoMedico.MATRICULA_PROV > 0,
         ).order_by(ListadoMedico.NRO_SOCIO).limit(n)
     )).scalars().all()
     assert len(out) == n
@@ -47,7 +47,7 @@ async def _medicos(db, n=3) -> list[ListadoMedico]:
 
 async def _clinica(db) -> ListadoMedico:
     c = (await db.execute(
-        select(ListadoMedico).where(ListadoMedico.EXISTE == "S", ListadoMedico.es_organizacion == 1).limit(1)
+        select(ListadoMedico).where(ListadoMedico.estado_cuenta == "activo", ListadoMedico.es_organizacion == 1).limit(1)
     )).scalars().first()
     if c is None:
         pytest.skip("No hay una clínica activa.")

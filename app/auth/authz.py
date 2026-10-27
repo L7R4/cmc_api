@@ -219,6 +219,7 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     ("PATCH", "/api/especialidades/{id}"): Scope.CATALOGO_EDITAR,
     ("GET", "/api/periodos/disponibles"): Scope.CATALOGO_LEER,
     ("GET", "/api/periodos/disponibles_lotes_ajustes"): Scope.CATALOGO_LEER,
+    ("GET", "/api/periodos/facturas_para_pago"): Scope.CATALOGO_LEER,
 
     # ── Catálogos: valores boletín y éticos ──────────────────────────────────
     ("GET", "/api/valores/boletin"): Scope.CATALOGO_LEER,
@@ -327,6 +328,7 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     # ── Médicos ──────────────────────────────────────────────────────────────
     ("GET", "/api/medicos"): Scope.MEDICO_LEER,
     ("GET", "/api/medicos/all"): Scope.MEDICO_LEER,
+    ("GET", "/api/medicos/selector"): Scope.MEDICO_LEER,
     ("GET", "/api/medicos/count"): Scope.MEDICO_LEER,
     ("GET", "/api/medicos/{medico_id}"): LECTURA_MEDICO,
     ("PUT", "/api/medicos/{medico_id}"): Scope.MEDICO_EDITAR,
@@ -335,7 +337,7 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     ("POST", "/api/medicos/admin/save-continue"): Scope.MEDICO_CREAR,
     ("POST", "/api/medicos/admin/register/{medico_id}/document"): Scope.MEDICO_DOCUMENTO,
     ("PATCH", "/api/medicos/{medico_id}/attach"): Scope.MEDICO_EDITAR,
-    ("PATCH", "/api/medicos/{medico_id}/existe"): Scope.MEDICO_EDITAR,
+    ("PATCH", "/api/medicos/{medico_id}/estado"): Scope.MEDICO_EDITAR,
     # Marca un socio como organización (clínica/sanatorio/servicio). Es editar
     # un campo del legajo, mismo scope que el resto de la edición.
     ("PATCH", "/api/medicos/{medico_id}/organizacion"): Scope.MEDICO_EDITAR,
@@ -378,6 +380,9 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     ("GET", "/api/padrones/catalogo"): Scope.CATALOGO_LEER,
     ("GET", "/api/padrones/obras-sociales/{nro_os}/medicos"): Scope.PADRON_LEER,
     ("GET", "/api/padrones/obras-sociales/{nro_os}/medicos/export"): Scope.PADRON_LEER,
+    ("GET", "/api/padrones/obras-sociales/{nro_os}/candidatos"): Scope.PADRON_LEER,
+    ("POST", "/api/padrones/obras-sociales/{nro_os}/adherir"): Scope.PADRON_EDITAR,
+    ("POST", "/api/padrones/obras-sociales/{nro_os}/quitar"): Scope.PADRON_EDITAR,
     ("GET", "/api/padrones/{nro_socio}"): LECTURA_PADRON,
     ("GET", "/api/padrones/{medico_id}/asignaciones"): LECTURA_PADRON,
     ("POST", "/api/padrones/{medico_id}/asignaciones/concepto"): Scope.PADRON_EDITAR,
@@ -414,7 +419,6 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     ("GET", "/api/liquidacion/liquidaciones_por_os/{liquidacion_id}/detalles_vista"): Scope.LIQUIDACION_LEER,
     ("GET", "/api/liquidacion/recibos/{recibo_id}"): Scope.RECIBO_LEER,
     ("GET", "/api/liquidacion/recibos/{recibo_id}/detalle"): Scope.RECIBO_LEER,
-    ("PUT", "/api/liquidacion/recibos/{recibo_id}/anular"): Scope.RECIBO_ANULAR,
 
     # ── Lotes de ajuste ──────────────────────────────────────────────────────
     ("GET", "/api/lotes/snaps/lista"): Scope.LOTE_LEER,
@@ -429,6 +433,27 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     ("DELETE", "/api/lotes/snaps/{lote_id}/items/{ajuste_id}"): Scope.LOTE_ELIMINAR,
     ("POST", "/api/lotes/snaps/crear_refacturacion"): Scope.LOTE_REFACTURAR,
     ("POST", "/api/lotes/snaps/crear_sin_factura"): Scope.LOTE_REFACTURAR,
+    # Adelantos: se manejan como los lotes de débitos y créditos, con sus mismos permisos.
+    ("GET", "/api/adelantos/lista"): Scope.LOTE_LEER,
+    ("GET", "/api/adelantos/facturas_disponibles"): Scope.LOTE_LEER,
+    ("GET", "/api/adelantos/{adelanto_id}"): Scope.LOTE_LEER,
+    ("GET", "/api/adelantos/{adelanto_id}/prestaciones"): Scope.LOTE_LEER,
+    ("POST", "/api/adelantos/"): Scope.LOTE_CREAR,
+    ("POST", "/api/adelantos/{adelanto_id}/items"): Scope.LOTE_CREAR,
+    ("PATCH", "/api/adelantos/{adelanto_id}"): Scope.LOTE_EDITAR,
+    ("PATCH", "/api/adelantos/{adelanto_id}/estado"): Scope.LOTE_EDITAR,
+    ("DELETE", "/api/adelantos/{adelanto_id}"): Scope.LOTE_ELIMINAR,
+    ("DELETE", "/api/adelantos/{adelanto_id}/items/{item_id}"): Scope.LOTE_ELIMINAR,
+    # Compensaciones: plata a favor o en contra de un socio, sin concepto. Permisos propios.
+    ("GET", "/api/compensaciones/lista"): Scope.COMPENSACION_LEER,
+    ("GET", "/api/compensaciones/{compensacion_id}"): Scope.COMPENSACION_LEER,
+    ("POST", "/api/compensaciones/"): Scope.COMPENSACION_CREAR,
+    ("PATCH", "/api/compensaciones/{compensacion_id}"): Scope.COMPENSACION_EDITAR,
+    ("PATCH", "/api/compensaciones/{compensacion_id}/estado"): Scope.COMPENSACION_EDITAR,
+    ("POST", "/api/compensaciones/{compensacion_id}/anular"): Scope.COMPENSACION_ANULAR,
+    # Retención de Ganancias: listado mensual y comprobantes (los datos son deducciones del pago).
+    ("GET", "/api/retenciones/ganancias"): Scope.DEDUCCION_LEER,
+    ("GET", "/api/retenciones/ganancias/escalas"): Scope.DEDUCCION_LEER,
 
     # ── Deducciones ──────────────────────────────────────────────────────────
     ("GET", "/api/deducciones/"): Scope.DEDUCCION_LEER,
@@ -538,7 +563,7 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     ("GET", "/api/facturacion/prestaciones/{id}"): Scope.FACTURACION_LEER,
     # Ficha completa de una prestación (pantalla de consulta, solo lectura).
     # `facturacion:leer` a secas y NO `LECTURA_FACTURACION`: la ficha es MÁS sensible
-    # que `/prestaciones/{id}` — expone `usuario`, `calculo_snapshot` y el audit_log
+    # que `/prestaciones/{id}` — expone `usuario`, `calculo_snapshot` y el audit_log_general
     # con IPs y bodies. Mismo criterio de acceso administrativo que ese endpoint.
     ("GET", "/api/facturacion/prestaciones/{id}/ficha"): Scope.FACTURACION_LEER,
     ("PATCH", "/api/facturacion/prestaciones/{id}"): Scope.FACTURACION_CARGAR,
@@ -782,7 +807,6 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     # allá de tenerlo.
     ("GET", "/auth/me"): SOLO_AUTENTICADO,
     ("POST", "/auth/change-password"): SOLO_AUTENTICADO,
-    ("GET", "/auth/legacy/sso-link"): SOLO_AUTENTICADO,
 }
 
 

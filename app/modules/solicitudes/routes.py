@@ -3,11 +3,13 @@ from typing import Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.params import Query
-from sqlalchemy import insert, select, func, or_, cast, String, and_
+from sqlalchemy import select, func, or_, cast, String, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.database import get_db
-from app.db.models import ListadoMedico, Role, SolicitudRegistro, UserRole
+from app.db.models import ListadoMedico, SolicitudRegistro
+from app.auth.identidad import asignar_rol_base_si_falta
+from app.db.models.medico import ESTADO_ACTIVO, ESTADO_BAJA
 from app.modules.solicitudes.schemas import ApproveIn, RejectIn, SolicitudDetailOut, SolicitudListItem
 from app.services.email import send_email_resend
 from app.services.mail_templates import build_approval_email, build_rejection_email
@@ -265,7 +267,8 @@ async def approve_solicitud(
         nro_socio = (q.scalar() or 0) + 1
 
     med.NRO_SOCIO = nro_socio
-    med.EXISTE = "S"
+    med.estado_cuenta = ESTADO_ACTIVO
+    med.estado_cuenta_at = datetime.now(UTC).replace(tzinfo=None)
     med.FECHA_INGRESO = datetime.now(UTC).date()
 
     sol.estado = "aprobada"
@@ -273,25 +276,7 @@ async def approve_solicitud(
     sol.aprobado_at = datetime.now(UTC)
     sol.observaciones = body.observaciones
 
-    rol_medico = await db.get(Role, 2)
-    if not rol_medico:
-        rol_medico = (await db.execute(
-            select(Role).where(Role.name == "Medico")
-        )).scalar_one_or_none()
-
-    if not rol_medico:
-        raise HTTPException(500, "No existe el rol 'Medico' (id=2). Cargá el rol en la tabla 'roles'.")
-
-    already_has_role = (await db.execute(
-        select(UserRole).where(
-            UserRole.user_id == med.ID,
-            UserRole.role_id == rol_medico.id
-        )
-    )).first()
-
-    if not already_has_role:
-        await db.execute(insert(UserRole).values(user_id=med.ID, role_id=rol_medico.id))
-
+    await asignar_rol_base_si_falta(db, med.ID)
     await db.commit()
 
     subject = "✅ Solicitud Aprobada — Próximos pasos"
@@ -325,6 +310,9 @@ async def reject_solicitud(
 
     sol.estado = "rechazada"
     sol.observaciones = body.observaciones
+    # Sin esto el legajo quedaba `pendiente` para siempre.
+    med.estado_cuenta = ESTADO_BAJA
+    med.estado_cuenta_at = datetime.now(UTC).replace(tzinfo=None)
     await db.commit()
 
     subject = "❌ Solicitud Rechazada — Información"

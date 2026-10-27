@@ -260,7 +260,7 @@ async def eliminar_documento(
 ):
     """Quita un documento. Si la prestación los exige, tiene que quedar al menos uno (409)."""
     socio = _socio_objetivo(user, nro_socio)
-    return await pipeline.eliminar_documento(db, prestacion_id, socio, doc_id)
+    return await pipeline.eliminar_documento(db, prestacion_id, socio, doc_id, actor_para(user, socio))
 
 
 @router.post("/prestaciones/{prestacion_id}/orden", response_model=PrestacionOut)

@@ -28,6 +28,7 @@ from app.modules.deducciones.helpers import (
     _handle_item_error,
     _honorarios_por_medico_en_pago,
     _medicos_para_descuento,
+    _pagadores_de_descuento,
 )
 from app.modules.deducciones.schemas import (
     DeduccionCreate,
@@ -57,7 +58,6 @@ from app.modules.deducciones.service import (
     get_historial_deducciones,
     get_historial_export,
     get_top_deudores,
-    marcar_deducciones_dirty,
     pagar_deduccion,
     refrescar_deducciones_pago,
     verificar_deducciones_por_pago,
@@ -110,13 +110,20 @@ async def bulk_generar_descuento(
     if not med_tuples:
         return {"enrolados": 0, "generados": 0, "omitidos": 0, "cargado_total": 0}
 
+    # Quién paga cada asignación: el pagador si lo hay, si no el propio médico. Entra al pago
+    # (y se descuenta) en la liquidación de quien paga.
+    pagadores = {} if getattr(desc, "aplica_a_todos", False) else await _pagadores_de_descuento(db, desc_id)
+
     precio = Decimal(str(getattr(desc, "precio", 0) or 0))
     porcentaje = Decimal(str(getattr(desc, "porcentaje", 0) or 0))
 
     # ── Paso 1: Enrolar pendientes con period <= pago — solo médicos en el pago ──
     enrolados = 0
     if not getattr(desc, "aplica_a_todos", False):
-        med_ids_false_en_pago = [mid for mid, paga_caja in med_tuples if not paga_caja and mid in base_por_med]
+        med_ids_false_en_pago = [
+            mid for mid, paga_caja in med_tuples
+            if not paga_caja and pagadores.get(mid, mid) in base_por_med
+        ]
         if med_ids_false_en_pago:
             rows_a_enrolar = (await db.execute(
                 select(Deduccion).where(
@@ -154,7 +161,7 @@ async def bulk_generar_descuento(
         if monto <= 0:
             continue
 
-        en_pago_ahora = not paga_caja and mid in base_por_med
+        en_pago_ahora = not paga_caja and pagadores.get(mid, mid) in base_por_med
         porc_ap = (porc_usado if porc_usado else Decimal("0")).quantize(
             TWOPLACES, rounding=ROUND_HALF_UP
         )
@@ -166,6 +173,7 @@ async def bulk_generar_descuento(
             "monto_aplicado": Decimal("0.00"),
             "origen": "automatico",
             "paga_por_caja": paga_caja,
+            "pagador_medico_id": pagadores.get(mid),
             "estado": "en_pago" if en_pago_ahora else "pendiente",
             "cuota_nro": 0,
             "mes_aplicar": pago.mes,
@@ -202,7 +210,8 @@ async def bulk_generar_descuento(
 
     await db.flush()
     await _recalcular_montos_aplicados_en_pago(db, pago_id)
-    await marcar_deducciones_dirty(db, pago_id)
+    # La vista previa se acaba de recalcular entera (todas las en_pago del pago): no queda vieja.
+    pago.deducciones_dirty = False
     await db.commit()
 
     return {
@@ -409,13 +418,14 @@ async def listar_deducciones(
     size: int = Query(50, ge=1, le=50),
     medico_id: Optional[int] = Query(None),
     descuento_id: Optional[int] = Query(None),
-    estado: Optional[str] = Query(None, description="pendiente|en_pago|aplicado|cancelado|vencida"),
+    estado: Optional[str] = Query(None, description="pendiente|en_pago|aplicado|cancelado|vencida; varios separados por coma"),
     origen: Optional[str] = Query(None, description="manual|automatico"),
     paga_por_caja: Optional[bool] = Query(None, description="true=solo caja | false=solo liquidación"),
     mes_desde: Optional[int] = Query(None, ge=1, le=12),
     anio_desde: Optional[int] = Query(None, ge=2000),
     mes_hasta: Optional[int] = Query(None, ge=1, le=12),
     anio_hasta: Optional[int] = Query(None, ge=2000),
+    solo_en_pago: bool = Query(False, description="solo deducciones de médicos que participan en el pago abierto"),
     db: AsyncSession = Depends(get_db),
 ):
     """Lista paginada de deducciones (manual + automático). Incluye monto_total agregado."""
@@ -432,6 +442,7 @@ async def listar_deducciones(
         anio_desde=anio_desde,
         mes_hasta=mes_hasta,
         anio_hasta=anio_hasta,
+        solo_en_pago=solo_en_pago,
     )
 
 
@@ -439,13 +450,14 @@ async def listar_deducciones(
 async def exportar_deducciones(
     medico_id: Optional[int] = Query(None),
     descuento_id: Optional[int] = Query(None),
-    estado: Optional[str] = Query(None, description="pendiente|en_pago|aplicado|cancelado|vencida"),
+    estado: Optional[str] = Query(None, description="pendiente|en_pago|aplicado|cancelado|vencida; varios separados por coma"),
     origen: Optional[str] = Query(None, description="manual|automatico"),
     paga_por_caja: Optional[bool] = Query(None, description="true=solo caja | false=solo liquidación"),
     mes_desde: Optional[int] = Query(None, ge=1, le=12),
     anio_desde: Optional[int] = Query(None, ge=2000),
     mes_hasta: Optional[int] = Query(None, ge=1, le=12),
     anio_hasta: Optional[int] = Query(None, ge=2000),
+    solo_en_pago: bool = Query(False, description="solo deducciones de médicos que participan en el pago abierto"),
     db: AsyncSession = Depends(get_db),
 ):
     """Sin paginación — para exportar a Excel/PDF."""
@@ -460,6 +472,7 @@ async def exportar_deducciones(
         anio_desde=anio_desde,
         mes_hasta=mes_hasta,
         anio_hasta=anio_hasta,
+        solo_en_pago=solo_en_pago,
     )
 
 

@@ -74,9 +74,9 @@ def medicos_sinteticos():
         with con.cursor() as cur:
             for nro in (NRO_MEDICO, NRO_MEDICO_2):
                 cur.execute(
-                    "INSERT INTO listado_medico (NRO_SOCIO, EXISTE, hashed_password, conceps_espec) "
+                    "INSERT INTO listado_medico (NRO_SOCIO, estado_cuenta, hashed_password, conceps_espec) "
                     "VALUES (%s, %s, %s, %s)",
-                    (nro, "S", "x", '{"conceps": [], "espec": []}'),
+                    (nro, "activo", "x", '{"conceps": [], "espec": []}'),
                 )
             cur.execute(
                 "INSERT INTO facturacion "

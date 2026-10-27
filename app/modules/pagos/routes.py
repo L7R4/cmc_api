@@ -3,15 +3,18 @@ from decimal import Decimal
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.database import get_db
 from app.db.models import (
     Liquidacion,
     Pago,
+    PagoMedico,
     Recibo,
+    RetencionGanancias,
 )
+from app.modules.deducciones.helpers import _medicos_en_pago
 from app.modules.pagos.schemas import (
     EditarEstadoRecibosPayload,
     EliminarRecibosPayload,
@@ -26,6 +29,9 @@ from app.modules.pagos.schemas import (
 )
 from app.modules.deducciones.service import (
     aplicar_deducciones_al_cierre,
+    crear_saldos_deudores,
+    generar_y_recalcular_porcentuales,
+    quitar_saldos_deudores_del_pago,
 )
 from app.modules.pagos.service import (
     generar_recibo_medico,
@@ -33,7 +39,6 @@ from app.modules.pagos.service import (
     informe_pago,
     recalcular_totales_pago,
     refrescar_detalle_medico,
-    refrescar_todos_medicos,
     vista_previa_pago,
 )
 from app.services.deducciones_update import (
@@ -49,6 +54,16 @@ from app.services.detalle_facturacion_update import (
     revertir_prestaciones_liquidadas,
 )
 from app.services.deducciones_rollback import rollback_deducciones_pago
+from app.services.adelanto_update import (
+    marcar_adelantos_aplicados,
+    revertir_adelantos_al_reabrir,
+    rollback_adelantos_pago,
+)
+from app.services.compensacion_update import (
+    marcar_compensaciones_pagadas,
+    revertir_compensaciones_al_reabrir,
+    rollback_compensaciones_pago,
+)
 from app.services.lote_ajuste_rollback import rollback_lotes_pago
 from app.services.liquidaciones_rollback import rollback_liquidaciones_pago, rollback_recibos_pago
 
@@ -69,6 +84,8 @@ def _enrich_pago(pago: Pago, totales: dict) -> PagoRead:
         total_creditos=totales["total_creditos"],
         total_neto=totales["total_neto"],
         total_deduccion=totales["total_deduccion"],
+        total_adelantos=totales.get("total_adelantos", 0),
+        total_compensaciones=totales.get("total_compensaciones", 0),
     )
 
 
@@ -175,11 +192,11 @@ async def eliminar_pago(pago_id: int, db: AsyncSession = Depends(get_db)):
     if pago.estado == "P":
         raise HTTPException(409, "No se puede eliminar un pago marcado como pagado")
 
-    # Bloquear si hay recibos ya cobrados (representan pagos reales efectuados)
+    # Un recibo emitido es un recibo pagado: no se elimina un pago que ya los tiene.
     rec_pagados = (await db.execute(
         select(func.count(Recibo.id)).where(
             Recibo.pago_id == pago_id,
-            Recibo.estado == "pagado",
+            Recibo.estado.in_(["emitido", "pagado"]),
         )
     )).scalar_one()
     if rec_pagados > 0:
@@ -188,11 +205,14 @@ async def eliminar_pago(pago_id: int, db: AsyncSession = Depends(get_db)):
             detail={
                 "reason": "recibos_pagados",
                 "cantidad": rec_pagados,
-                "message": "No se puede eliminar un pago con recibos ya cobrados.",
+                "message": "No se puede eliminar un pago con recibos emitidos.",
             },
         )
 
     # Rollback en orden respetando FK constraints:
+    # 0. Deudas de médicos que este pago dejó pendientes al cerrar (409 si ya se descontaron)
+    await quitar_saldos_deudores_del_pago(db, pago_id)
+
     # 1. Deducciones: elimina DeduccionAplicacion, revierte estado según tipo
     await rollback_deducciones_pago(db, pago_id)
 
@@ -202,6 +222,16 @@ async def eliminar_pago(pago_id: int, db: AsyncSession = Depends(get_db)):
     # 3. Prestaciones CMC liquidadas (L → C) — tiene que ir ANTES de borrar las
     #    liquidaciones/detalles, porque lee detalle_liquidacion para saber cuáles.
     await revertir_prestaciones_liquidadas(db, pago_id)
+
+    # 3b. Adelantos del pago: vuelven a «cerrado» y sin pago (después del paso 3, que los lee por pago_id)
+    await rollback_adelantos_pago(db, pago_id)
+
+    # 3c. Compensaciones del pago: vuelven a pendientes y sin pago
+    await rollback_compensaciones_pago(db, pago_id)
+
+    # 3d. La cuenta de Ganancias del pago (la FK tiene ON DELETE CASCADE; se borra explícito
+    #     para no depender de eso).
+    await db.execute(delete(RetencionGanancias).where(RetencionGanancias.pago_id == pago_id))
 
     # 4. Recibos (emitidos/pendientes): eliminar antes que Liquidacion por FK RESTRICT
     await rollback_recibos_pago(db, pago_id)
@@ -226,6 +256,10 @@ async def cerrar_pago(pago_id: int, db: AsyncSession = Depends(get_db)):
     if pago.estado != "A":
         raise HTTPException(409, "El pago ya está cerrado")
 
+    # 0. Dejar las deducciones al día: cuotas y deudas pendientes de los médicos del pago,
+    #    porcentuales y vista previa. Antes dependía de un botón que nadie tenía a mano.
+    await generar_y_recalcular_porcentuales(db, pago_id)
+
     # 1. Aplicar deducciones (greedy: mayor primero por médico) — marca aplicado/pendiente
     await aplicar_deducciones_al_cierre(db, pago_id)
 
@@ -234,6 +268,8 @@ async def cerrar_pago(pago_id: int, db: AsyncSession = Depends(get_db)):
 
     # 3. Marcar lotes: L → AP (Aplicado — inmutables desde ahora)
     lotes_info = await marcar_lotes_aplicados(db, pago_id)
+    lotes_info["adelantos_aplicados"] = await marcar_adelantos_aplicados(db, pago_id)
+    lotes_info["compensaciones_pagadas"] = await marcar_compensaciones_pagadas(db, pago_id)
 
     # 4. Marcar como liquidadas (C → L) las prestaciones CMC que este pago
     #    efectivamente liquidó — ver diagnóstico C3/A7.
@@ -241,6 +277,19 @@ async def cerrar_pago(pago_id: int, db: AsyncSession = Depends(get_db)):
 
     pago.estado = "C"
     pago.cierre_timestamp = datetime.datetime.now()
+    await db.flush()
+
+    # 5. Resumen de cada médico con lo realmente aplicado y recibos al día (liquidado),
+    #    en la misma transacción del cierre.
+    try:
+        await generar_todos_recibos(db, pago_id, pago=pago)
+    except HTTPException as e:
+        if e.status_code != 404:  # 404 = el pago no tiene ningún médico todavía
+            raise
+
+    # 6. Lo que un médico debe de más (débitos > producción) queda como deuda pendiente.
+    saldos_deudores = await crear_saldos_deudores(db, pago)
+
     await db.commit()
     await db.refresh(pago)
     totales = await recalcular_totales_pago(db, pago_id)
@@ -251,6 +300,7 @@ async def cerrar_pago(pago_id: int, db: AsyncSession = Depends(get_db)):
             **lotes_info,
             "deducciones_aplicadas_extra": ded_extra,
             "prestaciones_liquidadas": prestaciones_liquidadas,
+            "saldos_deudores": saldos_deudores,
         },
     }
 
@@ -276,7 +326,7 @@ async def reabrir_pago(pago_id: int, db: AsyncSession = Depends(get_db)):
         )
     )).scalar_one()
     if rec_activos > 0:
-        raise HTTPException(409, "No se puede reabrir un pago con recibos emitidos o pagados")
+        raise HTTPException(409, "No se puede reabrir un pago con recibos emitidos")
 
     # 409 si ya hay otro pago abierto
     otro_abierto = (await db.execute(
@@ -285,14 +335,30 @@ async def reabrir_pago(pago_id: int, db: AsyncSession = Depends(get_db)):
     if otro_abierto:
         raise HTTPException(409, f"Ya existe otro pago abierto (id={otro_abierto[0]})")
 
+    # Las deudas que dejó el cierre se rehacen al volver a cerrar (409 si ya se descontaron)
+    await quitar_saldos_deudores_del_pago(db, pago_id)
+
     # Revertir deducciones: aplicado → en_pago (re-evaluadas en el próximo cierre)
     await revertir_deducciones_al_reabrir(db, pago_id)
 
     # Revertir lotes: AP → L (vuelven a "En liquidaciones")
     await revertir_lotes_al_reabrir(db, pago_id)
 
+    # Revertir adelantos: AP → L
+    await revertir_adelantos_al_reabrir(db, pago_id)
+
+    # Revertir compensaciones: pagada → en_pago
+    await revertir_compensaciones_al_reabrir(db, pago_id)
+
     # Revertir prestaciones CMC liquidadas: L → C (ver diagnóstico C3/A7)
     await revertir_prestaciones_liquidadas(db, pago_id)
+
+    # Los recibos vuelven a borrador: el pago abierto puede cambiar sus montos.
+    await db.execute(
+        update(Recibo)
+        .where(Recibo.pago_id == pago_id, Recibo.estado == "liquidado")
+        .values(estado="en_revision")
+    )
 
     pago.estado = "A"
     pago.cierre_timestamp = None
@@ -308,11 +374,10 @@ async def reabrir_pago(pago_id: int, db: AsyncSession = Depends(get_db)):
 @router.post("/{pago_id}/marcar_pagado", response_model=PagoRead)
 async def marcar_pagado(pago_id: int, db: AsyncSession = Depends(get_db)):
     """
-    Marca el pago como P (Pagado) — el operador confirma que el pago bancario
-    ya se efectuó. Terminal: desde acá no se puede reabrir (ver reabrir_pago).
+    Marca el pago como P (Pagado) y emite los recibos de todos los médicos del pago de
+    una vez. Terminal: desde acá no se puede reabrir (ver reabrir_pago).
 
-    No exige que los recibos estén emitidos: el pago real y la emisión de
-    recibos son procesos independientes, el primero puede ocurrir antes.
+    Un recibo emitido es un recibo pagado: se le paga siempre a todos juntos.
     """
     pago = await db.get(Pago, pago_id)
     if not pago:
@@ -321,6 +386,23 @@ async def marcar_pagado(pago_id: int, db: AsyncSession = Depends(get_db)):
         raise HTTPException(409, "El pago ya está marcado como pagado")
     if pago.estado != "C":
         raise HTTPException(409, "Solo se puede marcar como pagado un pago cerrado")
+
+    hay_recibos = (await db.execute(
+        select(func.count(Recibo.id)).where(Recibo.pago_id == pago_id)
+    )).scalar_one()
+    if not hay_recibos:
+        try:
+            await generar_todos_recibos(db, pago_id, pago=pago)
+        except HTTPException as e:
+            if e.status_code != 404:
+                raise
+
+    ahora = datetime.datetime.now()
+    await db.execute(
+        update(Recibo)
+        .where(Recibo.pago_id == pago_id, Recibo.estado != "emitido")
+        .values(estado="emitido", emision_timestamp=ahora)
+    )
 
     pago.estado = "P"
     await db.commit()
@@ -342,20 +424,33 @@ async def obtener_pago_actualizado(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Recalcula y persiste PagoMedico para uno o todos los médicos del pago.
-    Devuelve {medico_id: {info_medico, resumen, detalle}} por cada médico procesado.
+    Resumen de uno o todos los médicos del pago. Es de lectura: no guarda nada.
+
+    - Pago abierto: calcula con los datos de hoy (los resúmenes se guardan al generar los
+      recibos y al cerrar).
+    - Pago cerrado o pagado: devuelve lo guardado al cerrarlo, sin recalcular; un pago cerrado
+      no cambia aunque cambien los datos de afuera. Si no hay nada guardado, calcula sin guardar.
+    Devuelve {medico_id: {info_medico, resumen, detalle}}.
     """
     pago = await db.get(Pago, pago_id)
     if not pago:
         raise HTTPException(404, "Pago no encontrado")
 
-    if medico_id is not None:
-        result = await refrescar_detalle_medico(db, pago_id, medico_id, pago=pago)
-    else:
-        result = await refrescar_todos_medicos(db, pago_id, pago=pago)
+    if pago.estado != "A":
+        stmt = select(PagoMedico).where(PagoMedico.pago_id == pago_id)
+        if medico_id is not None:
+            stmt = stmt.where(PagoMedico.medico_id == medico_id)
+        guardados = (await db.execute(stmt)).scalars().all()
+        if guardados or medico_id is None:
+            return {pm.medico_id: pm.detalle_json for pm in guardados if pm.detalle_json}
 
-    await db.commit()
-    return result
+    if medico_id is not None:
+        return await refrescar_detalle_medico(db, pago_id, medico_id, pago=pago, guardar=False)
+
+    resultado: dict = {}
+    for mid in sorted(await _medicos_en_pago(db, pago_id)):
+        resultado.update(await refrescar_detalle_medico(db, pago_id, mid, pago=pago, guardar=False))
+    return resultado
 
 
 # ================================================
@@ -388,6 +483,7 @@ async def generar_recibos_endpoint(
     pago = await db.get(Pago, pago_id)
     if not pago:
         raise HTTPException(404, "Pago no encontrado")
+    await _exigir_recibos_sin_emitir(db, pago)
 
     medico_ids = payload.medico_ids if payload else None
     recibos = await generar_todos_recibos(db, pago_id, medico_ids=medico_ids, pago=pago)
@@ -400,6 +496,18 @@ async def generar_recibos_endpoint(
 # ================================================
 # GET /pagos/{pago_id}/recibos — Listar recibos
 # ================================================
+async def _exigir_recibos_sin_emitir(db: AsyncSession, pago: Pago) -> None:
+    """409 si el pago ya está pagado o tiene algún recibo emitido: desde ahí es inmutable."""
+    emitidos = (await db.execute(
+        select(func.count(Recibo.id)).where(Recibo.pago_id == pago.id, Recibo.estado.in_(["emitido", "pagado"]))
+    )).scalar_one()
+    if pago.estado == "P" or emitidos:
+        raise HTTPException(
+            409,
+            "Este pago ya tiene recibos emitidos: sus recibos y sus montos no se pueden modificar.",
+        )
+
+
 @router.get("/{pago_id}/recibos", response_model=List[ReciboRead])
 async def listar_recibos(
     pago_id: int,
@@ -451,7 +559,13 @@ async def editar_estado_recibos(
     """
     Cambia el estado de una lista de recibos.
     Estados válidos: en_revision, liquidado, emitido.
+    Un recibo emitido no vuelve atrás ni se toca en un pago pagado.
     """
+    pago = await db.get(Pago, pago_id)
+    if not pago:
+        raise HTTPException(404, "Pago no encontrado")
+    if pago.estado == "P":
+        raise HTTPException(409, "El pago ya está pagado: sus recibos no se pueden modificar.")
     rows = (await db.execute(
         select(Recibo).where(
             Recibo.pago_id == pago_id,
@@ -461,6 +575,8 @@ async def editar_estado_recibos(
 
     if not rows:
         raise HTTPException(404, "No se encontraron recibos con los IDs indicados en este pago")
+    if any(r.estado == "emitido" for r in rows) and payload.estado != "emitido":
+        raise HTTPException(409, "Un recibo emitido no puede volver a otro estado.")
 
     for recibo in rows:
         recibo.estado = payload.estado
@@ -482,7 +598,7 @@ async def eliminar_recibos(
 ):
     """
     Elimina una lista de recibos por ID.
-    No se pueden eliminar recibos en estado 'pagado'.
+    No se pueden eliminar recibos emitidos (un recibo emitido es un recibo pagado).
     """
     rows = (await db.execute(
         select(Recibo).where(
@@ -494,14 +610,14 @@ async def eliminar_recibos(
     if not rows:
         raise HTTPException(404, "No se encontraron recibos con los IDs indicados en este pago")
 
-    pagados = [r.id for r in rows if r.estado == "pagado"]
+    pagados = [r.id for r in rows if r.estado in ("emitido", "pagado")]
     if pagados:
         raise HTTPException(
             409,
             detail={
                 "reason": "recibos_pagados",
                 "recibo_ids": pagados,
-                "message": "No se pueden eliminar recibos en estado 'pagado'.",
+                "message": "No se pueden eliminar recibos emitidos.",
             },
         )
 

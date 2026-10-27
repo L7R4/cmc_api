@@ -51,7 +51,7 @@ app.include_router(auth_router)  # expone /auth/*
 # RequestContext primero para que el request_id exista cuando Audit arma la fila
 # y para que el header X-Request-ID salga en toda respuesta.
 # BodyLimit inmediatamente después: cortar un body de 2 GB no tiene sentido si
-# antes Audit ya lo leyó para guardar los primeros 4 KB en `audit_log`.
+# antes Audit ya lo leyó para guardar los primeros 4 KB en `audit_log_general`.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_LIST(),

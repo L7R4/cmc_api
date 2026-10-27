@@ -67,8 +67,8 @@ def escenario():
             "VALUES (%s, %s, %s, 'activo', 1)", (COD_OBRA, nom_id, CODIGO),
         )
         cur.execute(
-            "INSERT INTO listado_medico (NRO_SOCIO, NOMBRE, MATRICULA_PROV, EXISTE, hashed_password, conceps_espec) "
-            "VALUES (%s, 'PRUEBA, DOC', 7777, 'S', 'x', %s)", (NRO_MEDICO, '{"conceps": [], "espec": []}'),
+            "INSERT INTO listado_medico (NRO_SOCIO, NOMBRE, MATRICULA_PROV, estado_cuenta, hashed_password, conceps_espec) "
+            "VALUES (%s, 'PRUEBA, DOC', 7777, 'activo', 'x', %s)", (NRO_MEDICO, '{"conceps": [], "espec": []}'),
         )
         cur.execute(
             "INSERT INTO facturacion (id_cliente, tipo_factura, nro_factura, tipo_factura_2, nro_factura_2, "

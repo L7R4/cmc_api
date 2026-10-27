@@ -17,6 +17,8 @@ from app.db.models import (
     SocioDescuento,
 )
 from app.db.models.liquidacion import Pago
+from app.modules.adelantos.queries import adelantos_por_medico_en_pago
+from app.modules.compensaciones.queries import compensaciones_por_medico_en_pago
 from app.modules.deducciones.schemas import (
     DeduccionHistorialItem,
     DeduccionRead,
@@ -30,15 +32,24 @@ TWOPLACES = Decimal("0.01")
 # nro_colegio de descuentos con base de cálculo especial
 NRO_COLEGIO_CONTRIB_HONORARIOS = 100  # base = suma de honorarios del médico
 NRO_COLEGIO_CONTRIB_GASTOS = 101      # base = suma de gastos del médico
+# Deuda de un médico que cobra menos de lo que debe (débitos > producción): la crea el
+# cierre del pago como deducción pendiente. Va en `cuota_nro` el id del pago que la originó.
+NRO_COLEGIO_SALDO_DEUDOR = 9900
 NRO_COLEGIO_IMPUESTO_LEY = 102        # Imp. Ley 25413
+# Retenciones que el Colegio practica como agente: base = producción neta de débitos y créditos.
+NRO_COLEGIO_INGRESOS_BRUTOS = 200     # D.G.R. (Ingresos Brutos), 2%
+NRO_COLEGIO_GANANCIAS = 300           # AFIP (Ganancias), con escala: app/modules/retenciones
+NRO_COLEGIO_RETENCIONES: frozenset[int] = frozenset({NRO_COLEGIO_INGRESOS_BRUTOS, NRO_COLEGIO_GANANCIAS})
 
 # nro_colegio (no descuento_id/PK) con prioridad fija de cobro cuando el
 # disponible no alcanza. nro_colegio es el número que asigna el Colegio y es
 # estable entre entornos; descuento_id es un autoincrement de la base sin
 # garantía de coincidir entre local y producción (ver diagnóstico M7).
+# Las retenciones van después de las contribuciones y antes que el resto, como en el
+# sistema anterior (contribuciones → D.G.R. → D.G.I. → servicios).
 NRO_COLEGIO_PRIORITARIOS: frozenset[int] = frozenset({
     NRO_COLEGIO_CONTRIB_HONORARIOS, NRO_COLEGIO_CONTRIB_GASTOS, NRO_COLEGIO_IMPUESTO_LEY,
-})
+}) | NRO_COLEGIO_RETENCIONES
 
 #endregion
 
@@ -96,7 +107,7 @@ async def _base_bruto_por_medico_en_pago(
     db: AsyncSession, pago_id: int
 ) -> dict[int, Decimal]:
     """
-    Suma de DetalleLiquidacion.importe_total 
+    Suma de DetalleLiquidacion.importe_total más los adelantos del pago
     por médico (listado_medico.ID) de un pago específico.
     """
 
@@ -110,7 +121,11 @@ async def _base_bruto_por_medico_en_pago(
         .where(Liquidacion.pago_id == pago_id)
         .group_by(DetalleLiquidacion.medico_id)
     )
-    return {int(med_id): Decimal(suma or 0) for med_id, suma in q}
+    out = {int(med_id): Decimal(suma or 0) for med_id, suma in q}
+    # El adelanto es producción del médico: suma a todas las bases como una factura.
+    for med_id, a in (await adelantos_por_medico_en_pago(db, pago_id)).items():
+        out[med_id] = out.get(med_id, Decimal("0")) + a["importe"]
+    return out
 
 
 async def _honorarios_por_medico_en_pago(
@@ -131,7 +146,10 @@ async def _honorarios_por_medico_en_pago(
         .where(Liquidacion.pago_id == pago_id)
         .group_by(DetalleLiquidacion.medico_id)
     )
-    return {int(med_id): Decimal(suma or 0) for med_id, suma in q}
+    out = {int(med_id): Decimal(suma or 0) for med_id, suma in q}
+    for med_id, a in (await adelantos_por_medico_en_pago(db, pago_id)).items():
+        out[med_id] = out.get(med_id, Decimal("0")) + a["honorarios"]
+    return out
 
 
 async def _gastos_por_medico_en_pago(
@@ -151,7 +169,71 @@ async def _gastos_por_medico_en_pago(
         .where(Liquidacion.pago_id == pago_id)
         .group_by(DetalleLiquidacion.medico_id)
     )
-    return {int(med_id): Decimal(suma or 0) for med_id, suma in q}
+    out = {int(med_id): Decimal(suma or 0) for med_id, suma in q}
+    for med_id, a in (await adelantos_por_medico_en_pago(db, pago_id)).items():
+        out[med_id] = out.get(med_id, Decimal("0")) + a["gastos"]
+    return out
+
+
+async def _base_retenciones_por_medico_en_pago(
+    db: AsyncSession, pago_id: int
+) -> dict[int, dict[str, Decimal]]:
+    """
+    Base de las retenciones (Ingresos Brutos y Ganancias) por médico:
+    {medico_id: {"honorarios", "gastos", "importe"}}, cada uno = lo producido en el pago
+    (facturas + adelantos) − débitos + créditos de los lotes liquidados.
+
+    Es la base del sistema anterior, que restaba los débitos y sumaba los créditos de la obra
+    social. Las compensaciones no cuentan: no son producción.
+    """
+    hon = await _honorarios_por_medico_en_pago(db, pago_id)
+    gas = await _gastos_por_medico_en_pago(db, pago_id)
+    imp = await _base_bruto_por_medico_en_pago(db, pago_id)
+    aj = (await db.execute(
+        select(
+            Ajuste.medico_id,
+            func.coalesce(func.sum(case((Ajuste.tipo == "c", Ajuste.honorarios), else_=-Ajuste.honorarios)), 0),
+            func.coalesce(func.sum(case((Ajuste.tipo == "c", Ajuste.gastos), else_=-Ajuste.gastos)), 0),
+        )
+        .select_from(Ajuste)
+        .join(LoteAjuste, LoteAjuste.id == Ajuste.lote_id)
+        .where(LoteAjuste.pago_id == pago_id, LoteAjuste.estado == "L")
+        .group_by(Ajuste.medico_id)
+    )).all()
+    neto_aj = {int(m): (Decimal(h or 0), Decimal(g or 0)) for m, h, g in aj}
+    cero = Decimal("0")
+    out: dict[int, dict[str, Decimal]] = {}
+    for m in set(hon) | set(gas) | set(imp) | set(neto_aj):
+        dh, dg = neto_aj.get(m, (cero, cero))
+        out[m] = {
+            "honorarios": hon.get(m, cero) + dh,
+            "gastos": gas.get(m, cero) + dg,
+            "importe": imp.get(m, cero) + dh + dg,
+        }
+    return out
+
+
+async def _medicos_en_pago(db: AsyncSession, pago_id: int) -> set[int]:
+    """Médicos que participan en el pago: con prestaciones (detalle), con algún ajuste en
+    un lote del pago o con un adelanto. Un médico con sólo un crédito de un lote sin factura
+    participa igual."""
+    con_detalle = (await db.execute(
+        select(DetalleLiquidacion.medico_id)
+        .select_from(DetalleLiquidacion)
+        .join(Liquidacion, Liquidacion.id == DetalleLiquidacion.liquidacion_id)
+        .where(Liquidacion.pago_id == pago_id)
+        .distinct()
+    )).scalars().all()
+    con_ajuste = (await db.execute(
+        select(Ajuste.medico_id)
+        .select_from(Ajuste)
+        .join(LoteAjuste, LoteAjuste.id == Ajuste.lote_id)
+        .where(LoteAjuste.pago_id == pago_id, LoteAjuste.estado.in_(["L", "AP"]))
+        .distinct()
+    )).scalars().all()
+    con_adelanto = await adelantos_por_medico_en_pago(db, pago_id)
+    con_compensacion = await compensaciones_por_medico_en_pago(db, pago_id)
+    return {int(m) for m in con_detalle} | {int(m) for m in con_ajuste} | set(con_adelanto) | set(con_compensacion)
 
 
 async def _ajustes_por_medico_en_pago(
@@ -182,6 +264,14 @@ async def _ajustes_por_medico_en_pago(
     for med, deb, cred in qaj:
         deb_map[int(med)] = Decimal(deb or 0)
         cred_map[int(med)] = Decimal(cred or 0)
+    # Las compensaciones del pago pesan en el disponible igual que un crédito (+) o un débito (−):
+    # una a favor sirve para pagar las deudas y cuotas del socio. NO suben el bruto, así que no
+    # pagan contribuciones ni impuestos.
+    for med, neto in (await compensaciones_por_medico_en_pago(db, pago_id)).items():
+        if neto >= 0:
+            cred_map[med] = cred_map.get(med, Decimal("0")) + neto
+        else:
+            deb_map[med] = deb_map.get(med, Decimal("0")) - neto
     return deb_map, cred_map
 
 
@@ -232,6 +322,19 @@ async def _medicos_para_descuento(db: AsyncSession, desc_id: int) -> list[tuple[
         )
     )
     return list({(m, bool(p)) for m, p in res.all()})
+
+
+async def _pagadores_de_descuento(db: AsyncSession, desc_id: int) -> dict[int, int]:
+    """{medico_id: pagador_medico_id} de las asignaciones activas del descuento que tienen
+    pagador (otro médico, de cuya liquidación sale el descuento). Las demás no figuran."""
+    res = await db.execute(
+        select(SocioDescuento.medico_id, SocioDescuento.pagador_medico_id).where(
+            SocioDescuento.descuento_id == desc_id,
+            SocioDescuento.fecha_baja.is_(None),
+            SocioDescuento.pagador_medico_id.is_not(None),
+        )
+    )
+    return {int(m): int(p) for m, p in res.all()}
 
 
 def _calc_monto(
@@ -431,6 +534,12 @@ _ERRORES_ITEM = {
 def _handle_item_error(exc: ValueError) -> None:
     """Convierte un ValueError del service layer en HTTPException con código apropiado."""
     msg = str(exc)
+    if msg.startswith("pago_cerrado:"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Esta deducción ya se descontó en el pago {msg.split(':', 1)[1]}, que está cerrado: "
+                   "no se puede editar ni eliminar. Para corregirla, cargá un crédito o una deducción nueva.",
+        )
     entry = _ERRORES_ITEM.get(msg)
     if entry is None:
         for key, val in _ERRORES_ITEM.items():

@@ -10,8 +10,8 @@ from fastapi import HTTPException, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import DetalleFacturacionCMC
-from app.modules.facturacion import documentacion
-from app.modules.facturacion.service import _cleanup_factura_si_vacia
+from app.modules.facturacion import documentacion, historial
+from app.modules.facturacion.service import VALIDACION_RECHAZOS, _cleanup_factura_si_vacia
 from app.modules.validaciones import obras
 from app.modules.validaciones.core.consultas import _descripciones
 from app.modules.validaciones.core.contrato import Contexto
@@ -110,9 +110,23 @@ async def _prestacion_del_socio(
     fila = await db.get(DetalleFacturacionCMC, prestacion_id)
     if fila is None or fila.validacion_estado is None or fila.validacion_anulada:
         raise HTTPException(404, "La prestación no existe o ya fue eliminada.")
+    # La que eliminó el Colegio desde facturación tampoco es del panel: el médico ve las
+    # rechazadas (también en X), no las eliminadas.
+    if fila.estado == DETALLE_FUERA_DE_FACTURA and fila.validacion_estado not in VALIDACION_RECHAZOS:
+        raise HTTPException(404, "La prestación no existe o ya fue eliminada.")
     if str(fila.cod_med) != str(nro_socio):
         raise HTTPException(403, "La prestación pertenece a otro prestador.")
     return fila
+
+
+async def _exigir_periodo_abierto(
+    db: AsyncSession, fila: DetalleFacturacionCMC, actor: str, accion: str,
+) -> None:
+    """409 si `actor` ya no puede operar el período de la prestación — mismo criterio
+    que la baja (`periodo_cerrado`): la fase médico cerrada bloquea al médico, y el
+    Colegio sigue pudiendo mientras su propia fase siga abierta."""
+    if await periodo_cerrado(db, int(fila.cod_obr), fila.periodo, actor):
+        raise HTTPException(409, f"El período ya está cerrado: no se puede {accion}.")
 
 
 async def _salida(db: AsyncSession, fila: DetalleFacturacionCMC) -> dict:
@@ -133,6 +147,7 @@ async def agregar_documentos(
 ) -> dict:
     """Suma archivos a la documentación de la prestación (PDF, JPG o PNG, por su contenido real)."""
     fila = await _prestacion_del_socio(db, prestacion_id, nro_socio)
+    await _exigir_periodo_abierto(db, fila, origen, "agregar documentación")
     await documentacion.agregar(db, fila, archivos, origen, subido_por)
     await db.refresh(fila)
     return await _salida(db, fila)
@@ -153,16 +168,18 @@ async def reemplazar_documento(
     origen: str, subido_por,
 ) -> dict:
     fila = await _prestacion_del_socio(db, prestacion_id, nro_socio)
+    await _exigir_periodo_abierto(db, fila, origen, "reemplazar documentación")
     await documentacion.reemplazar(db, fila, doc_id, archivo, origen, subido_por)
     await db.refresh(fila)
     return await _salida(db, fila)
 
 
 async def eliminar_documento(
-    db: AsyncSession, prestacion_id: int, nro_socio: int, doc_id: int,
+    db: AsyncSession, prestacion_id: int, nro_socio: int, doc_id: int, actor: str = ORIGEN_MEDICO,
 ) -> dict:
     """El médico no puede dejar la prestación sin documentos si los exige (409)."""
     fila = await _prestacion_del_socio(db, prestacion_id, nro_socio)
+    await _exigir_periodo_abierto(db, fila, actor, "eliminar documentación")
     await documentacion.eliminar(db, fila, doc_id, es_medico=True)
     await db.refresh(fila)
     return await _salida(db, fila)
@@ -208,8 +225,14 @@ async def eliminar_prestacion(
                 fila.validacion_detalle = anulacion.detalle[:255]
 
     facturaba = fila.estado == DETALLE_ACTIVO
+    estado_antes = fila.estado
     fila.validacion_anulada = True
     fila.estado = DETALLE_FUERA_DE_FACTURA
+    # Sin motivo: el médico no lo carga. Si la eliminó una rechazada, el estado ya era X.
+    await historial.registrar(db, [historial.evento(
+        fila, historial.ELIMINADA, estado_antes=estado_antes, estado_despues=DETALLE_FUERA_DE_FACTURA,
+        contexto=historial.contexto_de(fila, origen="validaciones"),
+    )])
     await db.flush()
     if facturaba:
         # Si era la última prestación abierta del período, se elimina la cabecera

@@ -1,10 +1,13 @@
 # app/services/medicos_register_service.py
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Optional, List, Dict, Any
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from app.auth import sessions
+from app.auth.identidad import asignar_rol_base_si_falta
 from app.db.models import ListadoMedico, SolicitudRegistro, Especialidad
+from app.db.models.medico import ESTADO_ACTIVO, ESTADO_PENDIENTE, ESTADOS_CUENTA
 from app.core.passwords import hash_password, hash_password_inicial
 from app.common.dates import _parse_date
 
@@ -43,7 +46,26 @@ async def build_spec_items(db: AsyncSession, body) -> List[Dict[str, Any]]:
             })
     return items[:6]
 
-async def create_medico_and_solicitud(db: AsyncSession, body, *, existe="N"):
+async def cambiar_estado_cuenta(db: AsyncSession, medico: ListadoMedico, estado: str) -> None:
+    """Único lugar donde cambia `estado_cuenta`. Hace commit.
+
+    Si la cuenta deja de estar `activo`, corta sus sesiones en el momento: sin esto
+    un socio dado de baja seguía renovando su token hasta `REFRESH_DAYS`.
+    """
+    if estado not in ESTADOS_CUENTA:
+        raise ValueError(f"estado_cuenta inválido: {estado!r}")
+    if medico.estado_cuenta == estado:
+        return
+    medico.estado_cuenta = estado
+    medico.estado_cuenta_at = datetime.now(UTC).replace(tzinfo=None)
+    if estado == ESTADO_ACTIVO:
+        await asignar_rol_base_si_falta(db, medico.ID)
+    await db.commit()
+    if estado != ESTADO_ACTIVO:
+        await sessions.revocar_sesiones(db, medico.ID, motivo="cuenta_inactiva")
+
+
+async def create_medico_and_solicitud(db: AsyncSession, body):
     nombre = f"{(body.firstName or '').strip()} {(body.lastName or '').strip()}".strip()
 
     # Licencias
@@ -73,7 +95,7 @@ async def create_medico_and_solicitud(db: AsyncSession, body, *, existe="N"):
         MAIL_PARTICULAR = getattr(body, "email", "a") or "a",
         CUIT = getattr(body, "cuit", "0") or "0",
         OBSERVACION = getattr(body, "observations", "A") or "A",
-        EXISTE = existe,
+        estado_cuenta = ESTADO_PENDIENTE,
         ANSSAL = _int_or_zero(getattr(body, "anssal", None)),
         # Especialidades en columnas
         NRO_ESPECIALIDAD  = nro_especs[0],
@@ -213,7 +235,7 @@ async def save_medico_admin_draft(
 
             CUIT = _nn(getattr(body, "cuit", None), "0"),
             OBSERVACION = _nn(getattr(body, "observations", None), "A"),
-            EXISTE = "N",
+            estado_cuenta = ESTADO_PENDIENTE,
 
             # Especialidades en columnas
             NRO_ESPECIALIDAD  = nro_especs[0],

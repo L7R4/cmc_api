@@ -84,8 +84,8 @@ async def _get_or_create_demo_admin(db: AsyncSession) -> ListadoMedico:
     if user:
         # Ensure the account is usable for demo
         changed = False
-        if getattr(user, "EXISTE", "N") != "S":
-            user.EXISTE = "S"
+        if user.estado_cuenta != "activo":
+            user.estado_cuenta = "activo"
             changed = True
         if not getattr(user, "hashed_password", None):
             user.hashed_password = hash_password(password)
@@ -102,8 +102,7 @@ async def _get_or_create_demo_admin(db: AsyncSession) -> ListadoMedico:
         NOMBRE="Demo Admin",
         MATRICULA_PROV=matricula,
         MATRICULA_NAC=matricula,
-        EXISTE="S",
-        INGRESAR="A",
+        estado_cuenta="activo",
         hashed_password=hash_password(password),
     )
     db.add(user)

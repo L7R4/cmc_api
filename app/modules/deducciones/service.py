@@ -19,6 +19,7 @@ from app.db.models import (
     LoteAjuste,
     Pago,
     PagoMedico,
+    RetencionGanancias,
     SocioDescuento,
 )
 from app.modules.deducciones.schemas import (
@@ -37,6 +38,7 @@ from app.modules.deducciones.schemas import (
 from app.modules.deducciones.helpers import (
     _advance_month,
     _base_bruto_por_medico_en_pago,
+    _base_retenciones_por_medico_en_pago,
     _calc_monto,
     _ded_to_historial,
     _disponible_por_medico_en_pago,
@@ -54,9 +56,11 @@ from app.modules.deducciones.helpers import (
     marcar_deducciones_dirty,
     NRO_COLEGIO_CONTRIB_GASTOS,
     NRO_COLEGIO_CONTRIB_HONORARIOS,
+    NRO_COLEGIO_INGRESOS_BRUTOS,
     NRO_COLEGIO_SALDO_DEUDOR,
     ordenar_deducciones_por_prioridad,
 )
+from app.modules.retenciones.service import recalcular_retencion_ganancias
 
 
 TWOPLACES = Decimal("0.01")
@@ -142,6 +146,7 @@ async def recalcular_automaticas_porcentuales(db: AsyncSession, pago_id: int) ->
     Determina la base correcta según nro_colegio del descuento:
       - NRO_COLEGIO_CONTRIB_HONORARIOS → base = honorarios del médico
       - NRO_COLEGIO_CONTRIB_GASTOS     → base = gastos del médico
+      - NRO_COLEGIO_INGRESOS_BRUTOS    → base = bruto − débitos + créditos (como el sistema anterior)
       - resto                          → base = importe_total (bruto)
     Devuelve {"cantidad": int, "ids": list[int]} con las deducciones cuyo calculado_total cambió.
     """
@@ -165,6 +170,7 @@ async def recalcular_automaticas_porcentuales(db: AsyncSession, pago_id: int) ->
     bruto_map = await _base_bruto_por_medico_en_pago(db, pago_id)
     hon_map = await _honorarios_por_medico_en_pago(db, pago_id)
     gas_map = await _gastos_por_medico_en_pago(db, pago_id)
+    ret_map = await _base_retenciones_por_medico_en_pago(db, pago_id)
 
     ids_recalculadas: list[int] = []
     for ded in deds_auto:
@@ -178,6 +184,8 @@ async def recalcular_automaticas_porcentuales(db: AsyncSession, pago_id: int) ->
             base = hon_map.get(ded.medico_id, Decimal("0"))
         elif nro == NRO_COLEGIO_CONTRIB_GASTOS:
             base = gas_map.get(ded.medico_id, Decimal("0"))
+        elif nro == NRO_COLEGIO_INGRESOS_BRUTOS:
+            base = max(ret_map.get(ded.medico_id, {}).get("importe", Decimal("0")), Decimal("0"))
         else:
             base = bruto_map.get(ded.medico_id, Decimal("0"))
 
@@ -202,7 +210,7 @@ async def _auto_generar_deducciones_porcentuales(db: AsyncSession, pago: Pago) -
     recalcular_automaticas_porcentuales las actualiza con el bruto real.
     """
     desc_rows = (await db.execute(
-        select(Conceptos).where(Conceptos.porcentaje > 0, Conceptos.nro_colegio != 200)
+        select(Conceptos).where(Conceptos.porcentaje > 0)
     )).scalars().all()
 
     if not desc_rows:
@@ -385,6 +393,10 @@ async def generar_y_recalcular_porcentuales(db: AsyncSession, pago_id: int) -> d
 
     recalculadas = await recalcular_automaticas_porcentuales(db, pago_id)
 
+    # Ganancias no es un porcentaje: tiene escala y se acumula en el mes (crea, ajusta o quita
+    # la deducción de cada socio alcanzado y deja la cuenta en retencion_ganancias).
+    ganancias = await recalcular_retencion_ganancias(db, pago)
+
     # Flush para que los calculado_total recién actualizados sean visibles
     # al recalcular el preview de monto_aplicado.
     await db.flush()
@@ -397,6 +409,7 @@ async def generar_y_recalcular_porcentuales(db: AsyncSession, pago_id: int) -> d
         "generadas_ids": generadas["ids"],
         "recalculadas": recalculadas["cantidad"],
         "recalculadas_ids": recalculadas["ids"],
+        "retenciones_ganancias": ganancias,
     }
 
 
@@ -1163,9 +1176,11 @@ async def eliminar_item(db: AsyncSession, id: int) -> DeduccionItemEliminarRespo
             await marcar_deducciones_dirty(db, pago.id)
 
     # Un porcentual generado para un pago (cuota_nro = id del pago) se marca eliminado en lugar
-    # de borrarse: así no se vuelve a generar en ese pago.
-    porcentual_de_pago = (
-        ded.origen == "automatico" and (ded.porcentaje_aplicado or 0) > 0 and (ded.cuota_nro or 0) > 0
+    # de borrarse: así no se vuelve a generar en ese pago. Lo mismo la retención de Ganancias.
+    porcentual_de_pago = ded.origen == "automatico" and (ded.cuota_nro or 0) > 0 and (
+        (ded.porcentaje_aplicado or 0) > 0
+        or await db.scalar(select(RetencionGanancias.id).where(RetencionGanancias.deduccion_id == ded.id).limit(1))
+        is not None
     )
     if ded.origen == "manual" or porcentual_de_pago:
         ded.estado = "eliminado"

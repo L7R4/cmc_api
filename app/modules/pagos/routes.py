@@ -3,7 +3,7 @@ from decimal import Decimal
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.database import get_db
@@ -12,6 +12,7 @@ from app.db.models import (
     Pago,
     PagoMedico,
     Recibo,
+    RetencionGanancias,
 )
 from app.modules.deducciones.helpers import _medicos_en_pago
 from app.modules.pagos.schemas import (
@@ -227,6 +228,10 @@ async def eliminar_pago(pago_id: int, db: AsyncSession = Depends(get_db)):
 
     # 3c. Compensaciones del pago: vuelven a pendientes y sin pago
     await rollback_compensaciones_pago(db, pago_id)
+
+    # 3d. La cuenta de Ganancias del pago (la FK tiene ON DELETE CASCADE; se borra explícito
+    #     para no depender de eso).
+    await db.execute(delete(RetencionGanancias).where(RetencionGanancias.pago_id == pago_id))
 
     # 4. Recibos (emitidos/pendientes): eliminar antes que Liquidacion por FK RESTRICT
     await rollback_recibos_pago(db, pago_id)

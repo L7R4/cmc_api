@@ -36,14 +36,20 @@ NRO_COLEGIO_CONTRIB_GASTOS = 101      # base = suma de gastos del médico
 # cierre del pago como deducción pendiente. Va en `cuota_nro` el id del pago que la originó.
 NRO_COLEGIO_SALDO_DEUDOR = 9900
 NRO_COLEGIO_IMPUESTO_LEY = 102        # Imp. Ley 25413
+# Retenciones que el Colegio practica como agente: base = producción neta de débitos y créditos.
+NRO_COLEGIO_INGRESOS_BRUTOS = 200     # D.G.R. (Ingresos Brutos), 2%
+NRO_COLEGIO_GANANCIAS = 300           # AFIP (Ganancias), con escala: app/modules/retenciones
+NRO_COLEGIO_RETENCIONES: frozenset[int] = frozenset({NRO_COLEGIO_INGRESOS_BRUTOS, NRO_COLEGIO_GANANCIAS})
 
 # nro_colegio (no descuento_id/PK) con prioridad fija de cobro cuando el
 # disponible no alcanza. nro_colegio es el número que asigna el Colegio y es
 # estable entre entornos; descuento_id es un autoincrement de la base sin
 # garantía de coincidir entre local y producción (ver diagnóstico M7).
+# Las retenciones van después de las contribuciones y antes que el resto, como en el
+# sistema anterior (contribuciones → D.G.R. → D.G.I. → servicios).
 NRO_COLEGIO_PRIORITARIOS: frozenset[int] = frozenset({
     NRO_COLEGIO_CONTRIB_HONORARIOS, NRO_COLEGIO_CONTRIB_GASTOS, NRO_COLEGIO_IMPUESTO_LEY,
-})
+}) | NRO_COLEGIO_RETENCIONES
 
 #endregion
 
@@ -166,6 +172,44 @@ async def _gastos_por_medico_en_pago(
     out = {int(med_id): Decimal(suma or 0) for med_id, suma in q}
     for med_id, a in (await adelantos_por_medico_en_pago(db, pago_id)).items():
         out[med_id] = out.get(med_id, Decimal("0")) + a["gastos"]
+    return out
+
+
+async def _base_retenciones_por_medico_en_pago(
+    db: AsyncSession, pago_id: int
+) -> dict[int, dict[str, Decimal]]:
+    """
+    Base de las retenciones (Ingresos Brutos y Ganancias) por médico:
+    {medico_id: {"honorarios", "gastos", "importe"}}, cada uno = lo producido en el pago
+    (facturas + adelantos) − débitos + créditos de los lotes liquidados.
+
+    Es la base del sistema anterior, que restaba los débitos y sumaba los créditos de la obra
+    social. Las compensaciones no cuentan: no son producción.
+    """
+    hon = await _honorarios_por_medico_en_pago(db, pago_id)
+    gas = await _gastos_por_medico_en_pago(db, pago_id)
+    imp = await _base_bruto_por_medico_en_pago(db, pago_id)
+    aj = (await db.execute(
+        select(
+            Ajuste.medico_id,
+            func.coalesce(func.sum(case((Ajuste.tipo == "c", Ajuste.honorarios), else_=-Ajuste.honorarios)), 0),
+            func.coalesce(func.sum(case((Ajuste.tipo == "c", Ajuste.gastos), else_=-Ajuste.gastos)), 0),
+        )
+        .select_from(Ajuste)
+        .join(LoteAjuste, LoteAjuste.id == Ajuste.lote_id)
+        .where(LoteAjuste.pago_id == pago_id, LoteAjuste.estado == "L")
+        .group_by(Ajuste.medico_id)
+    )).all()
+    neto_aj = {int(m): (Decimal(h or 0), Decimal(g or 0)) for m, h, g in aj}
+    cero = Decimal("0")
+    out: dict[int, dict[str, Decimal]] = {}
+    for m in set(hon) | set(gas) | set(imp) | set(neto_aj):
+        dh, dg = neto_aj.get(m, (cero, cero))
+        out[m] = {
+            "honorarios": hon.get(m, cero) + dh,
+            "gastos": gas.get(m, cero) + dg,
+            "importe": imp.get(m, cero) + dh + dg,
+        }
     return out
 
 

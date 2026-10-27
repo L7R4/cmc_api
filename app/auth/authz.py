@@ -451,6 +451,9 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     ("PATCH", "/api/compensaciones/{compensacion_id}"): Scope.COMPENSACION_EDITAR,
     ("PATCH", "/api/compensaciones/{compensacion_id}/estado"): Scope.COMPENSACION_EDITAR,
     ("POST", "/api/compensaciones/{compensacion_id}/anular"): Scope.COMPENSACION_ANULAR,
+    # Retención de Ganancias: listado mensual y comprobantes (los datos son deducciones del pago).
+    ("GET", "/api/retenciones/ganancias"): Scope.DEDUCCION_LEER,
+    ("GET", "/api/retenciones/ganancias/escalas"): Scope.DEDUCCION_LEER,
 
     # ── Deducciones ──────────────────────────────────────────────────────────
     ("GET", "/api/deducciones/"): Scope.DEDUCCION_LEER,

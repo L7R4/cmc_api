@@ -43,6 +43,8 @@ class Institucion(Base):
     cuit: Mapped[Optional[str]] = mapped_column(String(13), nullable=True)
     condicion_iva: Mapped[Optional[str]] = mapped_column(String(60), nullable=True)
     ingresos_brutos: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    # Número de agente de retención de Ganancias: lo lleva el comprobante de retención de cada socio.
+    agente_retencion_ganancias: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
 
     # 22 dígitos. Es contra lo que cobra el Colegio, así que va junto al alias y
     # al banco: un CBU suelto, sin saber de qué banco es, no sirve para nada.

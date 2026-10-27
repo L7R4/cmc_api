@@ -45,6 +45,7 @@ from app.modules.liquidacion.routes import router as liquidacion_router
 from app.modules.lotes.routes import router as lotes_router
 from app.modules.adelantos.routes import router as adelantos_router
 from app.modules.compensaciones.routes import router as compensaciones_router
+from app.modules.retenciones.routes import router as retenciones_router
 from app.modules.medicos.routes import router as medicos_router
 from app.modules.padrones.routes import router as padrones_router
 from app.modules.pagos.routes import router as pagos_router
@@ -81,6 +82,7 @@ api_router.include_router(pagos_router, prefix="/pagos", tags=["Pagos"])
 api_router.include_router(lotes_router, prefix="/lotes", tags=["Lotes de Ajuste"])
 api_router.include_router(adelantos_router, prefix="/adelantos", tags=["Adelantos"])
 api_router.include_router(compensaciones_router, prefix="/compensaciones", tags=["Compensaciones"])
+api_router.include_router(retenciones_router, prefix="/retenciones", tags=["Retenciones"])
 api_router.include_router(liquidacion_router, prefix="/liquidacion", tags=["Liquidacion"])
 api_router.include_router(facturacion_router, prefix="/facturacion", tags=["Facturación"])
 api_router.include_router(facturacion_export_router, prefix="/facturacion", tags=["Facturación"])

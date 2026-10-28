@@ -10,7 +10,11 @@ from sqlalchemy import case, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.adelantos.queries import ESTADOS_EN_PAGO, total_adelantos_del_pago
-from app.modules.compensaciones.queries import ESTADOS_EN_PAGO as COMP_EN_PAGO, totales_compensaciones_del_pago
+from app.modules.compensaciones.queries import (
+    ESTADOS_EN_PAGO as COMP_EN_PAGO,
+    leyenda_recibo,
+    totales_compensaciones_del_pago,
+)
 from app.modules.deducciones.helpers import _medicos_en_pago
 from app.db.models import (
     Ajuste,
@@ -188,7 +192,7 @@ async def vista_previa_pago(db: AsyncSession, pago_id: int) -> dict:
     #  - Cerrado (C o P): lo realmente descontado en ESTE pago, según el ledger
     #    (DeduccionAplicacion), venga la deducción de donde venga.
     #  - Abierto: todas las que están en_pago —las generadas en este pago y también las
-    #    enroladas (pendientes que entraron por «Refrescar»)—, con su preview. Filtrar por
+    #    enroladas (pendientes que entraron solas)—, con su preview. Filtrar por
     #    generado_en_pago_id dejaba afuera las enroladas y el total no coincidía con la tira.
     if pago_cerrado:
         ded_query = (
@@ -321,7 +325,7 @@ async def vista_previa_pago(db: AsyncSession, pago_id: int) -> dict:
             "estado":          r[0].estado,
             "medico_id":       r[0].medico_id,
             "medico_nombre":   (r.medico_nombre or "").strip(),
-            "leyenda":         r[0].leyenda,
+            "leyenda":         leyenda_recibo(r[0]),
             "importe":         _to_dec(r[0].importe),
         }
         for r in comp_rows
@@ -559,7 +563,7 @@ async def refrescar_detalle_medico(
         .order_by(Compensacion.id)
     )).scalars().all()
     compensaciones_out = [
-        {"compensacion_id": c.id, "leyenda": c.leyenda, "importe": float(_to_dec(c.importe))}
+        {"compensacion_id": c.id, "leyenda": leyenda_recibo(c), "importe": float(_to_dec(c.importe))}
         for c in comp_rows_med
     ]
     total_compensaciones = sum((_to_dec(c.importe) for c in comp_rows_med), Decimal("0"))
@@ -873,13 +877,52 @@ async def generar_recibo_medico(
     return recibo
 
 
+async def quitar_resumenes_de_ausentes(db: AsyncSession, pago_id: int, presentes: set[int]) -> int:
+    """
+    Borra el resumen (PagoMedico) y el recibo sin emitir de los médicos que ya no participan
+    en el pago: el que salió con un lote, un adelanto o una compensación después de «Generar
+    recibos». Su resumen viejo daba un recibo o una deuda falsa al cerrar (N16).
+    Un recibo emitido no se toca, ni su resumen. Sin commit.
+    """
+    ausentes = [
+        pm for pm in (await db.execute(
+            select(PagoMedico).where(PagoMedico.pago_id == pago_id)
+        )).scalars().all()
+        if pm.medico_id not in presentes
+    ]
+    if not ausentes:
+        return 0
+    emitidos = set((await db.execute(
+        select(Recibo.medico_id).where(
+            Recibo.pago_id == pago_id,
+            Recibo.medico_id.in_([pm.medico_id for pm in ausentes]),
+            Recibo.estado.in_(["emitido", "pagado"]),
+        )
+    )).scalars().all())
+    ausentes = [pm for pm in ausentes if pm.medico_id not in emitidos]
+    if not ausentes:
+        return 0
+    ids = [pm.medico_id for pm in ausentes]
+    await db.execute(
+        delete(Recibo).where(Recibo.pago_id == pago_id, Recibo.medico_id.in_(ids))
+    )
+    await db.execute(
+        delete(PagoMedico).where(PagoMedico.pago_id == pago_id, PagoMedico.medico_id.in_(ids))
+    )
+    await db.flush()
+    return len(ids)
+
+
 async def refrescar_todos_medicos(db: AsyncSession, pago_id: int, pago: Pago) -> dict:
     """
     Llama a refrescar_detalle_medico para cada médico que participa en el pago: con
     prestaciones o con algún ajuste (un crédito de un lote sin factura, por ejemplo).
+    Antes borra el resumen de los que ya no participan.
     Devuelve {medico_db_id: {info_medico, resumen, detalle}, ...}.
     """
-    medico_ids = sorted(await _medicos_en_pago(db, pago_id))
+    presentes = await _medicos_en_pago(db, pago_id)
+    await quitar_resumenes_de_ausentes(db, pago_id, presentes)
+    medico_ids = sorted(presentes)
 
     result: dict = {}
     for mid in medico_ids:
@@ -975,6 +1018,11 @@ async def generar_todos_recibos(
             raise HTTPException(404, "Pago no encontrado")
 
     if medico_ids:
+        presentes = await _medicos_en_pago(db, pago_id)
+        await quitar_resumenes_de_ausentes(db, pago_id, presentes)
+        medico_ids = [mid for mid in medico_ids if mid in presentes]
+        if not medico_ids:
+            raise HTTPException(404, "Los médicos indicados no participan en este pago")
         for mid in medico_ids:
             await refrescar_detalle_medico(db, pago_id, mid, pago=pago)
     else:

@@ -2,7 +2,7 @@ import datetime
 from decimal import Decimal
 from typing import Literal, Optional
 
-from sqlalchemy import DECIMAL, BigInteger, Boolean, Date, DateTime, Enum, ForeignKey, Index, Integer, String, UniqueConstraint, func
+from sqlalchemy import DECIMAL, BigInteger, Boolean, Date, DateTime, Enum, ForeignKey, Index, Integer, SmallInteger, String, UniqueConstraint, func
 from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -371,19 +371,27 @@ class LiquidacionAdelantoItem(AuditMixin, Base):
 
 class Compensacion(AuditMixin, Base):
     """Movimiento de plata a favor (+) o en contra (−) de un socio, sin un concepto del catálogo:
-    un regalo de cumpleaños, un reintegro, una rotura. Un solo importe, sin cuotas.
+    un regalo de cumpleaños, un reintegro, una rotura. Puede ir en cuotas: una fila por cuota.
 
     No es producción: no entra en las bases de los porcentuales. Suma (o resta) al reconocido
     del socio en el pago (`pago_id`, estado en_pago/pagada), como un crédito o un débito.
     También puede pagarse en caja, fuera de cualquier pago (`en_caja`).
+    Una cuota con mes entra sola al pago abierto cuando su mes llegó (ver
+    services/compensacion_update.enrolar_cuotas_del_mes).
     """
     __tablename__ = "compensacion"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     # Cualquier fila del padrón (médico, adherente u organización): listado_medico.ID
     medico_id: Mapped[int] = mapped_column(ForeignKey("listado_medico.ID"), nullable=False, index=True)
-    # Con signo: positivo a favor del socio, negativo en contra. Nunca cero.
+    # En cuotas: cada cuota es una fila; las de un plan comparten plan_id (el id de la cuota 1).
+    plan_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+    cuota_nro: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=1, server_default="1")
+    cuotas_total: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=1, server_default="1")
+    # Con signo: positivo a favor del socio, negativo en contra. Nunca cero. Es el de esta cuota;
+    # importe_total, el de todo el plan.
     importe: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), nullable=False)
+    importe_total: Mapped[Optional[Decimal]] = mapped_column(DECIMAL(14, 2), nullable=True)
     # Lo que dice el recibo (la ve el socio) y una nota solo para el Colegio.
     leyenda: Mapped[str] = mapped_column(String(160), nullable=False)
     nota_interna: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
@@ -394,6 +402,10 @@ class Compensacion(AuditMixin, Base):
         default="pendiente",
         server_default="pendiente",
     )
+    # Mes desde el que la cuota entra sola al pago abierto. NULL (las anteriores a las cuotas):
+    # entra a mano.
+    mes_aplicar: Mapped[Optional[int]] = mapped_column(SmallInteger, nullable=True)
+    anio_aplicar: Mapped[Optional[int]] = mapped_column(SmallInteger, nullable=True)
     pago_id: Mapped[Optional[int]] = mapped_column(ForeignKey("pago.id"), nullable=True, index=True)
     fecha_caja: Mapped[Optional[datetime.date]] = mapped_column(Date, nullable=True)
     motivo_anulacion: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)

@@ -574,10 +574,5 @@ async def _get_open_pago(db: AsyncSession) -> Optional[Pago]:
     return await db.scalar(select(Pago).where(Pago.estado == "A").limit(1))
 
 
-async def marcar_deducciones_dirty(db: AsyncSession, pago_id: int) -> None:
-    """Marca que algo cambió en el pago y las deducciones en_pago pueden estar desactualizadas."""
-    await db.execute(
-        update(Pago).where(Pago.id == pago_id).values(deducciones_dirty=True)
-    )
 #endregion 
 

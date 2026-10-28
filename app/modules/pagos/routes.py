@@ -140,6 +140,10 @@ async def crear_pago(payload: PagoCreate, db: AsyncSession = Depends(get_db)):
 
     obj = Pago(anio=payload.anio, mes=payload.mes, descripcion=payload.descripcion)
     db.add(obj)
+    await db.flush()
+    # Las cuotas de compensaciones cuyo mes llegó entran solas (y con ellas, las deducciones
+    # pendientes de esos socios).
+    await generar_y_recalcular_porcentuales(db, obj.id)
     await db.commit()
     await db.refresh(obj)
 

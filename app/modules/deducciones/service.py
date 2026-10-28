@@ -53,7 +53,6 @@ from app.modules.deducciones.helpers import (
     _nro_colegio_map_de_deducciones,
     _pagadores_de_descuento,
     enrich_many,
-    marcar_deducciones_dirty,
     NRO_COLEGIO_CONTRIB_GASTOS,
     NRO_COLEGIO_CONTRIB_HONORARIOS,
     NRO_COLEGIO_INGRESOS_BRUTOS,
@@ -61,6 +60,7 @@ from app.modules.deducciones.helpers import (
     ordenar_deducciones_por_prioridad,
 )
 from app.modules.retenciones.service import recalcular_retencion_ganancias
+from app.services.compensacion_update import enrolar_cuotas_del_mes
 
 
 TWOPLACES = Decimal("0.01")
@@ -140,26 +140,54 @@ async def auto_enrolar_pendientes(db: AsyncSession, pago: Pago) -> dict:
 # Refrescar deducciones del pago abierto
 # =============================================================================
 
+def _es_porcentual_del_pago(pago: Pago):
+    """Porcentual automático que nació en este pago (ver ya_existen en
+    _auto_generar_deducciones_porcentuales). Las de pagos anteriores que quedaron pendientes
+    ya tienen su monto, calculado sobre la producción de aquel pago."""
+    return and_(
+        Deduccion.origen == "automatico",
+        Deduccion.porcentaje_aplicado > 0,
+        or_(
+            Deduccion.generado_en_pago_id == pago.id,
+            Deduccion.cuota_nro == pago.id,
+            # Anteriores a la regla de una por pago (cuota_nro 0, una por mes).
+            and_(
+                Deduccion.cuota_nro == 0,
+                Deduccion.mes_aplicar == pago.mes,
+                Deduccion.anio_aplicar == pago.anio,
+            ),
+        ),
+    )
+
+
 async def recalcular_automaticas_porcentuales(db: AsyncSession, pago_id: int) -> dict:
     """
-    Recalcula calculado_total de las deducciones automáticas en_pago que usan porcentaje.
+    Recalcula calculado_total de las deducciones automáticas en_pago que usan porcentaje y
+    nacieron en este pago. Una porcentual pendiente de un pago anterior no se toca: ya tiene
+    su monto (el de aquel pago) y recalcularla con la base de este la cobraba dos veces (N15).
     Determina la base correcta según nro_colegio del descuento:
       - NRO_COLEGIO_CONTRIB_HONORARIOS → base = honorarios del médico
       - NRO_COLEGIO_CONTRIB_GASTOS     → base = gastos del médico
       - NRO_COLEGIO_INGRESOS_BRUTOS    → base = bruto − débitos + créditos (como el sistema anterior)
       - resto                          → base = importe_total (bruto)
-    Devuelve {"cantidad": int, "ids": list[int]} con las deducciones cuyo calculado_total cambió.
+    La que da $0 (el socio no tiene base en este pago) se borra: si no, quedaba pendiente y en
+    el pago siguiente se cobraba junto con la nueva. Vuelve a crearse si la base aparece.
+    Devuelve {"cantidad": int, "ids": list[int], "eliminadas": int} con las deducciones cuyo
+    calculado_total cambió y las que se borraron por quedar en $0.
     """
+    pago = await db.get(Pago, pago_id)
+    if not pago:
+        return {"cantidad": 0, "ids": [], "eliminadas": 0}
+
     deds_auto = (await db.execute(
         select(Deduccion).where(
-            Deduccion.origen == "automatico",
             Deduccion.estado == "en_pago",
-            Deduccion.porcentaje_aplicado > 0,
+            _es_porcentual_del_pago(pago),
         )
     )).scalars().all()
 
     if not deds_auto:
-        return {"cantidad": 0, "ids": []}
+        return {"cantidad": 0, "ids": [], "eliminadas": 0}
 
     desc_ids = list({d.descuento_id for d in deds_auto if d.descuento_id})
     desc_rows = (await db.execute(
@@ -173,6 +201,7 @@ async def recalcular_automaticas_porcentuales(db: AsyncSession, pago_id: int) ->
     ret_map = await _base_retenciones_por_medico_en_pago(db, pago_id)
 
     ids_recalculadas: list[int] = []
+    eliminadas = 0
     for ded in deds_auto:
         if not ded.descuento_id:
             continue
@@ -190,11 +219,15 @@ async def recalcular_automaticas_porcentuales(db: AsyncSession, pago_id: int) ->
             base = bruto_map.get(ded.medico_id, Decimal("0"))
 
         nuevo = (base * ded.porcentaje_aplicado / Decimal(100)).quantize(TWOPLACES)
+        if nuevo <= 0 and ded.generado_en_pago_id == pago_id and not ded.monto_aplicado:
+            await db.delete(ded)
+            eliminadas += 1
+            continue
         if nuevo != ded.calculado_total:
             ded.calculado_total = nuevo
             ids_recalculadas.append(ded.id)
 
-    return {"cantidad": len(ids_recalculadas), "ids": ids_recalculadas}
+    return {"cantidad": len(ids_recalculadas), "ids": ids_recalculadas, "eliminadas": eliminadas}
 
 
 async def _auto_generar_deducciones_porcentuales(db: AsyncSession, pago: Pago) -> dict:
@@ -206,6 +239,9 @@ async def _auto_generar_deducciones_porcentuales(db: AsyncSession, pago: Pago) -
       (misma lógica que bulk_generar_descuento).
     - aplica_a_todos=False: genera solo para los médicos en socio_descuento.
 
+    En los dos casos, sólo a quien tiene producción en este pago: un socio asignado que no
+    produjo quedaba con un porcentual en $0 pendiente que se cobraba en el pago siguiente (N15).
+
     Se crean con calculado_total=0 como placeholder;
     recalcular_automaticas_porcentuales las actualiza con el bruto real.
     """
@@ -216,21 +252,20 @@ async def _auto_generar_deducciones_porcentuales(db: AsyncSession, pago: Pago) -
     if not desc_rows:
         return {"cantidad": 0, "ids": []}
 
-    # Cargamos el bruto map una sola vez si hay algún desc aplica_a_todos
-    bruto_map: dict[int, Decimal] | None = None
-    if any(getattr(d, "aplica_a_todos", False) for d in desc_rows):
-        bruto_map = await _base_bruto_por_medico_en_pago(db, pago.id)
+    bruto_map = await _base_bruto_por_medico_en_pago(db, pago.id)
+    con_produccion = {mid for mid, bruto in bruto_map.items() if bruto > 0}
 
     creados: list[Deduccion] = []
 
     for desc in desc_rows:
         if getattr(desc, "aplica_a_todos", False):
             # Todos los médicos con bruto > 0 en este pago, paga_por_caja=False
-            med_tuples: list[tuple[int, bool]] = [
-                (mid, False) for mid, bruto in (bruto_map or {}).items() if bruto > 0
-            ]
+            med_tuples: list[tuple[int, bool]] = [(mid, False) for mid in sorted(con_produccion)]
         else:
-            med_tuples = await _medicos_para_descuento(db, desc.id)
+            med_tuples = [
+                (mid, caja) for mid, caja in await _medicos_para_descuento(db, desc.id)
+                if mid in con_produccion
+            ]
 
         if not med_tuples:
             continue
@@ -380,6 +415,9 @@ async def generar_y_recalcular_porcentuales(db: AsyncSession, pago_id: int) -> d
     # sean visibles al calcular el bruto en recalcular_automaticas_porcentuales.
     await db.flush()
 
+    # Las cuotas de compensaciones cuyo mes llegó entran antes: hacen participar al socio.
+    await enrolar_cuotas_del_mes(db, pago)
+
     # Las cuotas y deudas pendientes de los médicos que participan entran al pago
     # solas; antes sólo lo hacía el botón «Refrescar», que no existía en la pantalla.
     await auto_enrolar_pendientes(db, pago)
@@ -409,8 +447,29 @@ async def generar_y_recalcular_porcentuales(db: AsyncSession, pago_id: int) -> d
         "generadas_ids": generadas["ids"],
         "recalculadas": recalculadas["cantidad"],
         "recalculadas_ids": recalculadas["ids"],
+        "eliminadas_en_cero": recalculadas["eliminadas"],
         "retenciones_ganancias": ganancias,
     }
+
+
+async def _actualizar_pago_abierto(db: AsyncSession, pago: Pago, enrolar: bool = True) -> None:
+    """
+    Pone al día el pago abierto después de tocar una deducción a mano (alta, estado, monto,
+    caja o baja): enrola o saca las pendientes según quién participa y rehace el orden de
+    cobro. Antes quedaba marcado como «sucio» hasta que alguien apretaba «Refrescar», que se
+    sacó de la pantalla.
+
+    No recalcula las porcentuales: pisaría el monto que el operador acaba de corregir. Eso
+    lo hace generar_y_recalcular_porcentuales cuando cambia la producción del pago.
+    Con enrolar=False sólo rehace el orden de cobro (al quitar una del pago, para que no
+    vuelva a entrar en el acto).
+    """
+    await db.flush()
+    if enrolar:
+        await auto_enrolar_pendientes(db, pago)
+        await db.flush()
+    await _recalcular_montos_aplicados_en_pago(db, pago.id)
+    pago.deducciones_dirty = False
 
 
 async def refrescar_deducciones_pago(db: AsyncSession, pago: Pago) -> dict:
@@ -499,11 +558,16 @@ async def crear_saldos_deudores(db: AsyncSession, pago: Pago) -> dict:
         )
     await quitar_saldos_deudores_del_pago(db, pago.id)
 
-    filas = (await db.execute(
-        select(PagoMedico.medico_id, PagoMedico.reconocido).where(
-            PagoMedico.pago_id == pago.id, PagoMedico.reconocido < 0
-        )
-    )).all()
+    # Sólo quien sigue en el pago: un resumen viejo de alguien que salió daba una deuda falsa (N16).
+    presentes = await _medicos_en_pago(db, pago.id)
+    filas = [
+        (medico_id, reconocido) for medico_id, reconocido in (await db.execute(
+            select(PagoMedico.medico_id, PagoMedico.reconocido).where(
+                PagoMedico.pago_id == pago.id, PagoMedico.reconocido < 0
+            )
+        )).all()
+        if medico_id in presentes
+    ]
     total = Decimal("0")
     for medico_id, reconocido in filas:
         monto = (-Decimal(reconocido)).quantize(TWOPLACES)
@@ -576,7 +640,10 @@ async def crear_programa(db: AsyncSession, payload: DeduccionCreate) -> List[Ded
             mes_aplicar=mes,
             anio_aplicar=anio,
             pagador_medico_id=payload.pagador_medico_id,
-            generado_en_pago_id=open_pago.id if estado == "en_pago" else None,
+            # Entra como las cuotas que se enrolan solas, sin marca de pago: así el enrolamiento
+            # la devuelve a pendiente si el médico no participa del pago, y «Deshacer» del
+            # concepto no la borra como si la hubiera generado el pago.
+            generado_en_pago_id=None,
         )
         db.add(ded)
         creados.append(ded)
@@ -586,9 +653,9 @@ async def crear_programa(db: AsyncSession, payload: DeduccionCreate) -> List[Ded
 
     await db.flush()
 
-    # Marcar dirty si hay pago abierto y se enroló alguna
+    # Si alguna entró al pago abierto, se saca la de quien no participa y se rehace el orden de cobro.
     if open_pago and any(d.estado == "en_pago" for d in creados):
-        await marcar_deducciones_dirty(db, open_pago.id)
+        await _actualizar_pago_abierto(db, open_pago)
 
     await db.commit()
     for d in creados:
@@ -998,6 +1065,8 @@ async def cambiar_estado_item(db: AsyncSession, id: int, nuevo_estado: str) -> D
     if (db_actual, nuevo_estado) not in TRANSICIONES_VALIDAS:
         raise ValueError(f"transicion_invalida:{db_actual}:{nuevo_estado}")
 
+    pago_a_actualizar: Optional[Pago] = None
+
     # Side effects por transición
     if nuevo_estado == "aplicado":
         # Crear o actualizar DeduccionAplicacion sin pago_id (cobro en caja / manual).
@@ -1023,9 +1092,7 @@ async def cambiar_estado_item(db: AsyncSession, id: int, nuevo_estado: str) -> D
         ded.monto_aplicado = ded.calculado_total
         if db_actual == "en_pago":
             ded.generado_en_pago_id = None
-            pago = await _get_open_pago(db)
-            if pago:
-                await marcar_deducciones_dirty(db, pago.id)
+            pago_a_actualizar = await _get_open_pago(db)
 
     elif db_actual == "aplicado" and nuevo_estado == "pendiente":
         # Revertir cobro en caja
@@ -1041,16 +1108,20 @@ async def cambiar_estado_item(db: AsyncSession, id: int, nuevo_estado: str) -> D
         pago = await _get_open_pago(db)
         if not pago:
             raise ValueError("no_pago_abierto")
-        ded.generado_en_pago_id = pago.id
-        await marcar_deducciones_dirty(db, pago.id)
+        # Entra como enrolada, sin marca de pago: la marca es de lo que el pago genera
+        # («Generar», porcentuales, Ganancias), y con ella «Deshacer» la borraba y al eliminar
+        # el pago quedaba eliminada.
+        ded.generado_en_pago_id = None
+        pago_a_actualizar = pago
 
     elif db_actual == "en_pago" and nuevo_estado in ("pendiente", "cancelado"):
         ded.generado_en_pago_id = None
-        pago = await _get_open_pago(db)
-        if pago:
-            await marcar_deducciones_dirty(db, pago.id)
+        pago_a_actualizar = await _get_open_pago(db)
 
     ded.estado = nuevo_estado
+    if pago_a_actualizar:
+        # Al pasarla a pendiente no se vuelve a enrolar: si no, entraba de nuevo al pago en el acto.
+        await _actualizar_pago_abierto(db, pago_a_actualizar, enrolar=nuevo_estado != "pendiente")
     await db.commit()
     await db.refresh(ded)
     return await _ded_to_historial(db, ded)
@@ -1076,11 +1147,10 @@ async def pagar_deduccion(db: AsyncSession, id: int) -> DeduccionHistorialItem:
         raise ValueError(f"no_editable:{ded.estado}")
 
     # Si estaba en_pago, sacarlo del pago antes de aplicar en caja
+    pago_a_actualizar: Optional[Pago] = None
     if ded.estado == "en_pago":
         ded.generado_en_pago_id = None
-        pago = await _get_open_pago(db)
-        if pago:
-            await marcar_deducciones_dirty(db, pago.id)
+        pago_a_actualizar = await _get_open_pago(db)
 
     # Lo que falta cobrar, no el total: si ya se cobró una parte por liquidación
     # (monto_aplicado > 0, ej. una cuota parcialmente aplicada en un pago
@@ -1113,6 +1183,8 @@ async def pagar_deduccion(db: AsyncSession, id: int) -> DeduccionHistorialItem:
                 aplicado=saldo,
             ))
 
+    if pago_a_actualizar:
+        await _actualizar_pago_abierto(db, pago_a_actualizar)
     await db.commit()
     await db.refresh(ded)
     return await _ded_to_historial(db, ded)
@@ -1149,7 +1221,7 @@ async def cambiar_monto_item(db: AsyncSession, id: int, monto: Decimal) -> Deduc
     if ded.estado == "en_pago":
         pago = await _get_open_pago(db)
         if pago:
-            await marcar_deducciones_dirty(db, pago.id)
+            await _actualizar_pago_abierto(db, pago)
 
     await db.commit()
     await db.refresh(ded)
@@ -1170,10 +1242,7 @@ async def eliminar_item(db: AsyncSession, id: int) -> DeduccionItemEliminarRespo
         if not pago:
             raise ValueError("no_editable:aplicado")
 
-    if ded.estado == "en_pago":
-        pago = await _get_open_pago(db)
-        if pago:
-            await marcar_deducciones_dirty(db, pago.id)
+    pago_a_actualizar = await _get_open_pago(db) if ded.estado == "en_pago" else None
 
     # Un porcentual generado para un pago (cuota_nro = id del pago) se marca eliminado en lugar
     # de borrarse: así no se vuelve a generar en ese pago. Lo mismo la retención de Ganancias.
@@ -1184,12 +1253,14 @@ async def eliminar_item(db: AsyncSession, id: int) -> DeduccionItemEliminarRespo
     )
     if ded.origen == "manual" or porcentual_de_pago:
         ded.estado = "eliminado"
-        await db.commit()
-        return DeduccionItemEliminarResponse(id=id, origen=ded.origen, estado="eliminado")
+        resp = DeduccionItemEliminarResponse(id=id, origen=ded.origen, estado="eliminado")
     else:
         await db.delete(ded)
-        await db.commit()
-        return DeduccionItemEliminarResponse(id=id, origen="automatico", estado="eliminado")
+        resp = DeduccionItemEliminarResponse(id=id, origen="automatico", estado="eliminado")
+    if pago_a_actualizar:
+        await _actualizar_pago_abierto(db, pago_a_actualizar)
+    await db.commit()
+    return resp
 
 
 # =============================================================================
@@ -1372,11 +1443,12 @@ async def deshacer_descuentos_generados(
     """
     Deshace los efectos de bulk_generar_descuento para este pago:
 
-    1. Elimina físicamente las deducciones creadas por el pago
-       (generado_en_pago_id = pago_id).
+    1. Elimina físicamente las deducciones creadas por el pago: automáticas, con
+       generado_en_pago_id = pago_id y creadas después del pago.
 
-    2. Revierte a 'pendiente' las deducciones que estaban en_pago pero NO fueron
-       creadas por este pago (generado_en_pago_id IS NULL) — son las enroladas.
+    2. Revierte a 'pendiente' las demás que estaban en_pago — las enroladas, y las
+       manuales o anteriores al pago que quedaron marcadas con su id (antes se marcaban
+       al cargarlas o pasarlas al pago a mano, y este paso las borraba).
 
     Si se pasa desc_id, ambas operaciones se restringen a ese descuento.
     """
@@ -1387,7 +1459,11 @@ async def deshacer_descuentos_generados(
         raise ValueError("pago_cerrado")
 
     # ── 1. Eliminar las generadas por este pago ──────────────────────────────
-    filtro_generadas = [Deduccion.generado_en_pago_id == pago_id]
+    filtro_generadas = [
+        Deduccion.generado_en_pago_id == pago_id,
+        Deduccion.origen == "automatico",
+        Deduccion.created_at >= pago.created_at,
+    ]
     if desc_id is not None:
         filtro_generadas.append(Deduccion.descuento_id == desc_id)
 
@@ -1404,7 +1480,7 @@ async def deshacer_descuentos_generados(
     # ── 2. Revertir a pendiente las enroladas (en_pago sin generado_pago_id) ─
     filtro_enroladas = [
         Deduccion.estado == "en_pago",
-        Deduccion.generado_en_pago_id.is_(None),
+        or_(Deduccion.generado_en_pago_id.is_(None), Deduccion.generado_en_pago_id == pago_id),
     ]
     if desc_id is not None:
         filtro_enroladas.append(Deduccion.descuento_id == desc_id)
@@ -1412,7 +1488,7 @@ async def deshacer_descuentos_generados(
     await db.execute(
         update(Deduccion)
         .where(*filtro_enroladas)
-        .values(estado="pendiente")
+        .values(estado="pendiente", generado_en_pago_id=None)
     )
     await db.flush()
 

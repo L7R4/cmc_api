@@ -5,10 +5,17 @@ from typing import Optional, List, Dict, Any
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.auth import sessions
-from app.auth.identidad import asignar_rol_base_si_falta
+from app.auth.identidad import ROL_BASE, asignar_rol_base_si_falta
+from app.auth.permissions import get_effective_permission_codes
+from app.auth.scopes import ROLES, Scope
 from app.db.models import ListadoMedico, SolicitudRegistro, Especialidad
 from app.db.models.medico import ESTADO_ACTIVO, ESTADO_PENDIENTE, ESTADOS_CUENTA
-from app.core.passwords import hash_password, hash_password_inicial
+from app.core.passwords import (
+    generar_password_provisoria,
+    hash_password,
+    hash_password_inicial,
+    vencimiento_password_provisoria,
+)
 from app.common.dates import _parse_date
 
 def _int_or_zero(v: Optional[str]) -> int:
@@ -63,6 +70,69 @@ async def cambiar_estado_cuenta(db: AsyncSession, medico: ListadoMedico, estado:
     await db.commit()
     if estado != ESTADO_ACTIVO:
         await sessions.revocar_sesiones(db, medico.ID, motivo="cuenta_inactiva")
+
+
+class RenovacionNoPermitida(Exception):
+    """La cuenta tiene permisos que el operativo no tiene."""
+
+    def __init__(self, faltan: list[str]) -> None:
+        super().__init__(", ".join(faltan))
+        self.faltan = faltan
+
+
+def permisos_que_faltan(scopes_operador: list[str], scopes_objetivo: list[str]) -> set[str]:
+    """Permisos de la cuenta objetivo que el operativo no tiene.
+
+    Quien renueva una contraseña puede entrar a esa cuenta con la provisoria
+    antes de dictarla. Si la cuenta puede hacer algo que el operativo no, eso es
+    una escalada: un facturador renovándole la contraseña a un admin se queda
+    con todo el sistema. Por eso se compara lo que cada uno **puede hacer**, no
+    el nombre del rol: también cubre a un socio con permisos sueltos por
+    `user_permission`.
+
+    No cuentan los permisos base del rol `medico` ni los "propio": los tiene
+    cualquier socio sobre sus propios datos, y un liquidador —que no carga
+    validaciones— tiene que poder renovarle la contraseña a un médico. Tampoco
+    los códigos que ya no están en el catálogo (`CODIGOS_OBSOLETOS`), que no
+    habilitan nada.
+    """
+    catalogo = {s.value for s in Scope}
+    base = {s.value for s in ROLES[ROL_BASE]}
+    administrativos = {
+        c for c in scopes_objetivo
+        if c in catalogo and c not in base and not c.endswith("_propio")
+    }
+    return administrativos - set(scopes_operador)
+
+
+async def renovar_password(
+    db: AsyncSession, medico: ListadoMedico, *, scopes_operador: list[str]
+) -> tuple[str, datetime]:
+    """"Renovar contraseña" desde el legajo. Hace commit.
+
+    Genera una contraseña provisoria aleatoria, que vence a las
+    `HORAS_PASSWORD_PROVISORIA` y obliga a cambiarla al entrar. Devuelve
+    `(contraseña en claro, vencimiento UTC)`: el claro sale **sólo** en la
+    respuesta, para que el operativo se la dicte al socio; no se guarda ni se
+    loguea en ningún lado.
+
+    Cierra todas las sesiones de la cuenta, por el mismo motivo que el cambio
+    de contraseña (A7): a veces se pide porque otro sí pudo entrar.
+    """
+    faltan = permisos_que_faltan(
+        scopes_operador, await get_effective_permission_codes(db, medico.ID)
+    )
+    if faltan:
+        raise RenovacionNoPermitida(sorted(faltan))
+
+    password = generar_password_provisoria()
+    vence = vencimiento_password_provisoria()
+    medico.hashed_password = hash_password(password)
+    medico.must_change_password = True
+    medico.password_provisoria_vence = vence
+    await db.commit()
+    await sessions.revocar_sesiones(db, medico.ID, motivo="renovar_password")
+    return password, vence
 
 
 async def create_medico_and_solicitud(db: AsyncSession, body):

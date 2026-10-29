@@ -7,9 +7,9 @@ inventadas.
 
 El foco está en la forma del `<Item>`, que es lo único que separa una
 autorización de un rechazo y que no está documentado en ningún lado salvo en el
-PHP que corre en producción. Nobis homologa el código de su lado —no hay tabla
-de homologación acá, a diferencia de Sancor—; lo único que varía por código es
-bajo qué nomenclador anunciarlo. Ver `CODIGOS_FORMA_DIRECTA` en
+PHP que corre en producción. Nobis homologa casi todo de su lado —la tabla de
+`obras/nobis/homologador.py` sólo tiene `320101`—; lo único que varía por código
+es bajo qué nomenclador anunciarlo. Ver `CODIGOS_FORMA_DIRECTA` en
 `obras/nobis/cliente.py`, que documenta cómo se distingue "forma equivocada"
 (el mensaje `Nomenclador o Practica <código> Inexistente`) de un rechazo de
 negocio normal.
@@ -365,3 +365,110 @@ async def test_afiliado_no_encontrado(monkeypatch):
     assert r["encontrado"] is False
     assert r["activo"] is False
     assert r["nombre"] is None
+
+
+# ── Homologación: 320101 → 420132 ─────────────────────────────────────────────
+
+@pytest.mark.parametrize("especialidad", [None, 41, 99])
+def test_320101_se_homologa_a_420132_para_cualquier_especialidad(especialidad):
+    from app.modules.validaciones.obras.nobis.homologador import homologar
+
+    assert homologar("320101", especialidad) == ("420132", "320101")
+
+
+def test_lo_que_no_esta_en_la_tabla_de_nobis_va_tal_cual():
+    from app.modules.validaciones.obras.nobis.homologador import homologar
+
+    assert homologar("420132", None) == ("420132", None)
+    assert homologar("420101", 41) == ("420101", None)
+    assert homologar("320002", None) == ("320002", None), "320002 no se homologa en Nobis"
+
+
+def test_la_tabla_real_de_nobis_es_valida():
+    from app.modules.validaciones.obras.nobis import homologador
+
+    homologador._validar(homologador.HOMOLOGACIONES)
+
+
+def test_el_codigo_homologado_viaja_en_la_forma_origen_99():
+    """420132 vive bajo el nomenclador 99: es con el que Nobis lo autoriza."""
+    item = _item(_orden("420132"))
+    assert "<OrigenTipoNomCod>99</OrigenTipoNomCod>" in item
+    assert "<OrigenPracticaCod>420132</OrigenPracticaCod>" in item
+
+
+@pytest.mark.asyncio
+async def test_validar_manda_420132_pero_cotiza_y_devuelve_320101(monkeypatch):
+    """Homologar cambia sólo lo que se transmite: el precio, el código del
+    resultado (lo que se graba en `cod_nom`) y lo que se factura son los del
+    Colegio."""
+    from decimal import Decimal
+    from types import SimpleNamespace
+
+    from app.modules.validaciones.obras.nobis.validador import ValidadorNobis
+
+    enviado = {}
+
+    async def _insertar(**kw):
+        enviado.update(kw)
+        return nobis.RespuestaNobis(
+            autorizada=True, estado_detalle="Autorizado", estado="A",
+            nro_orden="123", cod_autorizacion="ABC", nombre_afiliado="PRUEBA",
+        )
+
+    monkeypatch.setattr(nobis, "insertar_autorizacion", _insertar)
+
+    precios = []
+
+    async def _precio(codigo, **_):
+        precios.append(codigo)
+        return Decimal("1000")
+
+    ctx = SimpleNamespace(
+        medico=SimpleNamespace(MATRICULA_PROV=7328),
+        fecha=datetime.date(2026, 10, 28),
+        especialidad_principal=lambda: 41,
+        precio=_precio,
+    )
+    entrada = SimpleNamespace(codigo="320101", nro_afiliado="38407571", token="290894", cantidad=1)
+
+    res = await ValidadorNobis().validar(ctx, entrada)
+
+    assert enviado["codigo_practica"] == "420132", "a Nobis le llega el homologado"
+    assert precios == ["320101"], "se cotiza el del Colegio"
+    assert res.codigo == "320101", "se graba el del Colegio"
+    assert res.traza["codigo_colegio"] == "320101"
+    assert res.traza["codigo_enviado"] == "420132"
+
+
+@pytest.mark.asyncio
+async def test_validar_sin_homologacion_manda_el_mismo_codigo(monkeypatch):
+    from decimal import Decimal
+    from types import SimpleNamespace
+
+    from app.modules.validaciones.obras.nobis.validador import ValidadorNobis
+
+    enviado = {}
+
+    async def _insertar(**kw):
+        enviado.update(kw)
+        return nobis.RespuestaNobis(autorizada=True, estado_detalle="Autorizado", estado="A", nro_orden="1")
+
+    monkeypatch.setattr(nobis, "insertar_autorizacion", _insertar)
+
+    async def _precio(codigo, **_):
+        return Decimal("1000")
+
+    ctx = SimpleNamespace(
+        medico=SimpleNamespace(MATRICULA_PROV=7328),
+        fecha=datetime.date(2026, 10, 28),
+        especialidad_principal=lambda: 41,
+        precio=_precio,
+    )
+    entrada = SimpleNamespace(codigo="420351", nro_afiliado="38407571", token="290894", cantidad=1)
+
+    res = await ValidadorNobis().validar(ctx, entrada)
+
+    assert enviado["codigo_practica"] == "420351"
+    assert res.traza["codigo_colegio"] == "420351"
+    assert res.traza["codigo_enviado"] == "420351"

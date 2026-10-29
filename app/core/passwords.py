@@ -22,7 +22,20 @@ creada hacía dos años que nunca se usó seguía siendo accesible con su matrí
 que es información de registro público de 4-5 dígitos. Era la mitad de la cadena
 de toma de control de cuentas de §2.4. Se eliminó: hoy la única forma de entrar
 es con el hash guardado.
+
+## Contraseña provisoria ("Renovar contraseña")
+
+Cuando un socio se olvida la contraseña, el personal del Colegio la renueva
+desde el legajo (`POST /api/medicos/{id}/renovar-password`). No vuelve a
+`PASSWORD_INICIAL`: se genera una **aleatoria**, que el operativo ve una sola
+vez para dictársela, y que **vence** a las `HORAS_PASSWORD_PROVISORIA`. El
+vencimiento vive en `listado_medico.password_provisoria_vence`.
+
+La del alta sigue siendo `PASSWORD_INICIAL` y no vence: así lo decidió el
+Colegio. Lo que comparten las dos es `must_change_password`.
 """
+import secrets
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from passlib.context import CryptContext
@@ -40,6 +53,18 @@ MIN_PASSWORD_LENGTH = 6
 # administrativa. Es pública a propósito —el médico la recibe por teléfono o en
 # el mostrador— y por eso viaja siempre junto a `must_change_password = True`.
 PASSWORD_INICIAL = "cmc1785"
+
+# Cuánto dura la contraseña provisoria de "Renovar contraseña". Alcanza para que
+# el socio la reciba por teléfono o WhatsApp y entre; si no entró, se pide otra.
+HORAS_PASSWORD_PROVISORIA = 48
+
+# Sin caracteres que se confunden al dictarla o al leerla en pantalla
+# (0/O, 1/l/I) y sin mayúsculas: se dicta por teléfono.
+_ALFABETO_PROVISORIA = "abcdefghjkmnpqrstuvwxyz23456789"
+
+MENSAJE_PROVISORIA_VENCIDA = (
+    "Tu contraseña provisoria venció. Pedile una nueva al Colegio."
+)
 
 
 def validate_new_password(raw: str) -> str:
@@ -67,6 +92,38 @@ def needs_update(hashed: Optional[str]) -> bool:
 def hash_password_inicial() -> str:
     """Hash de `PASSWORD_INICIAL`. Único punto de alta de credenciales."""
     return hash_password(PASSWORD_INICIAL)
+
+
+def generar_password_provisoria() -> str:
+    """Contraseña aleatoria de 8 caracteres en dos bloques, p. ej. `k7mp-2qxa`.
+
+    31 símbolos posibles por carácter: ~40 bits. Alcanza de sobra con el rate
+    limit del login (8 intentos fallidos por cuenta cada 15 minutos) y con que
+    vence a las `HORAS_PASSWORD_PROVISORIA`.
+    """
+    def bloque() -> str:
+        return "".join(secrets.choice(_ALFABETO_PROVISORIA) for _ in range(4))
+
+    return f"{bloque()}-{bloque()}"
+
+
+def _ahora() -> datetime:
+    """UTC naive, como el resto de las columnas DATETIME de la base."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def vencimiento_password_provisoria() -> datetime:
+    return _ahora() + timedelta(hours=HORAS_PASSWORD_PROVISORIA)
+
+
+def tiene_password_provisoria(user: ListadoMedico) -> bool:
+    """La contraseña actual la generó "Renovar contraseña" y todavía no se cambió."""
+    return user.password_provisoria_vence is not None
+
+
+def password_provisoria_vencida(user: ListadoMedico) -> bool:
+    vence = user.password_provisoria_vence
+    return vence is not None and vence <= _ahora()
 
 
 async def verify_and_upgrade(

@@ -341,7 +341,7 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     # Marca un socio como organización (clínica/sanatorio/servicio). Es editar
     # un campo del legajo, mismo scope que el resto de la edición.
     ("PATCH", "/api/medicos/{medico_id}/organizacion"): Scope.MEDICO_EDITAR,
-    ("POST", "/api/medicos/{medico_id}/reset-password"): Scope.MEDICO_EDITAR,
+    ("POST", "/api/medicos/{medico_id}/renovar-password"): Scope.MEDICO_RENOVAR_PASSWORD,
     ("GET", "/api/medicos/{medico_id}/conceptos"): LECTURA_PADRON,
     ("GET", "/api/medicos/{medico_id}/deuda"): LECTURA_MEDICO,
     ("POST", "/api/medicos/{medico_id}/deudas_manual"): Scope.MEDICO_EDITAR,
@@ -810,6 +810,15 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
 }
 
 
+# Lo único que puede usar una sesión abierta con contraseña provisoria: saber
+# quién es (el front lo necesita para mandar a la pantalla de cambio) y
+# cambiarla. Login, refresh y logout son públicos y no pasan por acá.
+RUTAS_CON_PASSWORD_PROVISORIA: frozenset[tuple[str, str]] = frozenset({
+    ("GET", "/auth/me"),
+    ("POST", "/auth/change-password"),
+})
+
+
 def scope_requerido(metodo: str, ruta: str) -> Scope | tuple[Scope, ...] | _Marca | None:
     """Scope de la ruta, o None si no está declarada."""
     return SCOPES_POR_RUTA.get((metodo.upper(), ruta))
@@ -875,6 +884,14 @@ async def enforce_authz(
     # intenta /auth/refresh, ahí también falla, y cae al login. Ver A7 y A12.
     if await access_revocado(db, user.get("uid"), user.get("iat")):
         raise HTTPException(401, "token_revocado")
+
+    # Sesión abierta con la contraseña provisoria de "Renovar contraseña": lo
+    # único que puede hacer es cambiarla. La conocen al menos dos personas —el
+    # socio y el operativo que se la dictó—, así que el front redirigiendo a la
+    # pantalla de cambio no alcanza. Va antes del chequeo de scopes y no depende
+    # de RBAC_ENFORCE.
+    if user.get("pwd_prov") and (metodo, ruta) not in RUTAS_CON_PASSWORD_PROVISORIA:
+        raise HTTPException(403, "password_provisoria")
 
     if requerido is SOLO_AUTENTICADO:
         return user

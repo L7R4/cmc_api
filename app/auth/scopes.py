@@ -159,6 +159,10 @@ class Scope(StrEnum):
     MEDICO_EDITAR_BANCARIO = "medico:editar_bancario"
     MEDICO_ELIMINAR = "medico:eliminar"
     MEDICO_DOCUMENTO = "medico:documento"
+    # "Renovar contraseña" desde el legajo. Separado de MEDICO_EDITAR: quien la
+    # renueva puede entrar a esa cuenta con la provisoria, así que conviene poder
+    # dárselo o sacárselo a una persona sin tocar el resto de la edición.
+    MEDICO_RENOVAR_PASSWORD = "medico:renovar_password"
 
     PADRON_LEER = "padron:leer"
     PADRON_EDITAR = "padron:editar"
@@ -268,6 +272,7 @@ ROLES: dict[str, set[Scope]] = {
         Scope.MEDICO_EDITAR,
         Scope.MEDICO_EDITAR_BANCARIO,
         Scope.MEDICO_DOCUMENTO,
+        Scope.MEDICO_RENOVAR_PASSWORD,
         Scope.FACTURACION_LEER,
         Scope.FACTURACION_CARGAR,
         Scope.FACTURACION_CERRAR,
@@ -328,6 +333,7 @@ ROLES: dict[str, set[Scope]] = {
         Scope.MEDICO_EDITAR,
         Scope.MEDICO_EDITAR_BANCARIO,
         Scope.MEDICO_DOCUMENTO,
+        Scope.MEDICO_RENOVAR_PASSWORD,
         # No estaba en la lista del Colegio y se agrega igual: sin esto se
         # rompe el botón "Exportar" de Deducciones, porque
         # `GET /api/deducciones/export` pide `deduccion:leer` **y**
@@ -485,6 +491,7 @@ DESCRIPCIONES: dict[Scope, str] = {
     Scope.MEDICO_EDITAR_BANCARIO: "Modificar el CBU de un médico",
     Scope.MEDICO_ELIMINAR: "Baja de un médico",
     Scope.MEDICO_DOCUMENTO: "Alta y baja de documentos adjuntos de médicos",
+    Scope.MEDICO_RENOVAR_PASSWORD: "Renovar la contraseña de un socio (genera una provisoria)",
     Scope.PADRON_LEER: "Ver padrones y asignaciones por obra social",
     Scope.PADRON_EDITAR: "Editar padrones, conceptos y especialidades asignadas",
     Scope.CATALOGO_LEER: "Ver obras sociales, especialidades, períodos y valores",

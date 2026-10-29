@@ -11,7 +11,15 @@ from app.auth.deps import get_current_user, get_current_user_with_scopes_and_rol
 from app.auth.identidad import SinAcceso, construir_usuario
 from app.core import ratelimit
 from app.core.config import settings
-from app.core.passwords import hash_password, validate_new_password, verify_and_upgrade, verify_password
+from app.core.passwords import (
+    MENSAJE_PROVISORIA_VENCIDA,
+    hash_password,
+    password_provisoria_vencida,
+    tiene_password_provisoria,
+    validate_new_password,
+    verify_and_upgrade,
+    verify_password,
+)
 from app.core.security import create_access_token, decode_token
 from app.db.database import get_db
 from app.db.models import ListadoMedico
@@ -74,6 +82,12 @@ async def login(
 
     ratelimit.registrar_exito(req, ns)
 
+    # La provisoria de "Renovar contraseña" vence (la del alta no). Se avisa
+    # recién acá, con la contraseña ya verificada, por lo mismo que el estado de
+    # la cuenta.
+    if password_provisoria_vencida(medico):
+        raise HTTPException(401, MENSAJE_PROVISORIA_VENCIDA)
+
     # Recién con la contraseña verificada se dice por qué no entra: antes, el
     # estado de la cuenta se informaba a cualquiera que probara un número de socio.
     try:
@@ -81,7 +95,10 @@ async def login(
     except SinAcceso as e:
         raise HTTPException(403, e.mensaje)
 
-    access  = create_access_token(sub=str(medico.NRO_SOCIO), uid=medico.ID, scopes=scopes, role=role)
+    access  = create_access_token(
+        sub=str(medico.NRO_SOCIO), uid=medico.ID, scopes=scopes, role=role,
+        provisoria=tiene_password_provisoria(medico),
+    )
     # El refresh queda registrado en `refresh_tokens` antes de salir: es lo que
     # hace que el logout y el cambio de contraseña puedan cerrarlo de verdad.
     refresh = await sessions.emitir_refresh(db, medico, origen="web", request=req)
@@ -137,6 +154,12 @@ async def refresh_token(
         _borrar_cookies_sesion(response)
         raise HTTPException(401, e.mensaje)
 
+    # Una sesión abierta con la provisoria no sobrevive a su vencimiento: el
+    # refresh dura 15 días y la provisoria 48 horas.
+    if password_provisoria_vencida(medico):
+        _borrar_cookies_sesion(response)
+        raise HTTPException(401, MENSAJE_PROVISORIA_VENCIDA)
+
     # 3) Rotar la sesión. Acá se valida que el `jti` esté vivo en la base: un
     #    refresh ya canjeado, o revocado por logout o por cambio de contraseña,
     #    no pasa de esta línea aunque su firma verifique.
@@ -153,7 +176,10 @@ async def refresh_token(
 
     # 4) Access nuevo, con los scopes releídos de la base (construir_usuario):
     #    es acá donde un cambio de permisos se hace efectivo.
-    access = create_access_token(sub=str(sub), uid=medico.ID, scopes=scopes, role=role)
+    access = create_access_token(
+        sub=str(sub), uid=medico.ID, scopes=scopes, role=role,
+        provisoria=tiene_password_provisoria(medico),
+    )
 
     max_age = 60 * 60 * 24 * settings.REFRESH_DAYS
     new_csrf = secrets.token_urlsafe(16)
@@ -237,8 +263,10 @@ async def change_password(
 
     ratelimit.registrar_exito(req, nro_socio)
     medico.hashed_password = hash_password(new_password)
-    # La cuenta deja de estar con la contraseña inicial pública.
+    # La cuenta deja de estar con la contraseña inicial pública, o con la
+    # provisoria de "Renovar contraseña".
     medico.must_change_password = False
+    medico.password_provisoria_vence = None
     await db.commit()
 
     # Todos los refresh a revocado y `tokens_valid_from = NOW()`, que invalida

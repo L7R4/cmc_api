@@ -12,6 +12,7 @@ from fastapi import HTTPException
 
 from app.db.models import DetalleFacturacionCMC, ListadoMedico
 from app.modules.validaciones.obras.nobis import cliente as nobis
+from app.modules.validaciones.obras.nobis import homologador
 from app.modules.validaciones.core.contrato import (
     CERO,
     Anulacion,
@@ -61,6 +62,10 @@ class ValidadorNobis(ValidadorOS):
         if not medico.MATRICULA_PROV:
             raise HTTPException(422, "El médico no tiene matrícula provincial cargada.")
 
+    def homologar(self, codigo: str, especialidad: Optional[int]) -> tuple[str, Optional[str]]:
+        """Tabla de `obras/nobis/homologador.py`, por especialidad principal."""
+        return homologador.homologar(codigo, especialidad)
+
     async def validar(self, ctx: Contexto, entrada: EntradaNobis) -> ResultadoValidacion:
         """Nobis devuelve tres estados, y los tres se graban:
 
@@ -84,14 +89,22 @@ class ValidadorNobis(ValidadorOS):
         En `nro_autorizacion` se guarda el **número de orden** (`Num`), que es
         lo que identifica la orden en Nobis; el código de autorización (`Cod`)
         queda en la traza, porque es lo que después pide la anulación.
+
+        La homologación (`obras/nobis/homologador.py`) decide **sólo con qué
+        código se le habla a Nobis**. El precio, lo que se graba en `cod_nom` y
+        lo que se factura usan el código del Colegio; el enviado queda anotado
+        en la traza como `codigo_enviado`.
         """
+        codigo_envio, codigo_colegio = self.homologar(
+            entrada.codigo, ctx.especialidad_principal()
+        )
         precio = await ctx.precio(entrada.codigo)
 
         try:
             res = await nobis.insertar_autorizacion(
                 numero_afiliado=entrada.nro_afiliado,
                 mat_prov=str(ctx.medico.MATRICULA_PROV or ""),
-                codigo_practica=entrada.codigo,
+                codigo_practica=codigo_envio,
                 token=entrada.token,
                 cantidad=entrada.cantidad,
                 fecha_prescripcion=ctx.fecha,
@@ -122,6 +135,8 @@ class ValidadorNobis(ValidadorOS):
             # en la traza para que el prestador sepa cuánto cobrarle al paciente.
             coseguro=CERO,
             traza={
+                "codigo_colegio": codigo_colegio or entrada.codigo,
+                "codigo_enviado": codigo_envio,
                 "modo": res.modo,
                 "estado": res.estado,
                 "nro_orden": res.nro_orden,

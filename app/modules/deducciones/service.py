@@ -45,13 +45,12 @@ from app.modules.deducciones.helpers import (
     _enrich_deduccion,
     _es_vencida,
     _floor2,
-    _gastos_por_medico_en_pago,
     _get_open_pago,
-    _honorarios_por_medico_en_pago,
     _medicos_en_pago,
     _medicos_para_descuento,
     _nro_colegio_map_de_deducciones,
     _pagadores_de_descuento,
+    base_neta_del_descuento,
     enrich_many,
     NRO_COLEGIO_CONTRIB_GASTOS,
     NRO_COLEGIO_CONTRIB_HONORARIOS,
@@ -165,11 +164,10 @@ async def recalcular_automaticas_porcentuales(db: AsyncSession, pago_id: int) ->
     Recalcula calculado_total de las deducciones automáticas en_pago que usan porcentaje y
     nacieron en este pago. Una porcentual pendiente de un pago anterior no se toca: ya tiene
     su monto (el de aquel pago) y recalcularla con la base de este la cobraba dos veces (N15).
-    Determina la base correcta según nro_colegio del descuento:
-      - NRO_COLEGIO_CONTRIB_HONORARIOS → base = honorarios del médico
-      - NRO_COLEGIO_CONTRIB_GASTOS     → base = gastos del médico
-      - NRO_COLEGIO_INGRESOS_BRUTOS    → base = bruto − débitos + créditos (como el sistema anterior)
-      - resto                          → base = importe_total (bruto)
+    La base es siempre el NETO del médico, como el sistema anterior (ver base_neta_del_descuento):
+      - NRO_COLEGIO_CONTRIB_HONORARIOS → honorarios + créditos − débitos
+      - NRO_COLEGIO_CONTRIB_GASTOS     → gastos + créditos − débitos
+      - resto (Ley 25413, D.G.R., Juzgado…) → honorarios + gastos netos (con adelantos)
     La que da $0 (el socio no tiene base en este pago) se borra: si no, quedaba pendiente y en
     el pago siguiente se cobraba junto con la nueva. Vuelve a crearse si la base aparece.
     Devuelve {"cantidad": int, "ids": list[int], "eliminadas": int} con las deducciones cuyo
@@ -195,9 +193,6 @@ async def recalcular_automaticas_porcentuales(db: AsyncSession, pago_id: int) ->
     )).scalars().all()
     desc_map = {d.id: d for d in desc_rows}
 
-    bruto_map = await _base_bruto_por_medico_en_pago(db, pago_id)
-    hon_map = await _honorarios_por_medico_en_pago(db, pago_id)
-    gas_map = await _gastos_por_medico_en_pago(db, pago_id)
     ret_map = await _base_retenciones_por_medico_en_pago(db, pago_id)
 
     ids_recalculadas: list[int] = []
@@ -208,15 +203,7 @@ async def recalcular_automaticas_porcentuales(db: AsyncSession, pago_id: int) ->
         desc = desc_map.get(ded.descuento_id)
         if not desc:
             continue
-        nro = int(desc.nro_colegio or 0)
-        if nro == NRO_COLEGIO_CONTRIB_HONORARIOS:
-            base = hon_map.get(ded.medico_id, Decimal("0"))
-        elif nro == NRO_COLEGIO_CONTRIB_GASTOS:
-            base = gas_map.get(ded.medico_id, Decimal("0"))
-        elif nro == NRO_COLEGIO_INGRESOS_BRUTOS:
-            base = max(ret_map.get(ded.medico_id, {}).get("importe", Decimal("0")), Decimal("0"))
-        else:
-            base = bruto_map.get(ded.medico_id, Decimal("0"))
+        base = base_neta_del_descuento(int(desc.nro_colegio or 0), ret_map.get(ded.medico_id))
 
         nuevo = (base * ded.porcentaje_aplicado / Decimal(100)).quantize(TWOPLACES)
         if nuevo <= 0 and ded.generado_en_pago_id == pago_id and not ded.monto_aplicado:
@@ -329,7 +316,7 @@ async def _auto_generar_deducciones_porcentuales(db: AsyncSession, pago: Pago) -
 async def _recalcular_montos_aplicados_en_pago(db: AsyncSession, pago_id: int) -> None:
     """
     Recalcula monto_aplicado_preview de todas las deducciones en_pago del pago
-    usando la lógica menor-a-mayor por pagador, sin cambiar estado ni crear
+    usando el orden del sistema anterior por pagador, sin cambiar estado ni crear
     registros DeduccionAplicacion. Es la función de 'preview': muestra cuánto
     se descontaría a cada médico con el disponible actual si se cerrara ahora.
 
@@ -476,7 +463,7 @@ async def refrescar_deducciones_pago(db: AsyncSession, pago: Pago) -> dict:
     """
     Refresco manual del pago abierto. Orquesta en orden:
     1. Auto-enrola deducciones manuales pendientes cuyo período <= pago.
-    2. Recalcula monto_aplicado (preview menor-a-mayor) para todas las en_pago.
+    2. Recalcula monto_aplicado (preview, con el orden del sistema anterior) para todas las en_pago.
     3. Resetea deducciones_dirty = False.
 
     Nota: la generación + recálculo de porcentuales automáticas NO se ejecuta aquí;
@@ -1330,7 +1317,7 @@ async def aplicar_deducciones_al_cierre(db: AsyncSession, pago_id: int) -> dict:
 
     Por cada pagador efectivo (medico o pagador_medico_id):
     - Calcula disponible = bruto - débitos + créditos
-    - Ordena deducciones por saldo_pendiente ASC (menor a mayor)
+    - Ordena las deducciones como el sistema anterior (ver ordenar_deducciones_por_prioridad)
     - Aplica las que entren completas; el resto recibe lo que queda (parcial)
     - Escribe DeduccionAplicacion, actualiza monto_aplicado
     - Completas → estado='aplicado'; parciales o sin cobertura → estado='pendiente'

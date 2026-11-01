@@ -30,12 +30,13 @@ from app.modules.deducciones.schemas import (
 TWOPLACES = Decimal("0.01")
 
 # nro_colegio de descuentos con base de cálculo especial
-NRO_COLEGIO_CONTRIB_HONORARIOS = 100  # base = suma de honorarios del médico
-NRO_COLEGIO_CONTRIB_GASTOS = 101      # base = suma de gastos del médico
+NRO_COLEGIO_CONTRIB_HONORARIOS = 100  # base = honorarios netos del médico (producción + créditos − débitos)
+NRO_COLEGIO_CONTRIB_GASTOS = 101      # base = gastos netos del médico (ídem)
 # Deuda de un médico que cobra menos de lo que debe (débitos > producción): la crea el
 # cierre del pago como deducción pendiente. Va en `cuota_nro` el id del pago que la originó.
 NRO_COLEGIO_SALDO_DEUDOR = 9900
 NRO_COLEGIO_IMPUESTO_LEY = 102        # Imp. Ley 25413
+NRO_COLEGIO_JUZGADO = 110             # Juzgado: porcentaje del socio sobre el total neto
 # Retenciones que el Colegio practica como agente: base = producción neta de débitos y créditos.
 NRO_COLEGIO_INGRESOS_BRUTOS = 200     # D.G.R. (Ingresos Brutos), 2%
 NRO_COLEGIO_GANANCIAS = 300           # AFIP (Ganancias), con escala: app/modules/retenciones
@@ -45,11 +46,13 @@ NRO_COLEGIO_RETENCIONES: frozenset[int] = frozenset({NRO_COLEGIO_INGRESOS_BRUTOS
 # disponible no alcanza. nro_colegio es el número que asigna el Colegio y es
 # estable entre entornos; descuento_id es un autoincrement de la base sin
 # garantía de coincidir entre local y producción (ver diagnóstico M7).
-# Las retenciones van después de las contribuciones y antes que el resto, como en el
-# sistema anterior (contribuciones → D.G.R. → D.G.I. → servicios).
-NRO_COLEGIO_PRIORITARIOS: frozenset[int] = frozenset({
+# Orden del sistema anterior (calcular_deducciones): contribuciones → Ley 25413 → Juzgado →
+# D.G.R. → Ganancias → el resto (cuotas y servicios), éste último por período y después por código.
+ORDEN_PRIORITARIOS: tuple[int, ...] = (
     NRO_COLEGIO_CONTRIB_HONORARIOS, NRO_COLEGIO_CONTRIB_GASTOS, NRO_COLEGIO_IMPUESTO_LEY,
-}) | NRO_COLEGIO_RETENCIONES
+    NRO_COLEGIO_JUZGADO, NRO_COLEGIO_INGRESOS_BRUTOS, NRO_COLEGIO_GANANCIAS,
+)
+NRO_COLEGIO_PRIORITARIOS: frozenset[int] = frozenset(ORDEN_PRIORITARIOS)
 
 #endregion
 
@@ -58,14 +61,11 @@ def ordenar_deducciones_por_prioridad(
     deds: list["Deduccion"], nro_colegio_map: dict[int, int]
 ) -> list["Deduccion"]:
     """
-    Orden de cobro cuando el disponible del pagador no alcanza para todo:
-    los descuentos prioritarios (NRO_COLEGIO_PRIORITARIOS) primero, en orden
-    de nro_colegio; el resto por saldo pendiente ascendente (calculado_total −
-    monto_aplicado), empate por id. Usado tanto por la vista previa como por
-    el cierre real (ver diagnóstico M2) — antes cada uno tenía su propio
-    criterio y divergían. Cuál de los dos criterios es el correcto sigue
-    siendo una decisión de negocio pendiente ("Decisiones del Colegio" #2);
-    mientras tanto usan el mismo acá para que preview y cierre no diverjan.
+    Orden de cobro cuando el disponible del pagador no alcanza para todo, el del sistema
+    anterior (decidido el 1/11/2026): los descuentos de ORDEN_PRIORITARIOS primero, en ese
+    orden; el resto por período (año y mes de aplicación) ascendente, después por nro_colegio
+    y, a igualdad, por id. Usado tanto por la vista previa como por el cierre real (ver
+    diagnóstico M2) para que no diverjan.
 
     nro_colegio_map: {Conceptos.id (== Deduccion.descuento_id): Conceptos.nro_colegio},
     a cargo del llamador (una sola query por corrida, no por pagador).
@@ -75,11 +75,11 @@ def ordenar_deducciones_por_prioridad(
 
     prioritarios = sorted(
         (d for d in deds if nro_colegio(d) in NRO_COLEGIO_PRIORITARIOS),
-        key=nro_colegio,
+        key=lambda d: (ORDEN_PRIORITARIOS.index(nro_colegio(d)), d.id),
     )
     resto = sorted(
         (d for d in deds if nro_colegio(d) not in NRO_COLEGIO_PRIORITARIOS),
-        key=lambda d: (d.calculado_total - d.monto_aplicado, d.id),
+        key=lambda d: (d.anio_aplicar or 9999, d.mes_aplicar or 99, nro_colegio(d) or 999999, d.id),
     )
     return prioritarios + resto
 
@@ -273,6 +273,28 @@ async def _ajustes_por_medico_en_pago(
         else:
             deb_map[med] = deb_map.get(med, Decimal("0")) - neto
     return deb_map, cred_map
+
+
+def base_neta_del_descuento(nro_colegio: int, base: Optional[dict[str, Decimal]]) -> Decimal:
+    """
+    Base de un descuento porcentual, como el sistema anterior: el NETO del médico en el pago
+    (producción + créditos − débitos de los lotes liquidados), nunca negativo.
+      - Contribución s/honorarios (100) → honorarios netos
+      - Contribución s/gastos (101)     → gastos netos
+      - Ley 25413, D.G.R., Juzgado y el resto de los porcentuales → honorarios + gastos netos
+    `base` es la fila de _base_retenciones_por_medico_en_pago (None si el médico no tiene nada).
+    Como en el sistema anterior, si el total neto del médico no es mayor que 0 no se le calcula
+    ninguna deducción, aunque sus honorarios o sus gastos sueltos sean positivos.
+    """
+    if not base or base["importe"] <= 0:
+        return Decimal("0")
+    if nro_colegio == NRO_COLEGIO_CONTRIB_HONORARIOS:
+        monto = base["honorarios"]
+    elif nro_colegio == NRO_COLEGIO_CONTRIB_GASTOS:
+        monto = base["gastos"]
+    else:
+        monto = base["importe"]
+    return max(monto, Decimal("0"))
 
 
 async def _disponible_por_medico_en_pago(

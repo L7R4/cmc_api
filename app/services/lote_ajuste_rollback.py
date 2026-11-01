@@ -11,6 +11,7 @@ from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import LoteAjuste
+from app.modules.liquidacion.service import restaurar_ajustes_facturados
 
 
 async def rollback_lotes_pago(db: AsyncSession, pago_id: int) -> dict:
@@ -20,6 +21,9 @@ async def rollback_lotes_pago(db: AsyncSession, pago_id: int) -> dict:
 
     Devuelve un dict con conteos por tipo para auditoría.
     """
+    # Los ajustes vuelven a su monto cargado (antes del porcentaje de pago de la factura).
+    await restaurar_ajustes_facturados(db, pago_id=pago_id)
+
     # Cubre tanto estado='L' (pago estaba abierto) como 'AP' (pago estaba cerrado)
     res_normal = await db.execute(
         update(LoteAjuste)

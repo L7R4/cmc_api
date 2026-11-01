@@ -153,6 +153,11 @@ class Liquidacion(AuditMixin, Base):
     total_creditos: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), default=0)
     total_neto: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), default=0)
 
+    # Porcentaje de lo facturado que se paga a los médicos (100 = todo; IOSCOR 98 / 98,4). Se elige al
+    # agregar la factura al pago. Los importes del detalle y de los ajustes de la factura quedan ya
+    # multiplicados por este porcentaje; lo facturado se guarda aparte (*_facturado).
+    porcentaje_pago: Mapped[Decimal] = mapped_column(DECIMAL(6, 2), nullable=False, default=Decimal("100.00"), server_default="100.00")
+
     pago: Mapped[Optional["Pago"]] = relationship(back_populates="liquidaciones")
     detalles: Mapped[list["DetalleLiquidacion"]] = relationship(
         back_populates="liquidacion",
@@ -195,6 +200,12 @@ class DetalleLiquidacion(AuditMixin, Base):
     honorarios: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), default=Decimal("0"), server_default="0.00")
     gastos: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), default=Decimal("0"), server_default="0.00")
     importe_total: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), default=Decimal("0"), server_default="0.00")
+
+    # Lo facturado, antes de aplicar el porcentaje de pago de la liquidación. NULL = todavía no se aplicó
+    # ningún porcentaje (lo facturado es lo que dicen honorarios/gastos/importe_total).
+    honorarios_facturado: Mapped[Optional[Decimal]] = mapped_column(DECIMAL(14, 2), nullable=True)
+    gastos_facturado: Mapped[Optional[Decimal]] = mapped_column(DECIMAL(14, 2), nullable=True)
+    importe_facturado: Mapped[Optional[Decimal]] = mapped_column(DECIMAL(14, 2), nullable=True)
 
     # Datos de enriquecimiento para registros CMC (NULL en registros GA)
     fecha_practica: Mapped[Optional[datetime.date]] = mapped_column(Date, nullable=True)

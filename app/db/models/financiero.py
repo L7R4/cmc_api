@@ -122,6 +122,11 @@ class Ajuste(AuditMixin, Base):
     gastos: Mapped[Decimal] = mapped_column(DECIMAL(14, 2), nullable=False, default=Decimal("0.00"), server_default="0.00")
     observacion: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
 
+    # Lo cargado, antes de aplicar el porcentaje de pago de la liquidación de su factura. Sólo se llena
+    # mientras el lote está en un pago (estado L) cuya factura tiene un porcentaje; NULL el resto del tiempo.
+    honorarios_facturado: Mapped[Optional[Decimal]] = mapped_column(DECIMAL(14, 2), nullable=True)
+    gastos_facturado: Mapped[Optional[Decimal]] = mapped_column(DECIMAL(14, 2), nullable=True)
+
     @hybrid_property
     def total(self) -> Decimal:
         return self.honorarios + self.gastos

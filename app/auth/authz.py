@@ -413,6 +413,8 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     # ── Liquidación ──────────────────────────────────────────────────────────
     ("GET", "/api/liquidacion/liquidaciones_por_os/"): Scope.LIQUIDACION_LEER,
     ("POST", "/api/liquidacion/liquidaciones_por_os/crear"): Scope.LIQUIDACION_CREAR,
+    ("GET", "/api/liquidacion/liquidaciones_por_os/porcentaje_sugerido"): Scope.LIQUIDACION_LEER,
+    ("PATCH", "/api/liquidacion/liquidaciones_por_os/{liquidacion_id}/porcentaje"): Scope.LIQUIDACION_CREAR,
     ("GET", "/api/liquidacion/liquidaciones_por_os/{liquidacion_id}"): Scope.LIQUIDACION_LEER,
     ("DELETE", "/api/liquidacion/liquidaciones_por_os/{liquidacion_id}"): Scope.LIQUIDACION_ELIMINAR,
     ("GET", "/api/liquidacion/liquidaciones_por_os/{liquidacion_id}/detalles"): Scope.LIQUIDACION_LEER,

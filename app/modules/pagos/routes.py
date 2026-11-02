@@ -87,6 +87,11 @@ def _enrich_pago(pago: Pago, totales: dict) -> PagoRead:
         total_deduccion=totales["total_deduccion"],
         total_adelantos=totales.get("total_adelantos", 0),
         total_compensaciones=totales.get("total_compensaciones", 0),
+        total_debitos_os=totales.get("total_debitos_os", 0),
+        total_arrastres=totales.get("total_arrastres", 0),
+        total_arrastres_cobrado=totales.get("total_arrastres_cobrado", 0),
+        total_negativo_proximo_mes=totales.get("total_negativo_proximo_mes", 0),
+        total_a_pagar=totales.get("total_a_pagar", totales["total_neto"]),
     )
 
 

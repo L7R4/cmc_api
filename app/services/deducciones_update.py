@@ -16,6 +16,7 @@ from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Deduccion, DeduccionAplicacion
+from app.modules.arrastres.queries import concepto_arrastre_id
 
 
 async def marcar_deducciones_aplicadas(db: AsyncSession, pago_id: int) -> int:
@@ -83,6 +84,20 @@ async def revertir_deducciones_al_reabrir(db: AsyncSession, pago_id: int) -> dic
     await db.execute(
         delete(DeduccionAplicacion).where(DeduccionAplicacion.pago_id == pago_id)
     )
+
+    # El saldo arrastrado que este pago consumió vuelve a pendiente (no a en_pago: no es una
+    # deducción del pago, se resta del reconocido; ver app/modules/arrastres/queries.py).
+    arrastre_id = await concepto_arrastre_id(db)
+    if arrastre_id is not None:
+        await db.execute(
+            update(Deduccion)
+            .where(
+                Deduccion.id.in_(list(deltas.keys())),
+                Deduccion.descuento_id == arrastre_id,
+                Deduccion.estado == "aplicado",
+            )
+            .values(estado="pendiente")
+        )
 
     result = await db.execute(
         update(Deduccion)

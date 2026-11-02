@@ -1,6 +1,6 @@
 import datetime
 from collections import defaultdict
-from decimal import ROUND_DOWN, Decimal
+from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
 from typing import List, Optional
 
 from fastapi import HTTPException
@@ -51,6 +51,8 @@ from app.modules.deducciones.helpers import (
     _nro_colegio_map_de_deducciones,
     _pagadores_de_descuento,
     base_neta_del_descuento,
+    importe_efectivo,
+    _importes_propios_de_descuento,
     enrich_many,
     NRO_COLEGIO_CONTRIB_GASTOS,
     NRO_COLEGIO_CONTRIB_HONORARIOS,
@@ -58,6 +60,7 @@ from app.modules.deducciones.helpers import (
     NRO_COLEGIO_SALDO_DEUDOR,
     ordenar_deducciones_por_prioridad,
 )
+from app.modules.arrastres.queries import concepto_arrastre_id
 from app.modules.retenciones.service import recalcular_retencion_ganancias
 from app.services.compensacion_update import enrolar_cuotas_del_mes
 
@@ -79,6 +82,21 @@ async def auto_enrolar_pendientes(db: AsyncSession, pago: Pago) -> dict:
       paga_por_caja=False, ni medico_id ni pagador_medico_id está en el pago.
     """
     medicos_en_pago: set[int] = await _medicos_en_pago(db, pago.id)
+
+    # El saldo arrastrado (9900) no es una deducción del pago: se resta del reconocido como un
+    # débito (ver app/modules/arrastres/queries.py). Nunca se enrola; si alguna quedó en_pago
+    # de antes, vuelve a pendiente.
+    arrastre_id = await concepto_arrastre_id(db)
+    if arrastre_id is not None:
+        await db.execute(
+            update(Deduccion)
+            .where(Deduccion.descuento_id == arrastre_id, Deduccion.estado == "en_pago")
+            .values(estado="pendiente", generado_en_pago_id=None)
+        )
+    no_es_arrastre = (
+        Deduccion.descuento_id.is_(None) if arrastre_id is None
+        else or_(Deduccion.descuento_id.is_(None), Deduccion.descuento_id != arrastre_id)
+    )
 
     # Desenrolar auto-enroladas cuyo médico/pagador ya no participa en el pago
     if medicos_en_pago:
@@ -111,6 +129,7 @@ async def auto_enrolar_pendientes(db: AsyncSession, pago: Pago) -> dict:
                 and_(
                     Deduccion.paga_por_caja == False,
                     Deduccion.estado == "pendiente",
+                    no_es_arrastre,
                     or_(
                         Deduccion.anio_aplicar < pago.anio,
                         and_(
@@ -195,6 +214,19 @@ async def recalcular_automaticas_porcentuales(db: AsyncSession, pago_id: int) ->
 
     ret_map = await _base_retenciones_por_medico_en_pago(db, pago_id)
 
+    # Porcentaje propio vigente de cada socio (Juzgado…): si lo cambiaron con el pago abierto, la
+    # deducción de este pago lo toma (el porcentaje_aplicado es sólo la foto de cuando se generó).
+    propios = {
+        (int(m), int(d)): Decimal(str(p))
+        for m, d, p in (await db.execute(
+            select(SocioDescuento.medico_id, SocioDescuento.descuento_id, SocioDescuento.porcentaje_propio).where(
+                SocioDescuento.descuento_id.in_(desc_ids),
+                SocioDescuento.fecha_baja.is_(None),
+                SocioDescuento.porcentaje_propio > 0,
+            )
+        )).all()
+    }
+
     ids_recalculadas: list[int] = []
     eliminadas = 0
     for ded in deds_auto:
@@ -203,9 +235,14 @@ async def recalcular_automaticas_porcentuales(db: AsyncSession, pago_id: int) ->
         desc = desc_map.get(ded.descuento_id)
         if not desc:
             continue
+        propio = propios.get((ded.medico_id, ded.descuento_id))
+        if propio is not None and ded.porcentaje_aplicado != propio:
+            ded.porcentaje_aplicado = propio
         base = base_neta_del_descuento(int(desc.nro_colegio or 0), ret_map.get(ded.medico_id))
 
-        nuevo = (base * ded.porcentaje_aplicado / Decimal(100)).quantize(TWOPLACES)
+        # Medio centavo hacia arriba, como el sistema anterior al guardar el importe (el redondeo por
+        # defecto de Decimal, mitad al par, daba un centavo menos: 2.231.205,55 x 30 % = 669.361,665).
+        nuevo = (base * ded.porcentaje_aplicado / Decimal(100)).quantize(TWOPLACES, rounding=ROUND_HALF_UP)
         if nuevo <= 0 and ded.generado_en_pago_id == pago_id and not ded.monto_aplicado:
             await db.delete(ded)
             eliminadas += 1
@@ -222,9 +259,11 @@ async def _auto_generar_deducciones_porcentuales(db: AsyncSession, pago: Pago) -
     Crea deducciones automáticas para descuentos con porcentaje > 0 que no tengan
     una deduccion activa en el período del pago.
 
-    - aplica_a_todos=True : genera para todos los médicos con bruto > 0 en el pago
+    - aplica_a_todos=True : genera para todos los médicos con bruto > 0 en el pago (o neto > 0 por créditos sin factura)
       (misma lógica que bulk_generar_descuento).
     - aplica_a_todos=False: genera solo para los médicos en socio_descuento.
+    - Porcentaje propio del socio (socio_descuento.porcentaje_propio, p. ej. Juzgado): reemplaza al
+      del concepto para ese socio, y el concepto entra aunque su porcentaje sea 0.
 
     En los dos casos, sólo a quien tiene producción en este pago: un socio asignado que no
     produjo quedaba con un porcentual en $0 pendiente que se cobraba en el pago siguiente (N15).
@@ -232,8 +271,13 @@ async def _auto_generar_deducciones_porcentuales(db: AsyncSession, pago: Pago) -
     Se crean con calculado_total=0 como placeholder;
     recalcular_automaticas_porcentuales las actualiza con el bruto real.
     """
+    # Conceptos con porcentaje propio en alguna asignación activa (Juzgado: su porcentaje es 0 y
+    # cada socio tiene el suyo) entran igual que los de porcentaje general.
+    con_propio = select(SocioDescuento.descuento_id).where(
+        SocioDescuento.fecha_baja.is_(None), SocioDescuento.porcentaje_propio > 0
+    )
     desc_rows = (await db.execute(
-        select(Conceptos).where(Conceptos.porcentaje > 0)
+        select(Conceptos).where(or_(Conceptos.porcentaje > 0, Conceptos.id.in_(con_propio)))
     )).scalars().all()
 
     if not desc_rows:
@@ -241,6 +285,10 @@ async def _auto_generar_deducciones_porcentuales(db: AsyncSession, pago: Pago) -
 
     bruto_map = await _base_bruto_por_medico_en_pago(db, pago.id)
     con_produccion = {mid for mid, bruto in bruto_map.items() if bruto > 0}
+    # Como en el sistema anterior, un crédito sin factura (un adelanto sin prestación) también es base de las
+    # contribuciones: el socio cuyo único ingreso en el pago es ese crédito las paga. Si lo neto (producción +
+    # créditos − débitos) no es positivo no hay base, y no se genera nada (N15).
+    con_produccion |= {mid for mid, base in (await _base_retenciones_por_medico_en_pago(db, pago.id)).items() if base["importe"] > 0}
 
     creados: list[Deduccion] = []
 
@@ -254,6 +302,14 @@ async def _auto_generar_deducciones_porcentuales(db: AsyncSession, pago: Pago) -
                 if mid in con_produccion
             ]
 
+        if not med_tuples:
+            continue
+
+        # Porcentaje de cada socio: el propio si lo tiene, si no el del concepto. Quien queda sin
+        # porcentaje (concepto en 0 y sin propio, o con monto propio fijo) no lleva porcentual.
+        propios = {} if getattr(desc, "aplica_a_todos", False) else await _importes_propios_de_descuento(db, desc.id)
+        porc_de = {mid: importe_efectivo(desc, *propios.get(mid, (None, None)))[1] for mid, _ in med_tuples}
+        med_tuples = [(mid, caja) for mid, caja in med_tuples if porc_de[mid] > 0]
         if not med_tuples:
             continue
 
@@ -291,7 +347,7 @@ async def _auto_generar_deducciones_porcentuales(db: AsyncSession, pago: Pago) -
                 medico_id=mid,
                 descuento_id=desc.id,
                 calculado_total=Decimal("0.00"),
-                porcentaje_aplicado=Decimal(str(desc.porcentaje or 0)),
+                porcentaje_aplicado=porc_de[mid],
                 monto_aplicado=Decimal("0.00"),
                 origen="automatico",
                 paga_por_caja=paga_caja,
@@ -530,9 +586,11 @@ async def quitar_saldos_deudores_del_pago(db: AsyncSession, pago_id: int) -> int
 
 async def crear_saldos_deudores(db: AsyncSession, pago: Pago) -> dict:
     """
-    Al cerrar el pago: por cada médico cuyo reconocido (bruto - débitos + créditos) es
-    negativo, deja la diferencia como deducción pendiente. Entra sola al próximo pago donde
-    ese médico participe y se descuenta con la prioridad de las demás deducciones.
+    Al cerrar el pago: por cada médico cuyo reconocido (bruto - débitos + créditos - saldo
+    arrastrado) es negativo, deja la diferencia como deuda pendiente. Como el reconocido ya
+    descuenta el arrastre que venía (que el cierre consumió), la deuda nueva es el total que
+    falta, no una suma aparte: igual que el sistema anterior. Entra sola al próximo pago
+    donde ese médico participe y se resta del reconocido como un débito (no se cobra al final).
     Idempotente: antes quita lo que este mismo pago hubiera creado. Sin commit.
     """
     concepto = await _concepto_saldo_deudor(db)

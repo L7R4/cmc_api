@@ -188,6 +188,16 @@ class SocioDescuento(AuditMixin, Base):
         Boolean, nullable=False, default=False, server_default="0"
     )
 
+    # Importe propio de este socio en este concepto (el sistema anterior lo guardaba en cada
+    # asignación: Juzgado 15/20/25/30 %, AMMECO 1.500/3.000…). NULL = vale lo del concepto.
+    # porcentaje_propio reemplaza a Conceptos.porcentaje y monto_propio a Conceptos.precio; si el
+    # socio tiene los dos, manda el porcentaje (como siempre: porcentaje > precio fijo).
+    porcentaje_propio: Mapped[Optional[Decimal]] = mapped_column(DECIMAL(6, 2), nullable=True)
+    monto_propio: Mapped[Optional[Decimal]] = mapped_column(DECIMAL(14, 2), nullable=True)
+    # Cuántas veces se cobra el importe fijo en cada período (el sistema anterior: socio_servicios.multiplica).
+    # 1 = lo normal. No multiplica porcentajes.
+    multiplicador: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=1, server_default="1")
+
     __table_args__ = (
         UniqueConstraint("medico_id", "descuento_id", name="uq_socio_descuento"),
         Index("idx_med_desc", "medico_id", "descuento_id"),

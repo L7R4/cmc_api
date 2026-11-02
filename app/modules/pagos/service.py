@@ -6,10 +6,15 @@ from decimal import Decimal
 from typing import Optional
 
 from fastapi import HTTPException
-from sqlalchemy import case, delete, func, select
+from sqlalchemy import case, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.adelantos.queries import ESTADOS_EN_PAGO, total_adelantos_del_pago
+from app.modules.arrastres.queries import (
+    arrastres_por_medico_en_pago,
+    concepto_arrastre_id,
+    detalle_arrastres_medico,
+)
 from app.modules.compensaciones.queries import (
     ESTADOS_EN_PAGO as COMP_EN_PAGO,
     leyenda_recibo,
@@ -45,12 +50,21 @@ def _to_dec(v) -> Decimal:
         return Decimal("0")
 
 
+async def _no_es_arrastre(db: AsyncSession):
+    """Condición sobre Deduccion: que no sea el saldo arrastrado (9900), que no cuenta como deducción."""
+    arrastre_id = await concepto_arrastre_id(db)
+    if arrastre_id is None:
+        return Deduccion.id.is_not(None)
+    return or_(Deduccion.descuento_id.is_(None), Deduccion.descuento_id != arrastre_id)
+
+
 async def recalcular_totales_pago(db: AsyncSession, pago_id: int) -> dict:
     """
     Recalcula los totales globales de un pago:
     - total_bruto: suma de brutos de todas las liquidaciones del pago, más los adelantos
     - total_adelantos: la parte de total_bruto que viene de adelantos
-    - total_debitos / total_creditos: suma de ajustes de lotes en estado='L' con pago_id dado
+    - total_debitos / total_creditos: suma de ajustes de lotes en estado='L' con pago_id dado;
+      los débitos incluyen el saldo arrastrado de los médicos (total_arrastres)
     - total_deduccion: suma de deducciones aplicadas al pago
     - total_neto: total_bruto - total_debitos + total_creditos - total_deduccion
     """
@@ -81,12 +95,18 @@ async def recalcular_totales_pago(db: AsyncSession, pago_id: int) -> dict:
     total_debitos = _to_dec(dc_row.debitos if dc_row else 0)
     total_creditos = _to_dec(dc_row.creditos if dc_row else 0)
 
+    # El saldo arrastrado de los médicos cuenta como un débito más (igual que el sistema anterior).
+    total_arrastres = _to_dec(sum((await arrastres_por_medico_en_pago(db, pago_id)).values(), Decimal("0")))
+    total_debitos += total_arrastres
+
     # Deducciones: pago cerrado (C o P) → suma lo efectivamente aplicado; abierto → suma lo en_pago
     pago = await db.get(Pago, pago_id)
     if pago and pago.estado in ("C", "P"):
+        # Sin el saldo arrastrado: lo consumió el cierre pero no es una deducción (ya está en débitos).
         ded_res = await db.execute(
             select(func.coalesce(func.sum(DeduccionAplicacion.aplicado), 0))
-            .where(DeduccionAplicacion.pago_id == pago_id)
+            .join(Deduccion, Deduccion.id == DeduccionAplicacion.deduccion_id)
+            .where(DeduccionAplicacion.pago_id == pago_id, await _no_es_arrastre(db))
         )
     else:
         ded_res = await db.execute(
@@ -109,6 +129,7 @@ async def recalcular_totales_pago(db: AsyncSession, pago_id: int) -> dict:
         "total_adelantos": total_adelantos,
         "total_compensaciones": total_compensaciones,
         "total_debitos": total_debitos,
+        "total_arrastres": total_arrastres,
         "total_creditos": total_creditos,
         "total_deduccion": total_deduccion,
         "total_neto": total_neto,
@@ -205,7 +226,7 @@ async def vista_previa_pago(db: AsyncSession, pago_id: int) -> dict:
             .select_from(DeduccionAplicacion)
             .join(Deduccion, Deduccion.id == DeduccionAplicacion.deduccion_id)
             .outerjoin(Conceptos, Conceptos.id == Deduccion.descuento_id)
-            .where(DeduccionAplicacion.pago_id == pago_id)
+            .where(DeduccionAplicacion.pago_id == pago_id, await _no_es_arrastre(db))
         )
     else:
         ded_query = (
@@ -627,8 +648,13 @@ async def refrescar_detalle_medico(
         (Decimal(str(a["total"])) for a in otros_ajustes if a["tipo"] == "credito"), Decimal("0")
     )
 
+    # Saldo arrastrado: se resta como un débito más (igual que el sistema anterior), pero se
+    # muestra aparte porque no viene de una obra social.
+    arrastres_items = await detalle_arrastres_medico(db, pago_id, medico_db_id)
+    total_arrastres = sum((Decimal(str(a["total"])) for a in arrastres_items), Decimal("0"))
+
     # Totales de ajustes y serialización del mapa
-    total_debitos = total_otros_debitos
+    total_debitos = total_otros_debitos + total_arrastres
     total_creditos = total_otros_creditos
     liquidaciones_out: dict[str, dict] = {}
 
@@ -666,6 +692,8 @@ async def refrescar_detalle_medico(
                 DeduccionAplicacion.pago_id == pago_id,
                 # Lo descuenta quien paga (el pagador, si lo hay): es de quien sale la plata.
                 func.coalesce(Deduccion.pagador_medico_id, Deduccion.medico_id) == medico_db_id,
+                # El saldo arrastrado no es una deducción: ya va en los débitos.
+                await _no_es_arrastre(db),
             )
             .group_by(
                 Conceptos.nro_colegio,
@@ -761,6 +789,7 @@ async def refrescar_detalle_medico(
         "gastos":      float(total_liq_gastos.quantize(Decimal("0.01"))),
         "bruto":       float(total_bruto.quantize(Decimal("0.01"))),
         "debitos":     float(total_debitos.quantize(Decimal("0.01"))),
+        "arrastres":   float(total_arrastres.quantize(Decimal("0.01"))),  # incluido en debitos
         "creditos":    float(total_creditos.quantize(Decimal("0.01"))),
         "compensaciones": float(total_compensaciones.quantize(Decimal("0.01"))),
         "reconocido":  float(reconocido),
@@ -781,6 +810,7 @@ async def refrescar_detalle_medico(
             "liquidaciones":  liquidaciones_out,
             "adelantos":      {"total": float(total_adelantos.quantize(Decimal("0.01"))), "detalle": adelantos_out},
             "compensaciones": {"total": float(total_compensaciones.quantize(Decimal("0.01"))), "detalle": compensaciones_out},
+            "arrastres":      {"total": float(total_arrastres.quantize(Decimal("0.01"))), "detalle": arrastres_items},
             "deducciones":    deducciones_out,
             "otros_ajustes":  otros_ajustes_out,
         },

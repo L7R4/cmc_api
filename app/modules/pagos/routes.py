@@ -27,6 +27,7 @@ from app.modules.pagos.schemas import (
     ReciboRead,
     TipoInforme,
 )
+from app.modules.arrastres.queries import consumir_arrastres_al_cierre
 from app.modules.deducciones.service import (
     aplicar_deducciones_al_cierre,
     crear_saldos_deudores,
@@ -270,6 +271,10 @@ async def cerrar_pago(pago_id: int, db: AsyncSession = Depends(get_db)):
     # 2. Red de seguridad: cualquier Deduccion en_pago que haya escapado el paso anterior
     ded_extra = await marcar_deducciones_aplicadas(db, pago_id)
 
+    # 2b. El saldo arrastrado de los médicos se da por consumido (se restó del reconocido como un
+    #     débito). Tiene que ir antes de marcar el pago como cerrado.
+    arrastres_consumidos = await consumir_arrastres_al_cierre(db, pago)
+
     # 3. Marcar lotes: L → AP (Aplicado — inmutables desde ahora)
     lotes_info = await marcar_lotes_aplicados(db, pago_id)
     lotes_info["adelantos_aplicados"] = await marcar_adelantos_aplicados(db, pago_id)
@@ -305,6 +310,7 @@ async def cerrar_pago(pago_id: int, db: AsyncSession = Depends(get_db)):
             "deducciones_aplicadas_extra": ded_extra,
             "prestaciones_liquidadas": prestaciones_liquidadas,
             "saldos_deudores": saldos_deudores,
+            "arrastres_consumidos": arrastres_consumidos,
         },
     }
 

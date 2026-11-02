@@ -5,7 +5,7 @@ Servicios para el módulo de liquidaciones.
 import datetime
 import json
 import re
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import HTTPException
@@ -86,6 +86,23 @@ def repartir_honorarios_gastos(
     multiplicador = Decimal(df.cantidad or 1) * Decimal(df.sesion or 1)
     honorarios = to_dec(getattr(df, col_hon)) * multiplicador if col_hon else Decimal("0")
     gastos = to_dec(getattr(df, col_gas)) * multiplicador if col_gas else Decimal("0")
+    # Manda lo PAGADO (`importe_total`). Hay filas en que se paga menos que el valor de la unidad por
+    # cantidad × sesión: una segunda práctica quirúrgica que se paga al 75 % (`porc` = 75) o una sesión
+    # de más que no se reconoce. En esas filas honorarios + gastos superan al importe; si se dejaban así,
+    # las contribuciones que se calculan sobre honorarios (la 100) tomaban una base mayor que lo cobrado
+    # (el sistema anterior las calcula sobre lo pagado) y el desglose no sumaba el bruto. Se escalan los
+    # dos en la misma proporción, de modo que honorarios + gastos == importe_total.
+    pagado = to_dec(getattr(df, "importe_total", None))
+    bruto = honorarios + gastos
+    if pagado > 0 and bruto - pagado > Decimal("0.02"):
+        factor = pagado / bruto
+        honorarios = (honorarios * factor).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        gastos = (gastos * factor).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        resto = pagado - honorarios - gastos            # centavos del redondeo: a la parte más grande
+        if honorarios >= gastos:
+            honorarios += resto
+        else:
+            gastos += resto
     return honorarios, gastos
 
 

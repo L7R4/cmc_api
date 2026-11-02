@@ -18,6 +18,7 @@ from app.db.models import (
 )
 from app.db.models.liquidacion import Pago
 from app.modules.adelantos.queries import adelantos_por_medico_en_pago
+from app.modules.arrastres.queries import arrastres_por_medico_en_pago
 from app.modules.compensaciones.queries import compensaciones_por_medico_en_pago
 from app.modules.deducciones.schemas import (
     DeduccionHistorialItem,
@@ -201,14 +202,18 @@ async def _base_retenciones_por_medico_en_pago(
         .group_by(Ajuste.medico_id)
     )).all()
     neto_aj = {int(m): (Decimal(h or 0), Decimal(g or 0)) for m, h, g in aj}
+    # Saldo arrastrado: el sistema anterior lo restaba como un débito más, y lo cargaba a los
+    # honorarios (los gastos no se tocan). Baja la base de 100, 102, D.G.R. y Ganancias.
+    arr = await arrastres_por_medico_en_pago(db, pago_id)
     cero = Decimal("0")
     out: dict[int, dict[str, Decimal]] = {}
-    for m in set(hon) | set(gas) | set(imp) | set(neto_aj):
+    for m in set(hon) | set(gas) | set(imp) | set(neto_aj) | set(arr):
         dh, dg = neto_aj.get(m, (cero, cero))
+        a = arr.get(m, cero)
         out[m] = {
-            "honorarios": hon.get(m, cero) + dh,
+            "honorarios": hon.get(m, cero) + dh - a,
             "gastos": gas.get(m, cero) + dg,
-            "importe": imp.get(m, cero) + dh + dg,
+            "importe": imp.get(m, cero) + dh + dg - a,
         }
     return out
 
@@ -233,7 +238,13 @@ async def _medicos_en_pago(db: AsyncSession, pago_id: int) -> set[int]:
     )).scalars().all()
     con_adelanto = await adelantos_por_medico_en_pago(db, pago_id)
     con_compensacion = await compensaciones_por_medico_en_pago(db, pago_id)
-    return {int(m) for m in con_detalle} | {int(m) for m in con_ajuste} | set(con_adelanto) | set(con_compensacion)
+    # Con un saldo arrastrado también (como en la liquidación del sistema anterior): queda con
+    # reconocido negativo y el cierre vuelve a dejarle la deuda.
+    con_arrastre = await arrastres_por_medico_en_pago(db, pago_id)
+    return (
+        {int(m) for m in con_detalle} | {int(m) for m in con_ajuste}
+        | set(con_adelanto) | set(con_compensacion) | set(con_arrastre)
+    )
 
 
 async def _ajustes_por_medico_en_pago(
@@ -301,18 +312,20 @@ async def _disponible_por_medico_en_pago(
     db: AsyncSession, pago_id: int
 ) -> dict[int, Decimal]:
     """
-    Disponible neto por médico = bruto − débitos de ajustes + créditos de ajustes.
+    Disponible neto por médico = bruto − débitos de ajustes + créditos de ajustes − saldo arrastrado.
     Combina _base_bruto_por_medico_en_pago y _ajustes_por_medico_en_pago.
     """
     bruto_map = await _base_bruto_por_medico_en_pago(db, pago_id)
     deb_map, cred_map = await _ajustes_por_medico_en_pago(db, pago_id)
+    arr_map = await arrastres_por_medico_en_pago(db, pago_id)
 
     out: dict[int, Decimal] = {}
-    for k in set(bruto_map) | set(deb_map) | set(cred_map):
+    for k in set(bruto_map) | set(deb_map) | set(cred_map) | set(arr_map):
         out[k] = (
             bruto_map.get(k, Decimal("0"))
             - deb_map.get(k, Decimal("0"))
             + cred_map.get(k, Decimal("0"))
+            - arr_map.get(k, Decimal("0"))
         )
     return out
 
@@ -344,6 +357,48 @@ async def _medicos_para_descuento(db: AsyncSession, desc_id: int) -> list[tuple[
         )
     )
     return list({(m, bool(p)) for m, p in res.all()})
+
+
+def importe_efectivo(
+    desc: "Conceptos", porcentaje_propio: Optional[Decimal], monto_propio: Optional[Decimal]
+) -> tuple[Decimal, Decimal]:
+    """(precio, porcentaje) que rigen para un socio en un concepto: lo propio de su asignación si
+    lo tiene, si no lo del concepto. Con porcentaje propio manda ese porcentaje y no hay precio;
+    con monto propio (y sin porcentaje propio) manda ese monto y no hay porcentaje."""
+    if porcentaje_propio is not None and porcentaje_propio > 0:
+        return Decimal("0"), Decimal(str(porcentaje_propio))
+    if monto_propio is not None and monto_propio > 0:
+        return Decimal(str(monto_propio)), Decimal("0")
+    return (Decimal(str(getattr(desc, "precio", 0) or 0)),
+            Decimal(str(getattr(desc, "porcentaje", 0) or 0)))
+
+
+async def _importes_propios_de_descuento(
+    db: AsyncSession, desc_id: int
+) -> dict[int, tuple[Optional[Decimal], Optional[Decimal]]]:
+    """{medico_id: (porcentaje_propio, monto_propio)} de las asignaciones activas del concepto
+    que tienen algún importe propio. Las demás no figuran (rigen los del concepto)."""
+    res = await db.execute(
+        select(SocioDescuento.medico_id, SocioDescuento.porcentaje_propio, SocioDescuento.monto_propio).where(
+            SocioDescuento.descuento_id == desc_id,
+            SocioDescuento.fecha_baja.is_(None),
+            (SocioDescuento.porcentaje_propio.is_not(None)) | (SocioDescuento.monto_propio.is_not(None)),
+        )
+    )
+    return {int(m): (p, mo) for m, p, mo in res.all()}
+
+
+async def _multiplicadores_de_descuento(db: AsyncSession, desc_id: int) -> dict[int, int]:
+    """{medico_id: multiplicador} de las asignaciones activas del concepto con multiplicador > 1.
+    Las demás no figuran (se cobra una vez)."""
+    res = await db.execute(
+        select(SocioDescuento.medico_id, SocioDescuento.multiplicador).where(
+            SocioDescuento.descuento_id == desc_id,
+            SocioDescuento.fecha_baja.is_(None),
+            SocioDescuento.multiplicador > 1,
+        )
+    )
+    return {int(m): int(n) for m, n in res.all()}
 
 
 async def _pagadores_de_descuento(db: AsyncSession, desc_id: int) -> dict[int, int]:
@@ -403,6 +458,9 @@ async def _enrich_socio(db: AsyncSession, socio: SocioDescuento) -> SocioDescuen
         descuento_nombre=getattr(desc, "nombre", None),
         descuento_precio=getattr(desc, "precio", None),
         descuento_porcentaje=getattr(desc, "porcentaje", None),
+        porcentaje_propio=socio.porcentaje_propio,
+        monto_propio=socio.monto_propio,
+        multiplicador=socio.multiplicador or 1,
         pagador_medico_id=socio.pagador_medico_id,
         pagador_nombre=getattr(pagador, "NOMBRE", None),
         pagador_nro_socio=getattr(pagador, "NRO_SOCIO", None),

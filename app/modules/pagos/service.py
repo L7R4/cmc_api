@@ -6,11 +6,20 @@ from decimal import Decimal
 from typing import Optional
 
 from fastapi import HTTPException
-from sqlalchemy import case, delete, func, select
+from sqlalchemy import case, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.adelantos.queries import ESTADOS_EN_PAGO, total_adelantos_del_pago
-from app.modules.compensaciones.queries import ESTADOS_EN_PAGO as COMP_EN_PAGO, totales_compensaciones_del_pago
+from app.modules.arrastres.queries import (
+    arrastres_por_medico_en_pago,
+    concepto_arrastre_id,
+    detalle_arrastres_medico,
+)
+from app.modules.compensaciones.queries import (
+    ESTADOS_EN_PAGO as COMP_EN_PAGO,
+    leyenda_recibo,
+    totales_compensaciones_del_pago,
+)
 from app.modules.deducciones.helpers import _medicos_en_pago
 from app.db.models import (
     Ajuste,
@@ -41,12 +50,21 @@ def _to_dec(v) -> Decimal:
         return Decimal("0")
 
 
+async def _no_es_arrastre(db: AsyncSession):
+    """Condición sobre Deduccion: que no sea el saldo arrastrado (9900), que no cuenta como deducción."""
+    arrastre_id = await concepto_arrastre_id(db)
+    if arrastre_id is None:
+        return Deduccion.id.is_not(None)
+    return or_(Deduccion.descuento_id.is_(None), Deduccion.descuento_id != arrastre_id)
+
+
 async def recalcular_totales_pago(db: AsyncSession, pago_id: int) -> dict:
     """
     Recalcula los totales globales de un pago:
     - total_bruto: suma de brutos de todas las liquidaciones del pago, más los adelantos
     - total_adelantos: la parte de total_bruto que viene de adelantos
-    - total_debitos / total_creditos: suma de ajustes de lotes en estado='L' con pago_id dado
+    - total_debitos / total_creditos: suma de ajustes de lotes en estado='L' con pago_id dado;
+      los débitos incluyen el saldo arrastrado de los médicos (total_arrastres)
     - total_deduccion: suma de deducciones aplicadas al pago
     - total_neto: total_bruto - total_debitos + total_creditos - total_deduccion
     """
@@ -77,12 +95,20 @@ async def recalcular_totales_pago(db: AsyncSession, pago_id: int) -> dict:
     total_debitos = _to_dec(dc_row.debitos if dc_row else 0)
     total_creditos = _to_dec(dc_row.creditos if dc_row else 0)
 
+    # El saldo arrastrado de los médicos cuenta como un débito más (igual que el sistema anterior).
+    # `total_debitos_os` es lo que cargaron las obras sociales, sin el arrastre: se muestra por separado.
+    total_debitos_os = total_debitos
+    total_arrastres = _to_dec(sum((await arrastres_por_medico_en_pago(db, pago_id)).values(), Decimal("0")))
+    total_debitos += total_arrastres
+
     # Deducciones: pago cerrado (C o P) → suma lo efectivamente aplicado; abierto → suma lo en_pago
     pago = await db.get(Pago, pago_id)
     if pago and pago.estado in ("C", "P"):
+        # Sin el saldo arrastrado: lo consumió el cierre pero no es una deducción (ya está en débitos).
         ded_res = await db.execute(
             select(func.coalesce(func.sum(DeduccionAplicacion.aplicado), 0))
-            .where(DeduccionAplicacion.pago_id == pago_id)
+            .join(Deduccion, Deduccion.id == DeduccionAplicacion.deduccion_id)
+            .where(DeduccionAplicacion.pago_id == pago_id, await _no_es_arrastre(db))
         )
     else:
         ded_res = await db.execute(
@@ -100,14 +126,63 @@ async def recalcular_totales_pago(db: AsyncSession, pago_id: int) -> dict:
         total_bruto - total_debitos + total_creditos + total_compensaciones - total_deduccion
     ).quantize(Decimal("0.01"))
 
+    # «Monto negativo próximo mes» (igual que el sistema anterior): lo que los médicos con reconocido negativo
+    # (les debitaron más de lo que produjeron) dejan como deuda para el pago siguiente. En el neto de cada médico
+    # esos casos valen $0, así que el total a pagar es el neto de arriba MÁS ese monto. Sólo se conoce cuando
+    # el pago está cerrado (los resúmenes por médico quedan guardados al cerrar).
+    total_negativo = Decimal("0")
+    total_a_pagar = total_neto
+    total_arrastres_cobrado = total_arrastres
+    if pago and pago.estado in ("C", "P"):
+        neg = (await db.execute(
+            select(func.coalesce(func.sum(-PagoMedico.reconocido), 0))
+            .where(PagoMedico.pago_id == pago_id, PagoMedico.reconocido < 0)
+        )).scalar_one()
+        total_negativo = _to_dec(neg).quantize(Decimal("0.01"))
+        total_a_pagar = (total_neto + total_negativo).quantize(Decimal("0.01"))
+        # Del saldo arrastrado que entró, lo que vuelve al mes siguiente como monto negativo no se cobra en este pago:
+        # lo cobrado de verdad es la diferencia (médicos que lo pagaron con lo que produjeron este mes).
+        total_arrastres_cobrado = (total_arrastres - total_negativo).quantize(Decimal("0.01"))
+
+        # Pago histórico traído del sistema anterior: sólo tiene el resumen por médico (sin facturas, lotes
+        # ni aplicaciones). Los totales salen de esos resúmenes en vez de quedar en cero.
+        sin_liquidaciones = total_bruto == 0 and total_debitos_os == 0 and total_creditos == 0
+        if sin_liquidaciones:
+            pm = (await db.execute(
+                select(
+                    func.count(PagoMedico.id),
+                    func.coalesce(func.sum(PagoMedico.bruto), 0),
+                    func.coalesce(func.sum(PagoMedico.debitos), 0),
+                    func.coalesce(func.sum(PagoMedico.creditos), 0),
+                    func.coalesce(func.sum(PagoMedico.deducciones), 0),
+                    func.coalesce(func.sum(PagoMedico.neto_a_pagar), 0),
+                ).where(PagoMedico.pago_id == pago_id)
+            )).one()
+            if pm[0]:
+                total_bruto = _to_dec(pm[1])
+                total_debitos = total_debitos_os = _to_dec(pm[2])
+                total_arrastres = total_arrastres_cobrado = Decimal("0")
+                total_creditos = _to_dec(pm[3])
+                total_deduccion = _to_dec(pm[4])
+                total_a_pagar = total_neto = _to_dec(pm[5]).quantize(Decimal("0.01"))
+            else:
+                # Pago ancla de cobros históricos: no es una liquidación, sólo guarda lo cobrado de cada deuda.
+                total_deduccion = Decimal("0")
+                total_a_pagar = total_neto = Decimal("0.00")
+
     return {
         "total_bruto": total_bruto,
         "total_adelantos": total_adelantos,
         "total_compensaciones": total_compensaciones,
         "total_debitos": total_debitos,
+        "total_debitos_os": total_debitos_os,
+        "total_arrastres": total_arrastres,
+        "total_arrastres_cobrado": total_arrastres_cobrado,
         "total_creditos": total_creditos,
         "total_deduccion": total_deduccion,
         "total_neto": total_neto,
+        "total_negativo_proximo_mes": total_negativo,
+        "total_a_pagar": total_a_pagar,
     }
 
 
@@ -188,7 +263,7 @@ async def vista_previa_pago(db: AsyncSession, pago_id: int) -> dict:
     #  - Cerrado (C o P): lo realmente descontado en ESTE pago, según el ledger
     #    (DeduccionAplicacion), venga la deducción de donde venga.
     #  - Abierto: todas las que están en_pago —las generadas en este pago y también las
-    #    enroladas (pendientes que entraron por «Refrescar»)—, con su preview. Filtrar por
+    #    enroladas (pendientes que entraron solas)—, con su preview. Filtrar por
     #    generado_en_pago_id dejaba afuera las enroladas y el total no coincidía con la tira.
     if pago_cerrado:
         ded_query = (
@@ -201,7 +276,7 @@ async def vista_previa_pago(db: AsyncSession, pago_id: int) -> dict:
             .select_from(DeduccionAplicacion)
             .join(Deduccion, Deduccion.id == DeduccionAplicacion.deduccion_id)
             .outerjoin(Conceptos, Conceptos.id == Deduccion.descuento_id)
-            .where(DeduccionAplicacion.pago_id == pago_id)
+            .where(DeduccionAplicacion.pago_id == pago_id, await _no_es_arrastre(db))
         )
     else:
         ded_query = (
@@ -321,7 +396,7 @@ async def vista_previa_pago(db: AsyncSession, pago_id: int) -> dict:
             "estado":          r[0].estado,
             "medico_id":       r[0].medico_id,
             "medico_nombre":   (r.medico_nombre or "").strip(),
-            "leyenda":         r[0].leyenda,
+            "leyenda":         leyenda_recibo(r[0]),
             "importe":         _to_dec(r[0].importe),
         }
         for r in comp_rows
@@ -329,12 +404,26 @@ async def vista_previa_pago(db: AsyncSession, pago_id: int) -> dict:
     comp_favor = sum((c["importe"] for c in comp_items if c["importe"] > 0), Decimal("0"))
     comp_contra = sum((-c["importe"] for c in comp_items if c["importe"] < 0), Decimal("0"))
 
+    totales_pago = await recalcular_totales_pago(db, pago_id)
     return {
         "pago_id":     pago.id,
         "mes":         pago.mes,
         "anio":        pago.anio,
         "descripcion": pago.descripcion,
         "estado":      pago.estado,
+        # Las mismas cifras del encabezado del pago: un solo «total a pagar» en todas las solapas.
+        "resumen": {
+            "total_bruto":                totales_pago["total_bruto"],
+            "total_debitos_os":           totales_pago["total_debitos_os"],
+            "total_arrastres":            totales_pago["total_arrastres"],
+            "total_arrastres_cobrado":    totales_pago["total_arrastres_cobrado"],
+            "total_creditos":             totales_pago["total_creditos"],
+            "total_compensaciones":       totales_pago["total_compensaciones"],
+            "total_deduccion":            totales_pago["total_deduccion"],
+            "total_neto":                 totales_pago["total_neto"],
+            "total_negativo_proximo_mes": totales_pago["total_negativo_proximo_mes"],
+            "total_a_pagar":              totales_pago["total_a_pagar"],
+        },
         "liquidaciones": {
             "items": liq_items,
             "totales": {
@@ -559,7 +648,7 @@ async def refrescar_detalle_medico(
         .order_by(Compensacion.id)
     )).scalars().all()
     compensaciones_out = [
-        {"compensacion_id": c.id, "leyenda": c.leyenda, "importe": float(_to_dec(c.importe))}
+        {"compensacion_id": c.id, "leyenda": leyenda_recibo(c), "importe": float(_to_dec(c.importe))}
         for c in comp_rows_med
     ]
     total_compensaciones = sum((_to_dec(c.importe) for c in comp_rows_med), Decimal("0"))
@@ -623,8 +712,13 @@ async def refrescar_detalle_medico(
         (Decimal(str(a["total"])) for a in otros_ajustes if a["tipo"] == "credito"), Decimal("0")
     )
 
+    # Saldo arrastrado: se resta como un débito más (igual que el sistema anterior), pero se
+    # muestra aparte porque no viene de una obra social.
+    arrastres_items = await detalle_arrastres_medico(db, pago_id, medico_db_id)
+    total_arrastres = sum((Decimal(str(a["total"])) for a in arrastres_items), Decimal("0"))
+
     # Totales de ajustes y serialización del mapa
-    total_debitos = total_otros_debitos
+    total_debitos = total_otros_debitos + total_arrastres
     total_creditos = total_otros_creditos
     liquidaciones_out: dict[str, dict] = {}
 
@@ -662,6 +756,8 @@ async def refrescar_detalle_medico(
                 DeduccionAplicacion.pago_id == pago_id,
                 # Lo descuenta quien paga (el pagador, si lo hay): es de quien sale la plata.
                 func.coalesce(Deduccion.pagador_medico_id, Deduccion.medico_id) == medico_db_id,
+                # El saldo arrastrado no es una deducción: ya va en los débitos.
+                await _no_es_arrastre(db),
             )
             .group_by(
                 Conceptos.nro_colegio,
@@ -757,6 +853,7 @@ async def refrescar_detalle_medico(
         "gastos":      float(total_liq_gastos.quantize(Decimal("0.01"))),
         "bruto":       float(total_bruto.quantize(Decimal("0.01"))),
         "debitos":     float(total_debitos.quantize(Decimal("0.01"))),
+        "arrastres":   float(total_arrastres.quantize(Decimal("0.01"))),  # incluido en debitos
         "creditos":    float(total_creditos.quantize(Decimal("0.01"))),
         "compensaciones": float(total_compensaciones.quantize(Decimal("0.01"))),
         "reconocido":  float(reconocido),
@@ -777,6 +874,7 @@ async def refrescar_detalle_medico(
             "liquidaciones":  liquidaciones_out,
             "adelantos":      {"total": float(total_adelantos.quantize(Decimal("0.01"))), "detalle": adelantos_out},
             "compensaciones": {"total": float(total_compensaciones.quantize(Decimal("0.01"))), "detalle": compensaciones_out},
+            "arrastres":      {"total": float(total_arrastres.quantize(Decimal("0.01"))), "detalle": arrastres_items},
             "deducciones":    deducciones_out,
             "otros_ajustes":  otros_ajustes_out,
         },
@@ -873,13 +971,52 @@ async def generar_recibo_medico(
     return recibo
 
 
+async def quitar_resumenes_de_ausentes(db: AsyncSession, pago_id: int, presentes: set[int]) -> int:
+    """
+    Borra el resumen (PagoMedico) y el recibo sin emitir de los médicos que ya no participan
+    en el pago: el que salió con un lote, un adelanto o una compensación después de «Generar
+    recibos». Su resumen viejo daba un recibo o una deuda falsa al cerrar (N16).
+    Un recibo emitido no se toca, ni su resumen. Sin commit.
+    """
+    ausentes = [
+        pm for pm in (await db.execute(
+            select(PagoMedico).where(PagoMedico.pago_id == pago_id)
+        )).scalars().all()
+        if pm.medico_id not in presentes
+    ]
+    if not ausentes:
+        return 0
+    emitidos = set((await db.execute(
+        select(Recibo.medico_id).where(
+            Recibo.pago_id == pago_id,
+            Recibo.medico_id.in_([pm.medico_id for pm in ausentes]),
+            Recibo.estado.in_(["emitido", "pagado"]),
+        )
+    )).scalars().all())
+    ausentes = [pm for pm in ausentes if pm.medico_id not in emitidos]
+    if not ausentes:
+        return 0
+    ids = [pm.medico_id for pm in ausentes]
+    await db.execute(
+        delete(Recibo).where(Recibo.pago_id == pago_id, Recibo.medico_id.in_(ids))
+    )
+    await db.execute(
+        delete(PagoMedico).where(PagoMedico.pago_id == pago_id, PagoMedico.medico_id.in_(ids))
+    )
+    await db.flush()
+    return len(ids)
+
+
 async def refrescar_todos_medicos(db: AsyncSession, pago_id: int, pago: Pago) -> dict:
     """
     Llama a refrescar_detalle_medico para cada médico que participa en el pago: con
     prestaciones o con algún ajuste (un crédito de un lote sin factura, por ejemplo).
+    Antes borra el resumen de los que ya no participan.
     Devuelve {medico_db_id: {info_medico, resumen, detalle}, ...}.
     """
-    medico_ids = sorted(await _medicos_en_pago(db, pago_id))
+    presentes = await _medicos_en_pago(db, pago_id)
+    await quitar_resumenes_de_ausentes(db, pago_id, presentes)
+    medico_ids = sorted(presentes)
 
     result: dict = {}
     for mid in medico_ids:
@@ -975,6 +1112,11 @@ async def generar_todos_recibos(
             raise HTTPException(404, "Pago no encontrado")
 
     if medico_ids:
+        presentes = await _medicos_en_pago(db, pago_id)
+        await quitar_resumenes_de_ausentes(db, pago_id, presentes)
+        medico_ids = [mid for mid in medico_ids if mid in presentes]
+        if not medico_ids:
+            raise HTTPException(404, "Los médicos indicados no participan en este pago")
         for mid in medico_ids:
             await refrescar_detalle_medico(db, pago_id, mid, pago=pago)
     else:

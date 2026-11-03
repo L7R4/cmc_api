@@ -17,7 +17,11 @@ from app.db.models import (
 )
 from app.db.models.catalogs import ObrasSociales
 from app.db.models.medico import ListadoMedico
-from app.modules.liquidacion.service import recalcular_totales_de_liquidacion
+from app.modules.liquidacion.service import (
+    aplicar_porcentaje_a_lote,
+    recalcular_totales_de_liquidacion,
+    restaurar_ajustes_facturados,
+)
 from app.modules.deducciones.service import generar_y_recalcular_porcentuales
 from app.modules.lotes.schemas import (
     AjusteCreate,
@@ -243,6 +247,7 @@ async def _get_lote_with_ajustes(db: AsyncSession, lote_id: int) -> LoteAjuste:
         select(LoteAjuste)
         .options(selectinload(LoteAjuste.ajustes))
         .where(LoteAjuste.id == lote_id)
+        .execution_options(populate_existing=True)
     )
     lote = (await db.execute(stmt)).scalars().first()
     if not lote:
@@ -650,12 +655,15 @@ async def cambiar_estado_lote(
         lote.pago_id = pago_abierto.id
         lote.estado = "L"
         pago_id_afectado = pago_abierto.id
+        # Si su factura ya está en el pago con un porcentaje de pago, los ajustes pasan a ese porcentaje.
+        await aplicar_porcentaje_a_lote(db, lote)
 
     elif transicion == ("L", "C"):
         pago_id_afectado = lote.pago_id
         pago = await db.get(Pago, pago_id_afectado)
         if pago and pago.estado != "A":
             raise HTTPException(409, "No se puede quitar un lote de un pago cerrado")
+        await restaurar_ajustes_facturados(db, lote_id=lote.id)
         lote.pago_id = None
         lote.estado = "C"
 

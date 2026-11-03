@@ -133,6 +133,10 @@ class SocioDescuentoRead(BaseModel):
     descuento_nombre: Optional[str] = None
     descuento_precio: Optional[Decimal] = None
     descuento_porcentaje: Optional[Decimal] = None
+    # Importe propio de este socio (NULL = rige el del concepto)
+    porcentaje_propio: Optional[Decimal] = None
+    monto_propio: Optional[Decimal] = None
+    multiplicador: int = 1
     pagador_medico_id: Optional[int] = None
     pagador_nombre: Optional[str] = None
     pagador_nro_socio: Optional[int] = None
@@ -151,6 +155,11 @@ class SocioDescuentoCreate(BaseModel):
     fecha_alta: Optional[datetime.date] = None
     fecha_baja: Optional[datetime.date] = None
     paga_por_caja: bool = False
+    # Importe propio (opcional, uno solo de los dos): reemplaza al porcentaje / precio del concepto
+    porcentaje_propio: Optional[Decimal] = Field(None, gt=0, le=100)
+    monto_propio: Optional[Decimal] = Field(None, gt=0)
+    # Veces que se cobra el importe fijo por período (1 = normal)
+    multiplicador: int = Field(1, ge=1, le=12)
 
 
 class SocioDescuentoUpdate(BaseModel):
@@ -162,6 +171,10 @@ class SocioDescuentoUpdate(BaseModel):
     pagador_medico_id: Optional[int] = None
     fecha_baja: Optional[datetime.date] = None
     paga_por_caja: Optional[bool] = None
+    # Para quitar el importe propio (volver al del concepto): enviar null.
+    porcentaje_propio: Optional[Decimal] = Field(None, gt=0, le=100)
+    monto_propio: Optional[Decimal] = Field(None, gt=0)
+    multiplicador: Optional[int] = Field(None, ge=1, le=12)
 
 
 class SocioDescuentoPagadorUpdate(BaseModel):

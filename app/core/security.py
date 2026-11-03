@@ -10,7 +10,7 @@ def _ts(dt: datetime) -> int:
     # convierte a epoch seconds (int)
     return int(dt.timestamp())
 
-def create_access_token(*, sub: str | int, uid: int | None = None, scopes: list[str] = None, role: str | None = None, expires_delta: timedelta | None = None):
+def create_access_token(*, sub: str | int, uid: int | None = None, scopes: list[str] = None, role: str | None = None, expires_delta: timedelta | None = None, provisoria: bool = False):
     """Access token.
 
     `sub` es el NRO_SOCIO (la credencial pública) y `uid` es `ListadoMedico.ID`
@@ -19,6 +19,11 @@ def create_access_token(*, sub: str | int, uid: int | None = None, scopes: list[
     `padrones` indexan por ID, `validaciones` y `DetalleLiquidacion` por
     NRO_SOCIO. Resolver uno desde el otro costaría una query por request.
     Ver app/auth/ownership.py y docs/api/RBAC_PROPUESTA.md §6.2.
+
+    `provisoria=True` (claim `pwd_prov`) marca una sesión abierta con la
+    contraseña provisoria de "Renovar contraseña": `enforce_authz` no le deja
+    hacer otra cosa que cambiarla. Va en el token para no sumar una consulta
+    por request; cambiar la contraseña revoca el token igual.
     """
     now = _now_utc()
     exp = now + timedelta(minutes=settings.ACCESS_MINUTES)
@@ -32,6 +37,8 @@ def create_access_token(*, sub: str | int, uid: int | None = None, scopes: list[
         "nbf": _ts(now),            # no válido antes de
         "exp": _ts(exp),            # vence en
     }
+    if provisoria:
+        payload["pwd_prov"] = True
     return jwt.encode(payload, settings.JWT_SECRET.get_secret_value(), algorithm=settings.JWT_ALG)
 
 def create_refresh_token(sub: str, jti: str):

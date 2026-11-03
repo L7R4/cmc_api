@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.database import get_db
 from app.db.models import (
+    Ajuste,
     DetalleLiquidacion,
     FacturacionCMC,
     Liquidacion,
@@ -20,11 +21,16 @@ from app.modules.liquidacion.schemas import (
     DetalleLiquidacionRead,
     DetalleVistaRow,
     LiquidacionCreate,
+    LiquidacionPorcentajeUpdate,
     LiquidacionRead,
     ReciboRead,
 )
 from app.modules.liquidacion.service import (
+    aplicar_porcentaje_pago,
     build_detalles_from_cmc,
+    porcentaje_pago_sugerido,
+    restaurar_ajustes_facturados,
+    validar_porcentaje_pago,
     detalle_recibo_medico,
     recalcular_totales_de_liquidacion,
     vista_detalles_liquidacion,
@@ -46,6 +52,7 @@ async def crear_liquidacion(payload: LiquidacionCreate, db: AsyncSession = Depen
         raise HTTPException(400, "pago_id inválido")
     if pago.estado != "A":
         raise HTTPException(409, "No se puede crear una liquidación en un pago cerrado")
+    porcentaje_pago = validar_porcentaje_pago(payload.porcentaje_pago)
 
     factura = await db.get(FacturacionCMC, payload.factura_id)
     if not factura or str(factura.cod_obr) != str(payload.obra_social_id):
@@ -102,6 +109,9 @@ async def crear_liquidacion(payload: LiquidacionCreate, db: AsyncSession = Depen
             + (f": {'; '.join(motivos)}." if motivos else "."),
         )
 
+    if porcentaje_pago != Decimal("100"):
+        await aplicar_porcentaje_pago(db, liq, porcentaje_pago)
+
     await recalcular_totales_de_liquidacion(db, liq.id)
     await db.flush()
     await generar_y_recalcular_porcentuales(db, payload.pago_id)
@@ -109,6 +119,44 @@ async def crear_liquidacion(payload: LiquidacionCreate, db: AsyncSession = Depen
     await db.commit()
     await db.refresh(liq)
     return LiquidacionRead.model_validate(liq).model_copy(update={"resumen_carga": resumen})
+
+
+# ================================================
+# GET: Porcentaje de pago sugerido para una obra social
+# ================================================
+@router.get("/liquidaciones_por_os/porcentaje_sugerido")
+async def obtener_porcentaje_sugerido(
+    obra_social_id: int = Query(..., description="NRO_OBRASOCIAL"), db: AsyncSession = Depends(get_db),
+):
+    """El último porcentaje con que se pagó una factura de esa obra social (100 si nunca se pagó).
+    Es sólo una sugerencia: el porcentaje se elige cada vez."""
+    return {"obra_social_id": obra_social_id, "porcentaje_pago": await porcentaje_pago_sugerido(db, obra_social_id)}
+
+
+# ================================================
+# PATCH: Cambia el porcentaje de pago de una factura del pago
+# ================================================
+@router.patch("/liquidaciones_por_os/{liquidacion_id}/porcentaje", response_model=LiquidacionRead)
+async def cambiar_porcentaje_pago(
+    liquidacion_id: int, payload: LiquidacionPorcentajeUpdate, db: AsyncSession = Depends(get_db),
+):
+    """Recalcula la factura (renglones y ajustes) sobre lo facturado con el nuevo porcentaje. Sólo con el pago abierto."""
+    liq = await db.get(Liquidacion, liquidacion_id)
+    if not liq:
+        raise HTTPException(404, "Liquidacion no encontrada")
+    pago = await db.get(Pago, liq.pago_id)
+    if pago and pago.estado != "A":
+        raise HTTPException(409, "No se puede cambiar el porcentaje de una liquidación de un pago cerrado")
+    medicos = await aplicar_porcentaje_pago(db, liq, payload.porcentaje_pago)
+    await recalcular_totales_de_liquidacion(db, liq.id)
+    await db.flush()
+    await generar_y_recalcular_porcentuales(db, liq.pago_id)
+    if pago is not None:
+        for medico_id in medicos:
+            await refrescar_detalle_medico(db, liq.pago_id, medico_id, pago=pago)
+    await db.commit()
+    await db.refresh(liq)
+    return LiquidacionRead.model_validate(liq)
 
 
 # ================================================
@@ -168,6 +216,14 @@ async def eliminar_liquidacion(liquidacion_id: int, db: AsyncSession = Depends(g
         .where(DetalleLiquidacion.liquidacion_id == liquidacion_id)
         .distinct()
     )).scalars().all())
+
+    # Los ajustes de esta factura que quedan en el pago vuelven a su monto cargado: el porcentaje era de la factura.
+    if obj.factura_id is not None and obj.porcentaje_pago != Decimal("100"):
+        medico_ids_afectados = sorted(set(medico_ids_afectados) | set((await db.execute(
+            select(Ajuste.medico_id).join(LoteAjuste, LoteAjuste.id == Ajuste.lote_id)
+            .where(LoteAjuste.pago_id == obj.pago_id, LoteAjuste.factura_id == obj.factura_id).distinct()
+        )).scalars().all()))
+        await restaurar_ajustes_facturados(db, pago_id=obj.pago_id, factura_id=obj.factura_id)
 
     pago_id_del = obj.pago_id
     await db.delete(obj)

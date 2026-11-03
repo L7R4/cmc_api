@@ -1,7 +1,8 @@
 from collections import defaultdict
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -20,17 +21,17 @@ from app.modules.medicos.helpers import (
 )
 
 from typing import Any, DefaultDict, Literal, Optional, Dict, List
-from fastapi import APIRouter, Body, Depends, File, Form, Query, HTTPException, Request, UploadFile, status
+from fastapi import APIRouter, Body, Depends, File, Form, Query, HTTPException, Request, Response, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import and_, case, delete, desc, func, literal, select, or_, cast, String, Integer, text, update
 
 from app.modules.medicos import auditoria
-from app.core.passwords import hash_password, validate_new_password
 from sqlalchemy import case, delete, desc, func, literal, select, or_, cast, String, Integer, update
 from app.auth import sessions
-from app.auth.deps import get_current_user, require_scope
+from app.auth.deps import get_current_user, get_current_user_with_scopes_and_role, require_scope
 from app.auth.ownership import medico_objetivo
-from app.core.passwords import hash_password, hash_password_inicial, validate_new_password
+from app.auth.scopes import Scope
+from app.core.passwords import HORAS_PASSWORD_PROVISORIA
 from app.db.database import get_db
 from app.db.models import (
     Deduccion, Conceptos, DetalleLiquidacion, Documento, Especialidad, Liquidacion, ListadoMedico,
@@ -41,7 +42,7 @@ from app.modules.medicos.schemas import (
     CEAppOut, CEBundleOut, CEBundlePatchIn, CEStoreOut, ConceptRecordOut, ConceptoAplicacionOut,
     DoctorStatsPointOut, EstadoCuentaIn, MedicoBase, MedicoConceptoOut, MedicoDebtOut, MedicoDocOut,
     MedicoEspecialidadOut, MedicoListRow, MedicoDetailOut, MedicoPartialIn, MedicoSelectorOut, MedicoUpdateIn,
-    NuevaDeudaIn, OrganizacionIn, PatchCEIn, RegisterIn, RegisterOut, ResetPasswordIn,
+    NuevaDeudaIn, OrganizacionIn, PatchCEIn, RegisterIn, RegisterOut, RenovarPasswordOut,
     SaveContinueOut,
     _coerce_sexo,
 )
@@ -49,7 +50,15 @@ from app.services.email import send_email_resend
 from app.core.config import settings
 from app.auth.identidad import rol_principal
 from app.db.models.medico import ESTADO_ACTIVO
-from app.modules.medicos.service import cambiar_estado_cuenta, create_medico_and_solicitud, save_medico_admin_draft
+from app.modules.medicos.service import (
+    RenovacionNoPermitida,
+    cambiar_estado_cuenta,
+    create_medico_and_solicitud,
+    renovar_password,
+    save_medico_admin_draft,
+)
+
+log = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -1518,36 +1527,62 @@ async def set_organizacion(
     }
 
 
-@router.post("/{medico_id}/reset-password")
-async def reset_password_medico(medico_id: int, body: ResetPasswordIn, db: AsyncSession = Depends(get_db)):
-    """Resetea la contraseña de un socio sin requerir la actual — para uso de un
-    admin/staff cuando el socio se la olvidó. El self-service está en
-    POST /auth/change-password (requiere la contraseña actual).
+@router.post("/{medico_id}/renovar-password", response_model=RenovarPasswordOut)
+async def renovar_password_medico(
+    medico_id: int,
+    response: Response,
+    dep=Depends(get_current_user_with_scopes_and_role),
+    db: AsyncSession = Depends(get_db),
+):
+    """"Renovar contraseña": el socio se la olvidó y el personal le genera una
+    provisoria para dictársela. Ver `service.renovar_password`.
 
-    Sin `new_password` vuelve a `PASSWORD_INICIAL`. En los dos casos la cuenta
-    queda con `must_change_password`: la contraseña la eligió otro, así que no
-    puede quedarse.
+    Tres controles, además del de `enforce_authz`:
 
-    Cierra además todas las sesiones del socio, por el mismo motivo que el
-    cambio de contraseña (A7): un reset suele pedirse porque alguien no puede
-    entrar, y a veces porque otro sí pudo.
+    * el permiso se chequea **acá también**, con los scopes leídos de la base:
+      con `RBAC_ENFORCE=false` la matriz sólo registra el faltante y deja pasar,
+      y esto no puede quedar abierto a cualquier sesión;
+    * no sobre la propia cuenta: para eso está el cambio de contraseña, que
+      pide la actual;
+    * no sobre una cuenta con permisos que el operativo no tiene
+      (`service.permisos_que_faltan`).
+
+    Queda en `audit_log_general` como cualquier POST (quién, a quién, cuándo,
+    desde dónde), sin la contraseña: el middleware no guarda el cuerpo de las
+    respuestas exitosas.
     """
+    operador, scopes, _rol = dep
+    if Scope.MEDICO_RENOVAR_PASSWORD not in scopes:
+        raise HTTPException(403, f"Falta el permiso '{Scope.MEDICO_RENOVAR_PASSWORD}'")
+
     med = await db.get(ListadoMedico, medico_id)
     if not med:
         raise HTTPException(404, "Médico no encontrado")
+    if med.ID == operador.ID:
+        raise HTTPException(
+            400, "No podés renovar tu propia contraseña: cambiala desde tu perfil."
+        )
 
-    if body.new_password:
-        try:
-            med.hashed_password = hash_password(validate_new_password(body.new_password))
-        except ValueError as e:
-            raise HTTPException(400, str(e))
-    else:
-        med.hashed_password = hash_password_inicial()
+    try:
+        password, vence = await renovar_password(db, med, scopes_operador=scopes)
+    except RenovacionNoPermitida as e:
+        raise HTTPException(
+            403,
+            "No podés renovar la contraseña de esta cuenta: tiene permisos que vos "
+            f"no tenés ({', '.join(e.faltan)}).",
+        )
 
-    med.must_change_password = True
-    await db.commit()
-    await sessions.revocar_sesiones(db, med.ID, motivo="cambio_password")
-    return {"ok": True, "medico_id": medico_id}
+    log.info(
+        "contraseña renovada: medico_id=%s por operador_id=%s", med.ID, operador.ID
+    )
+    # Lleva la contraseña en claro: que no quede en ninguna cache intermedia.
+    response.headers["Cache-Control"] = "no-store"
+    return RenovarPasswordOut(
+        medico_id=med.ID,
+        password_provisoria=password,
+        vence=vence.replace(tzinfo=timezone.utc),
+        horas_vigencia=HORAS_PASSWORD_PROVISORIA,
+    )
 
 
 @router.delete("/{medico_id}", status_code=204)

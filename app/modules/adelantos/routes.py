@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.database import get_db
 from app.db.models import (
+    Ajuste,
     DetalleFacturacionCMC,
     DetalleLiquidacion,
     FacturacionCMC,
@@ -31,6 +32,7 @@ from app.db.models import (
     LiquidacionAdelanto,
     LiquidacionAdelantoItem,
     ListadoMedico,
+    LoteAjuste,
     ObrasSociales,
     Pago,
 )
@@ -44,6 +46,7 @@ from app.modules.adelantos.schemas import (
     AdelantoListaRow,
     AdelantoRead,
     AdelantoUpdate,
+    AjustePrestacion,
     FacturaParaAdelanto,
     PrestacionesFacturaPage,
     PrestacionFacturaRow,
@@ -85,6 +88,34 @@ def _de_la_factura(factura: FacturacionCMC) -> list:
     ]
 
 
+async def _ajustes_de(db: AsyncSession, detalle_ids: list[int]) -> dict[int, list[AjustePrestacion]]:
+    """Débitos y créditos cargados a cada prestación (ajuste.id_atencion), en cualquier lote.
+    Solo para mostrar: el adelanto paga lo que vale la prestación y cada ajuste se descuenta (o
+    suma) una sola vez, cuando su lote entra a un pago."""
+    if not detalle_ids:
+        return {}
+    out: dict[int, list[AjustePrestacion]] = {}
+    for a, lote_estado, pago_id in (await db.execute(
+        select(Ajuste, LoteAjuste.estado, LoteAjuste.pago_id)
+        .join(LoteAjuste, LoteAjuste.id == Ajuste.lote_id)
+        .where(Ajuste.id_atencion.in_(detalle_ids))
+        .order_by(Ajuste.lote_id, Ajuste.id)
+    )).all():
+        h, g = to_dec(a.honorarios), to_dec(a.gastos)
+        out.setdefault(int(a.id_atencion), []).append(AjustePrestacion(
+            ajuste_id=a.id, lote_id=a.lote_id, lote_estado=lote_estado, pago_id=pago_id,
+            tipo="debito" if a.tipo == "d" else "credito",
+            honorarios=h, gastos=g, total=h + g, observacion=a.observacion,
+        ))
+    return out
+
+
+def _sumas(ajustes: list[AjustePrestacion]) -> tuple[Decimal, Decimal]:
+    deb = sum((a.total for a in ajustes if a.tipo == "debito"), Decimal("0"))
+    cred = sum((a.total for a in ajustes if a.tipo == "credito"), Decimal("0"))
+    return deb, cred
+
+
 # ================================================
 # Lectura de un adelanto
 # ================================================
@@ -120,6 +151,7 @@ async def _leer(db: AsyncSession, adelanto: LiquidacionAdelanto) -> AdelantoRead
         .order_by(LiquidacionAdelantoItem.id)
     )).all()
 
+    ajustes = await _ajustes_de(db, [int(r[0].detalle_facturacion_id) for r in filas])
     items = [
         AdelantoItemRead(
             id=r[0].id,
@@ -134,6 +166,9 @@ async def _leer(db: AsyncSession, adelanto: LiquidacionAdelanto) -> AdelantoRead
             honorarios=r[0].honorarios,
             gastos=r[0].gastos,
             importe_total=r[0].importe_total,
+            debitos=_sumas(ajustes.get(int(r[0].detalle_facturacion_id), []))[0],
+            creditos=_sumas(ajustes.get(int(r[0].detalle_facturacion_id), []))[1],
+            ajustes=ajustes.get(int(r[0].detalle_facturacion_id), []),
         )
         for r in filas
     ]
@@ -153,6 +188,8 @@ async def _leer(db: AsyncSession, adelanto: LiquidacionAdelanto) -> AdelantoRead
         medicos=len({i.medico_id for i in items}),
         prestaciones=len(items),
         importe=sum((i.importe_total for i in items), Decimal("0")),
+        debitos=sum((i.debitos for i in items), Decimal("0")),
+        creditos=sum((i.creditos for i in items), Decimal("0")),
         items=items,
         pago_abierto_id=await _pago_abierto_id(db),
     )
@@ -455,6 +492,8 @@ async def prestaciones_de_la_factura(
             )).all()
         }
 
+    ajustes = await _ajustes_de(db, ids)
+
     items: list[PrestacionFacturaRow] = []
     for r in rows:
         d = r[0]
@@ -500,6 +539,9 @@ async def prestaciones_de_la_factura(
             funcion=_rotulo_funcion(d.tpo_funcion),
             equipo=equipo,
             importe_total=d.importe_total or Decimal("0"),
+            debitos=_sumas(ajustes.get(det_id, []))[0],
+            creditos=_sumas(ajustes.get(det_id, []))[1],
+            ajustes=ajustes.get(det_id, []),
             estado=estado,
             adelanto_id=adelanto_ref,
             pago_id=pago_id,
@@ -562,7 +604,7 @@ async def agregar_prestaciones(
     } if socios else {}
 
     rechazadas: list[dict] = []
-    agregadas = 0
+    agregadas: list[int] = []
     for det_id in pedidas:
         d = filas.get(det_id)
         motivo: Optional[str] = None
@@ -594,14 +636,15 @@ async def agregar_prestaciones(
             gastos=gastos,
             importe_total=to_dec(d.importe_total),
         ))
-        agregadas += 1
+        agregadas.append(det_id)
 
     try:
         await db.commit()
     except IntegrityError:
         await db.rollback()
         raise HTTPException(409, "Otra persona acaba de adelantar alguna de esas prestaciones. Recargá la lista.")
-    return AdelantoItemsResultado(agregadas=agregadas, rechazadas=rechazadas)
+    con_ajustes = len(await _ajustes_de(db, agregadas))
+    return AdelantoItemsResultado(agregadas=len(agregadas), rechazadas=rechazadas, con_ajustes=con_ajustes)
 
 
 # ================================================

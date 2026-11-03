@@ -35,6 +35,15 @@ class PagoRead(BaseModel):
     total_adelantos: Decimal = Decimal("0")
     # Compensaciones del pago, con signo (+ a favor de socios, − en contra). Ya están en total_neto.
     total_compensaciones: Decimal = Decimal("0")
+    # `total_debitos` incluye el saldo arrastrado de los médicos (como el sistema anterior); acá va separado.
+    total_debitos_os: Decimal = Decimal("0")
+    total_arrastres: Decimal = Decimal("0")
+    # Del saldo arrastrado, lo que de verdad se cobra en este pago (el resto vuelve al mes siguiente como monto negativo).
+    total_arrastres_cobrado: Decimal = Decimal("0")
+    # Lo que los médicos que deben más de lo que produjeron dejan para el pago siguiente (sólo con el pago cerrado).
+    total_negativo_proximo_mes: Decimal = Decimal("0")
+    # Neto de todos los médicos tal como se les paga (suma de los netos por médico): total_neto + monto negativo.
+    total_a_pagar: Decimal = Decimal("0")
 
     class Config:
         from_attributes = True
@@ -218,6 +227,20 @@ class VistaPreviewCompensacionSection(BaseModel):
     totales: VistaPreviewCompensacionTotales = VistaPreviewCompensacionTotales()
 
 
+class VistaPreviaResumen(BaseModel):
+    """Las cifras del encabezado del pago, para que la vista previa muestre el mismo total a pagar."""
+    total_bruto: Decimal = Decimal("0")
+    total_debitos_os: Decimal = Decimal("0")
+    total_arrastres: Decimal = Decimal("0")
+    total_arrastres_cobrado: Decimal = Decimal("0")
+    total_creditos: Decimal = Decimal("0")
+    total_compensaciones: Decimal = Decimal("0")
+    total_deduccion: Decimal = Decimal("0")
+    total_neto: Decimal = Decimal("0")
+    total_negativo_proximo_mes: Decimal = Decimal("0")
+    total_a_pagar: Decimal = Decimal("0")
+
+
 class PagoVistaPreviaRead(BaseModel):
     pago_id: int
     mes: int
@@ -227,6 +250,7 @@ class PagoVistaPreviaRead(BaseModel):
     liquidaciones: VistaPreviaLiqSection
     deducciones: VistaPreviewDedSection
     lotes: VistaPreviewLoteSection
+    resumen: "VistaPreviaResumen"
     adelantos: VistaPreviewAdelantoSection = VistaPreviewAdelantoSection()
     compensaciones: VistaPreviewCompensacionSection = VistaPreviewCompensacionSection()
 

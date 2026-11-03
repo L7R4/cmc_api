@@ -16,6 +16,13 @@ from app.db.models import Compensacion
 ESTADOS_EN_PAGO = ("en_pago", "pagada")
 
 
+def leyenda_recibo(c: Compensacion) -> str:
+    """La leyenda que ve el socio; si va en cuotas, con cuál es: «Rotura de silla (cuota 2/5)»."""
+    if (c.cuotas_total or 1) > 1:
+        return f"{c.leyenda} (cuota {c.cuota_nro}/{c.cuotas_total})"
+    return c.leyenda
+
+
 async def compensaciones_por_medico_en_pago(db: AsyncSession, pago_id: int) -> dict[int, Decimal]:
     """Importe neto (con signo) de las compensaciones del pago, por médico (listado_medico.ID)."""
     rows = (await db.execute(

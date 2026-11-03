@@ -66,8 +66,9 @@ ESTADO_RECHAZADO = "R"
 
 # ── Cómo se arma el <Item> ────────────────────────────────────────────────────
 #
-# Nobis homologa la práctica de su lado: acá no se traduce el código, se manda
-# tal cual lo tiene el Colegio — mismo criterio del legacy. Lo único que varía
+# Nobis homologa la práctica de su lado: acá el cliente no traduce el código, manda
+# el que le pasan (el del Colegio, salvo los de `obras/nobis/homologador.py`, que
+# resuelve el validador antes de llamar). Lo único que varía
 # por código es **bajo qué nomenclador hay que anunciarlo**, y Nobis acepta dos
 # formas de decirlo. No está documentado en ningún lado: la regla vive
 # hardcodeada en `helpers/NobisSoapLowLevel.php::buildOrdenXml()` del sistema

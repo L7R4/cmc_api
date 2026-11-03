@@ -50,6 +50,8 @@ def get_current_user(creds: HTTPAuthorizationCredentials = Depends(bearer)):
         # Lo usa app/auth/sessions.py::access_revocado para comparar contra
         # `listado_medico.tokens_valid_from` y cortar sesiones sin esperar al exp.
         "iat": data.get("iat"),
+        # Sesión abierta con la contraseña provisoria: ver `enforce_authz`.
+        "pwd_prov": bool(data.get("pwd_prov")),
     }
 
 
@@ -73,6 +75,10 @@ def usuario_opcional(creds: HTTPAuthorizationCredentials = Depends(bearer)):
     except (ExpiredSignatureError, JWTError):
         return None
     if data.get("type") != "access":
+        return None
+    # Con la contraseña provisoria todavía sin cambiar, la sesión no ve más que
+    # un visitante (ver `enforce_authz`).
+    if data.get("pwd_prov"):
         return None
     return {
         "nro_socio": data.get("sub"),

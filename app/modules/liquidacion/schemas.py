@@ -15,6 +15,14 @@ class LiquidacionCreate(BaseModel):
     pago_id: int
     obra_social_id: int
     factura_id: int = Field(..., description="facturacion.id_prestaciones")
+    porcentaje_pago: Decimal = Field(
+        Decimal("100"), description="Porcentaje de lo facturado que se paga a los médicos (IOSCOR 98 / 98,4; el resto 100)",
+    )
+
+
+class LiquidacionPorcentajeUpdate(BaseModel):
+    """Cambia el porcentaje de pago de una factura que ya está en un pago abierto."""
+    porcentaje_pago: Decimal
 
 
 class LiquidacionRead(BaseModel):
@@ -32,6 +40,7 @@ class LiquidacionRead(BaseModel):
     total_debitos: Decimal
     total_creditos: Decimal
     total_neto: Decimal
+    porcentaje_pago: Decimal = Decimal("100.00")
     # Sólo al agregar la factura al pago: cuántas prestaciones entraron y cuáles no.
     resumen_carga: Optional[dict] = None
 

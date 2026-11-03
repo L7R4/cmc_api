@@ -18,6 +18,7 @@ from app.db.models import (
 )
 from app.db.models.liquidacion import Pago
 from app.modules.adelantos.queries import adelantos_por_medico_en_pago
+from app.modules.arrastres.queries import arrastres_por_medico_en_pago
 from app.modules.compensaciones.queries import compensaciones_por_medico_en_pago
 from app.modules.deducciones.schemas import (
     DeduccionHistorialItem,
@@ -30,12 +31,13 @@ from app.modules.deducciones.schemas import (
 TWOPLACES = Decimal("0.01")
 
 # nro_colegio de descuentos con base de cálculo especial
-NRO_COLEGIO_CONTRIB_HONORARIOS = 100  # base = suma de honorarios del médico
-NRO_COLEGIO_CONTRIB_GASTOS = 101      # base = suma de gastos del médico
+NRO_COLEGIO_CONTRIB_HONORARIOS = 100  # base = honorarios netos del médico (producción + créditos − débitos)
+NRO_COLEGIO_CONTRIB_GASTOS = 101      # base = gastos netos del médico (ídem)
 # Deuda de un médico que cobra menos de lo que debe (débitos > producción): la crea el
 # cierre del pago como deducción pendiente. Va en `cuota_nro` el id del pago que la originó.
 NRO_COLEGIO_SALDO_DEUDOR = 9900
 NRO_COLEGIO_IMPUESTO_LEY = 102        # Imp. Ley 25413
+NRO_COLEGIO_JUZGADO = 110             # Juzgado: porcentaje del socio sobre el total neto
 # Retenciones que el Colegio practica como agente: base = producción neta de débitos y créditos.
 NRO_COLEGIO_INGRESOS_BRUTOS = 200     # D.G.R. (Ingresos Brutos), 2%
 NRO_COLEGIO_GANANCIAS = 300           # AFIP (Ganancias), con escala: app/modules/retenciones
@@ -45,11 +47,13 @@ NRO_COLEGIO_RETENCIONES: frozenset[int] = frozenset({NRO_COLEGIO_INGRESOS_BRUTOS
 # disponible no alcanza. nro_colegio es el número que asigna el Colegio y es
 # estable entre entornos; descuento_id es un autoincrement de la base sin
 # garantía de coincidir entre local y producción (ver diagnóstico M7).
-# Las retenciones van después de las contribuciones y antes que el resto, como en el
-# sistema anterior (contribuciones → D.G.R. → D.G.I. → servicios).
-NRO_COLEGIO_PRIORITARIOS: frozenset[int] = frozenset({
+# Orden del sistema anterior (calcular_deducciones): contribuciones → Ley 25413 → Juzgado →
+# D.G.R. → Ganancias → el resto (cuotas y servicios), éste último por período y después por código.
+ORDEN_PRIORITARIOS: tuple[int, ...] = (
     NRO_COLEGIO_CONTRIB_HONORARIOS, NRO_COLEGIO_CONTRIB_GASTOS, NRO_COLEGIO_IMPUESTO_LEY,
-}) | NRO_COLEGIO_RETENCIONES
+    NRO_COLEGIO_JUZGADO, NRO_COLEGIO_INGRESOS_BRUTOS, NRO_COLEGIO_GANANCIAS,
+)
+NRO_COLEGIO_PRIORITARIOS: frozenset[int] = frozenset(ORDEN_PRIORITARIOS)
 
 #endregion
 
@@ -58,14 +62,11 @@ def ordenar_deducciones_por_prioridad(
     deds: list["Deduccion"], nro_colegio_map: dict[int, int]
 ) -> list["Deduccion"]:
     """
-    Orden de cobro cuando el disponible del pagador no alcanza para todo:
-    los descuentos prioritarios (NRO_COLEGIO_PRIORITARIOS) primero, en orden
-    de nro_colegio; el resto por saldo pendiente ascendente (calculado_total −
-    monto_aplicado), empate por id. Usado tanto por la vista previa como por
-    el cierre real (ver diagnóstico M2) — antes cada uno tenía su propio
-    criterio y divergían. Cuál de los dos criterios es el correcto sigue
-    siendo una decisión de negocio pendiente ("Decisiones del Colegio" #2);
-    mientras tanto usan el mismo acá para que preview y cierre no diverjan.
+    Orden de cobro cuando el disponible del pagador no alcanza para todo, el del sistema
+    anterior (decidido el 1/11/2026): los descuentos de ORDEN_PRIORITARIOS primero, en ese
+    orden; el resto por período (año y mes de aplicación) ascendente, después por nro_colegio
+    y, a igualdad, por id. Usado tanto por la vista previa como por el cierre real (ver
+    diagnóstico M2) para que no diverjan.
 
     nro_colegio_map: {Conceptos.id (== Deduccion.descuento_id): Conceptos.nro_colegio},
     a cargo del llamador (una sola query por corrida, no por pagador).
@@ -75,11 +76,11 @@ def ordenar_deducciones_por_prioridad(
 
     prioritarios = sorted(
         (d for d in deds if nro_colegio(d) in NRO_COLEGIO_PRIORITARIOS),
-        key=nro_colegio,
+        key=lambda d: (ORDEN_PRIORITARIOS.index(nro_colegio(d)), d.id),
     )
     resto = sorted(
         (d for d in deds if nro_colegio(d) not in NRO_COLEGIO_PRIORITARIOS),
-        key=lambda d: (d.calculado_total - d.monto_aplicado, d.id),
+        key=lambda d: (d.anio_aplicar or 9999, d.mes_aplicar or 99, nro_colegio(d) or 999999, d.id),
     )
     return prioritarios + resto
 
@@ -201,14 +202,18 @@ async def _base_retenciones_por_medico_en_pago(
         .group_by(Ajuste.medico_id)
     )).all()
     neto_aj = {int(m): (Decimal(h or 0), Decimal(g or 0)) for m, h, g in aj}
+    # Saldo arrastrado: el sistema anterior lo restaba como un débito más, y lo cargaba a los
+    # honorarios (los gastos no se tocan). Baja la base de 100, 102, D.G.R. y Ganancias.
+    arr = await arrastres_por_medico_en_pago(db, pago_id)
     cero = Decimal("0")
     out: dict[int, dict[str, Decimal]] = {}
-    for m in set(hon) | set(gas) | set(imp) | set(neto_aj):
+    for m in set(hon) | set(gas) | set(imp) | set(neto_aj) | set(arr):
         dh, dg = neto_aj.get(m, (cero, cero))
+        a = arr.get(m, cero)
         out[m] = {
-            "honorarios": hon.get(m, cero) + dh,
+            "honorarios": hon.get(m, cero) + dh - a,
             "gastos": gas.get(m, cero) + dg,
-            "importe": imp.get(m, cero) + dh + dg,
+            "importe": imp.get(m, cero) + dh + dg - a,
         }
     return out
 
@@ -233,7 +238,13 @@ async def _medicos_en_pago(db: AsyncSession, pago_id: int) -> set[int]:
     )).scalars().all()
     con_adelanto = await adelantos_por_medico_en_pago(db, pago_id)
     con_compensacion = await compensaciones_por_medico_en_pago(db, pago_id)
-    return {int(m) for m in con_detalle} | {int(m) for m in con_ajuste} | set(con_adelanto) | set(con_compensacion)
+    # Con un saldo arrastrado también (como en la liquidación del sistema anterior): queda con
+    # reconocido negativo y el cierre vuelve a dejarle la deuda.
+    con_arrastre = await arrastres_por_medico_en_pago(db, pago_id)
+    return (
+        {int(m) for m in con_detalle} | {int(m) for m in con_ajuste}
+        | set(con_adelanto) | set(con_compensacion) | set(con_arrastre)
+    )
 
 
 async def _ajustes_por_medico_en_pago(
@@ -275,22 +286,46 @@ async def _ajustes_por_medico_en_pago(
     return deb_map, cred_map
 
 
+def base_neta_del_descuento(nro_colegio: int, base: Optional[dict[str, Decimal]]) -> Decimal:
+    """
+    Base de un descuento porcentual, como el sistema anterior: el NETO del médico en el pago
+    (producción + créditos − débitos de los lotes liquidados), nunca negativo.
+      - Contribución s/honorarios (100) → honorarios netos
+      - Contribución s/gastos (101)     → gastos netos
+      - Ley 25413, D.G.R., Juzgado y el resto de los porcentuales → honorarios + gastos netos
+    `base` es la fila de _base_retenciones_por_medico_en_pago (None si el médico no tiene nada).
+    Como en el sistema anterior, si el total neto del médico no es mayor que 0 no se le calcula
+    ninguna deducción, aunque sus honorarios o sus gastos sueltos sean positivos.
+    """
+    if not base or base["importe"] <= 0:
+        return Decimal("0")
+    if nro_colegio == NRO_COLEGIO_CONTRIB_HONORARIOS:
+        monto = base["honorarios"]
+    elif nro_colegio == NRO_COLEGIO_CONTRIB_GASTOS:
+        monto = base["gastos"]
+    else:
+        monto = base["importe"]
+    return max(monto, Decimal("0"))
+
+
 async def _disponible_por_medico_en_pago(
     db: AsyncSession, pago_id: int
 ) -> dict[int, Decimal]:
     """
-    Disponible neto por médico = bruto − débitos de ajustes + créditos de ajustes.
+    Disponible neto por médico = bruto − débitos de ajustes + créditos de ajustes − saldo arrastrado.
     Combina _base_bruto_por_medico_en_pago y _ajustes_por_medico_en_pago.
     """
     bruto_map = await _base_bruto_por_medico_en_pago(db, pago_id)
     deb_map, cred_map = await _ajustes_por_medico_en_pago(db, pago_id)
+    arr_map = await arrastres_por_medico_en_pago(db, pago_id)
 
     out: dict[int, Decimal] = {}
-    for k in set(bruto_map) | set(deb_map) | set(cred_map):
+    for k in set(bruto_map) | set(deb_map) | set(cred_map) | set(arr_map):
         out[k] = (
             bruto_map.get(k, Decimal("0"))
             - deb_map.get(k, Decimal("0"))
             + cred_map.get(k, Decimal("0"))
+            - arr_map.get(k, Decimal("0"))
         )
     return out
 
@@ -322,6 +357,48 @@ async def _medicos_para_descuento(db: AsyncSession, desc_id: int) -> list[tuple[
         )
     )
     return list({(m, bool(p)) for m, p in res.all()})
+
+
+def importe_efectivo(
+    desc: "Conceptos", porcentaje_propio: Optional[Decimal], monto_propio: Optional[Decimal]
+) -> tuple[Decimal, Decimal]:
+    """(precio, porcentaje) que rigen para un socio en un concepto: lo propio de su asignación si
+    lo tiene, si no lo del concepto. Con porcentaje propio manda ese porcentaje y no hay precio;
+    con monto propio (y sin porcentaje propio) manda ese monto y no hay porcentaje."""
+    if porcentaje_propio is not None and porcentaje_propio > 0:
+        return Decimal("0"), Decimal(str(porcentaje_propio))
+    if monto_propio is not None and monto_propio > 0:
+        return Decimal(str(monto_propio)), Decimal("0")
+    return (Decimal(str(getattr(desc, "precio", 0) or 0)),
+            Decimal(str(getattr(desc, "porcentaje", 0) or 0)))
+
+
+async def _importes_propios_de_descuento(
+    db: AsyncSession, desc_id: int
+) -> dict[int, tuple[Optional[Decimal], Optional[Decimal]]]:
+    """{medico_id: (porcentaje_propio, monto_propio)} de las asignaciones activas del concepto
+    que tienen algún importe propio. Las demás no figuran (rigen los del concepto)."""
+    res = await db.execute(
+        select(SocioDescuento.medico_id, SocioDescuento.porcentaje_propio, SocioDescuento.monto_propio).where(
+            SocioDescuento.descuento_id == desc_id,
+            SocioDescuento.fecha_baja.is_(None),
+            (SocioDescuento.porcentaje_propio.is_not(None)) | (SocioDescuento.monto_propio.is_not(None)),
+        )
+    )
+    return {int(m): (p, mo) for m, p, mo in res.all()}
+
+
+async def _multiplicadores_de_descuento(db: AsyncSession, desc_id: int) -> dict[int, int]:
+    """{medico_id: multiplicador} de las asignaciones activas del concepto con multiplicador > 1.
+    Las demás no figuran (se cobra una vez)."""
+    res = await db.execute(
+        select(SocioDescuento.medico_id, SocioDescuento.multiplicador).where(
+            SocioDescuento.descuento_id == desc_id,
+            SocioDescuento.fecha_baja.is_(None),
+            SocioDescuento.multiplicador > 1,
+        )
+    )
+    return {int(m): int(n) for m, n in res.all()}
 
 
 async def _pagadores_de_descuento(db: AsyncSession, desc_id: int) -> dict[int, int]:
@@ -381,6 +458,9 @@ async def _enrich_socio(db: AsyncSession, socio: SocioDescuento) -> SocioDescuen
         descuento_nombre=getattr(desc, "nombre", None),
         descuento_precio=getattr(desc, "precio", None),
         descuento_porcentaje=getattr(desc, "porcentaje", None),
+        porcentaje_propio=socio.porcentaje_propio,
+        monto_propio=socio.monto_propio,
+        multiplicador=socio.multiplicador or 1,
         pagador_medico_id=socio.pagador_medico_id,
         pagador_nombre=getattr(pagador, "NOMBRE", None),
         pagador_nro_socio=getattr(pagador, "NRO_SOCIO", None),
@@ -574,10 +654,5 @@ async def _get_open_pago(db: AsyncSession) -> Optional[Pago]:
     return await db.scalar(select(Pago).where(Pago.estado == "A").limit(1))
 
 
-async def marcar_deducciones_dirty(db: AsyncSession, pago_id: int) -> None:
-    """Marca que algo cambió en el pago y las deducciones en_pago pueden estar desactualizadas."""
-    await db.execute(
-        update(Pago).where(Pago.id == pago_id).values(deducciones_dirty=True)
-    )
 #endregion 
 

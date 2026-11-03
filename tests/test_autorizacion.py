@@ -207,7 +207,7 @@ def test_convencion_de_nombres():
         "cerrar", "reabrir", "marcar_pagado", "emitir", "anular", "aplicar", "cargar",
         "refacturar", "periodo", "complementar", "masivo", "gestionar",
         "purgar", "generar", "resolver", "documento", "leer_sensible",
-        "leer_propio", "editar_bancario",
+        "leer_propio", "editar_bancario", "renovar_password",
     }
     malos = []
     for s in Scope:

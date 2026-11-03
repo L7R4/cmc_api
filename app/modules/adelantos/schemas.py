@@ -56,6 +56,20 @@ class AdelantoListaRow(BaseModel):
     created_at: Optional[datetime.datetime] = None
 
 
+class AjustePrestacion(BaseModel):
+    """Un débito o crédito cargado a la prestación en un lote. Solo informa: el adelanto paga lo
+    que vale la prestación y el ajuste se descuenta (o suma) cuando su lote entra a un pago."""
+    ajuste_id: int
+    lote_id: int
+    lote_estado: str          # A abierto · C cerrado · L en un pago · AP ya aplicado
+    pago_id: Optional[int] = None
+    tipo: Literal["debito", "credito"]
+    honorarios: Decimal
+    gastos: Decimal
+    total: Decimal
+    observacion: Optional[str] = None
+
+
 class AdelantoItemRead(BaseModel):
     id: int
     detalle_id: int
@@ -69,6 +83,9 @@ class AdelantoItemRead(BaseModel):
     honorarios: Decimal
     gastos: Decimal
     importe_total: Decimal
+    debitos: Decimal = Decimal("0")
+    creditos: Decimal = Decimal("0")
+    ajustes: List[AjustePrestacion] = []
 
 
 class AdelantoRead(BaseModel):
@@ -87,6 +104,9 @@ class AdelantoRead(BaseModel):
     medicos: int
     prestaciones: int
     importe: Decimal
+    # Débitos y créditos cargados a sus prestaciones (no se restan del importe: van con su lote).
+    debitos: Decimal = Decimal("0")
+    creditos: Decimal = Decimal("0")
     items: List[AdelantoItemRead]
     # Solo informativo: ¿hay un pago abierto al que se pueda pasar?
     pago_abierto_id: Optional[int] = None
@@ -95,6 +115,8 @@ class AdelantoRead(BaseModel):
 class AdelantoItemsResultado(BaseModel):
     agregadas: int
     rechazadas: List[dict]
+    # De las agregadas, cuántas tienen débitos o créditos cargados (para avisar).
+    con_ajustes: int = 0
 
 
 # Estado de una prestación de la factura frente a los adelantos:
@@ -118,6 +140,9 @@ class PrestacionFacturaRow(BaseModel):
     funcion: Optional[str] = None
     equipo: Optional[str] = None
     importe_total: Decimal
+    debitos: Decimal = Decimal("0")
+    creditos: Decimal = Decimal("0")
+    ajustes: List[AjustePrestacion] = []
     estado: EstadoPrestacion
     adelanto_id: Optional[int] = None
     pago_id: Optional[int] = None

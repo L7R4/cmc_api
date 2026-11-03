@@ -575,11 +575,13 @@ class OrganizacionIn(BaseModel):
     es_organizacion: bool
 
 
-class ResetPasswordIn(BaseModel):
-    # Opcional: sin valor, la cuenta vuelve a PASSWORD_INICIAL. Es el caso
-    # habitual del mostrador —"me olvidé la contraseña"— y evita que el
-    # administrativo tenga que inventar una y dictarla por teléfono.
-    new_password: Optional[str] = None
+class RenovarPasswordOut(BaseModel):
+    """Respuesta de "Renovar contraseña". `password_provisoria` es la única vez
+    que la contraseña sale de la API: el front la muestra y no la guarda."""
+    medico_id: int
+    password_provisoria: str
+    vence: datetime  # UTC, con zona
+    horas_vigencia: int
 
 
 class AdminSaveContinueIn(BaseModel):

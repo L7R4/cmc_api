@@ -20,13 +20,16 @@ from app.modules.deducciones.helpers import (
     NRO_COLEGIO_CONTRIB_GASTOS,
     NRO_COLEGIO_CONTRIB_HONORARIOS,
     TWOPLACES,
-    _base_bruto_por_medico_en_pago,
+    base_neta_del_descuento,
+    importe_efectivo,
+    _importes_propios_de_descuento,
+    _multiplicadores_de_descuento,
+    _base_retenciones_por_medico_en_pago,
     _calc_monto,
     _enrich_socio,
-    _gastos_por_medico_en_pago,
     _get_descuento,
+    _get_open_pago,
     _handle_item_error,
-    _honorarios_por_medico_en_pago,
     _medicos_para_descuento,
     _pagadores_de_descuento,
 )
@@ -54,6 +57,7 @@ from app.modules.deducciones.service import (
     crear_programa,
     deshacer_descuentos_generados,
     eliminar_item,
+    generar_y_recalcular_porcentuales,
     get_deducciones_aplicadas,
     get_historial_deducciones,
     get_historial_export,
@@ -92,13 +96,13 @@ async def bulk_generar_descuento(
     except ValueError:
         raise HTTPException(404, "Descuento no encontrado")
 
+    # Base neta (producción + créditos − débitos), como el sistema anterior: solo se descuenta a
+    # quien termina con neto mayor que 0.
     nro_colegio = int(desc.nro_colegio or 0)
-    if nro_colegio == NRO_COLEGIO_CONTRIB_HONORARIOS:
-        base_por_med = await _honorarios_por_medico_en_pago(db, pago_id)
-    elif nro_colegio == NRO_COLEGIO_CONTRIB_GASTOS:
-        base_por_med = await _gastos_por_medico_en_pago(db, pago_id)
-    else:
-        base_por_med = await _base_bruto_por_medico_en_pago(db, pago_id)
+    base_por_med = {
+        mid: base_neta_del_descuento(nro_colegio, base)
+        for mid, base in (await _base_retenciones_por_medico_en_pago(db, pago_id)).items()
+    }
 
     if getattr(desc, "aplica_a_todos", False):
         med_tuples: list[tuple[int, bool]] = [
@@ -114,8 +118,10 @@ async def bulk_generar_descuento(
     # (y se descuenta) en la liquidación de quien paga.
     pagadores = {} if getattr(desc, "aplica_a_todos", False) else await _pagadores_de_descuento(db, desc_id)
 
-    precio = Decimal(str(getattr(desc, "precio", 0) or 0))
-    porcentaje = Decimal(str(getattr(desc, "porcentaje", 0) or 0))
+    # Importe propio de cada socio (Juzgado, AMMECO…): reemplaza al del concepto.
+    propios = {} if getattr(desc, "aplica_a_todos", False) else await _importes_propios_de_descuento(db, desc_id)
+    # Multiplicador por socio: cuántas veces se cobra el importe fijo en el período (porcentajes no).
+    multiplos = {} if getattr(desc, "aplica_a_todos", False) else await _multiplicadores_de_descuento(db, desc_id)
 
     # ── Paso 1: Enrolar pendientes con period <= pago — solo médicos en el pago ──
     enrolados = 0
@@ -157,7 +163,10 @@ async def bulk_generar_descuento(
     to_insert = []
     for mid, paga_caja in med_tuples:
         base = base_por_med.get(mid, Decimal(0))
+        precio, porcentaje = importe_efectivo(desc, *propios.get(mid, (None, None)))
         monto, porc_usado = _calc_monto(base, precio, porcentaje)
+        if monto > 0 and not porc_usado:
+            monto = monto * multiplos.get(mid, 1)
         if monto <= 0:
             continue
 
@@ -283,6 +292,14 @@ async def detalle_socio_descuento(
     return await _enrich_socio(db, socio)
 
 
+async def _poner_al_dia_porcentuales_del_pago_abierto(db: AsyncSession) -> None:
+    """Si hay un pago abierto, genera y recalcula sus deducciones porcentuales (sin commit): el porcentaje
+    propio de un socio recién cargado o cambiado se refleja en el pago sin esperar a que cambie la producción."""
+    pago = await _get_open_pago(db)
+    if pago:
+        await generar_y_recalcular_porcentuales(db, pago.id)
+
+
 @router.post("/socios", response_model=SocioDescuentoRead, status_code=201)
 async def crear_socio_descuento(
     payload: SocioDescuentoCreate,
@@ -297,6 +314,9 @@ async def crear_socio_descuento(
         if not await db.scalar(select(ListadoMedico.ID).where(ListadoMedico.ID == payload.pagador_medico_id)):
             raise HTTPException(404, "Médico pagador no encontrado")
 
+    if payload.porcentaje_propio is not None and payload.monto_propio is not None:
+        raise HTTPException(422, "Cargá el porcentaje propio o el monto propio, no los dos")
+
     from sqlalchemy.exc import IntegrityError
     socio = SocioDescuento(
         medico_id=payload.medico_id,
@@ -305,13 +325,19 @@ async def crear_socio_descuento(
         fecha_alta=payload.fecha_alta or datetime.date.today(),
         fecha_baja=payload.fecha_baja,
         paga_por_caja=payload.paga_por_caja,
+        porcentaje_propio=payload.porcentaje_propio,
+        monto_propio=payload.monto_propio,
+        multiplicador=payload.multiplicador,
     )
     db.add(socio)
     try:
-        await db.commit()
+        await db.flush()
     except IntegrityError:
         await db.rollback()
         raise HTTPException(409, "El médico ya tiene asignado ese descuento")
+    if socio.porcentaje_propio is not None and socio.fecha_baja is None:
+        await _poner_al_dia_porcentuales_del_pago_abierto(db)
+    await db.commit()
     await db.refresh(socio)
     return await _enrich_socio(db, socio)
 
@@ -323,15 +349,19 @@ async def actualizar_socio_descuento(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Actualiza descuento_id, pagador_medico_id y/o fecha_baja de un SocioDescuento.
+    Actualiza descuento_id, pagador_medico_id, fecha_baja, paga_por_caja y/o el importe propio
+    (porcentaje_propio / monto_propio) de un SocioDescuento.
     Solo se modifican los campos explícitamente enviados en el body.
-    Para quitar el pagador: enviar `pagador_medico_id: null`.
+    Para quitar el pagador: enviar `pagador_medico_id: null`. Para volver al importe del
+    concepto: `porcentaje_propio: null` / `monto_propio: null`.
+    El importe propio rige desde la próxima deducción que se genere; las ya generadas no cambian.
     """
     socio = await db.get(SocioDescuento, socio_descuento_id)
     if not socio:
         raise HTTPException(404, "SocioDescuento no encontrado")
 
     sent = payload.model_fields_set
+    porcentaje_antes = socio.porcentaje_propio
 
     if "descuento_id" in sent and payload.descuento_id is not None:
         if not await db.scalar(select(Conceptos.id).where(Conceptos.id == payload.descuento_id)):
@@ -350,6 +380,24 @@ async def actualizar_socio_descuento(
     if "paga_por_caja" in sent and payload.paga_por_caja is not None:
         socio.paga_por_caja = payload.paga_por_caja
 
+    # Importe propio: cargar uno reemplaza al otro (queda uno solo); null lo quita.
+    if "porcentaje_propio" in sent:
+        socio.porcentaje_propio = payload.porcentaje_propio
+        if payload.porcentaje_propio is not None and "monto_propio" not in sent:
+            socio.monto_propio = None
+    if "multiplicador" in sent and payload.multiplicador is not None:
+        socio.multiplicador = payload.multiplicador
+    if "monto_propio" in sent:
+        socio.monto_propio = payload.monto_propio
+        if payload.monto_propio is not None and "porcentaje_propio" not in sent:
+            socio.porcentaje_propio = None
+    if socio.porcentaje_propio is not None and socio.monto_propio is not None:
+        raise HTTPException(422, "Cargá el porcentaje propio o el monto propio, no los dos")
+
+    # Un porcentaje propio nuevo o distinto cambia lo que le toca pagar en el pago abierto.
+    if socio.porcentaje_propio != porcentaje_antes and socio.porcentaje_propio is not None:
+        await db.flush()
+        await _poner_al_dia_porcentuales_del_pago_abierto(db)
     await db.commit()
     await db.refresh(socio)
     return await _enrich_socio(db, socio)

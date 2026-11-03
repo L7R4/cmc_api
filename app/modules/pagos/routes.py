@@ -27,6 +27,7 @@ from app.modules.pagos.schemas import (
     ReciboRead,
     TipoInforme,
 )
+from app.modules.arrastres.queries import consumir_arrastres_al_cierre
 from app.modules.deducciones.service import (
     aplicar_deducciones_al_cierre,
     crear_saldos_deudores,
@@ -86,6 +87,11 @@ def _enrich_pago(pago: Pago, totales: dict) -> PagoRead:
         total_deduccion=totales["total_deduccion"],
         total_adelantos=totales.get("total_adelantos", 0),
         total_compensaciones=totales.get("total_compensaciones", 0),
+        total_debitos_os=totales.get("total_debitos_os", 0),
+        total_arrastres=totales.get("total_arrastres", 0),
+        total_arrastres_cobrado=totales.get("total_arrastres_cobrado", 0),
+        total_negativo_proximo_mes=totales.get("total_negativo_proximo_mes", 0),
+        total_a_pagar=totales.get("total_a_pagar", totales["total_neto"]),
     )
 
 
@@ -140,6 +146,10 @@ async def crear_pago(payload: PagoCreate, db: AsyncSession = Depends(get_db)):
 
     obj = Pago(anio=payload.anio, mes=payload.mes, descripcion=payload.descripcion)
     db.add(obj)
+    await db.flush()
+    # Las cuotas de compensaciones cuyo mes llegó entran solas (y con ellas, las deducciones
+    # pendientes de esos socios).
+    await generar_y_recalcular_porcentuales(db, obj.id)
     await db.commit()
     await db.refresh(obj)
 
@@ -266,6 +276,10 @@ async def cerrar_pago(pago_id: int, db: AsyncSession = Depends(get_db)):
     # 2. Red de seguridad: cualquier Deduccion en_pago que haya escapado el paso anterior
     ded_extra = await marcar_deducciones_aplicadas(db, pago_id)
 
+    # 2b. El saldo arrastrado de los médicos se da por consumido (se restó del reconocido como un
+    #     débito). Tiene que ir antes de marcar el pago como cerrado.
+    arrastres_consumidos = await consumir_arrastres_al_cierre(db, pago)
+
     # 3. Marcar lotes: L → AP (Aplicado — inmutables desde ahora)
     lotes_info = await marcar_lotes_aplicados(db, pago_id)
     lotes_info["adelantos_aplicados"] = await marcar_adelantos_aplicados(db, pago_id)
@@ -301,6 +315,7 @@ async def cerrar_pago(pago_id: int, db: AsyncSession = Depends(get_db)):
             "deducciones_aplicadas_extra": ded_extra,
             "prestaciones_liquidadas": prestaciones_liquidadas,
             "saldos_deudores": saldos_deudores,
+            "arrastres_consumidos": arrastres_consumidos,
         },
     }
 

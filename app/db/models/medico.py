@@ -121,6 +121,16 @@ class ListadoMedico(Base):
         Boolean, nullable=False, default=False, server_default="0"
     )
 
+    # Vencimiento de la contraseña provisoria que genera "Renovar contraseña"
+    # (POST /api/medicos/{id}/renovar-password). NULL = la contraseña actual no
+    # es provisoria; también la del alta (`PASSWORD_INICIAL`), que no vence por
+    # decisión del Colegio. Con valor, el login la rechaza pasada la fecha y el
+    # access token sale marcado para que la API no deje hacer otra cosa que
+    # cambiarla (ver `enforce_authz`). La limpia /auth/change-password.
+    password_provisoria_vence: Mapped[Optional[datetime.datetime]] = mapped_column(
+        DateTime, nullable=True
+    )
+
     # Reemplaza a `EXISTE`, que usaba 'N' tanto para "pendiente" como para "baja".
     # Sólo `activo` puede iniciar sesión. Se cambia con `cambiar_estado_cuenta()`
     # (app/modules/medicos/service.py), que además corta las sesiones al dar de baja.

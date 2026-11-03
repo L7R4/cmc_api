@@ -26,7 +26,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth import sessions
 from app.auth.deps import get_current_user_with_scopes_and_role
 from app.core import ratelimit
-from app.core.passwords import verify_and_upgrade
+from app.core.passwords import (
+    MENSAJE_PROVISORIA_VENCIDA,
+    password_provisoria_vencida,
+    tiene_password_provisoria,
+    verify_and_upgrade,
+)
 from app.core.security import create_access_token, decode_token
 from app.db.database import get_db
 from app.db.models import Especialidad, ListadoMedico
@@ -800,6 +805,18 @@ async def mobile_login(
         raise HTTPException(401, "Credenciales inválidas")
 
     ratelimit.registrar_exito(req, body.nro_socio)
+    # El app no tiene pantalla de cambio de contraseña: con la provisoria de
+    # "Renovar contraseña" se entra primero por la web, que obliga a cambiarla.
+    # Así tampoco hay que limitar las rutas del app como hace `enforce_authz`
+    # con las de la web.
+    if password_provisoria_vencida(medico):
+        raise HTTPException(401, MENSAJE_PROVISORIA_VENCIDA)
+    if tiene_password_provisoria(medico):
+        raise HTTPException(
+            403,
+            "Tenés una contraseña provisoria. Entrá primero a la web del Colegio "
+            "para elegir una nueva y después volvé a ingresar acá.",
+        )
     # Con la contraseña ya verificada, igual que el login web.
     usuario, scopes, role = await _usuario_o_403(db, medico, status=403)
     refresh = await sessions.emitir_refresh(db, medico, origen="mobile", request=req)

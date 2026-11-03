@@ -5,11 +5,11 @@ Servicios para el módulo de liquidaciones.
 import datetime
 import json
 import re
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import HTTPException
-from sqlalchemy import and_, case, func, or_, select
+from sqlalchemy import and_, case, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -86,6 +86,23 @@ def repartir_honorarios_gastos(
     multiplicador = Decimal(df.cantidad or 1) * Decimal(df.sesion or 1)
     honorarios = to_dec(getattr(df, col_hon)) * multiplicador if col_hon else Decimal("0")
     gastos = to_dec(getattr(df, col_gas)) * multiplicador if col_gas else Decimal("0")
+    # Manda lo PAGADO (`importe_total`). Hay filas en que se paga menos que el valor de la unidad por
+    # cantidad × sesión: una segunda práctica quirúrgica que se paga al 75 % (`porc` = 75) o una sesión
+    # de más que no se reconoce. En esas filas honorarios + gastos superan al importe; si se dejaban así,
+    # las contribuciones que se calculan sobre honorarios (la 100) tomaban una base mayor que lo cobrado
+    # (el sistema anterior las calcula sobre lo pagado) y el desglose no sumaba el bruto. Se escalan los
+    # dos en la misma proporción, de modo que honorarios + gastos == importe_total.
+    pagado = to_dec(getattr(df, "importe_total", None))
+    bruto = honorarios + gastos
+    if pagado > 0 and bruto - pagado > Decimal("0.02"):
+        factor = pagado / bruto
+        honorarios = (honorarios * factor).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        gastos = (gastos * factor).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        resto = pagado - honorarios - gastos            # centavos del redondeo: a la parte más grande
+        if honorarios >= gastos:
+            honorarios += resto
+        else:
+            gastos += resto
     return honorarios, gastos
 
 
@@ -110,6 +127,128 @@ def condicion_ajustes_de_liquidacion(liq: Liquidacion) -> list:
             LoteAjuste.anio_periodo == liq.anio_periodo,
         ]
     return conds
+
+
+
+# ================================================
+# Porcentaje de pago de la factura (IOSCOR 98 / 98,4 %, el resto 100 %)
+# ================================================
+PORCENTAJE_PAGO_MIN = Decimal("0.01")
+PORCENTAJE_PAGO_MAX = Decimal("200")
+# Más de 100 sólo como último recurso para conciliar un resto que nada justifica; la pantalla lo avisa.
+
+# honorarios y gastos se multiplican por separado y se redondean al centavo (como el sistema anterior);
+# el resto del importe (coseguro, ayudante no repartido) se multiplica aparte.
+_SQL_DETALLE_LIQUIDADO = """
+    UPDATE detalle_liquidacion SET
+        honorarios = ROUND(honorarios_facturado * CAST(:p AS DECIMAL(7,2)) / 100, 2),
+        gastos = ROUND(gastos_facturado * CAST(:p AS DECIMAL(7,2)) / 100, 2),
+        importe_total = ROUND(honorarios_facturado * CAST(:p AS DECIMAL(7,2)) / 100, 2)
+                      + ROUND(gastos_facturado * CAST(:p AS DECIMAL(7,2)) / 100, 2)
+                      + ROUND((importe_facturado - honorarios_facturado - gastos_facturado) * CAST(:p AS DECIMAL(7,2)) / 100, 2)
+    WHERE liquidacion_id = :liq
+"""
+
+
+def validar_porcentaje_pago(valor) -> Decimal:
+    try:
+        p = Decimal(str(valor)).quantize(Decimal("0.01"))
+    except Exception:
+        raise HTTPException(422, "El porcentaje de pago no es un número")
+    if p < PORCENTAJE_PAGO_MIN or p > PORCENTAJE_PAGO_MAX:
+        raise HTTPException(422, f"El porcentaje de pago tiene que estar entre {PORCENTAJE_PAGO_MIN} y {PORCENTAJE_PAGO_MAX}")
+    return p
+
+
+async def _aplicar_porcentaje_a_ajustes(db: AsyncSession, porcentaje: Decimal, filtro: str, params: dict) -> None:
+    """Multiplica por el porcentaje los ajustes que cumplen `filtro` (sobre lote_ajuste `l`), partiendo siempre de lo cargado."""
+    await db.execute(text(
+        "UPDATE ajuste a JOIN lote_ajuste l ON l.id = a.lote_id "
+        "SET a.honorarios_facturado = COALESCE(a.honorarios_facturado, a.honorarios), "
+        "    a.gastos_facturado = COALESCE(a.gastos_facturado, a.gastos) "
+        f"WHERE {filtro}"
+    ), params)
+    await db.execute(text(
+        "UPDATE ajuste a JOIN lote_ajuste l ON l.id = a.lote_id "
+        "SET a.honorarios = ROUND(a.honorarios_facturado * CAST(:p AS DECIMAL(7,2)) / 100, 2), "
+        "    a.gastos = ROUND(a.gastos_facturado * CAST(:p AS DECIMAL(7,2)) / 100, 2) "
+        f"WHERE {filtro}"
+    ), {**params, "p": str(porcentaje)})
+
+
+async def restaurar_ajustes_facturados(
+    db: AsyncSession, *, pago_id: Optional[int] = None, lote_id: Optional[int] = None, factura_id: Optional[int] = None,
+) -> None:
+    """Devuelve a los ajustes lo que se cargó (antes del porcentaje de pago). Se llama cuando el lote sale del pago,
+    el pago se elimina o la factura sale del pago."""
+    filtros = ["a.honorarios_facturado IS NOT NULL"]
+    params: dict = {}
+    if lote_id is not None:
+        filtros.append("l.id = :lote")
+        params["lote"] = lote_id
+    if pago_id is not None:
+        filtros.append("l.pago_id = :pago")
+        params["pago"] = pago_id
+    if factura_id is not None:
+        filtros.append("l.factura_id = :fac")
+        params["fac"] = factura_id
+    await db.execute(text(
+        "UPDATE ajuste a JOIN lote_ajuste l ON l.id = a.lote_id "
+        "SET a.honorarios = a.honorarios_facturado, a.gastos = a.gastos_facturado, "
+        "    a.honorarios_facturado = NULL, a.gastos_facturado = NULL "
+        f"WHERE {' AND '.join(filtros)}"
+    ), params)
+
+
+async def aplicar_porcentaje_pago(db: AsyncSession, liq: Liquidacion, porcentaje) -> list[int]:
+    """Fija el porcentaje de pago de la liquidación y lo aplica a sus renglones y a los ajustes de su factura.
+
+    Siempre parte de lo facturado, así que cambiarlo varias veces no acumula redondeos. Devuelve los médicos
+    (listado_medico.ID) cuyo monto cambió, para refrescar su recibo. No recalcula totales ni deducciones.
+    """
+    p = validar_porcentaje_pago(porcentaje)
+    liq.porcentaje_pago = p
+    await db.execute(text(
+        "UPDATE detalle_liquidacion SET honorarios_facturado = honorarios, gastos_facturado = gastos, importe_facturado = importe_total "
+        "WHERE liquidacion_id = :liq AND honorarios_facturado IS NULL"
+    ), {"liq": liq.id})
+    await db.execute(text(_SQL_DETALLE_LIQUIDADO), {"liq": liq.id, "p": str(p)})
+    medicos = set((await db.execute(
+        select(DetalleLiquidacion.medico_id).where(DetalleLiquidacion.liquidacion_id == liq.id).distinct()
+    )).scalars().all())
+    if liq.factura_id is not None:
+        filtro = "l.pago_id = :pago AND l.factura_id = :fac AND l.estado = 'L'"
+        params = {"pago": liq.pago_id, "fac": liq.factura_id}
+        medicos |= set((await db.execute(
+            select(Ajuste.medico_id).join(LoteAjuste, LoteAjuste.id == Ajuste.lote_id)
+            .where(LoteAjuste.pago_id == liq.pago_id, LoteAjuste.factura_id == liq.factura_id, LoteAjuste.estado == "L")
+            .distinct()
+        )).scalars().all())
+        await _aplicar_porcentaje_a_ajustes(db, p, filtro, params)
+    await db.flush()
+    return sorted(int(m) for m in medicos)
+
+
+async def aplicar_porcentaje_a_lote(db: AsyncSession, lote: LoteAjuste) -> None:
+    """Cuando un lote entra al pago (C -> L): si su factura ya está en el pago con un porcentaje distinto de 100,
+    sus ajustes pasan a ese porcentaje."""
+    if lote.factura_id is None or lote.pago_id is None:
+        return
+    p = await db.scalar(select(Liquidacion.porcentaje_pago).where(
+        Liquidacion.pago_id == lote.pago_id, Liquidacion.factura_id == lote.factura_id))
+    if p is None or Decimal(p) == Decimal("100"):
+        return
+    await _aplicar_porcentaje_a_ajustes(db, Decimal(p), "l.id = :lote", {"lote": lote.id})
+    await db.flush()
+
+
+async def porcentaje_pago_sugerido(db: AsyncSession, obra_social_id: int) -> Decimal:
+    """El último porcentaje con que se pagó una factura de esta obra social (100 si nunca se pagó)."""
+    p = await db.scalar(
+        select(Liquidacion.porcentaje_pago).where(Liquidacion.obra_social_id == obra_social_id)
+        .order_by(Liquidacion.id.desc()).limit(1)
+    )
+    return Decimal(p) if p is not None else Decimal("100.00")
 
 
 # ================================================

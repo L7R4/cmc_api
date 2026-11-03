@@ -39,6 +39,8 @@ class ObraSocialActualizada(BaseModel):
     vigencia_desde: datetime.date
     #: Cuántas filas de `nm_valores` entraron con esa vigencia.
     codigos: int
+    #: Cuándo se terminó de cargar esa vigencia (la última fila que entró).
+    cargado_el: Optional[datetime.datetime] = None
     #: Si esa vigencia tiene documento respaldatorio cargado.
     tiene_documento: bool = False
 

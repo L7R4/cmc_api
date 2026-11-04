@@ -34,6 +34,7 @@ from app.modules.nomenclador.schemas import (
     GalenoVisibilidadIn,
     GalenoVisibilidadOut,
     ReplicarFamiliaGalenoIn,
+    ReplicarFamiliaGalenosLoteIn,
     ReplicarFamiliaOut,
     slugify_codigo,
 )
@@ -610,6 +611,18 @@ async def replicar_galeno_en_familia(
     from app.modules.nomenclador.replicar_familia import replicar_galenos
 
     return await replicar_galenos(db, body)
+
+
+@router.post("/replicar_lote_en_familia", response_model=ReplicarFamiliaOut)
+async def replicar_galenos_lote_en_familia(
+    body: ReplicarFamiliaGalenosLoteIn, db: AsyncSession = Depends(get_db)
+):
+    """Replica en los otros planes de la familia lo hecho en «Actualizar galenos»: el cambio de
+    precio de varios galenos (todos sus niveles) o su visibilidad en el boletín. Resultado por OS.
+    Ver `replicar_familia.py`."""
+    from app.modules.nomenclador.replicar_familia import replicar_galenos_lote
+
+    return await replicar_galenos_lote(db, body)
 
 
 @router.post("/actualizar_precio_masivo", response_model=ActualizacionMasivaResult)

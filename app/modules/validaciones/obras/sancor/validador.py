@@ -96,15 +96,10 @@ class ValidadorSancor(ValidadorOS):
             precio_gestion = await ctx.precio(entrada.codigo, exigir_admitido=False)
             return ResultadoValidacion(
                 # Mismo criterio que el M024 de más abajo: queda como rechazada
-                # aunque nunca se haya consultado al autorizador. Si este camino
-                # siguiera siendo "pendiente", el operador vería igual un chip
-                # "Pendiente" en Sancor y volvería la ambigüedad que se quiso
-                # sacar.
+                # aunque nunca se haya consultado al autorizador, con el motivo
+                # a secas (sin prefijo de "pendiente").
                 estado="rechazada",
-                detalle=(
-                    "Pendiente de autorización de la obra social. El paciente debe "
-                    "tramitar esta práctica en oficinas de Sancor."
-                ),
+                detalle="El paciente debe tramitar esta práctica en oficinas de Sancor.",
                 codigo=entrada.codigo,
                 precio=precio_gestion,
                 nro_afiliado=afiliado,
@@ -140,20 +135,13 @@ class ValidadorSancor(ValidadorOS):
 
         if res.autorizada:
             estado, detalle = "autorizada", res.estado_detalle
-        elif res.requiere_gestion:
-            # Sancor no la rechaza: la deja a la espera de que el afiliado la
-            # gestione (M024, M087, M233, M030, M026, M144). Para el Colegio eso
-            # es lo mismo que un rechazo —no se factura, importe 0, fuera de la
-            # factura— y un estado propio "pendiente" invitaba a leerlo como
-            # "todavía puede salir". Se guarda como rechazada, con el motivo
-            # adelante para que dentro de seis meses se entienda que no fue un
-            # rechazo de la práctica sino una autorización que quedó pendiente.
-            #
-            # `requiere_gestion` y CODIGOS_PENDIENTE se conservan: siguen
-            # distinguiendo POR QUÉ, y el código de Sancor queda en la traza.
-            estado = "rechazada"
-            detalle = f"Pendiente de autorización de la obra social. {res.estado_detalle}"
         else:
+            # Lo que Sancor deja a la espera de que el afiliado lo gestione
+            # (M024, M087, M233, M030, M026, M144) es para el Colegio un rechazo:
+            # no se factura, importe 0, fuera de la factura. Se graba y se
+            # muestra como rechazada, con el motivo que informó Sancor; el código
+            # (`traza["codigo_resultado"]`) conserva POR QUÉ. `requiere_gestion` y
+            # CODIGOS_PENDIENTE siguen en el cliente por esa clasificación.
             estado, detalle = "rechazada", res.estado_detalle
 
         return ResultadoValidacion(

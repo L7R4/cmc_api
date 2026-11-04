@@ -29,6 +29,8 @@ class LiquidacionRead(BaseModel):
     id: int
     pago_id: int
     obra_social_id: int
+    # Sólo en el listado de facturas de un pago.
+    obra_social_nombre: Optional[str] = None
     mes_periodo: int
     anio_periodo: int
     nro_factura: Optional[str] = None

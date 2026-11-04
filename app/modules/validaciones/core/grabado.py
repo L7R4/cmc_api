@@ -29,10 +29,12 @@ CERO = Decimal("0.00")
 #   autorizada → el validador de la OS la aprobó en línea
 #   rechazada  → no se puede facturar. Cubre tanto el rechazo de la obra social
 #                como lo que ella deja a la espera de que el afiliado lo
-#                gestione: el motivo lo distingue (`validacion_detalle` arranca
-#                con "Pendiente de autorización de la obra social."), pero el
-#                desenlace para el Colegio es el mismo — importe 0, fuera de la
-#                factura. Ningún validador emite ya "pendiente".
+#                gestione: el desenlace para el Colegio es el mismo — importe 0,
+#                fuera de la factura — y así se muestra. `validacion_detalle`
+#                guarda el motivo que informó la obra social, sin prefijo (las
+#                filas anteriores a 2026-11-04 traen "Pendiente de autorización
+#                de la obra social." adelante; el front lo ignora). Ningún
+#                validador emite ya "pendiente".
 #   cargada    → carga manual: la OS autorizó por fuera, acá se registró
 #
 # "pendiente" sigue siendo un valor válido de la columna: hay filas viejas

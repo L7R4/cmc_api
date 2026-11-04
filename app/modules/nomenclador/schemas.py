@@ -1041,6 +1041,38 @@ class ReplicarFamiliaGalenoIn(BaseModel):
         return self
 
 
+class ReplicaGalenoLoteItem(BaseModel):
+    """Un galeno (todos sus niveles) del cambio en lote que se replica en la familia."""
+    codigo: str
+    # precios: el valor unitario nuevo para todos los niveles. visibilidad: si se muestra.
+    nuevo_valor_unitario: Optional[Decimal] = Field(default=None, ge=0)
+    visible: Optional[bool] = None
+
+
+class ReplicarFamiliaGalenosLoteIn(BaseModel):
+    """Replica en los otros planes de la familia lo hecho en «Actualizar galenos»: el cambio de
+    precio de varios galenos de una vez, o su visibilidad en el boletín del médico."""
+    origen_obra_social_nro: int
+    destinos: List[int] = Field(min_length=1)
+    operacion: Literal["precios", "visibilidad"]
+    vigencia_desde: Optional[datetime.date] = None
+    items: List[ReplicaGalenoLoteItem] = Field(min_length=1, max_length=500)
+
+    @model_validator(mode="after")
+    def _payload(self) -> "ReplicarFamiliaGalenosLoteIn":
+        codigos = [i.codigo for i in self.items]
+        if len(set(codigos)) != len(codigos):
+            raise ValueError("Hay códigos repetidos en el pedido")
+        if self.operacion == "precios":
+            if self.vigencia_desde is None:
+                raise ValueError("Replicar precios requiere vigencia_desde")
+            if any(i.nuevo_valor_unitario is None for i in self.items):
+                raise ValueError("Replicar precios requiere nuevo_valor_unitario en cada galeno")
+        elif any(i.visible is None for i in self.items):
+            raise ValueError("Replicar visibilidad requiere visible en cada galeno")
+        return self
+
+
 class ReplicaResultadoItem(BaseModel):
     obra_social_nro: int
     nombre: str

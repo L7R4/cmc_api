@@ -269,6 +269,7 @@ async def vista_previa_pago(db: AsyncSession, pago_id: int) -> dict:
         ded_query = (
             select(
                 Deduccion.descuento_id,
+                Conceptos.nro_colegio.label("nro_colegio"),
                 Conceptos.nombre.label("descuento_nombre"),
                 func.count(func.distinct(Deduccion.id)).label("cantidad_socios"),
                 func.coalesce(func.sum(DeduccionAplicacion.aplicado), 0).label("total_monto"),
@@ -282,6 +283,7 @@ async def vista_previa_pago(db: AsyncSession, pago_id: int) -> dict:
         ded_query = (
             select(
                 Deduccion.descuento_id,
+                Conceptos.nro_colegio.label("nro_colegio"),
                 Conceptos.nombre.label("descuento_nombre"),
                 func.count(Deduccion.id).label("cantidad_socios"),
                 func.coalesce(func.sum(Deduccion.monto_aplicado_preview), 0).label("total_monto"),
@@ -290,7 +292,8 @@ async def vista_previa_pago(db: AsyncSession, pago_id: int) -> dict:
             .where(Deduccion.estado == "en_pago")
         )
     ded_rows = (await db.execute(
-        ded_query.group_by(Deduccion.descuento_id, Conceptos.nombre).order_by(Conceptos.nombre)
+        ded_query.group_by(Deduccion.descuento_id, Conceptos.nro_colegio, Conceptos.nombre)
+        .order_by(Conceptos.nro_colegio, Conceptos.nombre)
     )).mappings().all()
 
     ded_items = []
@@ -299,6 +302,7 @@ async def vista_previa_pago(db: AsyncSession, pago_id: int) -> dict:
         monto = _to_dec(r["total_monto"])
         ded_items.append({
             "descuento_id":     r["descuento_id"],
+            "nro_colegio":      r["nro_colegio"],
             "descuento_nombre": r["descuento_nombre"] or "",
             "cantidad_socios":  r["cantidad_socios"],
             "total_monto":      monto,
@@ -317,11 +321,27 @@ async def vista_previa_pago(db: AsyncSession, pago_id: int) -> dict:
             LoteAjuste.estado,
             LoteAjuste.total_debitos,
             LoteAjuste.total_creditos,
+            FacturacionCMC.nro_factura.label("nro_factura"),
         )
         .join(ObrasSociales, ObrasSociales.NRO_OBRASOCIAL == LoteAjuste.obra_social_id)
+        .outerjoin(FacturacionCMC, FacturacionCMC.id_prestaciones == LoteAjuste.factura_id)
         .where(LoteAjuste.pago_id == pago_id)
         .order_by(LoteAjuste.tipo, LoteAjuste.obra_social_id)
     )).mappings().all()
+
+    # Lo que cada lote suma o resta en honorarios y en gastos (créditos +, débitos −): el resumen lo muestra por separado.
+    netos_lote: dict[int, tuple[Decimal, Decimal]] = {}
+    if lote_rows:
+        for lid, h, g in (await db.execute(
+            select(
+                Ajuste.lote_id,
+                func.coalesce(func.sum(case((Ajuste.tipo == "d", -Ajuste.honorarios), else_=Ajuste.honorarios)), 0),
+                func.coalesce(func.sum(case((Ajuste.tipo == "d", -Ajuste.gastos), else_=Ajuste.gastos)), 0),
+            )
+            .where(Ajuste.lote_id.in_([r["lote_id"] for r in lote_rows]))
+            .group_by(Ajuste.lote_id)
+        )).all():
+            netos_lote[lid] = (_to_dec(h), _to_dec(g))
 
     lote_items = []
     lote_tot_deb = lote_tot_cred = Decimal("0")
@@ -336,6 +356,9 @@ async def vista_previa_pago(db: AsyncSession, pago_id: int) -> dict:
             "mes_periodo":        r["mes_periodo"],
             "anio_periodo":       r["anio_periodo"],
             "estado":             r["estado"],
+            "nro_factura":        r["nro_factura"],
+            "total_honorarios":   netos_lote.get(r["lote_id"], (Decimal("0"), Decimal("0")))[0],
+            "total_gastos":       netos_lote.get(r["lote_id"], (Decimal("0"), Decimal("0")))[1],
             "total_debitos":      deb,
             "total_creditos":     cred,
         })
@@ -404,11 +427,24 @@ async def vista_previa_pago(db: AsyncSession, pago_id: int) -> dict:
     comp_favor = sum((c["importe"] for c in comp_items if c["importe"] > 0), Decimal("0"))
     comp_contra = sum((-c["importe"] for c in comp_items if c["importe"] < 0), Decimal("0"))
 
+    # Socios que intervienen en el pago: con producción, con débitos o créditos, o con adelantos.
+    socios: set[int] = set()
+    for q in (
+        select(DetalleLiquidacion.medico_id).join(Liquidacion, Liquidacion.id == DetalleLiquidacion.liquidacion_id)
+        .where(Liquidacion.pago_id == pago_id).distinct(),
+        select(Ajuste.medico_id).join(LoteAjuste, LoteAjuste.id == Ajuste.lote_id)
+        .where(LoteAjuste.pago_id == pago_id, LoteAjuste.estado.in_(["L", "AP"])).distinct(),
+        select(I.medico_id).join(A, A.id == I.adelanto_id)
+        .where(A.pago_id == pago_id, A.estado.in_(ESTADOS_EN_PAGO)).distinct(),
+    ):
+        socios.update(m for m in (await db.execute(q)).scalars().all() if m is not None)
+
     totales_pago = await recalcular_totales_pago(db, pago_id)
     return {
         "pago_id":     pago.id,
         "mes":         pago.mes,
         "anio":        pago.anio,
+        "cantidad_socios": len(socios),
         "descripcion": pago.descripcion,
         "estado":      pago.estado,
         # Las mismas cifras del encabezado del pago: un solo «total a pagar» en todas las solapas.
@@ -748,6 +784,8 @@ async def refrescar_detalle_medico(
                 Deduccion.mes_aplicar,
                 Deduccion.anio_aplicar,
                 func.coalesce(func.sum(DeduccionAplicacion.aplicado), 0).label("total"),
+                func.coalesce(func.sum(Deduccion.calculado_total), 0).label("adeudado"),
+                func.group_concat(Deduccion.id).label("ded_ids"),
             )
             .select_from(DeduccionAplicacion)
             .join(Deduccion, Deduccion.id == DeduccionAplicacion.deduccion_id)
@@ -778,6 +816,8 @@ async def refrescar_detalle_medico(
                 Deduccion.mes_aplicar,
                 Deduccion.anio_aplicar,
                 func.coalesce(func.sum(Deduccion.monto_aplicado_preview), 0).label("total"),
+                func.coalesce(func.sum(Deduccion.calculado_total), 0).label("adeudado"),
+                func.group_concat(Deduccion.id).label("ded_ids"),
                 # Para «Quitar del pago»: sólo los porcentuales automáticos (las cuotas no se quitan).
                 func.group_concat(Deduccion.id).label("ids"),
                 func.max(case(
@@ -813,11 +853,28 @@ async def refrescar_detalle_medico(
         )).all():
             titular_info[tid] = {"nro_socio": nro, "nombre": nombre}
 
+    # Lo ya cobrado de cada deducción en pagos anteriores a éste: el recibo muestra el saldo que queda
+    # después de lo que se cobra ahora (adeudado − cobrado antes − cobrado en este pago).
+    ids_ded = {int(i) for r in ded_rows for i in str(r.ded_ids or "").split(",") if i}
+    cobrado_antes: dict[int, Decimal] = {}
+    if ids_ded:
+        for did, monto in (await db.execute(
+            select(DeduccionAplicacion.deduccion_id, func.coalesce(func.sum(DeduccionAplicacion.aplicado), 0))
+            .where(
+                DeduccionAplicacion.deduccion_id.in_(ids_ded),
+                DeduccionAplicacion.pago_id < pago_id,
+            )
+            .group_by(DeduccionAplicacion.deduccion_id)
+        )).all():
+            cobrado_antes[did] = _to_dec(monto)
+
     total_deducciones = Decimal("0")
     ded_detalle = []
     for r in ded_rows:
         t = _to_dec(r.total)
         total_deducciones += t
+        adeudado = _to_dec(r.adeudado)
+        previo = sum((cobrado_antes.get(int(i), Decimal("0")) for i in str(r.ded_ids or "").split(",") if i), Decimal("0"))
         mes  = r.mes_aplicar
         anio = r.anio_aplicar
         item = {
@@ -825,6 +882,8 @@ async def refrescar_detalle_medico(
             "nombre_deduccion": r.nombre_deduccion or "Manual",
             "periodo_a_aplicar": f"{mes:02d}/{anio}" if mes and anio else None,
             "total": float(t),
+            "adeudado": float(adeudado),
+            "saldo": float(max(adeudado - previo - t, Decimal("0"))),
         }
         if r.titular_id != medico_db_id:
             item["por_cuenta_de"] = titular_info.get(r.titular_id, {"nro_socio": None, "nombre": None})

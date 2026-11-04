@@ -199,6 +199,7 @@ class DeduccionHistorialItem(BaseModel):
     paga_por_caja: bool = False
     medico_id: int
     medico_nombre: str
+    nro_socio: Optional[int] = None
     descuento_id: Optional[int] = None
     descuento_nombre: str
     monto: Decimal

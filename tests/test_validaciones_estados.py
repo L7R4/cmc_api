@@ -2,7 +2,7 @@
 
 Desde 2026-08-18 ningún validador emite `"pendiente"`: lo que la obra social
 deja a la espera de que el afiliado lo gestione se graba como `"rechazada"`,
-con el motivo adelante en `validacion_detalle`. El desenlace para el Colegio ya
+con el motivo que informó la obra social en `validacion_detalle`. El desenlace para el Colegio ya
 era el mismo —importe 0, `estado='X'`, fuera de la factura—, y un estado propio
 hacía leer como "todavía puede salir" algo que no iba a salir.
 
@@ -40,8 +40,8 @@ def test_pendiente_no_es_facturable_ni_dejo_de_ser_un_estado_valido():
 # ── Sancor ────────────────────────────────────────────────────────────────────
 
 def test_sancor_sigue_distinguiendo_el_pendiente_de_un_rechazo():
-    """`requiere_gestion` no se tocó: es lo que hace que el motivo diga
-    "Pendiente de autorización" en vez de pasar el rechazo tal cual."""
+    """`requiere_gestion` no se tocó: sigue distinguiendo, en el cliente, lo que
+    Sancor deja a la espera del afiliado (se muestra igual como rechazada)."""
     assert "M024" in sancor.CODIGOS_PENDIENTE
     assert "M022" not in sancor.CODIGOS_PENDIENTE
 

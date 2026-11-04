@@ -20,47 +20,27 @@ import calendar
 import datetime
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Path as PathParam, Query, Response, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Path as PathParam, Query, Response, status
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.deps import get_current_user
+from app.core.config import settings
 from app.db.database import get_db
 from app.db.models import AgendaEvento, ListadoMedico, Role, UserRole
 from app.db.models.medico import ESTADO_ACTIVO
-from app.modules.agenda.schemas import EventoIn, EventoOut, OcurrenciaOut, ResponsableOut
+from app.modules.agenda import avisos
+from app.modules.agenda.ocurrencias import ocurrencias
+from app.modules.agenda.schemas import (
+    AvisoOut,
+    EventoIn,
+    EventoOut,
+    GeneracionOut,
+    OcurrenciaOut,
+    ResponsableOut,
+)
 
 router = APIRouter()  # El scope lo declara app/auth/authz.py::SCOPES_POR_RUTA (fuente unica de autorizacion).
-
-
-def _dia_valido(anio: int, mes: int, dia: int) -> datetime.date:
-    """El día pedido dentro de ese mes, corrido al último si no existe.
-
-    El 31 en un mes de 30 y el 29 de febrero fuera de año bisiesto se resuelven
-    hacia atrás y no salteándose el mes: una tarea "el 31 se cierra el período"
-    tiene que aparecer en abril, y el cumpleaños del 29/2 se saluda el 28. Que
-    el evento desaparezca del calendario sería peor que mostrarlo un día antes.
-    """
-    ultimo = calendar.monthrange(anio, mes)[1]
-    return datetime.date(anio, mes, min(dia, ultimo))
-
-
-def _ocurrencias(evento: AgendaEvento, anio: int, mes: int) -> List[datetime.date]:
-    """En qué días de ese mes cae este evento. Lista vacía si no cae."""
-    if evento.recurrencia == "unica":
-        if evento.fecha and evento.fecha.year == anio and evento.fecha.month == mes:
-            return [evento.fecha]
-        return []
-
-    if evento.recurrencia == "anual":
-        if evento.mes == mes and evento.dia:
-            return [_dia_valido(anio, mes, evento.dia)]
-        return []
-
-    # mensual: cae todos los meses, siempre.
-    if evento.dia:
-        return [_dia_valido(anio, mes, evento.dia)]
-    return []
 
 
 def _marcar(evento: AgendaEvento, usuario: dict) -> None:
@@ -135,7 +115,7 @@ async def eventos_del_mes(
 
     salida: List[OcurrenciaOut] = []
     for evento in (await db.execute(stmt)).scalars().all():
-        for dia in _ocurrencias(evento, anio, mes):
+        for dia in ocurrencias(evento, anio, mes):
             salida.append(
                 OcurrenciaOut(**EventoOut.model_validate(evento).model_dump(), ocurre_el=dia)
             )
@@ -201,6 +181,67 @@ async def listar_responsables(
         aguja = q.strip().lower()
         salida = [p for p in salida if aguja in p.nombre.lower()]
     return salida
+
+
+def _verificar_cron_secret(x_cron_secret: Optional[str] = Header(None)) -> None:
+    if not settings.CRON_SECRET or x_cron_secret != settings.CRON_SECRET:
+        raise HTTPException(401, "Secreto de cron inválido o no configurado")
+
+
+def _dueno(usuario: dict) -> int:
+    uid = usuario.get("uid")
+    if uid is None:
+        # Token viejo sin el claim: el front renueva con /auth/refresh y sigue.
+        raise HTTPException(401, "token_sin_identidad")
+    return int(uid)
+
+
+@router.get("/avisos", response_model=List[AvisoOut])
+async def avisos_de_hoy(
+    db: AsyncSession = Depends(get_db),
+    usuario: dict = Depends(get_current_user),
+):
+    """Los avisos de hoy sin leer del usuario del token.
+
+    El dueño sale siempre del token. Sólo los administradores tienen filas (las
+    crea `generar-hoy`), así que a cualquier otro usuario le devuelve vacío.
+    """
+    filas = await avisos.pendientes(db, _dueno(usuario))
+    return [
+        AvisoOut(
+            id=a.id,
+            evento_id=e.id,
+            tipo=e.tipo,
+            titulo=e.titulo,
+            descripcion=e.descripcion,
+            fecha=a.fecha,
+        )
+        for a, e in filas
+    ]
+
+
+@router.post("/avisos/leer", status_code=status.HTTP_204_NO_CONTENT)
+async def marcar_avisos_leidos(
+    db: AsyncSession = Depends(get_db),
+    usuario: dict = Depends(get_current_user),
+) -> Response:
+    """Marca como leídos los avisos de hoy del usuario del token."""
+    await avisos.marcar_leidos(db, _dueno(usuario))
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post(
+    "/avisos/generar-hoy",
+    response_model=GeneracionOut,
+    dependencies=[Depends(_verificar_cron_secret)],
+)
+async def generar_avisos_de_hoy(db: AsyncSession = Depends(get_db)):
+    """Crea los avisos del día para los administradores (nunca médicos).
+
+    Lo dispara el cron diario con `X-Cron-Secret`, sin usuario. Es idempotente.
+    """
+    eventos, destinatarios, nuevos = await avisos.generar_de_hoy(db)
+    return GeneracionOut(eventos=eventos, destinatarios=destinatarios, avisos_nuevos=nuevos)
 
 
 @router.post("/", response_model=EventoOut, status_code=status.HTTP_201_CREATED)

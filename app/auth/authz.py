@@ -289,6 +289,11 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     # con `catalogo:leer`, que el rol `medico` sí tiene: un socio no tiene por
     # qué obtener la nómina del personal.
     ("GET", "/api/agenda/responsables"): Scope.MEDICO_LEER,
+    # Avisos del día de los administradores: el dueño sale del token y sólo ellos
+    # tienen filas. `generar-hoy` lo dispara el cron con `X-Cron-Secret`.
+    ("GET", "/api/agenda/avisos"): SOLO_AUTENTICADO,
+    ("POST", "/api/agenda/avisos/leer"): SOLO_AUTENTICADO,
+    ("POST", "/api/agenda/avisos/generar-hoy"): MAQUINA,
     ("POST", "/api/agenda/"): Scope.CATALOGO_EDITAR,
     ("PUT", "/api/agenda/{evento_id}"): Scope.CATALOGO_EDITAR,
     ("DELETE", "/api/agenda/{evento_id}"): Scope.CATALOGO_EDITAR,

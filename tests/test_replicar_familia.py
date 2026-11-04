@@ -241,3 +241,104 @@ async def test_galeno_unidades_omite_si_no_existe(s):
     assert _estados(r) == {A1: "replicado", A2: "omitido"}
     g1 = await service.buscar_galeno_vigente(s, A1, GALENO, None)
     assert g1.unidades_honorarios == Decimal("3")
+
+
+# ─── «Actualizar galenos»: precios en lote y visibilidad ─────────────────────
+
+async def _gal(db, os_nro, codigo, vu, vig=VIG, nivel=None, visible=True) -> Galeno:
+    g = Galeno(obra_social_nro=os_nro, codigo=codigo, nombre=f"Nombre {codigo}", nivel=nivel,
+               vigencia_desde=vig, valor_unitario=Decimal(vu), activo=True, visible=visible,
+               unidades_honorarios=Decimal("2") if nivel is not None else None)
+    db.add(g)
+    await db.flush()
+    return g
+
+
+async def _vigentes(db, os_nro, codigo):
+    return list((await db.execute(select(Galeno).where(
+        Galeno.obra_social_nro == os_nro, Galeno.codigo == codigo,
+        Galeno.vigencia_hasta.is_(None), Galeno.activo.is_(True),
+    ).order_by(Galeno.nivel))).scalars())
+
+
+@pytest.mark.asyncio
+async def test_lote_precios_rota_todos_los_niveles_y_crea_si_falta(s):
+    from app.modules.nomenclador.schemas import ReplicaGalenoLoteItem, ReplicarFamiliaGalenosLoteIn
+
+    await _familia(s)
+    for n in (1, 2):
+        await _gal(s, P, "gal_niv", "1100.00", vig=NUEVA, nivel=n)   # el origen ya quedó actualizado
+        await _gal(s, A1, "gal_niv", "900.00", nivel=n)
+    r = await replicar_familia.replicar_galenos_lote(s, ReplicarFamiliaGalenosLoteIn(
+        origen_obra_social_nro=P, destinos=[A1, A2], operacion="precios", vigencia_desde=NUEVA,
+        items=[ReplicaGalenoLoteItem(codigo="gal_niv", nuevo_valor_unitario=Decimal("1100.00"))],
+    ))
+    assert _estados(r) == {A1: "replicado", A2: "replicado"}
+    por = {x.obra_social_nro: x for x in r.resultados}
+    assert por[A2].motivo == "Se creó: gal_niv"
+
+    for dest in (A1, A2):
+        filas = await _vigentes(s, dest, "gal_niv")
+        assert [f.nivel for f in filas] == [1, 2]
+        assert all(f.valor_unitario == Decimal("1100.00") and f.vigencia_desde == NUEVA for f in filas)
+        assert all(f.unidades_honorarios == Decimal("2") for f in filas)
+    # El historial del plan que ya lo tenía queda cerrado un día antes.
+    viejas = (await s.execute(select(Galeno).where(
+        Galeno.obra_social_nro == A1, Galeno.codigo == "gal_niv", Galeno.activo.is_(False)))).scalars().all()
+    assert len(viejas) == 2 and all(v.vigencia_hasta == NUEVA - datetime.timedelta(days=1) for v in viejas)
+
+
+@pytest.mark.asyncio
+async def test_lote_precios_parcial_cuenta_los_omitidos(s):
+    from app.modules.nomenclador.schemas import ReplicaGalenoLoteItem, ReplicarFamiliaGalenosLoteIn
+
+    await _familia(s)
+    await _gal(s, P, "gal_a", "1100.00", vig=NUEVA)
+    await _gal(s, P, "gal_b", "1100.00", vig=NUEVA)
+    await _gal(s, A1, "gal_a", "900.00")
+    await _gal(s, A1, "gal_b", "900.00", vig=NUEVA)       # ya tiene esa vigencia
+    await _gal(s, A2, "gal_b", "900.00", vig=NUEVA)       # sólo tiene el que no se puede
+    r = await replicar_familia.replicar_galenos_lote(s, ReplicarFamiliaGalenosLoteIn(
+        origen_obra_social_nro=P, destinos=[A1, A2], operacion="precios", vigencia_desde=NUEVA,
+        items=[ReplicaGalenoLoteItem(codigo="gal_a", nuevo_valor_unitario=Decimal("1100.00")),
+               ReplicaGalenoLoteItem(codigo="gal_b", nuevo_valor_unitario=Decimal("1100.00"))],
+    ))
+    por = {x.obra_social_nro: x for x in r.resultados}
+    assert por[A1].estado == "replicado" and "Omitidos: gal_b" in por[A1].motivo
+    # A2: gal_a no lo tiene (se crea) y gal_b se omite → también cuenta como replicado.
+    assert por[A2].estado == "replicado" and por[A2].motivo.startswith("Se creó: gal_a")
+    assert (await _vigentes(s, A1, "gal_a"))[0].valor_unitario == Decimal("1100.00")
+    assert (await _vigentes(s, A1, "gal_b"))[0].valor_unitario == Decimal("900.00")
+
+
+@pytest.mark.asyncio
+async def test_lote_visibilidad_pisa_todas_las_filas_y_omite_si_no_lo_tiene(s):
+    from app.modules.nomenclador.schemas import ReplicaGalenoLoteItem, ReplicarFamiliaGalenosLoteIn
+
+    await _familia(s)
+    await _gal(s, P, "gal_v", "1000.00", visible=False)
+    vieja = await _gal(s, A1, "gal_v", "900.00", vig=datetime.date(2026, 1, 1))
+    vieja.activo, vieja.vigencia_hasta = False, VIG - datetime.timedelta(days=1)
+    await _gal(s, A1, "gal_v", "950.00")
+    r = await replicar_familia.replicar_galenos_lote(s, ReplicarFamiliaGalenosLoteIn(
+        origen_obra_social_nro=P, destinos=[A1, A2], operacion="visibilidad",
+        items=[ReplicaGalenoLoteItem(codigo="gal_v", visible=False)],
+    ))
+    assert _estados(r) == {A1: "replicado", A2: "omitido"}
+    filas = (await s.execute(select(Galeno).where(Galeno.obra_social_nro == A1, Galeno.codigo == "gal_v"))).scalars().all()
+    assert len(filas) == 2 and not any(f.visible for f in filas)
+
+
+def test_lote_valida_el_pedido():
+    from pydantic import ValidationError
+    from app.modules.nomenclador.schemas import ReplicaGalenoLoteItem, ReplicarFamiliaGalenosLoteIn
+
+    base = dict(origen_obra_social_nro=P, destinos=[A1])
+    with pytest.raises(ValidationError):   # precios sin vigencia
+        ReplicarFamiliaGalenosLoteIn(**base, operacion="precios",
+                                     items=[ReplicaGalenoLoteItem(codigo="x", nuevo_valor_unitario=Decimal("1"))])
+    with pytest.raises(ValidationError):   # visibilidad sin el valor
+        ReplicarFamiliaGalenosLoteIn(**base, operacion="visibilidad", items=[ReplicaGalenoLoteItem(codigo="x")])
+    with pytest.raises(ValidationError):   # códigos repetidos
+        ReplicarFamiliaGalenosLoteIn(**base, operacion="visibilidad",
+                                     items=[ReplicaGalenoLoteItem(codigo="x", visible=True)] * 2)

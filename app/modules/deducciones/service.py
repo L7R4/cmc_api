@@ -792,7 +792,8 @@ async def _filtros_historial(
 
 
 def _a_item_historial(
-    ded: Deduccion, desc_nombre: str, med_nombre: str, fecha_aplicacion: Optional[datetime.datetime] = None
+    ded: Deduccion, desc_nombre: str, med_nombre: str, fecha_aplicacion: Optional[datetime.datetime] = None,
+    nro_socio: Optional[int] = None,
 ) -> DeduccionHistorialItem:
     est = ded.estado
     if (
@@ -809,6 +810,7 @@ def _a_item_historial(
         paga_por_caja=bool(ded.paga_por_caja),
         medico_id=ded.medico_id,
         medico_nombre=med_nombre or "",
+        nro_socio=nro_socio,
         descuento_id=ded.descuento_id,
         descuento_nombre=desc_nombre or "",
         monto=ded.calculado_total,
@@ -845,6 +847,7 @@ def _select_historial(por_aplicacion: bool = False):
             Conceptos.nombre.label("desc_nombre"),
             ListadoMedico.NOMBRE.label("med_nombre"),
             fecha_aplicacion.label("fecha_aplicacion"),
+            ListadoMedico.NRO_SOCIO.label("nro_socio"),
         )
         .outerjoin(Conceptos, Conceptos.id == Deduccion.descuento_id)
         .join(ListadoMedico, ListadoMedico.ID == Deduccion.medico_id)
@@ -877,7 +880,7 @@ async def fetch_deducciones_item(
         mes_hasta=mes_hasta, anio_hasta=anio_hasta, solo_en_pago=solo_en_pago,
     )
     rows = (await db.execute(_select_historial(_solo_aplicadas(estado)).where(*filtros))).all()
-    return [_a_item_historial(r[0], r[1], r[2], r[3]) for r in rows]
+    return [_a_item_historial(r[0], r[1], r[2], r[3], r[4]) for r in rows]
 
 
 # =============================================================================
@@ -927,7 +930,7 @@ async def get_historial_deducciones(
         page=page,
         size=size,
         monto_total=Decimal(monto_total or 0),
-        items=[_a_item_historial(r[0], r[1], r[2], r[3]) for r in rows],
+        items=[_a_item_historial(r[0], r[1], r[2], r[3], r[4]) for r in rows],
         conteos=[ConteoEstado(estado=e, cantidad=int(c), monto=Decimal(m or 0)) for e, c, m in conteo_rows],
     )
 

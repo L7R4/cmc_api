@@ -678,6 +678,7 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     ("POST", "/api/galenos/actualizar_precio_masivo"): Scope.NOMENCLADOR_MASIVO,
     ("POST", "/api/galenos/actualizar_precios_lote"): Scope.NOMENCLADOR_EDITAR,
     ("POST", "/api/galenos/replicar_en_familia"): Scope.NOMENCLADOR_EDITAR,
+    ("POST", "/api/galenos/replicar_lote_en_familia"): Scope.NOMENCLADOR_EDITAR,
     # Etapa 3 — códigos por obra social (alta sin precio)
     ("GET", "/api/codigos_os/"): Scope.NOMENCLADOR_LEER,
     ("POST", "/api/codigos_os/alta"): Scope.NOMENCLADOR_EDITAR,

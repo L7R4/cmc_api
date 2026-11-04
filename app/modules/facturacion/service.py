@@ -3164,6 +3164,18 @@ async def marcar_revisado(
     if faltantes:
         raise HTTPException(404, {"mensaje": "Prestación no encontrada", "ids": faltantes})
 
+    # Auditar (o desauditar) la cabecera lo hace también con todo su equipo; un integrante, sólo él.
+    cabezas_marcadas = [rows_por_id[i] for i in marcados]
+    cabezas_desmarcadas = [rows_por_id[i] for i in desmarcados]
+    for cabezas, destino in ((cabezas_marcadas, marcados), (cabezas_desmarcadas, desmarcados)):
+        for extra in await _equipo_de_cabezas(db, cabezas):
+            if extra.id_detalle_prestaciones in rows_por_id:
+                continue
+            rows_por_id[extra.id_detalle_prestaciones] = extra
+            rows.append(extra)
+            destino.append(extra.id_detalle_prestaciones)
+    ids = [*marcados, *desmarcados]
+
     # Con documentación digital, «auditado y controlado» significa que la documentación está y
     # se revisó: una prestación que la exige no se puede auditar sin archivos.
     exigen = await documentacion.exigen_en_bloque(db, [rows_por_id[i] for i in marcados])
@@ -3414,6 +3426,34 @@ async def _cleanup_factura_si_vacia(
     await db.delete(cabecera)
 
 
+async def _equipo_de_cabezas(
+    db: AsyncSession, rows: list[DetalleFacturacionCMC], *, solo_abiertas: bool = False,
+) -> list[DetalleFacturacionCMC]:
+    """Integrantes (ayudante / pediatra / gastos) de las cabeceras de `rows` que NO están en `rows`.
+
+    Una acción sobre la cabecera del equipo arrastra a todo su equipo; sobre un integrante, no:
+    sólo se expande una fila que es cabeza (`grupo_equipo_id` nulo o igual a su propio id). Los
+    integrantes se buscan por `grupo_equipo_id` dentro de la misma OS y período; las anuladas
+    no acompañan. Un equipo sin `grupo_equipo_id` (carga vieja) no se reconstruye acá."""
+    M = DetalleFacturacionCMC
+    cabezas = [
+        r.id_detalle_prestaciones for r in rows
+        if r.grupo_equipo_id is None or r.grupo_equipo_id == r.id_detalle_prestaciones
+    ]
+    if not cabezas:
+        return []
+    ya = {r.id_detalle_prestaciones for r in rows}
+    cond = [
+        M.grupo_equipo_id.in_(cabezas),
+        M.id_detalle_prestaciones.notin_(ya),
+        M.estado != "X",
+        tuple_(M.cod_obr, M.periodo).in_({(r.cod_obr, r.periodo) for r in rows}),
+    ]
+    if solo_abiertas:
+        cond.append(M.estado == "A")
+    return list((await db.execute(select(M).where(*cond))).scalars().all())
+
+
 async def mover_prestaciones_periodo(
     db: AsyncSession, payload: MoverPeriodoPayload
 ) -> MoverPeriodoResponse:
@@ -3442,6 +3482,9 @@ async def mover_prestaciones_periodo(
             {"mensaje": "Algunas prestaciones no existen o no están en estado 'A' (abierto)",
              "faltantes": faltantes},
         )
+    # Mover la cabecera mueve a todo su equipo; mover un integrante, sólo a él.
+    rows += await _equipo_de_cabezas(db, rows, solo_abiertas=True)
+
     # Las marcadas (auditadas) se quedan en su período: solo se mueven las no marcadas.
     marcadas = [r.id_detalle_prestaciones for r in rows if r.revisado]
     if marcadas:

@@ -783,6 +783,7 @@ async def detalle_recibo_medico(
         select(
             DeduccionAplicacion.aplicado,
             Deduccion.descuento_id,
+            Conceptos.nro_colegio.label("nro_colegio"),
             Conceptos.nombre.label("concepto_nombre"),
         )
         .select_from(DeduccionAplicacion)
@@ -800,6 +801,8 @@ async def detalle_recibo_medico(
         aplicado = to_dec(apl.aplicado)
         deducciones.append({
             "descuento_id": apl.descuento_id,
+            # Número del concepto para el Colegio (no el id de la tabla): el cliente arma «300 AFIP».
+            "nro_colegio": apl.nro_colegio,
             "nombre": apl.concepto_nombre or (
                 f"Concepto #{apl.descuento_id}" if apl.descuento_id else "Deducción manual"
             ),

@@ -116,10 +116,9 @@ class ValidadorNobis(ValidadorOS):
 
         if res.autorizada:
             estado, detalle = "autorizada", res.estado_detalle
-        elif res.requiere_gestion:
-            estado = "rechazada"
-            detalle = f"Pendiente de autorización de la obra social. {res.estado_detalle}"
         else:
+            # `P-Pendiente` también se graba y se muestra como rechazada (ver la
+            # tabla de arriba); la letra queda en `traza["estado"]`.
             estado, detalle = "rechazada", res.estado_detalle
 
         return ResultadoValidacion(

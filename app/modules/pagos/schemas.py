@@ -147,6 +147,8 @@ class VistaPreviaLiqSection(BaseModel):
 
 class VistaPreviewDedItem(BaseModel):
     descuento_id: Optional[int]
+    # Número del concepto para el Colegio (conceptos.nro_colegio), no el id de la tabla.
+    nro_colegio: Optional[int] = None
     descuento_nombre: str
     cantidad_socios: int
     total_monto: Decimal
@@ -169,6 +171,11 @@ class VistaPreviewLoteItem(BaseModel):
     mes_periodo: int
     anio_periodo: int
     estado: str
+    # Factura a la que está atada (refacturaciones y lotes con factura), si la tiene.
+    nro_factura: Optional[str] = None
+    # Lo que el lote suma o resta en honorarios y en gastos (créditos +, débitos −).
+    total_honorarios: Decimal = Decimal("0")
+    total_gastos: Decimal = Decimal("0")
     total_debitos: Decimal
     total_creditos: Decimal
 
@@ -247,6 +254,7 @@ class PagoVistaPreviaRead(BaseModel):
     anio: int
     descripcion: Optional[str]
     estado: str
+    cantidad_socios: int = 0
     liquidaciones: VistaPreviaLiqSection
     deducciones: VistaPreviewDedSection
     lotes: VistaPreviewLoteSection

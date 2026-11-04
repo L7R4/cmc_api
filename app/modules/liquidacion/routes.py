@@ -14,6 +14,7 @@ from app.db.models import (
     FacturacionCMC,
     Liquidacion,
     LoteAjuste,
+    ObrasSociales,
     Pago,
     Recibo,
 )
@@ -168,11 +169,15 @@ async def listar_liquidaciones_por_pago(
     db: AsyncSession = Depends(get_db),
 ):
     res = await db.execute(
-        select(Liquidacion)
+        select(Liquidacion, ObrasSociales.OBRA_SOCIAL)
+        .outerjoin(ObrasSociales, ObrasSociales.NRO_OBRASOCIAL == Liquidacion.obra_social_id)
         .where(Liquidacion.pago_id == pago_id)
         .order_by(Liquidacion.obra_social_id)
     )
-    return res.scalars().all()
+    return [
+        LiquidacionRead.model_validate(liq).model_copy(update={"obra_social_nombre": nombre})
+        for liq, nombre in res.all()
+    ]
 
 
 # ================================================

@@ -25,6 +25,7 @@ from typing import Optional
 
 from fastapi import HTTPException
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.catalogs import ObrasSociales
@@ -35,6 +36,7 @@ from app.modules.nomenclador.schemas import (
     ObraSocialFamiliaItem,
     ReplicaResultadoItem,
     ReplicarFamiliaGalenoIn,
+    ReplicarFamiliaGalenosLoteIn,
     ReplicarFamiliaOut,
     ReplicarFamiliaValorIn,
     ValorCerrarYCrearIn,
@@ -336,6 +338,116 @@ async def _replicar_galeno_en(
 async def replicar_galenos(db: AsyncSession, body: ReplicarFamiliaGalenoIn) -> ReplicarFamiliaOut:
     destinos = await _destinos_validos(db, body.origen_obra_social_nro, body.destinos)
     resultados = [await _en_savepoint(db, nro, nombre, _replicar_galeno_en(db, body, nro))
+                  for nro, nombre in destinos.items()]
+    await db.commit()
+    return ReplicarFamiliaOut(resultados=resultados)
+
+
+# ─── Galenos en lote («Actualizar galenos») ──────────────────────────────────
+
+async def _vigentes_de(db: AsyncSession, os_nro: int, codigo: str) -> list[Galeno]:
+    """Las filas vigentes (todos los niveles) del galeno de la OS."""
+    return list((await db.execute(
+        select(Galeno).where(
+            Galeno.obra_social_nro == os_nro, Galeno.codigo == codigo,
+            Galeno.vigencia_hasta.is_(None), Galeno.activo.is_(True),
+        ).order_by(Galeno.nivel)
+    )).scalars())
+
+
+async def _visibilidad_en(db: AsyncSession, dest: int, codigo: str, visible: bool) -> None:
+    """Pisa `visible` en todas las filas del (OS, código), como `PATCH /galenos/visibilidad`."""
+    filas = list((await db.execute(
+        select(Galeno).where(Galeno.obra_social_nro == dest, Galeno.codigo == codigo)
+    )).scalars())
+    if not filas:
+        raise _Omitir("No tiene el galeno")
+    for g in filas:
+        g.visible = visible
+    await db.flush()
+
+
+async def _precio_en(
+    db: AsyncSession, body: ReplicarFamiliaGalenosLoteIn, dest: int, codigo: str, valor,
+) -> tuple[str, list[tuple[int, int]]]:
+    """Cambia el valor unitario de TODOS los niveles vigentes del galeno en el destino (cada nivel
+    conserva sus unidades). Si el destino no lo tiene, lo crea copiando el de la OS de origen
+    con el valor nuevo. Devuelve («replicado»|«creado», pares viejo→nuevo para el historial)."""
+    from app.modules.nomenclador.routes_galenos import _rotar_fila_galeno, _validar_mezcla_niveles
+
+    filas = await _vigentes_de(db, dest, codigo)
+    if not filas:
+        origen = await _vigentes_de(db, body.origen_obra_social_nro, codigo)
+        if not origen:
+            raise _Omitir("El galeno tampoco está vigente en la obra social de origen")
+        for o in origen:
+            await _validar_mezcla_niveles(db, dest, codigo, o.nivel)
+            db.add(Galeno(
+                obra_social_nro=dest, codigo=codigo, nombre=o.nombre, nivel=o.nivel,
+                vigencia_desde=body.vigencia_desde, vigencia_hasta=None, valor_unitario=valor,
+                unidades_honorarios=o.unidades_honorarios, unidades_ayudante=o.unidades_ayudante,
+                unidades_gastos=o.unidades_gastos, precio_por_nivel=o.precio_por_nivel,
+                visible=o.visible,
+            ))
+        await db.flush()
+        return "creado", []
+
+    ultima = max(g.vigencia_desde for g in filas)
+    if body.vigencia_desde <= ultima:
+        raise _Omitir(f"Ya tiene una vigencia igual o posterior ({_fmt(ultima)})")
+    pares = []
+    for g in filas:
+        nuevo = await _rotar_fila_galeno(db, g, valor, body.vigencia_desde)
+        pares.append((g.id, nuevo.id))
+    return "replicado", pares
+
+
+async def _replicar_galenos_lote_en(
+    db: AsyncSession, body: ReplicarFamiliaGalenosLoteIn, dest: int
+) -> tuple[str, Optional[str]]:
+    """Un destino: cada galeno va en su savepoint, así uno que no se puede no frena a los demás.
+    Si al menos uno se aplicó, el destino cuenta como replicado y el motivo cuenta el resto."""
+    pares: list[tuple[int, int]] = []
+    aplicados, creados, omitidos = 0, [], []
+    for item in body.items:
+        try:
+            async with db.begin_nested():
+                if body.operacion == "visibilidad":
+                    await _visibilidad_en(db, dest, item.codigo, bool(item.visible))
+                    estado, nuevos = "replicado", []
+                else:
+                    estado, nuevos = await _precio_en(db, body, dest, item.codigo, item.nuevo_valor_unitario)
+        except _Omitir as e:
+            omitidos.append(f"{item.codigo} ({e})")
+            continue
+        except HTTPException as e:
+            omitidos.append(f"{item.codigo} ({e.detail})")
+            continue
+        except IntegrityError:
+            omitidos.append(f"{item.codigo} (ya existe una fila con esa vigencia)")
+            continue
+        aplicados += 1
+        pares.extend(nuevos)
+        if estado == "creado":
+            creados.append(item.codigo)
+
+    if aplicados == 0:
+        raise _Omitir("; ".join(omitidos))
+    if pares:
+        # Los valores que usan estos galenos se recalculan una sola vez, con todos los precios nuevos.
+        await service.regenerar_historial_por_galenos(pares, body.vigencia_desde, db)
+
+    partes = []
+    if creados:
+        partes.append(f"Se creó: {', '.join(creados)}")
+    if omitidos:
+        partes.append(f"Omitidos: {'; '.join(omitidos)}")
+    return "replicado", ". ".join(partes) or None
+
+
+async def replicar_galenos_lote(db: AsyncSession, body: ReplicarFamiliaGalenosLoteIn) -> ReplicarFamiliaOut:
+    destinos = await _destinos_validos(db, body.origen_obra_social_nro, body.destinos)
+    resultados = [await _en_savepoint(db, nro, nombre, _replicar_galenos_lote_en(db, body, nro))
                   for nro, nombre in destinos.items()]
     await db.commit()
     return ReplicarFamiliaOut(resultados=resultados)

@@ -276,13 +276,13 @@ async def actualizaciones_por_mes(
     cantidad de actualizaciones, que son unas pocas por mes; por eso no se pagina.
     """
     filas = (await db.execute(text(
-        "SELECT vigencia_desde, obra_social_nro, COUNT(*) "
+        "SELECT vigencia_desde, obra_social_nro, COUNT(*), MAX(created_at) "
         "FROM nm_valores GROUP BY vigencia_desde, obra_social_nro"
     ))).all()
     if not filas:
         return []
 
-    nros = {nro for _, nro, _ in filas}
+    nros = {nro for _, nro, *_ in filas}
     nombres = dict((await db.execute(
         text("SELECT NRO_OBRASOCIAL, OBRA_SOCIAL FROM obras_sociales "
              "WHERE NRO_OBRASOCIAL IN :nros").bindparams(bindparam("nros", expanding=True)),
@@ -297,7 +297,7 @@ async def actualizaciones_por_mes(
     }
 
     meses: dict[str, MesActualizaciones] = {}
-    for vigencia, nro, codigos in filas:
+    for vigencia, nro, codigos, cargado_el in filas:
         clave = vigencia.strftime("%Y-%m")
         meses.setdefault(clave, MesActualizaciones(mes=clave)).obras_sociales.append(
             ObraSocialActualizada(
@@ -307,6 +307,7 @@ async def actualizaciones_por_mes(
                 nombre=(nombres.get(nro) or "").strip() or f"O.S. {nro}",
                 vigencia_desde=vigencia,
                 codigos=codigos,
+                cargado_el=cargado_el,
                 tiene_documento=(nro, vigencia) in con_documento,
             )
         )

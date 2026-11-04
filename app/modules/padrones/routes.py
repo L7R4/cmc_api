@@ -307,6 +307,7 @@ async def _armar_query_medicos_por_os(db: AsyncSession, nro_os: int, search: str
     # única fila de `medico_obra_social` para ellos.
     lm_min_id_subq = (
         select(ListadoMedico.NRO_SOCIO, func.min(ListadoMedico.ID).label("min_id"))
+        .where(ListadoMedico.estado_cuenta == ESTADO_ACTIVO)
         .group_by(ListadoMedico.NRO_SOCIO)
         .subquery()
     )
@@ -343,7 +344,7 @@ async def _armar_query_medicos_por_os(db: AsyncSession, nro_os: int, search: str
         select(func.count(func.distinct(MedicoObraSocial.NRO_SOCIO)))
         .select_from(MedicoObraSocial)
         .join(LM, LM.NRO_SOCIO == MedicoObraSocial.NRO_SOCIO)
-        .where(and_(padron_os_attr.in_(familia), *search_filters))
+        .where(and_(padron_os_attr.in_(familia), LM.estado_cuenta == ESTADO_ACTIVO, *search_filters))
     )
     total = (await db.execute(total_stmt)).scalar_one()
 

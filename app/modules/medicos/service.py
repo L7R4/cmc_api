@@ -2,6 +2,7 @@
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Optional, List, Dict, Any
+from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.auth import sessions
@@ -16,6 +17,7 @@ from app.core.passwords import (
     hash_password_inicial,
     vencimiento_password_provisoria,
 )
+from app.common.cbu import DatosBancariosInvalidos, resolver_alta, resolver_cambio
 from app.common.dates import _parse_date
 
 def _int_or_zero(v: Optional[str]) -> int:
@@ -193,7 +195,7 @@ async def create_medico_and_solicitud(db: AsyncSession, body):
         apellido = getattr(body, "lastName", None),
         nombre_ = getattr(body, "firstName", None),
         localidad = getattr(body, "locality", None),
-        cbu = getattr(body, "cbu", None),
+        **_bancarios_de_alta(body),
         condicion_impositiva = (getattr(body, "condicionImpositiva", None) or getattr(body, "taxCondition", None)),
         titulo = getattr(body, "specialty", None),
         
@@ -236,6 +238,57 @@ async def create_medico_and_solicitud(db: AsyncSession, body):
     return medico, solicitud
 
 
+def _bancarios_de_alta(body) -> dict:
+    """Columnas de cobro de un socio nuevo, a partir de lo que mandó el formulario.
+
+    El formulario nuevo manda `cbuSantander` / `cbuOtroBanco` / `medioCobro`; los
+    clientes viejos mandan un solo `cbu`, que se clasifica por su entidad. Un dato
+    inválido es un 422 y no se crea nada.
+    """
+    try:
+        return resolver_alta(
+            cbu_santander=getattr(body, "cbuSantander", None),
+            cbu_otro_banco=getattr(body, "cbuOtroBanco", None),
+            medio_cobro=getattr(body, "medioCobro", None),
+            cbu=getattr(body, "cbu", None),
+        )
+    except DatosBancariosInvalidos as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+
+def _aplicar_bancarios(med: ListadoMedico, body, puede_editar_bancario: bool = True) -> None:
+    """Edición parcial de un socio que ya existe: solo toca lo que vino en el body.
+
+    Si cambia algo y quien edita no tiene `medico:editar_bancario`, es un 403. Repetir los
+    valores que ya estaban guardados no cuenta como cambio."""
+    cambios: dict = {}
+    if getattr(body, "cbuSantander", None) is not None:
+        cambios["cbu_santander"] = body.cbuSantander
+    if getattr(body, "cbuOtroBanco", None) is not None:
+        cambios["cbu_otro_banco"] = body.cbuOtroBanco
+    if getattr(body, "medioCobro", None) is not None:
+        cambios["medio_cobro"] = body.medioCobro
+    unico = getattr(body, "cbu", None)
+    if unico is not None and not cambios:
+        # cliente viejo con un solo campo: se clasifica por la entidad del CBU
+        try:
+            alta = resolver_alta(cbu=unico)
+        except DatosBancariosInvalidos as e:
+            raise HTTPException(status_code=422, detail=str(e))
+        cambios = {k: v for k, v in alta.items() if v is not None}
+    if not cambios:
+        return
+    actual = {"cbu_santander": med.cbu_santander, "cbu_otro_banco": med.cbu_otro_banco, "medio_cobro": med.medio_cobro}
+    try:
+        escribir = resolver_cambio(actual, cambios)
+    except DatosBancariosInvalidos as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    if escribir and not puede_editar_bancario:
+        raise HTTPException(status_code=403, detail="No tenés permiso para modificar los datos bancarios.")
+    for k, v in escribir.items():
+        setattr(med, k, v)
+
+
 def _nn(v, fallback):
     """string nullable → string no vacío"""
     v = (v or "").strip()
@@ -249,6 +302,7 @@ async def save_medico_admin_draft(
     body,  # Pydantic con los mismos nombres del público (firstName, lastName, etc.)
     *,
     medico_id: Optional[int] = None,
+    puede_editar_bancario: bool = True,
 ) -> ListadoMedico:
     """
     - Si viene medico_id: PATCH parcial sobre esa fila.
@@ -334,7 +388,7 @@ async def save_medico_admin_draft(
             apellido = _first(getattr(body, "lastName", None), None),
             nombre_  = _first(getattr(body, "firstName", None), None),
             localidad = _first(getattr(body, "locality", None), None),
-            cbu = _first(getattr(body, "cbu", None), None),
+            **_bancarios_de_alta(body),
             condicion_impositiva = (
                 getattr(body, "condicionImpositiva", None)
                 or getattr(body, "taxCondition", None)
@@ -395,10 +449,12 @@ async def save_medico_admin_draft(
         ("TELEFONO_CONSULTA", "officePhone"),
         ("MAIL_PARTICULAR", "email"),
         ("localidad", "locality"),
-        ("cbu", "cbu"),
     ]:
         if getattr(body, src, None) is not None:
             setattr(med, attr, _nn(getattr(body, src), getattr(med, attr, "") or ("a" if "DOMICILIO" in attr else "0")))
+
+    # Cobro (CBU y medio de cobro)
+    _aplicar_bancarios(med, body, puede_editar_bancario)
 
     # Fiscales / Seguros
     if getattr(body, "cuit", None) is not None:
@@ -561,8 +617,6 @@ async def save_medico_admin_draft(
         _set_first_existing_attr(med, ["MALAPRACTICA_COMPANIA","seguro_mala_praxis"], _norm_str(body.malpracticeCompany))
     if body.malpracticeExpiry is not None:
         _set_first_existing_attr(med, ["MALAPRACTICA_VENC","mala_praxis_venc"], _norm_date(body.malpracticeExpiry))
-    if body.cbu is not None:
-        _set_first_existing_attr(med, ["CBU","cbu"], _norm_str(body.cbu))
 
     # OTROS
     if body.observations is not None:

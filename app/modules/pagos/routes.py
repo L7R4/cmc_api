@@ -691,10 +691,11 @@ async def informe_pago_endpoint(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Retorna los médicos que participaron en el pago filtrados por tipo:
-    - santander:    CBU empieza con 072
-    - otros_bancos: tiene CBU pero no empieza con 072
-    - cheques:      sin CBU (se paga por cheque)
-    - cuit_30:      CUIT comienza con 30 (personas jurídicas)
+    Socios del pago que van en cada archivo del banco, según su `medio_cobro`:
+    - santander / santander_30:       transferencia a su CBU de Santander (la _30, CUIT que empieza con 30)
+    - otros_bancos / otros_bancos_30: transferencia a su CBU de otro banco
+    - cheques:                        cobran con cheque
+    - observados:                     hay que transferirles y falta un CBU o un CUIT válido
+    Solo con el pago cerrado y solo neto > 0. Cada socio sale en un único archivo.
     """
     return await informe_pago(db, pago_id, tipo)

@@ -274,20 +274,26 @@ class PagoVistaPreviaRead(BaseModel):
 # Informe por tipo de pago
 # ================================================
 
-TipoInforme = Literal["santander", "otros_bancos", "cuit_30", "cheques"]
+TipoInforme = Literal["santander", "santander_30", "otros_bancos", "otros_bancos_30", "cheques", "observados"]
 
 
 class InformeMedicoRow(BaseModel):
     medico_id: int
-    nro_socio: int
-    nombre: str
-    cuit: Optional[str]
-    cbu: Optional[str]
-    cuenta_bancaria: Optional[str]
+    nro_socio: Optional[int] = None
+    nombre: str = ""
+    cuit: Optional[str] = None
+    cbu: Optional[str] = None
+    medio_cobro: Optional[str] = None
     neto_a_pagar: Decimal
+    motivo: Optional[str] = None      # solo en «observados»: por qué no sale en un archivo del banco
 
     class Config:
         from_attributes = True
+
+
+class InformeResumenItem(BaseModel):
+    cantidad: int
+    total: Decimal
 
 
 class InformePagoRead(BaseModel):
@@ -296,3 +302,4 @@ class InformePagoRead(BaseModel):
     total_neto: Decimal
     cantidad: int
     medicos: List[InformeMedicoRow]
+    resumen: Dict[str, InformeResumenItem] = {}

@@ -42,7 +42,9 @@ CAMPOS_EDITABLES_POR_MEDICO: dict[str, str] = {
     "localidad": "localidad",
     "provincia": "PROVINCIA",
     "codigo_postal": "CODIGO_POSTAL",
-    "cbu": "cbu",
+    # El CBU y el medio de cobro NO se piden por acá: se cargan desde el legajo con
+    # el permiso `medico:editar_bancario` y se validan (ver app/common/cbu.py). Esta
+    # lista escribe el texto tal cual lo manda el socio, sin validar nada.
 }
 
 # NUNCA editables por el médico, ni por formulario ni por reclamo suelto.
@@ -88,7 +90,6 @@ ETIQUETAS_CAMPOS: dict[str, str] = {
     "localidad": "Localidad",
     "provincia": "Provincia",
     "codigo_postal": "Código postal",
-    "cbu": "CBU",
 }
 
 # Largo máximo por valor. Coincide con `valor_propuesto` para que un cambio

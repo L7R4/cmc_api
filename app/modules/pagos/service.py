@@ -9,6 +9,7 @@ from fastapi import HTTPException
 from sqlalchemy import case, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.common.cbu import es_cbu_valido, es_cuit_valido, es_santander, solo_digitos
 from app.modules.adelantos.queries import ESTADOS_EN_PAGO, total_adelantos_del_pago
 from app.modules.arrastres.queries import (
     arrastres_por_medico_en_pago,
@@ -1097,19 +1098,58 @@ async def refrescar_todos_medicos(db: AsyncSession, pago_id: int, pago: Pago) ->
     return result
 
 
+# Archivos de la pestaña «Exportables». Cada socio con neto > 0 cae en UNO solo:
+#   santander / santander_30      transferencia a su CBU de Santander (la «_30» es la de CUIT que empieza con 30)
+#   otros_bancos / otros_bancos_30  transferencia a su CBU de otro banco
+#   cheques                       cobra con cheque
+#   observados                    tiene que transferirse y no se puede: sin CBU válido o sin CUIT válido
+# Esa separación (las CUIT 30 en su propio archivo, nunca repetidas) es la del sistema anterior.
+TIPOS_INFORME = ("santander", "santander_30", "otros_bancos", "otros_bancos_30", "cheques", "observados")
+
+
+def _clasificar_para_informe(medio_cobro: Optional[str], cbu_santander, cbu_otro_banco, cuit) -> tuple[str, Optional[str], Optional[str], str]:
+    """(tipo de archivo, motivo si es observado, CBU a usar, CUIT en 11 dígitos)."""
+    cuit_limpio = solo_digitos(cuit)
+    medio = medio_cobro or "cheque"
+    if medio == "cheque":
+        return "cheques", None, None, cuit_limpio
+
+    if medio == "santander":
+        cbu = (cbu_santander or "").strip()
+        if not es_cbu_valido(cbu):
+            return "observados", "Cobra por Santander y su CBU no es válido", None, cuit_limpio
+        if not es_santander(cbu):
+            return "observados", "El CBU de Santander no empieza con 072", None, cuit_limpio
+        base = "santander"
+    else:
+        cbu = (cbu_otro_banco or "").strip()
+        if not es_cbu_valido(cbu):
+            return "observados", "Cobra por otro banco y su CBU no es válido", None, cuit_limpio
+        if es_santander(cbu):
+            return "observados", "El CBU de «otro banco» es de Santander", None, cuit_limpio
+        base = "otros_bancos"
+
+    if not es_cuit_valido(cuit_limpio):
+        return "observados", "El CUIT está vacío o no es válido", cbu, cuit_limpio
+    return (f"{base}_30" if cuit_limpio.startswith("30") else base), None, cbu, cuit_limpio
+
+
 async def informe_pago(db: AsyncSession, pago_id: int, tipo: str) -> dict:
+    """Socios del pago que van en un archivo del banco (ver TIPOS_INFORME).
+
+    * Solo con el pago cerrado: con el pago abierto los netos todavía se mueven.
+    * Solo neto > 0: el que cobra cero no va en ningún archivo.
+    * `resumen` trae la cantidad y el total de TODOS los archivos, para que la pantalla
+      avise cuántos observados hay sin tener que pedirlos.
     """
-    Devuelve médicos que participaron en el pago filtrados por tipo de informe:
-    - santander:    cuenta_bancaria == 'santander'
-    - otros_bancos: cuenta_bancaria == 'otro_banco'
-    - cuit_30:      CUIT comienza con '30'
-    - cheques:      cuenta_bancaria == 'cheque'
-    """
-    from sqlalchemy import and_
+    if tipo not in TIPOS_INFORME:
+        raise HTTPException(400, f"Tipo de informe inválido: {tipo}")
 
     pago = await db.get(Pago, pago_id)
     if not pago:
         raise HTTPException(404, "Pago no encontrado")
+    if pago.estado == "A":
+        raise HTTPException(409, "Cerrá el pago antes de generar los archivos del banco.")
 
     stmt = (
         select(
@@ -1117,42 +1157,44 @@ async def informe_pago(db: AsyncSession, pago_id: int, tipo: str) -> dict:
             ListadoMedico.NRO_SOCIO.label("nro_socio"),
             ListadoMedico.NOMBRE.label("nombre"),
             ListadoMedico.CUIT.label("cuit"),
-            ListadoMedico.cbu.label("cbu"),
-            ListadoMedico.cuenta_bancaria.label("cuenta_bancaria"),
+            ListadoMedico.cbu_santander.label("cbu_santander"),
+            ListadoMedico.cbu_otro_banco.label("cbu_otro_banco"),
+            ListadoMedico.medio_cobro.label("medio_cobro"),
             PagoMedico.neto_a_pagar.label("neto_a_pagar"),
         )
         .select_from(PagoMedico)
         .join(ListadoMedico, ListadoMedico.ID == PagoMedico.medico_id)
-        .where(PagoMedico.pago_id == pago_id)
+        .where(PagoMedico.pago_id == pago_id, PagoMedico.neto_a_pagar > 0)
+        .order_by(ListadoMedico.NOMBRE)
     )
-
-    if tipo == "santander":
-        stmt = stmt.where(ListadoMedico.cuenta_bancaria == "santander")
-    elif tipo == "otros_bancos":
-        stmt = stmt.where(ListadoMedico.cuenta_bancaria == "otro_banco")
-    elif tipo == "cheques":
-        stmt = stmt.where(ListadoMedico.cuenta_bancaria == "cheque")
-    elif tipo == "cuit_30":
-        stmt = stmt.where(ListadoMedico.CUIT.like("30%"))
-    else:
-        raise HTTPException(400, f"Tipo de informe inválido: {tipo}")
-
-    stmt = stmt.order_by(ListadoMedico.NOMBRE)
     rows = (await db.execute(stmt)).mappings().all()
 
-    medicos = [
-        {
-            "medico_id": r["medico_id"],
-            "nro_socio": r["nro_socio"],
-            "nombre": r["nombre"],
-            "cuit": r["cuit"],
-            "cbu": r["cbu"],
-            "cuenta_bancaria": r["cuenta_bancaria"],
-            "neto_a_pagar": _to_dec(r["neto_a_pagar"]),
-        }
-        for r in rows
-    ]
+    resumen = {t: {"cantidad": 0, "total": Decimal("0")} for t in TIPOS_INFORME}
+    medicos = []
+    for r in rows:
+        destino, motivo, cbu, cuit = _clasificar_para_informe(
+            r["medio_cobro"], r["cbu_santander"], r["cbu_otro_banco"], r["cuit"]
+        )
+        neto = _to_dec(r["neto_a_pagar"])
+        resumen[destino]["cantidad"] += 1
+        resumen[destino]["total"] += neto
+        if destino != tipo:
+            continue
+        medicos.append(
+            {
+                "medico_id": r["medico_id"],
+                "nro_socio": r["nro_socio"],
+                "nombre": r["nombre"] or "",
+                "cuit": cuit or None,
+                "cbu": cbu,
+                "medio_cobro": r["medio_cobro"],
+                "neto_a_pagar": neto,
+                "motivo": motivo,
+            }
+        )
 
+    for t in resumen:
+        resumen[t]["total"] = resumen[t]["total"].quantize(Decimal("0.01"))
     total_neto = sum((m["neto_a_pagar"] for m in medicos), Decimal("0")).quantize(Decimal("0.01"))
 
     return {
@@ -1161,6 +1203,7 @@ async def informe_pago(db: AsyncSession, pago_id: int, tipo: str) -> dict:
         "total_neto": total_neto,
         "cantidad": len(medicos),
         "medicos": medicos,
+        "resumen": resumen,
     }
 
 

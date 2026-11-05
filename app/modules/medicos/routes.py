@@ -12,6 +12,7 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from uuid import uuid4
 
+from app.common.cbu import DatosBancariosInvalidos, resolver_cambio
 from app.common.dates import _parse_fecha_to_yyyy_mm_dd, parse_ddmmyyyy, _parse_date
 from app.common.files import save_upload_for_medico, url_archivo
 from app.common.uploads import DOCUMENTOS, validate_upload
@@ -114,7 +115,7 @@ MEDICO_ALL_FIELDS = [
     "cobertura", "vencimiento_cobertura", "provincia", "localidad", "codigo_postal",
     "vitalicio", "fecha_vitalicio", "observacion", "categoria", "estado_cuenta",
     "excep_desde", "excep_hasta", "excep_desde2", "excep_hasta2",
-    "excep_desde3", "excep_hasta3", "cbu", "nro_resolucion",
+    "excep_desde3", "excep_hasta3", "cbu_santander", "cbu_otro_banco", "medio_cobro", "nro_resolucion",
     "fecha_resolucion", "es_organizacion", "adherente", "interior",
     "conceps_espec", "attach_titulo", "attach_matricula_nac",
     "attach_matricula_prov", "attach_resolucion", "attach_habilitacion_municipal",
@@ -599,7 +600,9 @@ async def obtener_medico(
             ListadoMedico.VENCIMIENTO_MALAPRAXIS.label("vencimiento_malapraxis"),
             ListadoMedico.COBERTURA.label("cobertura"),
             ListadoMedico.VENCIMIENTO_COBERTURA.label("vencimiento_cobertura"),
-            ListadoMedico.cbu.label("cbu"),
+            ListadoMedico.cbu_santander.label("cbu_santander"),
+            ListadoMedico.cbu_otro_banco.label("cbu_otro_banco"),
+            ListadoMedico.medio_cobro.label("medio_cobro"),
             ListadoMedico.OBSERVACION.label("observacion"),
             ListadoMedico.attach_titulo.label("attach_titulo"),
             ListadoMedico.attach_matricula_nac.label("attach_matricula_nac"),
@@ -722,17 +725,45 @@ async def obtener_medico(
     return d
 
 
+CAMPOS_BANCARIOS = ("cbu_santander", "cbu_otro_banco", "medio_cobro")
+
+
+def _exigir_editar_bancario(user: dict) -> None:
+    """Los datos de cobro son el campo contra el que se pagan las liquidaciones:
+    cambiarlos pide un permiso propio, aparte de `medico:editar`."""
+    if Scope.MEDICO_EDITAR_BANCARIO.value not in (user.get("scopes") or []):
+        raise HTTPException(403, "No tenés permiso para modificar los datos bancarios.")
+
+
 @router.put("/{medico_id}", status_code=204)
 async def update_medico(
     medico_id: int,
     payload: MedicoUpdateIn = Body(default={}),
     db: AsyncSession = Depends(get_db),
+    user: dict = Depends(get_current_user),
 ):
     row = await db.get(ListadoMedico, medico_id)
     if not row:
         raise HTTPException(404, "Médico no encontrado")
 
     data = payload.model_dump(exclude_unset=True)
+
+    # Datos de cobro: CBU Santander, CBU de otro banco y medio de cobro. Se sacan de
+    # `data` para que no pasen por el seteo genérico (ni por el print de abajo).
+    bancarios = {k: data.pop(k) for k in CAMPOS_BANCARIOS if k in data}
+    if bancarios:
+        actual = {k: getattr(row, k) for k in CAMPOS_BANCARIOS}
+
+        def _txt(v):
+            return str(v).strip() if v is not None and str(v).strip() not in ("", "0") else None
+
+        if any(_txt(v) != _txt(actual[k]) for k, v in bancarios.items()):
+            _exigir_editar_bancario(user)
+        try:
+            for k, v in resolver_cambio(actual, bancarios).items():
+                setattr(row, k, v)
+        except DatosBancariosInvalidos as e:
+            raise HTTPException(422, str(e))
     if "sexo" in data:
         data["sexo"] = _coerce_sexo(data["sexo"])
 
@@ -1469,8 +1500,19 @@ async def admin_upload_document(
 
 
 @router.post("/admin/save-continue", response_model=SaveContinueOut)
-async def admin_save_continue(body: AdminSaveContinueIn, db: AsyncSession = Depends(get_db)):
-    med = await save_medico_admin_draft(db, body, medico_id=body.medico_id)
+async def admin_save_continue(
+    body: AdminSaveContinueIn,
+    db: AsyncSession = Depends(get_db),
+    user: dict = Depends(get_current_user),
+):
+    # Sobre un legajo que ya existe, los datos de cobro los toca solo quien tiene
+    # `medico:editar_bancario` (igual que en PUT /medicos/{id}); el alta no lo pide.
+    med = await save_medico_admin_draft(
+        db,
+        body,
+        medico_id=body.medico_id,
+        puede_editar_bancario=Scope.MEDICO_EDITAR_BANCARIO.value in (user.get("scopes") or []),
+    )
     return {"medico_id": int(med.ID), "ok": True}
 
 

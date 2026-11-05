@@ -4,6 +4,8 @@ from typing import Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.common.cbu import MedioCobro
+
 # `listado_medico.estado_cuenta`. Reemplaza al `EXISTE` ('S'/'N') del sistema viejo.
 EstadoCuenta = Literal["pendiente", "activo", "baja"]
 
@@ -42,7 +44,9 @@ FIELD_MAP = {
     "malapraxis": "MALAPRAXIS",
     "vencimiento_malapraxis": "VENCIMIENTO_MALAPRAXIS",
     "vencimiento_cobertura": "VENCIMIENTO_COBERTURA",
-    "cbu": "cbu",
+    "cbu_santander": "cbu_santander",
+    "cbu_otro_banco": "cbu_otro_banco",
+    "medio_cobro": "medio_cobro",
     "observacion": "OBSERVACION",
 }
 
@@ -167,7 +171,9 @@ class MedicoBase(BaseModel):
     excep_hasta2: Optional[str] = Field(None)
     excep_desde3: Optional[str] = Field(None)
     excep_hasta3: Optional[str] = Field(None)
-    cbu: Optional[str] = Field(None)
+    cbu_santander: Optional[str] = Field(None)
+    cbu_otro_banco: Optional[str] = Field(None)
+    medio_cobro: Optional[MedioCobro] = Field(None)
     nro_resolucion: Optional[str] = Field(None)
     fecha_resolucion: Optional[date] = Field(None)
     es_organizacion: Optional[bool] = Field(None)
@@ -298,7 +304,9 @@ class MedicoDetailOut(BaseModel):
     vencimiento_malapraxis: Optional[date] = None
     cobertura: Optional[int] = None
     vencimiento_cobertura: Optional[date] = None
-    cbu: Optional[str] = None
+    cbu_santander: Optional[str] = None
+    cbu_otro_banco: Optional[str] = None
+    medio_cobro: Optional[MedioCobro] = None
     observacion: Optional[str] = None
     es_organizacion: Optional[bool] = None
     # Rol principal del legajo. La credencial lo usa para no titular "Dr./Dra."
@@ -388,7 +396,9 @@ class MedicoUpdateIn(BaseModel):
     malapraxis: Optional[str] = None
     vencimiento_malapraxis: Optional[str] = None
     vencimiento_cobertura: Optional[str] = None
-    cbu: Optional[str] = None
+    cbu_santander: Optional[str] = None
+    cbu_otro_banco: Optional[str] = None
+    medio_cobro: Optional[MedioCobro] = None
     observacion: Optional[str] = None
     es_organizacion: Optional[bool] = None
     adherente: Optional[bool] = None
@@ -401,7 +411,7 @@ class MedicoUpdateIn(BaseModel):
         "localidad", "codigo_postal", "domicilio_particular", "tele_particular",
         "celular_particular", "mail_particular", "categoria", "titulo",
         "domicilio_consulta", "telefono_consulta", "condicion_impositiva",
-        "malapraxis", "cbu", "observacion",
+        "malapraxis", "cbu_santander", "cbu_otro_banco", "observacion",
         mode="before",
     )
     @classmethod
@@ -554,6 +564,9 @@ class MedicoPartialIn(BaseModel):
     malpracticeCompany: Optional[str] = None
     malpracticeExpiry: Optional[str] = None
     cbu: Optional[str] = None
+    cbuSantander: Optional[str] = None
+    cbuOtroBanco: Optional[str] = None
+    medioCobro: Optional[MedioCobro] = None
     observations: Optional[str] = None
 
 
@@ -621,6 +634,9 @@ class AdminSaveContinueIn(BaseModel):
     condicionImpositiva: Optional[str] = None
     taxCondition: Optional[str] = None
     cbu: Optional[str] = None
+    cbuSantander: Optional[str] = None
+    cbuOtroBanco: Optional[str] = None
+    medioCobro: Optional[MedioCobro] = None
 
 
 # ---------------------------------------------------------------------------
@@ -651,6 +667,9 @@ class RegisterIn(BaseModel):
     officePhone: str | None = None
     cuit: str | None = None
     cbu: str | None = None
+    cbuSantander: str | None = None
+    cbuOtroBanco: str | None = None
+    medioCobro: MedioCobro | None = None
     condicionImpositiva: str | None = None
     observations: str | None = None
     provincialLicense: str | None = None

@@ -155,7 +155,8 @@ class Scope(StrEnum):
     # es el serializer, y ahí se decide si vuelve a hacer falta un scope aparte.
     MEDICO_CREAR = "medico:crear"
     MEDICO_EDITAR = "medico:editar"
-    # Solo el CBU: es el campo contra el que se pagan las liquidaciones.
+    # Solo los datos de cobro (CBU Santander, CBU de otro banco y medio de cobro): son lo contra
+    # lo que se pagan las liquidaciones. La API lo exige en PUT /medicos/{id}.
     MEDICO_EDITAR_BANCARIO = "medico:editar_bancario"
     MEDICO_ELIMINAR = "medico:eliminar"
     MEDICO_DOCUMENTO = "medico:documento"
@@ -488,7 +489,7 @@ DESCRIPCIONES: dict[Scope, str] = {
     Scope.MEDICO_LEER_PROPIO: "Ver únicamente el propio legajo, padrón y adjuntos",
     Scope.MEDICO_CREAR: "Alta administrativa de médicos",
     Scope.MEDICO_EDITAR: "Editar datos de un médico",
-    Scope.MEDICO_EDITAR_BANCARIO: "Modificar el CBU de un médico",
+    Scope.MEDICO_EDITAR_BANCARIO: "Modificar los datos de cobro de un médico (CBU y medio de cobro)",
     Scope.MEDICO_ELIMINAR: "Baja de un médico",
     Scope.MEDICO_DOCUMENTO: "Alta y baja de documentos adjuntos de médicos",
     Scope.MEDICO_RENOVAR_PASSWORD: "Renovar la contraseña de un socio (genera una provisoria)",

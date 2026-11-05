@@ -87,9 +87,18 @@ class ListadoMedico(Base):
         nullable=False,
         default=lambda: {"conceps": [], "espec": []}
     )
-    cbu: Mapped[str] = mapped_column(String(50, 'utf8_spanish2_ci'), nullable=True)
+    # Cobro del socio (reemplaza a `cbu` y `cuenta_bancaria`, que se borran de la
+    # tabla cuando la API nueva ya está en producción). Ver app/common/cbu.py.
+    #   cbu_santander   CBU de una cuenta del Banco Santander (empieza con 072)
+    #   cbu_otro_banco  CBU de cualquier otro banco; puede traer un valor viejo que no es un CBU
+    #   medio_cobro     por dónde se le paga: santander / otros_bancos / cheque
+    cbu_santander: Mapped[Optional[str]] = mapped_column(String(22), nullable=True)
+    cbu_otro_banco: Mapped[Optional[str]] = mapped_column(String(22), nullable=True)
+    medio_cobro: Mapped[str] = mapped_column(
+        Enum("santander", "otros_bancos", "cheque", name="medio_cobro_enum"),
+        nullable=False, default="cheque", server_default="cheque",
+    )
     es_organizacion: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
-    cuenta_bancaria: Mapped[Optional[str]] = mapped_column(String(20, 'utf8_spanish2_ci'), nullable=True)
     adherente: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
     interior: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
     nro_resolucion: Mapped[str] = mapped_column(String(70, 'utf8_spanish2_ci'), nullable=True)

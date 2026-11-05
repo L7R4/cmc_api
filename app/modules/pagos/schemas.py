@@ -119,8 +119,13 @@ class VistaPreviaLiqItem(BaseModel):
     obra_social_id: int
     obra_social_nombre: str
     nro_factura: Optional[str]
+    # Id de la factura y su versión (1 = original, 2+ = complementaria): el front marca las complementarias con ellos.
+    factura_id: Optional[int] = None
+    factura_version: Optional[int] = None
     mes_periodo: int
     anio_periodo: int
+    # Porcentaje de lo facturado que se paga a los médicos en esta liquidación (100 = todo).
+    porcentaje_pago: Decimal = Decimal("100")
     total_honorarios: Decimal
     total_gastos: Decimal
     total_bruto: Decimal
@@ -198,6 +203,8 @@ class VistaPreviewAdelantoItem(BaseModel):
     nro_factura: Optional[str] = None
     mes_periodo: int
     anio_periodo: int
+    # Porcentaje de pago de la liquidación de su factura en este pago; None si la factura no está liquidada acá.
+    porcentaje_pago: Optional[Decimal] = None
     prestaciones: int
     medicos: int
     total_honorarios: Decimal

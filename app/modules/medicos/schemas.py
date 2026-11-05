@@ -112,6 +112,8 @@ class MedicoSelectorOut(BaseModel):
     id: int
     nro_socio: Optional[int] = None
     nombre: str
+    # Para ver por qué coincidió una búsqueda por matrícula; None si no tiene.
+    matricula_prov: Optional[int] = None
 
 
 class MedicoBase(BaseModel):

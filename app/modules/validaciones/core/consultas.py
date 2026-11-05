@@ -14,7 +14,11 @@ from app.common.money import quantize_money
 from app.db.models import DetalleFacturacionCMC
 from app.db.models.nomenclador_cmc import NomencladorCMC, Valor
 from app.modules.facturacion import documentacion
-from app.modules.facturacion.service import VALIDACION_RECHAZOS, resolver_precio
+from app.modules.facturacion.service import (
+    VALIDACION_RECHAZOS,
+    es_honorarios_individuales,
+    resolver_precio,
+)
 from app.modules.nomenclador import service as service_nm
 from app.modules.validaciones.core.contrato import factura_en_cero
 from app.modules.validaciones.core.documentos import enriquecer
@@ -236,7 +240,8 @@ def _filtrar_habilitados(habilitados: list[dict], q: str) -> list[dict]:
 
 
 async def buscar_codigos(
-    db: AsyncSession, obra_social_id: int, nro_socio: int, q: str, limite: int = 20
+    db: AsyncSession, obra_social_id: int, nro_socio: int, q: str, limite: int = 20,
+    *, sin_cirugias: bool = False,
 ) -> list[dict]:
     """Códigos del nomenclador nuevo que **ese médico puede facturar** en esa
     obra social, con su valor.
@@ -261,6 +266,10 @@ async def buscar_codigos(
     ofrecer algo que no se puede usar. Es el caso que dejaba pasar
     `CARGA_SIN_PRECIO=true`, y el que hacía que un médico con especialidad 33
     viera `420130` a $ 0,00 y lo cargara igual.
+
+    **`sin_cirugias`** (el propio médico): tampoco se devuelven los códigos de categoría
+    'Honorarios individuales' en esa obra social —las cirugías las carga el Colegio—, que
+    es lo mismo que rechaza `pipeline.crear_prestacion` al cargar.
     """
     medico = await get_medico(db, nro_socio)
     hoy = datetime.date.today()
@@ -284,6 +293,8 @@ async def buscar_codigos(
         if len(salida) >= limite:
             break
         codigo = h["codigo"]
+        if sin_cirugias and await es_honorarios_individuales(db, codigo, str(obra_social_id)):
+            continue
         try:
             precio = await resolver_precio(db, str(obra_social_id), medico, codigo, hoy)
         except HTTPException:

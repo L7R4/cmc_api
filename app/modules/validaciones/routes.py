@@ -40,6 +40,7 @@ from app.modules.validaciones.core.consultas import listar_periodos as _listar_p
 from app.modules.validaciones.core.consultas import listar_prestaciones as _listar_prestaciones
 from app.modules.validaciones.core.medicos import get_medico
 from app.modules.validaciones.core.periodos import (
+    ORIGEN_MEDICO,
     actor_para,
     partes_periodo,
     periodo_actual,
@@ -146,7 +147,10 @@ async def buscar_codigos(
     vea lo que efectivamente se le va a liquidar.
     """
     socio = _socio_objetivo(user, nro_socio)
-    return await _buscar_codigos(db, obra_social, socio, q, limit)
+    # El propio médico no ve las cirugías (honorarios individuales): las carga el Colegio.
+    return await _buscar_codigos(
+        db, obra_social, socio, q, limit, sin_cirugias=actor_para(user, socio) == ORIGEN_MEDICO
+    )
 
 
 @router.post("/prestaciones", response_model=PrestacionOut, status_code=status.HTTP_201_CREATED)

@@ -9,11 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.database import get_db
 from app.db.models import (
-    Ajuste,
     DetalleLiquidacion,
     FacturacionCMC,
     Liquidacion,
-    LoteAjuste,
     ObrasSociales,
     Pago,
     Recibo,
@@ -29,8 +27,9 @@ from app.modules.liquidacion.schemas import (
 from app.modules.liquidacion.service import (
     aplicar_porcentaje_pago,
     build_detalles_from_cmc,
+    lotes_sin_cobertura,
     porcentaje_pago_sugerido,
-    restaurar_ajustes_facturados,
+    sacar_lotes_del_pago,
     validar_porcentaje_pago,
     detalle_recibo_medico,
     recalcular_totales_de_liquidacion,
@@ -207,8 +206,9 @@ async def eliminar_liquidacion(liquidacion_id: int, db: AsyncSession = Depends(g
     if pago and pago.estado != "A":
         raise HTTPException(409, "No se puede eliminar una liquidación de un pago cerrado")
 
-    # Un lote de esta factura que ya está en liquidación NO impide quitarla: los lotes pueden
-    # estar en el pago sin su factura (decisión del Colegio); sus ajustes siguen contando.
+    # Un lote de esta factura que ya está en el pago NO impide quitarla, pero se va con ella: un lote con factura
+    # sólo puede estar en un pago si su factura está en ese pago o ya fue pagada en otro. Más abajo, una vez
+    # quitada la factura, los lotes que quedaron sin cobertura vuelven a «cerrado» y salen del pago.
 
     # Médicos con detalle en esta liquidación: sin esto su PagoMedico/Recibo
     # queda con montos viejos hasta que alguien vuelva a abrir su vista a mano
@@ -222,17 +222,16 @@ async def eliminar_liquidacion(liquidacion_id: int, db: AsyncSession = Depends(g
         .distinct()
     )).scalars().all())
 
-    # Los ajustes de esta factura que quedan en el pago vuelven a su monto cargado: el porcentaje era de la factura.
-    if obj.factura_id is not None and obj.porcentaje_pago != Decimal("100"):
-        medico_ids_afectados = sorted(set(medico_ids_afectados) | set((await db.execute(
-            select(Ajuste.medico_id).join(LoteAjuste, LoteAjuste.id == Ajuste.lote_id)
-            .where(LoteAjuste.pago_id == obj.pago_id, LoteAjuste.factura_id == obj.factura_id).distinct()
-        )).scalars().all()))
-        await restaurar_ajustes_facturados(db, pago_id=obj.pago_id, factura_id=obj.factura_id)
+    # Los ajustes de los lotes de esta factura no se tocan acá: cada uno lleva su propio porcentaje, y los que
+    # salen del pago con su lote (más abajo) recuperan lo cargado.
 
     pago_id_del = obj.pago_id
+    factura_id_del = obj.factura_id
     await db.delete(obj)
     await db.flush()
+    if factura_id_del is not None:
+        lotes_afuera = await lotes_sin_cobertura(db, pago_id_del, factura_id=factura_id_del)
+        medico_ids_afectados = sorted(set(medico_ids_afectados) | set(await sacar_lotes_del_pago(db, lotes_afuera)))
     await generar_y_recalcular_porcentuales(db, pago_id_del)
     if pago is not None:
         for medico_id in medico_ids_afectados:

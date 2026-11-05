@@ -46,6 +46,15 @@ class ValidadorManual(ValidadorOS):
         )
 
         precio = await ctx.precio(entrada.codigo)
+
+        # El coseguro es opcional: si no viene (o es 0) se carga en 0 y no frena
+        # nada. Sólo se frena lo imposible —un coseguro mayor que lo que vale la
+        # práctica dejaría el total negativo (p. ej. tipear el código en el campo).
+        coseguro = Decimal(entrada.coseguro or 0) if self.descuenta_coseguro else CERO
+        valor = (precio.honorarios + precio.gastos) * entrada.cantidad
+        if coseguro > valor:
+            raise HTTPException(422, "El coseguro no puede superar el valor de la prestación.")
+
         return ResultadoValidacion(
             estado="cargada",
             detalle="",
@@ -54,5 +63,5 @@ class ValidadorManual(ValidadorOS):
             nro_afiliado=entrada.nro_afiliado.strip(),
             nombre_afiliado=entrada.nombre_afiliado.strip().upper(),
             nro_autorizacion=entrada.nro_validacion.strip() or None,
-            coseguro=Decimal(entrada.coseguro or 0) if self.descuenta_coseguro else CERO,
+            coseguro=coseguro,
         )

@@ -30,6 +30,7 @@ from app.db.models import (
     PagoMedico,
     Recibo,
 )
+from app.modules.medicos.busqueda import criterio_socio
 
 
 # ==============================
@@ -201,7 +202,8 @@ async def restaurar_ajustes_facturados(
 
 
 async def aplicar_porcentaje_pago(db: AsyncSession, liq: Liquidacion, porcentaje) -> list[int]:
-    """Fija el porcentaje de pago de la liquidación y lo aplica a sus renglones y a los ajustes de su factura.
+    """Fija el porcentaje de pago de la liquidación y lo aplica a sus renglones (NO a los ajustes de su factura:
+    cada ajuste lleva su propio porcentaje).
 
     Siempre parte de lo facturado, así que cambiarlo varias veces no acumula redondeos. Devuelve los médicos
     (listado_medico.ID) cuyo monto cambió, para refrescar su recibo. No recalcula totales ni deducciones.
@@ -216,29 +218,25 @@ async def aplicar_porcentaje_pago(db: AsyncSession, liq: Liquidacion, porcentaje
     medicos = set((await db.execute(
         select(DetalleLiquidacion.medico_id).where(DetalleLiquidacion.liquidacion_id == liq.id).distinct()
     )).scalars().all())
-    if liq.factura_id is not None:
-        filtro = "l.pago_id = :pago AND l.factura_id = :fac AND l.estado = 'L'"
-        params = {"pago": liq.pago_id, "fac": liq.factura_id}
-        medicos |= set((await db.execute(
-            select(Ajuste.medico_id).join(LoteAjuste, LoteAjuste.id == Ajuste.lote_id)
-            .where(LoteAjuste.pago_id == liq.pago_id, LoteAjuste.factura_id == liq.factura_id, LoteAjuste.estado == "L")
-            .distinct()
-        )).scalars().all())
-        await _aplicar_porcentaje_a_ajustes(db, p, filtro, params)
     await db.flush()
     return sorted(int(m) for m in medicos)
 
 
 async def aplicar_porcentaje_a_lote(db: AsyncSession, lote: LoteAjuste) -> None:
-    """Cuando un lote entra al pago (C -> L): si su factura ya está en el pago con un porcentaje distinto de 100,
-    sus ajustes pasan a ese porcentaje."""
-    if lote.factura_id is None or lote.pago_id is None:
+    """Cuando un lote entra al pago (C -> L), cada ajuste con un porcentaje propio (ajuste.porcentaje_pago) distinto
+    de 100 se multiplica por él; los demás quedan como se cargaron. Vale para lotes con y sin factura: el ajuste NO
+    toma el porcentaje que tenga la factura en el pago. Al salir el lote del pago se restauran (restaurar_ajustes_facturados)."""
+    if lote.pago_id is None:
         return
-    p = await db.scalar(select(Liquidacion.porcentaje_pago).where(
-        Liquidacion.pago_id == lote.pago_id, Liquidacion.factura_id == lote.factura_id))
-    if p is None or Decimal(p) == Decimal("100"):
-        return
-    await _aplicar_porcentaje_a_ajustes(db, Decimal(p), "l.id = :lote", {"lote": lote.id})
+    distintos = (await db.execute(
+        select(Ajuste.porcentaje_pago).where(Ajuste.lote_id == lote.id, Ajuste.porcentaje_pago.is_not(None)).distinct()
+    )).scalars().all()
+    for p in distintos:
+        if Decimal(p) != Decimal("100"):
+            await _aplicar_porcentaje_a_ajustes(
+                db, Decimal(p), "l.id = :lote AND a.porcentaje_pago = CAST(:ap AS DECIMAL(6,2))",
+                {"lote": lote.id, "ap": str(Decimal(p))},
+            )
     await db.flush()
 
 
@@ -249,6 +247,92 @@ async def porcentaje_pago_sugerido(db: AsyncSession, obra_social_id: int) -> Dec
         .order_by(Liquidacion.id.desc()).limit(1)
     )
     return Decimal(p) if p is not None else Decimal("100.00")
+
+
+# ================================================
+# Cobertura de los lotes: un lote con factura sólo puede estar en un pago si su factura
+# está en ese pago o ya fue pagada (está en un pago cerrado o pagado)
+# ================================================
+async def factura_en_pago(db: AsyncSession, factura_id: int, pago_id: int) -> bool:
+    """¿La factura tiene su liquidación en ese pago?"""
+    return (await db.execute(
+        select(Liquidacion.id).where(Liquidacion.pago_id == pago_id, Liquidacion.factura_id == factura_id).limit(1)
+    )).first() is not None
+
+
+async def factura_pagada(
+    db: AsyncSession, factura_id: int, *, excepto_pago_id: Optional[int] = None, tambien_excepto: Optional[int] = None,
+) -> bool:
+    """¿La factura ya fue pagada, es decir, está en un pago cerrado (C) o pagado (P)?
+
+    `excepto_pago_id` deja afuera el pago en cuestión (para ver si la factura se pagó en OTRO) y
+    `tambien_excepto` un segundo pago, el que está por eliminarse.
+    """
+    stmt = (
+        select(Liquidacion.id)
+        .join(Pago, Pago.id == Liquidacion.pago_id)
+        .where(Liquidacion.factura_id == factura_id, Pago.estado.in_(["C", "P"]))
+    )
+    for excluido in (excepto_pago_id, tambien_excepto):
+        if excluido is not None:
+            stmt = stmt.where(Liquidacion.pago_id != excluido)
+    return (await db.execute(stmt.limit(1))).first() is not None
+
+
+async def factura_habilita_lote(
+    db: AsyncSession, factura_id: int, pago_id: int, *, excepto_pago_id: Optional[int] = None,
+) -> bool:
+    """¿Un lote de esa factura puede estar en el pago? Sí si la factura está en ese pago o ya fue pagada en otro."""
+    if await factura_en_pago(db, factura_id, pago_id):
+        return True
+    return await factura_pagada(db, factura_id, excepto_pago_id=pago_id, tambien_excepto=excepto_pago_id)
+
+
+async def lotes_sin_cobertura(
+    db: AsyncSession, pago_id: int, *, factura_id: Optional[int] = None, excepto_pago_id: Optional[int] = None,
+    estados: tuple[str, ...] = ("L",),
+) -> list[LoteAjuste]:
+    """Los lotes con factura del pago cuya factura ya no está en el pago ni fue pagada en otro.
+
+    `factura_id` limita a una factura (cuando se la acaba de sacar del pago) y `excepto_pago_id` es un pago
+    que se considera ya eliminado (no cuenta como pago de la factura).
+    """
+    stmt = select(LoteAjuste).where(
+        LoteAjuste.pago_id == pago_id, LoteAjuste.estado.in_(estados), LoteAjuste.factura_id.is_not(None),
+    )
+    if factura_id is not None:
+        stmt = stmt.where(LoteAjuste.factura_id == factura_id)
+    lotes = (await db.execute(stmt.order_by(LoteAjuste.id))).scalars().all()
+    habilitada: dict[int, bool] = {}
+    sin: list[LoteAjuste] = []
+    for lote in lotes:
+        if lote.factura_id not in habilitada:
+            habilitada[lote.factura_id] = await factura_habilita_lote(
+                db, lote.factura_id, pago_id, excepto_pago_id=excepto_pago_id
+            )
+        if not habilitada[lote.factura_id]:
+            sin.append(lote)
+    return sin
+
+
+async def sacar_lotes_del_pago(db: AsyncSession, lotes: list[LoteAjuste]) -> list[int]:
+    """Saca los lotes del pago: vuelven a «cerrado», sin pago, y sus ajustes recuperan lo cargado (sin porcentaje).
+
+    Devuelve los médicos (listado_medico.ID) con ajustes en esos lotes, para refrescar su resumen.
+    Sólo hace flush: el commit queda a cargo del llamador.
+    """
+    if not lotes:
+        return []
+    ids = [l.id for l in lotes]
+    medicos = sorted(int(m) for m in (await db.execute(
+        select(Ajuste.medico_id).where(Ajuste.lote_id.in_(ids)).distinct()
+    )).scalars().all())
+    for lote in lotes:
+        await restaurar_ajustes_facturados(db, lote_id=lote.id)
+        lote.pago_id = None
+        lote.estado = "C"
+    await db.flush()
+    return medicos
 
 
 # ================================================
@@ -494,26 +578,14 @@ async def vista_detalles_liquidacion(
     if medico_id is not None:
         filters.append(DL.medico_id == medico_id)
 
-    if search:
+    # El médico se busca con el criterio compartido de todos los buscadores de socio (ver medicos/busqueda.py):
+    # sólo números -> N° de socio, nombre y matrícula; con letras -> nombre y matrícula; primero lo exacto.
+    # El código de prestación sigue siendo otra manera de encontrar el renglón y va al final.
+    criterio = criterio_socio(search, nro=LM.NRO_SOCIO, nombre=LM.NOMBRE, matricula=LM.MATRICULA_PROV)
+    if criterio is not None:
         s = search.strip()
-        if s:
-            if s.isdigit():
-                n = int(s)
-                filters.append(
-                    or_(
-                        LM.NRO_SOCIO == n,
-                        DL.medico_id == n,
-                        DL.codigo_prestacion_cmc == s,
-                    )
-                )
-            else:
-                like = f"%{s}%"
-                filters.append(
-                    or_(
-                        LM.NOMBRE.like(like),
-                        DL.codigo_prestacion_cmc.like(like),
-                    )
-                )
+        por_codigo = DL.codigo_prestacion_cmc == s if s.isdigit() else DL.codigo_prestacion_cmc.like(f"%{s}%")
+        filters.append(or_(criterio.condicion, por_codigo))
 
     stmt_base = (
         select(
@@ -538,7 +610,7 @@ async def vista_detalles_liquidacion(
         .select_from(DL)
         .outerjoin(LM, LM.ID == DL.medico_id)
         .where(and_(*filters))
-        .order_by(DL.id)
+        .order_by(*(criterio.orden if criterio is not None else []), DL.id)
     )
 
     base_rows = (await db.execute(stmt_base)).mappings().all()

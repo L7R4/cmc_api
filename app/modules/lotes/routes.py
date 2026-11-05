@@ -19,8 +19,11 @@ from app.db.models.catalogs import ObrasSociales
 from app.db.models.medico import ListadoMedico
 from app.modules.liquidacion.service import (
     aplicar_porcentaje_a_lote,
+    factura_habilita_lote,
+    factura_pagada as _factura_pagada,
     recalcular_totales_de_liquidacion,
     restaurar_ajustes_facturados,
+    validar_porcentaje_pago,
 )
 from app.modules.deducciones.service import generar_y_recalcular_porcentuales
 from app.modules.lotes.schemas import (
@@ -70,6 +73,8 @@ def _build_ajuste_read(ajuste: Ajuste, cmc_det=None, medico=None) -> AjusteRead:
         observacion=ajuste.observacion,
         id_atencion=ajuste.id_atencion,
         origen=ajuste.origen,
+        porcentaje_pago=ajuste.porcentaje_pago,
+        created_at=ajuste.created_at,
         nombre_afiliado=cmc_det.nom_ape_p if cmc_det else None,
         nombre_prestador=medico.NOMBRE if medico else None,
         nro_socio=medico.NRO_SOCIO if medico else None,
@@ -88,6 +93,7 @@ def _lote_with_ajustes(
     obra_social_nombre: Optional[str] = None,
     factura: Optional[FacturacionCMC] = None,
     factura_en_pago: Optional[bool] = None,
+    factura_pagada: Optional[bool] = None,
 ) -> LoteAjusteRead:
     if ajuste_rows is not None:
         ajustes = [_build_ajuste_read(a, cmc, med) for a, cmc, med in ajuste_rows]
@@ -101,6 +107,7 @@ def _lote_with_ajustes(
         nro_factura=factura.nro_factura if factura else None,
         factura_version=factura.version if factura else None,
         factura_en_pago=factura_en_pago,
+        factura_pagada=factura_pagada,
         mes_periodo=lote.mes_periodo,
         anio_periodo=lote.anio_periodo,
         tipo=lote.tipo,
@@ -109,8 +116,19 @@ def _lote_with_ajustes(
         pago_id=lote.pago_id,
         total_debitos=lote.total_debitos,
         total_creditos=lote.total_creditos,
+        created_at=lote.created_at,
         ajustes=ajustes,
     )
+
+
+def _porcentaje_del_item(valor) -> Decimal:
+    """El porcentaje de pago de un ítem (de cualquier lote, con o sin factura): 0,01 a 200, y 100 si no se manda.
+
+    Es propio de cada ítem y NO se toma del que tenga la factura en el pago: al pasar el lote al pago el ítem se
+    multiplica por el suyo."""
+    if valor is None:
+        return Decimal("100.00")
+    return validar_porcentaje_pago(valor)
 
 
 async def _validar_ajuste(
@@ -210,11 +228,22 @@ async def _factura_cerrada(
     return factura, int(periodo[4:]), int(periodo[:4])
 
 
+async def _factura_pagada_en_otro(db: AsyncSession, lote: LoteAjuste) -> Optional[bool]:
+    """¿La factura del lote ya fue pagada (está en un pago cerrado o pagado que no es el del lote)?
+
+    Un lote con factura puede estar en un pago si su factura está en ese pago o ya fue pagada.
+    None si no aplica (lote sin factura).
+    """
+    if not lote.factura_id:
+        return None
+    return await _factura_pagada(db, lote.factura_id, excepto_pago_id=lote.pago_id)
+
+
 async def _factura_en_pago(db: AsyncSession, lote: LoteAjuste) -> Optional[bool]:
     """¿La factura del lote ya está en el pago al que va (o está) el lote?
 
-    Es informativo: el lote puede pasar a L aunque su factura todavía no esté en el
-    pago. None si no aplica (sin factura) o no hay pago contra el cual comparar.
+    Es informativo (junto con `factura_pagada` dice si el lote puede pasar a L).
+    None si no aplica (sin factura) o no hay pago contra el cual comparar.
     """
     if not lote.factura_id:
         return None
@@ -239,6 +268,7 @@ async def _respuesta_lote(db: AsyncSession, lote: LoteAjuste, rows=None) -> Lote
     return _lote_with_ajustes(
         lote, rows, await _nombre_obra_social(db, lote.obra_social_id), factura,
         await _factura_en_pago(db, lote),
+        await _factura_pagada_en_otro(db, lote),
     )
 
 
@@ -425,6 +455,7 @@ async def listar_lotes_enriquecidos(
             LoteAjuste.obra_social_id,
             LoteAjuste.total_debitos,
             LoteAjuste.total_creditos,
+            LoteAjuste.created_at,
             ObrasSociales.OBRA_SOCIAL.label("obra_social_nombre"),
             FacturacionCMC.nro_factura.label("nro_factura"),
         )
@@ -484,6 +515,7 @@ async def listar_lotes_enriquecidos(
                 nro_factura=None,
                 total_debitos=row.total_debitos,
                 total_creditos=row.total_creditos,
+                created_at=row.created_at,
             )
             facturas[row.id] = []
         nro = (row.nro_factura or "").strip()
@@ -628,7 +660,8 @@ async def cambiar_estado_lote(
     Transiciones válidas:
       A → C : cerrar
       C → A : reabrir
-      C → L : pasar al pago abierto (asigna pago_id automáticamente)
+      C → L : pasar al pago abierto (asigna pago_id automáticamente). Un lote con factura sólo
+              pasa si su factura está en ese pago o ya fue pagada en otro (409 si no).
       L → C : quitar del pago (limpia pago_id)
     """
     lote = await _get_lote_with_ajustes(db, lote_id)
@@ -652,10 +685,19 @@ async def cambiar_estado_lote(
         )).scalars().first()
         if not pago_abierto:
             raise HTTPException(409, "No hay pago abierto al que asignar el lote")
+        # Un lote con factura sólo puede estar en un pago si su factura está en ese pago o ya fue pagada.
+        if lote.factura_id is not None and not await factura_habilita_lote(db, lote.factura_id, pago_abierto.id):
+            factura = await db.get(FacturacionCMC, lote.factura_id)
+            nro = f" {factura.nro_factura}" if factura and factura.nro_factura else ""
+            raise HTTPException(
+                409,
+                f"La factura{nro} de este lote todavía no fue pagada ni está en el pago #{pago_abierto.id}. "
+                "Agregá la factura al pago primero.",
+            )
         lote.pago_id = pago_abierto.id
         lote.estado = "L"
         pago_id_afectado = pago_abierto.id
-        # Si su factura ya está en el pago con un porcentaje de pago, los ajustes pasan a ese porcentaje.
+        # Cada ajuste con un porcentaje de pago distinto de 100 se multiplica por el suyo (no por el de la factura).
         await aplicar_porcentaje_a_lote(db, lote)
 
     elif transicion == ("L", "C"):
@@ -753,6 +795,8 @@ async def crear_ajuste(
         id_atencion=payload.id_atencion, medico_id=payload.medico_id,
     )
 
+    porcentaje_pago = _porcentaje_del_item(payload.porcentaje_pago)
+
     if lote.tipo == "sin_factura":
         if medico_id is None:
             raise HTTPException(422, "Para lotes sin_factura se requiere medico_id explícito")
@@ -782,6 +826,7 @@ async def crear_ajuste(
         observacion=payload.observacion,
         id_atencion=payload.id_atencion,
         origen="manual",
+        porcentaje_pago=porcentaje_pago,
     )
     db.add(ajuste)
     await db.flush()
@@ -831,6 +876,8 @@ async def actualizar_ajuste(
         ajuste.gastos = payload.gastos
     if payload.observacion is not None:
         ajuste.observacion = payload.observacion
+    if payload.porcentaje_pago is not None:
+        ajuste.porcentaje_pago = _porcentaje_del_item(payload.porcentaje_pago)
 
     await db.flush()
     await recalcular_totales_lote(db, lote_id)

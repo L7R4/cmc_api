@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from decimal import ROUND_HALF_UP, Decimal
 
 from app.db.database import get_db
+from app.modules.medicos.busqueda import criterio_socio
 from app.db.models import (
     Deduccion,
     Conceptos,
@@ -257,7 +258,7 @@ async def refrescar_deducciones_endpoint(pago_id: int, db: AsyncSession = Depend
 async def listar_socios_descuento(
     medico_id: Optional[int] = Query(None),
     descuento_id: Optional[int] = Query(None),
-    q: Optional[str] = Query(None, description="Busca por nombre del médico (LIKE)"),
+    q: Optional[str] = Query(None, description="Busca el médico: sólo números = N° de socio, nombre y matrícula; con letras = nombre y matrícula; primero lo exacto"),
     activos_only: bool = Query(False, description="True: solo sin fecha_baja"),
     db: AsyncSession = Depends(get_db),
 ):
@@ -271,12 +272,14 @@ async def listar_socios_descuento(
     if activos_only:
         stmt = stmt.where(SocioDescuento.fecha_baja.is_(None))
 
-    if q and q.strip():
+    criterio = criterio_socio(q)
+    if criterio is not None:
         stmt = stmt.join(
             ListadoMedico, ListadoMedico.ID == SocioDescuento.medico_id
-        ).where(ListadoMedico.NOMBRE.ilike(f"%{q.strip()}%"))
+        ).where(criterio.condicion)
 
-    socios = (await db.execute(stmt.order_by(SocioDescuento.id))).scalars().all()
+    orden = [*criterio.orden, SocioDescuento.id] if criterio is not None else [SocioDescuento.id]
+    socios = (await db.execute(stmt.order_by(*orden))).scalars().all()
     return [await _enrich_socio(db, s) for s in socios]
 
 

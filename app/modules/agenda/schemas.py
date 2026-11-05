@@ -118,3 +118,22 @@ class OcurrenciaOut(EventoOut):
 
     #: El día concreto en el mes pedido. Siempre presente.
     ocurre_el: datetime.date
+
+
+class AvisoOut(BaseModel):
+    """Un evento de hoy que el administrador todavía no vio."""
+
+    id: int
+    evento_id: int
+    tipo: TipoEvento
+    titulo: str
+    descripcion: Optional[str] = None
+    fecha: datetime.date
+
+
+class GeneracionOut(BaseModel):
+    """Qué hizo el cron: cuántos eventos caían hoy, a cuántos admins y cuántos avisos nuevos."""
+
+    eventos: int
+    destinatarios: int
+    avisos_nuevos: int

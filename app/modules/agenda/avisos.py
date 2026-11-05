@@ -10,7 +10,7 @@ que la imagen de producción no trae.
 import datetime
 from typing import List, Tuple
 
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.mysql import insert as mysql_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -111,3 +111,17 @@ async def marcar_leidos(db: AsyncSession, medico_id: int) -> None:
         .values(leido=True)
     )
     await db.commit()
+
+
+async def reprogramar_de_hoy(db: AsyncSession, evento: AgendaEvento) -> None:
+    """Tras editar un evento: vuelve a avisarlo hoy si cae hoy, y lo retira si ya no."""
+    dia = hoy()
+    donde = (AgendaAviso.evento_id == evento.id, AgendaAviso.fecha == dia)
+    if not (evento.activo and dia in ocurrencias(evento, dia.year, dia.month)):
+        await db.execute(delete(AgendaAviso).where(*donde))
+        return
+    ids = await destinatarios(db)
+    if ids:
+        filas = [{"medico_id": uid, "evento_id": evento.id, "fecha": dia} for uid in ids]
+        await db.execute(mysql_insert(AgendaAviso).prefix_with("IGNORE"), filas)
+    await db.execute(update(AgendaAviso).where(*donde).values(leido=False))

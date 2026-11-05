@@ -279,6 +279,8 @@ async def editar_evento(
     for campo, valor in body.model_dump().items():
         setattr(evento, campo, valor)
     _marcar(evento, usuario)
+    # Un evento editado vuelve a la campana de hoy, aunque ya lo hubieran leído.
+    await avisos.reprogramar_de_hoy(db, evento)
     await db.commit()
     await db.refresh(evento)
     return EventoOut.model_validate(evento)

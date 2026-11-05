@@ -121,6 +121,24 @@ async def test_fila_de_validacion_conserva_su_formula_y_su_coseguro(s):
 
 
 @pytest.mark.asyncio
+async def test_validacion_del_panel_nuevo_sin_ga_id_conserva_su_coseguro(s):
+    med = await _medico(s)
+    await _factura(s)
+    # Panel nuevo: no pasa por `guardar_atencion` (ga_id NULL) pero sí por validaciones.
+    # (1 + 1) × 2 − 0,5 = 3,5. El coseguro es lo que pagó el afiliado, no el del nomenclador.
+    row = _fila(med, cantidad=2, coseguro=D("0.5"), importe_total=D("3.5"),
+                validacion_estado="cargada", ga_id=None)
+    s.add(row)
+    await s.flush()
+    assert recotizar.formula_de(row) == recotizar.FORMULA_VALIDACION
+
+    await _correr(s)
+    p = await _precio(s, med)
+    assert row.coseguro == D("0.5")
+    assert row.importe_total == (p.honorarios + p.gastos) * 2 - D("0.5")
+
+
+@pytest.mark.asyncio
 async def test_manual_y_total_raro_no_se_tocan(s):
     med = await _medico(s)
     await _factura(s)
@@ -258,3 +276,31 @@ async def test_revalorizar_toma_las_automaticas_sin_marca_y_cuenta_las_que_no_ca
     assert vieja.id_detalle_prestaciones in ids
     assert al_dia.id_detalle_prestaciones not in ids and manual.id_detalle_prestaciones not in ids
     assert out.sin_cambios >= 1
+
+
+@pytest.mark.asyncio
+async def test_manual_conserva_su_coseguro_y_la_automatica_toma_el_del_precio(s):
+    med = await _medico(s)
+    await _factura(s)
+    p = await _precio(s, med)
+    # Un coseguro que no sea el del nomenclador, para que se note si lo pisan.
+    cos_manual = p.coseguro + D("7")
+    manual = _fila(
+        med, manual="M", honorarios=D("100"), gastos=D("0"), coseguro=cos_manual,
+        importe_total=service.calcular_importe_total(D("100"), D("0"), D("0"), 1, 1, coseguro=cos_manual),
+    )
+    auto = _fila(
+        med, honorarios=D("1"), gastos=D("1"), coseguro=D("0.5"),
+        importe_total=service.calcular_importe_total(D("1"), D("1"), D("0"), 1, 1, coseguro=D("0.5")),
+    )
+    s.add_all([manual, auto])
+    await s.flush()
+    total_manual = manual.importe_total
+
+    await _correr(s)
+
+    # Manual: coseguro, montos y total intactos.
+    assert manual.coseguro == cos_manual
+    assert manual.honorarios == D("100") and manual.importe_total == total_manual
+    # Automática: el coseguro sale del precio vigente.
+    assert auto.coseguro == min(p.coseguro, p.honorarios + p.gastos)

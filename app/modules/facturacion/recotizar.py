@@ -22,6 +22,9 @@ Reglas de la fila (decididas con el usuario, 2026-10-05):
 * Total: se guarda con la misma fórmula que ya tenía la fila — cantidad,
   sesión, porcentaje y coseguro como en la carga, o el coseguro descontado una
   sola vez si vino de validaciones (ver `formula_de`).
+* El coseguro de una fila que vino de validaciones (`validacion_estado` o
+  `ga_id`) se conserva: es lo que pagó el afiliado, nunca el sugerido del
+  nomenclador. Sólo las cargadas desde facturación toman el sugerido.
 * Sin precio, por presupuesto, no admitida o con un total que no sale de sus
   montos: la fila queda como está y se informa el motivo.
 
@@ -276,9 +279,10 @@ async def recotizar_fila(
         # El coseguro es del acto: lo lleva la fila del médico, nunca la del
         # pediatra ni la del ayudante.
         coseguro = CERO
-    elif row.ga_id is not None:
-        # Vino de una validación: el coseguro es lo que el afiliado pagó según la
-        # obra social, no el sugerido del nomenclador.
+    elif row.validacion_estado is not None or row.ga_id is not None:
+        # Vino de una validación (panel nuevo: `validacion_estado`; migrada del
+        # legacy: `ga_id`): el coseguro es lo que el afiliado pagó según la obra
+        # social, no el sugerido del nomenclador.
         coseguro = service._dec(row.coseguro or 0)
     else:
         coseguro = service._dec(precio.coseguro or 0)

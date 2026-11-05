@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import and_, case, delete, desc, func, literal, select, or_, cast, String, Integer, text, update
 
 from app.modules.medicos import auditoria
+from app.modules.medicos.busqueda import criterio_socio
 from sqlalchemy import case, delete, desc, func, literal, select, or_, cast, String, Integer, update
 from app.auth import sessions
 from app.auth.deps import get_current_user, get_current_user_with_scopes_and_role, require_scope
@@ -480,48 +481,33 @@ async def selector_medicos(
 ):
     """Médicos para un select, livianos y ya ordenados: de la A a la Z y, al buscar, por cercanía.
 
-    Orden al buscar: primero el N° de socio igual a lo tipeado (buscar «36» trae primero al 36),
-    después el nombre igual, los N° de socio que empiezan así, los nombres que empiezan así, los que
-    tienen una palabra que empieza así y, al final, el resto de las coincidencias (dentro del nombre,
-    la matrícula o el documento). A igual cercanía, alfabético. El orden se resuelve antes del límite:
-    la coincidencia exacta nunca queda afuera.
+    Es el criterio compartido de todos los buscadores de socio (ver `medicos/busqueda.py`): si lo escrito son
+    sólo números se busca por N° de socio, después por nombre y al final por matrícula; si tiene letras, por
+    nombre y al final por matrícula. En cada campo primero lo exacto y después lo parcial (empieza con / contiene),
+    sin distinguir mayúsculas ni acentos. El orden se resuelve antes del límite: la coincidencia exacta nunca
+    queda afuera.
     """
-    nro = cast(ListadoMedico.NRO_SOCIO, String)
     nombre = ListadoMedico.NOMBRE
-    stmt = select(ListadoMedico.ID.label("id"), ListadoMedico.NRO_SOCIO.label("nro_socio"), nombre.label("nombre"))
+    stmt = select(
+        ListadoMedico.ID.label("id"),
+        ListadoMedico.NRO_SOCIO.label("nro_socio"),
+        nombre.label("nombre"),
+        ListadoMedico.MATRICULA_PROV.label("matricula_prov"),
+    )
 
-    texto = (q or "").strip()
-    if not texto:
+    criterio = criterio_socio(q)
+    if criterio is None:
         # Sin búsqueda, los registros sin nombre (hay tres con «0») no se ofrecen: quedarían primeros.
         stmt = stmt.where(func.trim(nombre).notin_(["", "0"])).order_by(nombre.asc())
     else:
-        palabras = texto.split()
-        en_nombre = and_(*[nombre.contains(p, autoescape=True) for p in palabras])
-        stmt = stmt.where(or_(
-            en_nombre,
-            nro.contains(texto, autoescape=True),
-            cast(ListadoMedico.MATRICULA_PROV, String).contains(texto, autoescape=True),
-            cast(ListadoMedico.DOCUMENTO, String).contains(texto, autoescape=True),
-        ))
-        cercania = case(
-            (nro == texto, 0),
-            (nombre == texto, 1),
-            (nro.startswith(texto, autoescape=True), 2),
-            (nombre.startswith(texto, autoescape=True), 3),
-            (nombre.contains(" " + texto, autoescape=True), 4),
-            (en_nombre, 5),
-            else_=6,
-        )
-        stmt = stmt.order_by(
-            cercania.asc(),
-            # Entre los N° de socio que empiezan igual, el más chico primero (36, 360, 361…).
-            case((nro.startswith(texto, autoescape=True), ListadoMedico.NRO_SOCIO), else_=0).asc(),
-            nombre.asc(),
-        )
+        stmt = stmt.where(criterio.condicion).order_by(*criterio.orden)
 
     rows = (await db.execute(stmt.limit(limit))).mappings().all()
     return [
-        MedicoSelectorOut(id=r["id"], nro_socio=r["nro_socio"], nombre=(r["nombre"] or "").strip())
+        MedicoSelectorOut(
+            id=r["id"], nro_socio=r["nro_socio"], nombre=(r["nombre"] or "").strip(),
+            matricula_prov=r["matricula_prov"] or None,
+        )
         for r in rows
     ]
 

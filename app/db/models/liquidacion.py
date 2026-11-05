@@ -95,9 +95,9 @@ class Pago(AuditMixin, Base):
     anio: Mapped[int] = mapped_column(Integer, nullable=False)
     mes: Mapped[int] = mapped_column(Integer, nullable=False)
     descripcion: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    # P = Pagado: terminal, el operador lo marca a mano una vez efectuado el
-    # pago bancario, independiente de que los recibos ya estén emitidos o no.
-    # Desde P no se puede reabrir (ver pagos/routes.py reabrir_pago).
+    # P = Pagado: terminal. El operador lo marca a mano (POST /pagos/{id}/marcar_pagado) y en el
+    # mismo paso se emiten los recibos de todos los médicos: recibo emitido = pago pagado, y no hay
+    # otra forma de emitirlos. Desde P no se puede reabrir (ver pagos/routes.py reabrir_pago).
     estado: Mapped[Literal["A", "C", "P"]] = mapped_column(
         Enum("A", "C", "P", name="pago_estado"), default="A", server_default="A"
     )

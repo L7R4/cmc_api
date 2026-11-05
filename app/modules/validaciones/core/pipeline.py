@@ -11,7 +11,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import DetalleFacturacionCMC
 from app.modules.facturacion import documentacion, historial
-from app.modules.facturacion.service import VALIDACION_RECHAZOS, _cleanup_factura_si_vacia
+from app.modules.facturacion.service import (
+    VALIDACION_RECHAZOS,
+    _cleanup_factura_si_vacia,
+    exigir_no_honorarios_individuales,
+)
 from app.modules.validaciones import obras
 from app.modules.validaciones.core.consultas import _descripciones
 from app.modules.validaciones.core.contrato import Contexto
@@ -39,6 +43,12 @@ async def crear_prestacion(
 ) -> dict:
     obra = obras.obtener_o_error(payload.obra_social)
     entrada = parsear_entrada(obra.entrada, payload)
+
+    # Cirugías (honorarios individuales): las carga el Colegio por facturación. Va primero
+    # de todo —antes de hablar con la O.S., que podría consumir una autorización o un
+    # token— y sólo para el propio médico: el Colegio operando en su nombre sigue igual.
+    if usuario_carga == nro_socio:
+        await exigir_no_honorarios_individuales(db, payload.codigo, str(obra.nro))
 
     medico = await get_medico(db, nro_socio)
     obra.verificar_prestador(medico)

@@ -208,6 +208,7 @@ async def vista_previa_pago(db: AsyncSession, pago_id: int) -> dict:
             Liquidacion.factura_version,
             Liquidacion.mes_periodo,
             Liquidacion.anio_periodo,
+            Liquidacion.porcentaje_pago,
             Liquidacion.total_honorarios,
             Liquidacion.total_gastos,
             Liquidacion.total_bruto,
@@ -219,6 +220,11 @@ async def vista_previa_pago(db: AsyncSession, pago_id: int) -> dict:
         .where(Liquidacion.pago_id == pago_id)
         .order_by(Liquidacion.obra_social_id, Liquidacion.anio_periodo, Liquidacion.mes_periodo, Liquidacion.factura_version)
     )).mappings().all()
+
+    # Porcentaje de pago de cada factura liquidada en este pago: lo heredan sus lotes y adelantos.
+    porcentaje_por_factura = {
+        r["factura_id"]: _to_dec(r["porcentaje_pago"]) for r in liq_rows if r["factura_id"] is not None
+    }
 
     liq_items = []
     liq_tot_honorarios = liq_tot_gastos = Decimal("0")
@@ -240,6 +246,7 @@ async def vista_previa_pago(db: AsyncSession, pago_id: int) -> dict:
             "factura_version":    r["factura_version"],
             "mes_periodo":        r["mes_periodo"],
             "anio_periodo":       r["anio_periodo"],
+            "porcentaje_pago":    _to_dec(r["porcentaje_pago"]),
             "total_honorarios":   honorarios,
             "total_gastos":       gastos,
             "total_bruto":        bruto,
@@ -319,6 +326,7 @@ async def vista_previa_pago(db: AsyncSession, pago_id: int) -> dict:
             LoteAjuste.mes_periodo,
             LoteAjuste.anio_periodo,
             LoteAjuste.estado,
+            LoteAjuste.factura_id,
             LoteAjuste.total_debitos,
             LoteAjuste.total_creditos,
             FacturacionCMC.nro_factura.label("nro_factura"),
@@ -331,6 +339,7 @@ async def vista_previa_pago(db: AsyncSession, pago_id: int) -> dict:
 
     # Lo que cada lote suma o resta en honorarios y en gastos (créditos +, débitos −): el resumen lo muestra por separado.
     netos_lote: dict[int, tuple[Decimal, Decimal]] = {}
+    # El porcentaje de pago es de cada ítem, no del lote: la fila del lote no lleva porcentaje.
     if lote_rows:
         for lid, h, g in (await db.execute(
             select(
@@ -369,7 +378,7 @@ async def vista_previa_pago(db: AsyncSession, pago_id: int) -> dict:
     A, I = LiquidacionAdelanto, LiquidacionAdelantoItem
     adel_rows = (await db.execute(
         select(
-            A.id.label("adelanto_id"), A.estado, A.obra_social_id,
+            A.id.label("adelanto_id"), A.estado, A.obra_social_id, A.factura_id,
             ObrasSociales.OBRA_SOCIAL.label("obra_social_nombre"),
             FacturacionCMC.nro_factura, A.mes_periodo, A.anio_periodo,
             func.count(I.id).label("prestaciones"),
@@ -383,7 +392,7 @@ async def vista_previa_pago(db: AsyncSession, pago_id: int) -> dict:
         .join(ObrasSociales, ObrasSociales.NRO_OBRASOCIAL == A.obra_social_id)
         .outerjoin(FacturacionCMC, FacturacionCMC.id_prestaciones == A.factura_id)
         .where(A.pago_id == pago_id, A.estado.in_(ESTADOS_EN_PAGO))
-        .group_by(A.id, A.estado, A.obra_social_id, ObrasSociales.OBRA_SOCIAL,
+        .group_by(A.id, A.estado, A.obra_social_id, A.factura_id, ObrasSociales.OBRA_SOCIAL,
                   FacturacionCMC.nro_factura, A.mes_periodo, A.anio_periodo)
         .order_by(A.id)
     )).mappings().all()
@@ -396,6 +405,7 @@ async def vista_previa_pago(db: AsyncSession, pago_id: int) -> dict:
             "nro_factura":        r["nro_factura"],
             "mes_periodo":        r["mes_periodo"],
             "anio_periodo":       r["anio_periodo"],
+            "porcentaje_pago":    porcentaje_por_factura.get(r["factura_id"]),
             "prestaciones":       r["prestaciones"],
             "medicos":            r["medicos"],
             "total_honorarios":   _to_dec(r["total_honorarios"]),
@@ -577,6 +587,7 @@ async def refrescar_detalle_medico(
             Ajuste.honorarios,
             Ajuste.gastos,
             Ajuste.observacion,
+            Ajuste.porcentaje_pago,
             LoteAjuste.id.label("lote_id"),
             LoteAjuste.factura_id,
             LoteAjuste.obra_social_id,
@@ -716,6 +727,7 @@ async def refrescar_detalle_medico(
                 "gastos":         float(g),
                 "total":          float(h + g),
                 "observacion":    r.observacion,
+                "porcentaje_pago": float(r.porcentaje_pago) if r.porcentaje_pago is not None else None,
             })
             continue
         item = {
@@ -725,6 +737,7 @@ async def refrescar_detalle_medico(
             "gastos":     float(g),
             "total":      float(h + g),
             "observacion": r.observacion,
+            "porcentaje_pago": float(r.porcentaje_pago) if r.porcentaje_pago is not None else None,
         }
         bucket = "debitos" if r.tipo == "d" else "creditos"
         liq_map[liq_id][bucket]["detalle"].append(item)
@@ -997,7 +1010,6 @@ async def generar_recibo_medico(
         raise HTTPException(404, f"PagoMedico no encontrado para médico {medico_db_id} en pago {pago_id}")
 
     estado_recibo = "liquidado" if pago.estado in ("C", "P") else "en_revision"
-    now = datetime.datetime.now()
 
     existing = (await db.execute(
         select(Recibo).where(Recibo.pago_medico_id == pm.id)
@@ -1010,7 +1022,8 @@ async def generar_recibo_medico(
     if existing:
         existing.total_neto        = pm.neto_a_pagar
         existing.detalle_json      = pm.detalle_json
-        existing.emision_timestamp = now
+        # La fecha de emisión se pone recién al emitir el recibo (marcar_pagado): generar o recalcular no emite.
+        existing.emision_timestamp = None
         existing.estado            = estado_recibo
         recibo = existing
     else:
@@ -1021,7 +1034,7 @@ async def generar_recibo_medico(
             pago_medico_id=pm.id,
             total_neto=pm.neto_a_pagar,
             detalle_json=pm.detalle_json,
-            emision_timestamp=now,
+            emision_timestamp=None,
             estado=estado_recibo,
         )
         db.add(recibo)

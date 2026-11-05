@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime
 from decimal import Decimal
 from typing import List, Literal, Optional
 
@@ -44,6 +45,9 @@ class AjusteCreate(BaseModel):
     gastos: Decimal = Field(default=Decimal("0.00"), ge=0)
     observacion: Optional[str] = None
     id_atencion: Optional[int] = None  # Si se provee, deriva medico_id y obra_social_id automáticamente
+    # % de este ítem que se paga (entre 0,01 y 200; 100 = todo; si no se manda, 100). Vale para lotes con y sin
+    # factura. Al pasar el lote al pago el ítem se multiplica por él; NO se toma el de la factura.
+    porcentaje_pago: Optional[Decimal] = None
 
 
 class PrestacionCMCSearchRow(BaseModel):
@@ -71,6 +75,8 @@ class AjusteUpdate(BaseModel):
     honorarios: Optional[Decimal] = Field(None, ge=0)
     gastos: Optional[Decimal] = Field(None, ge=0)
     observacion: Optional[str] = None
+    # Ver AjusteCreate.
+    porcentaje_pago: Optional[Decimal] = None
 
 
 class AjusteRead(BaseModel):
@@ -85,6 +91,11 @@ class AjusteRead(BaseModel):
     observacion: Optional[str] = None
     id_atencion: Optional[int] = None
     origen: str
+    # % de pago del ítem; None = anterior al porcentaje por ítem (se toma como 100). Con el lote en el pago
+    # (L/AP) `honorarios` y `gastos` ya vienen multiplicados por él.
+    porcentaje_pago: Optional[Decimal] = None
+    # Cuándo se cargó el ajuste (ajuste.created_at).
+    created_at: Optional[datetime.datetime] = None
     nombre_afiliado: Optional[str] = None
     nombre_prestador: Optional[str] = None
     nro_socio: Optional[int] = None
@@ -112,6 +123,8 @@ class LoteListaRow(BaseModel):
     nro_factura: Optional[str] = None
     total_debitos: Decimal
     total_creditos: Decimal
+    # Cuándo se creó el lote (lote_ajuste.created_at).
+    created_at: Optional[datetime.datetime] = None
 
 
 class LoteAjusteRead(BaseModel):
@@ -125,12 +138,16 @@ class LoteAjusteRead(BaseModel):
     factura_id: Optional[int] = None
     nro_factura: Optional[str] = None
     factura_version: Optional[int] = None
-    # False = la factura del lote todavía no está en el pago; sólo informativo.
+    # La factura del lote ya está en el pago al que va (o está) el lote. None = no aplica.
     factura_en_pago: Optional[bool] = None
+    # La factura ya fue pagada (está en un pago cerrado o pagado que no es el del lote). Un lote con
+    # factura sólo puede pasar al pago si factura_en_pago o factura_pagada. None = lote sin factura.
+    factura_pagada: Optional[bool] = None
     estado: str
     pago_id: Optional[int] = None
     total_debitos: Decimal
     total_creditos: Decimal
+    created_at: Optional[datetime.datetime] = None
     ajustes: Optional[List[AjusteRead]] = None
 
     class Config:

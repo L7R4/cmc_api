@@ -107,6 +107,24 @@ async def test_boreal_sin_coseguro_cargado_toma_cero():
     assert resultado.coseguro == Decimal("0")
 
 
+@pytest.mark.asyncio
+async def test_boreal_coseguro_igual_al_valor_de_la_practica_pasa():
+    # El valor de la práctica son 1000 (honorarios) × cantidad 2.
+    entrada = _entrada(nro_validacion="ABC123", coseguro=Decimal("2000"), cantidad=2)
+    resultado = await BOREAL.validar(_CtxFake(), entrada)
+    assert resultado.coseguro == Decimal("2000")
+
+
+@pytest.mark.asyncio
+async def test_boreal_coseguro_mayor_al_valor_de_la_practica_da_422():
+    # Caso real: tipearon el código (420132) en el campo del coseguro y el total quedaba negativo.
+    entrada = _entrada(nro_validacion="ABC123", coseguro=Decimal("420132"))
+    with pytest.raises(HTTPException) as exc:
+        await BOREAL.validar(_CtxFake(), entrada)
+    assert exc.value.status_code == 422
+    assert "coseguro" in exc.value.detail.lower()
+
+
 # ── Omint: no exige autorización, no descuenta coseguro, sí exige nombre ──────
 
 @pytest.mark.asyncio

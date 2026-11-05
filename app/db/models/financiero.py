@@ -126,6 +126,10 @@ class Ajuste(AuditMixin, Base):
     # mientras el lote está en un pago (estado L) cuya factura tiene un porcentaje; NULL el resto del tiempo.
     honorarios_facturado: Mapped[Optional[Decimal]] = mapped_column(DECIMAL(14, 2), nullable=True)
     gastos_facturado: Mapped[Optional[Decimal]] = mapped_column(DECIMAL(14, 2), nullable=True)
+    # Sólo ítems de lotes sin factura (los de lotes con factura heredan el de la liquidación de su factura).
+    # NULL = sin porcentaje cargado (importados del legacy, ya vienen con el porcentaje aplicado); al pasar el lote
+    # al pago el ítem se multiplica por él.
+    porcentaje_pago: Mapped[Optional[Decimal]] = mapped_column(DECIMAL(6, 2), nullable=True)
 
     @hybrid_property
     def total(self) -> Decimal:

@@ -1373,6 +1373,36 @@ async def derivar_tipo(
     return tipo_de_categoria(await _get_categoria(db, cod_nomenclador, cod_obra))
 
 
+# Las cirugías (categoría "Honorarios individuales") las carga el Colegio desde
+# facturación: llevan clínica, equipo y ayudantes, que el panel del prestador no
+# tiene dónde expresar. El médico no las puede cargar ni verlas al buscar códigos.
+MOTIVO_HONORARIOS_INDIVIDUALES = (
+    "es una cirugía (honorarios individuales): no se puede cargar desde el panel del "
+    "médico. Comunicate con el Colegio para que la carguen."
+)
+
+
+async def es_honorarios_individuales(
+    db: AsyncSession, cod_nomenclador: str, cod_obra: Optional[str]
+) -> bool:
+    """`True` si el código es 'Honorarios individuales' **en esa obra social**.
+
+    Mismo criterio que decide el `tipo` al grabar (`derivar_tipo` sin forzado):
+    override de la OS > alta del código > catálogo, así que la misma práctica puede
+    ser cirugía para una obra social y no para otra."""
+    categoria = await _get_categoria(db, cod_nomenclador, cod_obra)
+    return tipo_de_categoria(categoria) == CATEGORIA_HONORARIOS_INDIVIDUALES
+
+
+async def exigir_no_honorarios_individuales(
+    db: AsyncSession, cod_nomenclador: str, cod_obra: Optional[str]
+) -> None:
+    """422 si el código es una cirugía. Es la regla del **médico**: quien llama decide
+    si corresponde aplicarla (el Colegio carga cirugías por facturación)."""
+    if await es_honorarios_individuales(db, cod_nomenclador, cod_obra):
+        raise HTTPException(422, f"El código {cod_nomenclador} {MOTIVO_HONORARIOS_INDIVIDUALES}")
+
+
 async def tipos_sin_clinica(
     db: AsyncSession, pares: set[tuple[Optional[str], Optional[str]]],
 ) -> dict[tuple[Optional[str], Optional[str]], str]:
@@ -1754,6 +1784,24 @@ async def preparar_equipo(
     # que la prestación ya vino autorizada.
     if actor == ORIGEN_MEDICO:
         for item in items:
+            # Cirugías (honorarios individuales): las carga el Colegio. Se mira el `tipo`
+            # que va a quedar —no sólo la categoría del código— porque la clínica como
+            # ámbito también lo fuerza a 'Honorarios individuales'.
+            if item.grupo_equipo_id is None:
+                prestador_item = await resolver_prestador(
+                    db, item.cod_medico, item.cod_medico_ejecutor, item.cod_clinica
+                )
+                tipo_item = await derivar_tipo(
+                    db, item.cod_nomenclador, prestador_item.tipo, cod_obra
+                )
+            else:
+                # Se suma a un equipo ya guardado: lleva el tipo de su cabeza.
+                cabeza_item = await db.get(DetalleFacturacionCMC, item.grupo_equipo_id)
+                tipo_item = cabeza_item.tipo if cabeza_item is not None else None
+            if tipo_item == CATEGORIA_HONORARIOS_INDIVIDUALES:
+                raise HTTPException(
+                    422, f"El código {item.cod_nomenclador} {MOTIVO_HONORARIOS_INDIVIDUALES}"
+                )
             await _validar_autorizacion_medico(
                 db, item.cod_nomenclador, cod_obra, item.autorizacion
             )

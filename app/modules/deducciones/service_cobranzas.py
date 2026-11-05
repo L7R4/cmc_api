@@ -28,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Deduccion, Conceptos, ListadoMedico
 from app.modules.deducciones.helpers import TWOPLACES
+from app.modules.medicos.busqueda import criterio_socio
 from app.modules.deducciones.schemas import (
     CobranzaCuotaItem,
     CobranzaExportRow,
@@ -136,17 +137,17 @@ async def get_resumen(db: AsyncSession, filtros: CobranzasFiltros) -> CobranzasR
         func.count(Deduccion.id).label("cuotas_impagas"),
     ).select_from(Deduccion)
 
-    if filtros.q:
+    criterio = criterio_socio(filtros.q)
+    if criterio is not None:
         q = q.join(Conceptos, Conceptos.id == Deduccion.descuento_id).join(
             ListadoMedico, ListadoMedico.ID == Deduccion.medico_id
         )
-        like = f"%{filtros.q}%"
+        like = f"%{filtros.q.strip()}%"
         conds.append(
             or_(
                 Conceptos.nombre.ilike(like),
                 func.cast(Conceptos.nro_colegio, sa.String(20)).like(like),
-                ListadoMedico.NOMBRE.ilike(like),
-                func.cast(ListadoMedico.NRO_SOCIO, sa.String(20)).like(like),
+                criterio.condicion,
             )
         )
 
@@ -245,24 +246,27 @@ async def get_medicos_por_concepto(
         .join(ListadoMedico, ListadoMedico.ID == Deduccion.medico_id)
         .where(*conds)
     )
-    if filtros.q:
-        like = f"%{filtros.q}%"
-        base = base.where(
-            or_(
-                ListadoMedico.NOMBRE.ilike(like),
-                func.cast(ListadoMedico.NRO_SOCIO, sa.String(20)).like(like),
-            )
-        )
-    base = base.group_by(Deduccion.medico_id, ListadoMedico.NRO_SOCIO, ListadoMedico.NOMBRE)
+    criterio = criterio_socio(filtros.q)
+    if criterio is not None:
+        base = base.where(criterio.condicion).add_columns(criterio.rango.label("rango"))
+    base = base.group_by(
+        Deduccion.medico_id, ListadoMedico.NRO_SOCIO, ListadoMedico.NOMBRE, ListadoMedico.MATRICULA_PROV
+    )
 
     subq = base.subquery()
     total = await db.scalar(select(func.count()).select_from(subq))
+
+    # Con una búsqueda, primero lo más exacto (mismo criterio de todos los buscadores de socio) y después el saldo.
+    if criterio is None:
+        orden = [subq.c.saldo.desc()]
+    else:
+        orden = [subq.c.rango.asc(), (subq.c.nro_socio if criterio.por_numero else subq.c.medico_nombre).asc(), subq.c.saldo.desc()]
 
     rows_q = (
         select(subq, pagador.c.NOMBRE.label("pagador_nombre"))
         .select_from(subq)
         .outerjoin(pagador, pagador.c.ID == subq.c.pagador_medico_id)
-        .order_by(subq.c.saldo.desc())
+        .order_by(*orden)
         .offset((page - 1) * size)
         .limit(size)
     )
@@ -319,22 +323,25 @@ async def get_socios_deudores(
         .join(ListadoMedico, ListadoMedico.ID == Deduccion.medico_id)
         .where(*conds)
     )
-    if filtros.q:
-        like = f"%{filtros.q}%"
-        base = base.where(
-            or_(
-                ListadoMedico.NOMBRE.ilike(like),
-                func.cast(ListadoMedico.NRO_SOCIO, sa.String(20)).like(like),
-            )
-        )
-    base = base.group_by(Deduccion.medico_id, ListadoMedico.NRO_SOCIO, ListadoMedico.NOMBRE)
+    criterio = criterio_socio(filtros.q)
+    if criterio is not None:
+        base = base.where(criterio.condicion).add_columns(criterio.rango.label("rango"))
+    base = base.group_by(
+        Deduccion.medico_id, ListadoMedico.NRO_SOCIO, ListadoMedico.NOMBRE, ListadoMedico.MATRICULA_PROV
+    )
 
     subq = base.subquery()
     total = await db.scalar(select(func.count()).select_from(subq))
 
+    # Con una búsqueda, primero lo más exacto (mismo criterio de todos los buscadores de socio) y después el saldo.
+    if criterio is None:
+        orden = [subq.c.saldo.desc()]
+    else:
+        orden = [subq.c.rango.asc(), (subq.c.nro_socio if criterio.por_numero else subq.c.medico_nombre).asc(), subq.c.saldo.desc()]
+
     rows = (
         await db.execute(
-            select(subq).order_by(subq.c.saldo.desc()).offset((page - 1) * size).limit(size)
+            select(subq).order_by(*orden).offset((page - 1) * size).limit(size)
         )
     ).all()
 
@@ -442,14 +449,14 @@ async def get_export_rows(db: AsyncSession, filtros: CobranzasFiltros) -> list[C
         .join(ListadoMedico, ListadoMedico.ID == Deduccion.medico_id)
         .where(*conds)
     )
-    if filtros.q:
-        like = f"%{filtros.q}%"
+    criterio = criterio_socio(filtros.q)
+    if criterio is not None:
+        like = f"%{filtros.q.strip()}%"
         q = q.where(
             or_(
                 Conceptos.nombre.ilike(like),
                 func.cast(Conceptos.nro_colegio, sa.String(20)).like(like),
-                ListadoMedico.NOMBRE.ilike(like),
-                func.cast(ListadoMedico.NRO_SOCIO, sa.String(20)).like(like),
+                criterio.condicion,
             )
         )
     q = q.order_by(Conceptos.nro_colegio.asc(), ListadoMedico.NOMBRE.asc())

@@ -9,12 +9,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.database import get_db
 from app.db.models import (
     Liquidacion,
+    LoteAjuste,
     Pago,
     PagoMedico,
     Recibo,
     RetencionGanancias,
 )
 from app.modules.deducciones.helpers import _medicos_en_pago
+from app.modules.liquidacion.service import factura_en_pago, lotes_sin_cobertura, sacar_lotes_del_pago
 from app.modules.pagos.schemas import (
     EditarEstadoRecibosPayload,
     EliminarRecibosPayload,
@@ -219,6 +221,35 @@ async def eliminar_pago(pago_id: int, db: AsyncSession = Depends(get_db)):
             },
         )
 
+    # Un pago cerrado deja «pagadas» a sus facturas, y eso habilita los lotes de esas facturas en otros pagos.
+    # Si se elimina, esos lotes pierden la cobertura: los del pago abierto salen del pago; si alguno está en un
+    # pago cerrado no se puede (es inmutable), así que se frena antes de tocar nada.
+    lotes_a_sacar: dict[int, list] = {}
+    if pago.estado == "C":
+        pagos_con_lotes = (await db.execute(
+            select(LoteAjuste.pago_id).where(
+                LoteAjuste.pago_id.is_not(None), LoteAjuste.pago_id != pago_id,
+                LoteAjuste.factura_id.is_not(None), LoteAjuste.estado.in_(["L", "AP"]),
+            ).distinct()
+        )).scalars().all()
+        for otro_id in pagos_con_lotes:
+            # Sólo los que dependían de este pago: su factura está en él. Los lotes históricos (migrados del
+            # sistema anterior) sin cobertura desde siempre no cambian por esta baja.
+            sin = [
+                l for l in await lotes_sin_cobertura(db, otro_id, excepto_pago_id=pago_id, estados=("L", "AP"))
+                if await factura_en_pago(db, l.factura_id, pago_id)
+            ]
+            if not sin:
+                continue
+            otro = await db.get(Pago, otro_id)
+            if otro and otro.estado != "A":
+                raise HTTPException(
+                    409,
+                    f"No se puede eliminar el pago: los lotes {', '.join('#' + str(l.id) for l in sin)} del pago "
+                    f"#{otro_id} (cerrado) son de facturas que sólo se pagaron en este.",
+                )
+            lotes_a_sacar[otro_id] = sin
+
     # Rollback en orden respetando FK constraints:
     # 0. Deudas de médicos que este pago dejó pendientes al cerrar (409 si ya se descontaron)
     await quitar_saldos_deudores_del_pago(db, pago_id)
@@ -228,6 +259,9 @@ async def eliminar_pago(pago_id: int, db: AsyncSession = Depends(get_db)):
 
     # 2. Lotes: desvincula LoteAjuste (L → C, pago_id → NULL)
     await rollback_lotes_pago(db, pago_id)
+    medicos_por_pago: dict[int, list[int]] = {
+        otro_id: await sacar_lotes_del_pago(db, lotes) for otro_id, lotes in lotes_a_sacar.items()
+    }
 
     # 3. Prestaciones CMC liquidadas (L → C) — tiene que ir ANTES de borrar las
     #    liquidaciones/detalles, porque lee detalle_liquidacion para saber cuáles.
@@ -251,6 +285,14 @@ async def eliminar_pago(pago_id: int, db: AsyncSession = Depends(get_db)):
 
     # 6. Eliminar Pago (PagoMedico se elimina por CASCADE automáticamente)
     await db.delete(pago)
+    await db.flush()
+
+    # 7. El pago abierto que perdió lotes (2) se recalcula: deducciones y resumen de los médicos de esos lotes.
+    for otro_id, medico_ids in medicos_por_pago.items():
+        otro = await db.get(Pago, otro_id)
+        await generar_y_recalcular_porcentuales(db, otro_id)
+        for medico_id in medico_ids:
+            await refrescar_detalle_medico(db, otro_id, medico_id, pago=otro)
     await db.commit()
     return None
 
@@ -542,24 +584,15 @@ async def listar_recibos(
 # ================================================
 @router.post("/{pago_id}/recibos/emitir_todos", response_model=List[ReciboRead])
 async def emitir_todos_recibos(pago_id: int, db: AsyncSession = Depends(get_db)):
-    """Marca como 'emitido' todos los recibos del pago que no estén en estado 'pagado'."""
-    rows = (await db.execute(
-        select(Recibo).where(
-            Recibo.pago_id == pago_id,
-            Recibo.estado != "pagado",
-        )
-    )).scalars().all()
-
-    if not rows:
-        raise HTTPException(404, "No se encontraron recibos para emitir en este pago")
-
-    for recibo in rows:
-        recibo.estado = "emitido"
-
-    await db.commit()
-    for r in rows:
-        await db.refresh(r)
-    return rows
+    """
+    Ya no emite: los recibos se emiten sólo con POST /pagos/{id}/marcar_pagado, que los emite
+    todos y deja el pago en P en el mismo paso. Emitirlos por separado dejaba recibos emitidos con
+    el pago en C: ya no se podía reabrir y el pago seguía sin figurar como pagado.
+    """
+    raise HTTPException(
+        409,
+        "Los recibos se emiten al marcar el pago como pagado (POST /pagos/{id}/marcar_pagado).",
+    )
 
 
 # ================================================
@@ -572,10 +605,15 @@ async def editar_estado_recibos(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Cambia el estado de una lista de recibos.
-    Estados válidos: en_revision, liquidado, emitido.
+    Cambia el estado de una lista de recibos entre en_revision y liquidado.
+    «emitido» se rechaza: los recibos se emiten sólo con marcar_pagado (ver emitir_todos_recibos).
     Un recibo emitido no vuelve atrás ni se toca en un pago pagado.
     """
+    if payload.estado == "emitido":
+        raise HTTPException(
+            409,
+            "Los recibos se emiten al marcar el pago como pagado (POST /pagos/{id}/marcar_pagado).",
+        )
     pago = await db.get(Pago, pago_id)
     if not pago:
         raise HTTPException(404, "Pago no encontrado")
@@ -590,7 +628,7 @@ async def editar_estado_recibos(
 
     if not rows:
         raise HTTPException(404, "No se encontraron recibos con los IDs indicados en este pago")
-    if any(r.estado == "emitido" for r in rows) and payload.estado != "emitido":
+    if any(r.estado == "emitido" for r in rows):
         raise HTTPException(409, "Un recibo emitido no puede volver a otro estado.")
 
     for recibo in rows:

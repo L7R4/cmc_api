@@ -178,6 +178,9 @@ class VistaPreviewLoteItem(BaseModel):
     estado: str
     # Factura a la que está atada (refacturaciones y lotes con factura), si la tiene.
     nro_factura: Optional[str] = None
+    # Refacturaciones: la factura NUEVA (tipo A/B/C y número), si ya se cargó. Es la que muestra el resumen.
+    refact_tipo_factura: Optional[str] = None
+    refact_nro_factura: Optional[str] = None
     # Lo que el lote suma o resta en honorarios y en gastos (créditos +, débitos −).
     total_honorarios: Decimal = Decimal("0")
     total_gastos: Decimal = Decimal("0")

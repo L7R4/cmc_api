@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import os
 import shutil
 import uuid
-from decimal import Decimal
+from decimal import ROUND_DOWN, Decimal
 from typing import NamedTuple, Optional, Sequence
 
 from fastapi import HTTPException, UploadFile
@@ -1447,6 +1447,119 @@ def _aplicar_porcentaje(
     )
 
 
+# ── Reparto de la ayudantía entre los ayudantes del equipo ───────────────────
+# El valor de ayudantía de un código (`precio.ayudante`, el 25 % de los honorarios del
+# cirujano) es el TOTAL de la práctica: lo comparten los ayudantes que la hicieron. El
+# nomenclador guarda ese total entero; la división por la cantidad de ayudantes se hace
+# SOLO acá, al facturar. Aplica a las filas cotizadas en automático (`manual='A'`): una
+# fila con monto cargado a mano se respeta tal cual. Lo ya cerrado (estado C/L) no se
+# recalcula nunca.
+
+def reparto_ayudante(total, n: int) -> list[Decimal]:
+    """Parte `total` en `n` montos que suman exactamente `total`: los centavos que no
+    se dividen parejo (redondeo hacia abajo) van al primer ayudante."""
+    n = max(int(n or 1), 1)
+    total = quantize_money(total)
+    base = (total / n).quantize(Decimal("0.01"), rounding=ROUND_DOWN)
+    resto = total - base * n
+    return [base + resto] + [base] * (n - 1)
+
+
+def es_fila_ayudante(row: DetalleFacturacionCMC) -> bool:
+    """La fila factura el concepto ayudante (no es pediatra). Una cargada sin precio
+    tiene los montos en 0 y lo dice `sin_valorizar` (ver `es_solo_ayudante`)."""
+    if (row.tpo_funcion or "").upper() == TPO_FUNCION_PEDIATRA:
+        return False
+    return _dec(row.ayudante) > 0 or (bool(row.sin_valorizar) and set(row.sin_valorizar) == {"A"})
+
+
+async def ayudantes_del_equipo(
+    db: AsyncSession, grupo_equipo_id: Optional[int],
+) -> list[DetalleFacturacionCMC]:
+    """Los ayudantes no anulados del equipo, por orden de carga (id). Cuenta también los
+    cerrados: el total de ayudantía es uno solo para todos los que asistieron."""
+    if grupo_equipo_id is None:
+        return []
+    M = DetalleFacturacionCMC
+    filas = (await db.execute(
+        select(M).where(M.grupo_equipo_id == grupo_equipo_id, M.estado != "X")
+        .order_by(M.id_detalle_prestaciones)
+    )).scalars().all()
+    return [f for f in filas if es_fila_ayudante(f)]
+
+
+async def lugar_en_reparto(
+    db: AsyncSession, grupo_equipo_id: Optional[int], fila_id: Optional[int],
+) -> tuple[int, int]:
+    """`(n, índice)` de una fila entre los ayudantes de su equipo, contándola aunque
+    todavía no esté guardada como ayudante (alta o PATCH que la convierte en una)."""
+    otros = [
+        f for f in await ayudantes_del_equipo(db, grupo_equipo_id)
+        if f.id_detalle_prestaciones != fila_id
+    ]
+    indice = sum(1 for f in otros if fila_id is not None and f.id_detalle_prestaciones < fila_id)
+    return len(otros) + 1, indice
+
+
+def anotar_reparto(snapshot, n: int):
+    """Copia del snapshot de precio con la cantidad de ayudantes entre los que se repartió
+    (el componente Ayudante conserva el total; lo que cobra cada uno es `ayudante`)."""
+    if not isinstance(snapshot, list):
+        return snapshot
+    return [
+        {**c, "ayudantes": n} if isinstance(c, dict) and c.get("concepto") == "Ayudante" else c
+        for c in snapshot
+    ]
+
+
+def ayudante_total_de_snapshot(snapshot) -> Optional[Decimal]:
+    """Total de ayudantía (sin repartir) con el que se cotizó la fila; None si no se sabe."""
+    if not isinstance(snapshot, list):
+        return None
+    montos = [
+        Decimal(str(c.get("subtotal") or 0)) for c in snapshot
+        if isinstance(c, dict) and c.get("concepto") == "Ayudante"
+    ]
+    return quantize_money(sum(montos, Decimal("0"))) if montos else None
+
+
+async def rebalancear_ayudantes(
+    db: AsyncSession, grupo_equipo_id: Optional[int], *, motivo: str = "reparto_ayudantes",
+) -> int:
+    """Vuelve a repartir la ayudantía entre los ayudantes ABIERTOS del equipo, después de
+    que se sumó, se quitó o se movió uno. Sólo toca filas en estado 'A', cotizadas en
+    automático y con el snapshot del precio que las generó. Deja un evento de historial
+    por cada fila que cambia. No hace commit. Devuelve cuántas filas cambió."""
+    ayudantes = await ayudantes_del_equipo(db, grupo_equipo_id)
+    n = len(ayudantes)
+    eventos: list[dict] = []
+    for indice, fila in enumerate(ayudantes):
+        if fila.estado != "A" or (fila.manual or "").upper() != "A":
+            continue
+        total = ayudante_total_de_snapshot(fila.calculo_snapshot)
+        if total is None or total <= 0:
+            continue
+        _, _, a = _aplicar_porcentaje(Decimal("0"), Decimal("0"), reparto_ayudante(total, n)[indice], fila.porc or 100)
+        snapshot = anotar_reparto(fila.calculo_snapshot, n)
+        if a == _dec(fila.ayudante) and snapshot == fila.calculo_snapshot:
+            continue
+        antes = historial.foto(fila)
+        fila.ayudante = a
+        fila.calculo_snapshot = snapshot
+        fila.importe_total = calcular_importe_total(
+            _dec(fila.honorarios), _dec(fila.gastos), a, fila.cantidad or 1, fila.sesion or 1,
+            coseguro=_dec(fila.coseguro),
+        )
+        cambios = historial.diferencias(antes, historial.foto(fila))
+        if cambios:
+            eventos.append(historial.evento(
+                fila, historial.EDITADA, cambios=cambios,
+                contexto=historial.contexto_de(fila, motivo=motivo, ayudantes=n),
+            ))
+    await historial.registrar(db, eventos)
+    return len(eventos)
+
+
 async def _tipo_de_la_cabeza(db: AsyncSession, row: DetalleFacturacionCMC) -> Optional[str]:
     """`tipo` de la cabeza del equipo si `row` es un integrante (ayudante, pediatra…); None
     si la fila no es de un equipo o es la propia cabeza."""
@@ -1533,6 +1646,7 @@ async def _montos_de_item(
     cod_nomenclador: str,
     tipo_calculo: str,
     fecha: datetime.date,
+    reparto: tuple[int, int] = (1, 0),
 ) -> tuple[Decimal, Decimal, Decimal, Optional[list[dict]], Decimal, Optional[str]]:
     """Resuelve los montos base (h, g, a) SIN porcentaje, el snapshot y el coseguro
     efectivo (sin escalar por cantidad/sesión — eso lo hace calcular_importe_total).
@@ -1565,8 +1679,11 @@ async def _montos_de_item(
         # Para cada concepto marcado en > 0 por el front, usar el valor autoritativo del lookup.
         h = precio.honorarios if hi > 0 else Decimal("0")
         g = precio.gastos if gi > 0 else Decimal("0")
-        a = precio.ayudante if ai > 0 else Decimal("0")
-        return h, g, a, precio.snapshot, coseguro, None
+        # La ayudantía del código es el total de la práctica: se reparte entre los
+        # ayudantes del equipo (`reparto` = (cantidad, lugar de esta fila entre ellos)).
+        n_ayud, lugar = reparto
+        a = reparto_ayudante(precio.ayudante, n_ayud)[lugar] if ai > 0 else Decimal("0")
+        return h, g, a, anotar_reparto(precio.snapshot, n_ayud) if ai > 0 else precio.snapshot, coseguro, None
     return hi, gi, ai, None, (coseguro_item if coseguro_item is not None else Decimal("0")), None
 
 
@@ -1810,6 +1927,18 @@ async def preparar_equipo(
     filas: list[DetalleFacturacionCMC] = []
     cabeza_idx: Optional[int] = None  # fila del médico (honorarios > 0) = cabeza del equipo
 
+    # Reparto de la ayudantía: el valor del código es el total de la práctica y lo
+    # comparten todos los ayudantes del equipo. En el alta, los del payload; al sumar uno a
+    # un equipo ya guardado (`grupo_equipo_id`), también los que ya estaban.
+    nuevos_por_grupo: dict[Optional[int], int] = {}
+    for it in items:
+        if (it.ayudante or 0) > 0 and it.rol != ROL_PEDIATRA:
+            nuevos_por_grupo[it.grupo_equipo_id] = nuevos_por_grupo.get(it.grupo_equipo_id, 0) + 1
+    ya_por_grupo = {
+        g: len(await ayudantes_del_equipo(db, g)) for g in nuevos_por_grupo if g is not None
+    }
+    cargados_por_grupo: dict[Optional[int], int] = {}
+
     for i, item in enumerate(items):
         es_pediatra = item.rol == ROL_PEDIATRA
         # Traduce la selección del front a columnas: el médico siempre termina en
@@ -1839,9 +1968,16 @@ async def preparar_equipo(
 
         # El precio sale de la especialidad del médico ejecutor (= el propio médico si el
         # payee no es una clínica).
+        reparto = (1, 0)
+        if (item.ayudante or 0) > 0 and not es_pediatra:
+            grupo = item.grupo_equipo_id
+            ya = ya_por_grupo.get(grupo, 0)
+            lugar = ya + cargados_por_grupo.get(grupo, 0)
+            cargados_por_grupo[grupo] = cargados_por_grupo.get(grupo, 0) + 1
+            reparto = (ya + nuevos_por_grupo[grupo], lugar)
         h_base, g_base, a_base, snapshot, coseguro, sin_valorizar = await _montos_de_item(
             db, item, cod_obra, medico_precio,
-            item.cod_nomenclador, item.tipo_calculo, fecha_precio,
+            item.cod_nomenclador, item.tipo_calculo, fecha_precio, reparto,
         )
         tipo = await derivar_tipo(db, item.cod_nomenclador, prestador.tipo, cod_obra)
         # Con clínica (Sanatorio / Honorarios individuales) el formulario propone gastos
@@ -1936,6 +2072,11 @@ async def persistir_equipo(
     commit: lo decide quien llama. La importación por planilla pasa `tipo_evento`
     `importada` y en `contexto_evento` el archivo."""
     ids: list[int] = []
+    # Equipos YA guardados a los que se suma algún ayudante: los que estaban se vuelven a repartir.
+    grupos_con_ayudante_nuevo = {
+        r.grupo_equipo_id for r in prep.filas
+        if r.grupo_equipo_id is not None and es_fila_ayudante(r)
+    }
     for row in prep.filas:
         db.add(row)
         await db.flush()  # asigna id_detalle_prestaciones (PK)
@@ -1959,6 +2100,9 @@ async def persistir_equipo(
             # resto se carga como médico y por su cuenta saldría por la categoría del código.
             if row.grupo_equipo_id == cabeza_id and row.id_detalle_prestaciones != cabeza_id and cabeza_row.tipo:
                 row.tipo = cabeza_row.tipo
+
+    for grupo in grupos_con_ayudante_nuevo:
+        await rebalancear_ayudantes(db, grupo)
 
     await historial.registrar(db, [
         historial.evento(
@@ -2925,6 +3069,7 @@ async def editar_prestacion(
     try:
         data = payload.model_dump(exclude_unset=True)
         foto_antes = historial.foto(row)
+        grupo_previo, era_ayudante = row.grupo_equipo_id, es_fila_ayudante(row)
         eventos_integrantes: list[dict] = []
 
         # Cambio de obra social y/o período: la fila se MUEVE a otra cabecera `facturacion`
@@ -3086,6 +3231,10 @@ async def editar_prestacion(
                 precio = await resolver_precio(db, row.cod_obr, medico_precio, row.cod_nom, fecha, via=via)
                 if not precio.admitido:
                     raise HTTPException(422, precio.motivo)
+                n_ayud, lugar = (1, 0)
+                if ai > 0 and not es_pediatra:
+                    # La ayudantía del código se reparte entre los ayudantes del equipo.
+                    n_ayud, lugar = await lugar_en_reparto(db, row.grupo_equipo_id, prestacion_id)
                 if precio.sin_precio:
                     row.sin_valorizar = row.sin_valorizar or conceptos_sin_precio(
                         SimpleNamespace(rol=rol_efectivo, honorarios=hi, gastos=gi, ayudante=ai)
@@ -3096,10 +3245,10 @@ async def editar_prestacion(
                 else:
                     hb = precio.honorarios if hi > 0 else Decimal("0")
                     gb = precio.gastos if gi > 0 else Decimal("0")
-                    ab = precio.ayudante if ai > 0 else Decimal("0")
+                    ab = reparto_ayudante(precio.ayudante, n_ayud)[lugar] if ai > 0 else Decimal("0")
                 if not precio.sin_precio:
                     row.sin_valorizar = None
-                row.calculo_snapshot = precio.snapshot
+                row.calculo_snapshot = anotar_reparto(precio.snapshot, n_ayud) if ai > 0 else precio.snapshot
                 # El código/OS que cotiza pudo haber cambiado — el coseguro viejo era del
                 # código/OS anterior. Si el operador no lo tocó en este mismo PATCH, se
                 # refresca con el sugerido del nuevo código; si lo tocó, ya quedó aplicado
@@ -3162,6 +3311,15 @@ async def editar_prestacion(
 
         # Sin tope de ayudantes: el máximo del Valor es solo referencia, no se valida (ver
         # nota en `_insertar_prestaciones`).
+
+        # Si esta fila es (o dejó de ser) un ayudante, o cambió de equipo, la ayudantía se
+        # vuelve a repartir entre los ayudantes abiertos del equipo nuevo y del anterior.
+        if (era_ayudante or es_fila_ayudante(row)) and (
+            ((pricing_keys | {"grupo_equipo_id"}) & data.keys())
+        ):
+            await db.flush()
+            for grupo in {grupo_previo, row.grupo_equipo_id} - {None}:
+                await rebalancear_ayudantes(db, grupo)
 
         if cambia_ubicacion:
             # Mantener el invariante cabecera ⟺ prestaciones abiertas: crear la del
@@ -3324,6 +3482,9 @@ async def anular_prestacion(
             ))
     await historial.registrar(db, eventos)
     await db.flush()
+    # Se quitó un ayudante (no la cabecera): los que quedan abiertos se reparten el total.
+    if row.grupo_equipo_id not in (None, prestacion_id) and es_fila_ayudante(row):
+        await rebalancear_ayudantes(db, row.grupo_equipo_id)
     # Si era la última prestación abierta del período, se elimina la cabecera abierta.
     await _cleanup_factura_si_vacia(db, cod_obra, periodo)
     await db.commit()

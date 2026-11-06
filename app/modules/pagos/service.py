@@ -330,6 +330,8 @@ async def vista_previa_pago(db: AsyncSession, pago_id: int) -> dict:
             LoteAjuste.factura_id,
             LoteAjuste.total_debitos,
             LoteAjuste.total_creditos,
+            LoteAjuste.refact_tipo_factura,
+            LoteAjuste.refact_nro_factura,
             FacturacionCMC.nro_factura.label("nro_factura"),
         )
         .join(ObrasSociales, ObrasSociales.NRO_OBRASOCIAL == LoteAjuste.obra_social_id)
@@ -367,6 +369,8 @@ async def vista_previa_pago(db: AsyncSession, pago_id: int) -> dict:
             "anio_periodo":       r["anio_periodo"],
             "estado":             r["estado"],
             "nro_factura":        r["nro_factura"],
+            "refact_tipo_factura": r["refact_tipo_factura"],
+            "refact_nro_factura":  r["refact_nro_factura"],
             "total_honorarios":   netos_lote.get(r["lote_id"], (Decimal("0"), Decimal("0")))[0],
             "total_gastos":       netos_lote.get(r["lote_id"], (Decimal("0"), Decimal("0")))[1],
             "total_debitos":      deb,

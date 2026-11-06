@@ -440,6 +440,10 @@ SCOPES_POR_RUTA: dict[tuple[str, str], Scope | tuple[Scope, ...] | _Marca] = {
     ("DELETE", "/api/lotes/snaps/{lote_id}/items/{ajuste_id}"): Scope.LOTE_ELIMINAR,
     ("POST", "/api/lotes/snaps/crear_refacturacion"): Scope.LOTE_REFACTURAR,
     ("POST", "/api/lotes/snaps/crear_sin_factura"): Scope.LOTE_REFACTURAR,
+    # Factura nueva de la refacturación (tipo, número y archivo dentro del lote).
+    ("PATCH", "/api/lotes/snaps/{lote_id}/factura_refact"): Scope.LOTE_EDITAR,
+    ("PUT", "/api/lotes/snaps/{lote_id}/factura_refact/documento"): Scope.LOTE_EDITAR,
+    ("DELETE", "/api/lotes/snaps/{lote_id}/factura_refact/documento"): Scope.LOTE_EDITAR,
     # Adelantos: se manejan como los lotes de débitos y créditos, con sus mismos permisos.
     ("GET", "/api/adelantos/lista"): Scope.LOTE_LEER,
     ("GET", "/api/adelantos/facturas_disponibles"): Scope.LOTE_LEER,

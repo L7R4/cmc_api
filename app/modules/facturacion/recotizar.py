@@ -272,7 +272,12 @@ async def recotizar_fila(
 
     hb = precio.honorarios if con_h else CERO
     gb = precio.gastos if con_g else CERO
-    ab = precio.ayudante if con_a else CERO
+    # La ayudantía del código es el total de la práctica: se reparte entre los ayudantes
+    # del equipo (el lugar de esta fila entre ellos).
+    n_ayud, lugar = (1, 0)
+    if con_a and not es_pediatra:
+        n_ayud, lugar = await service.lugar_en_reparto(db, row.grupo_equipo_id, row.id_detalle_prestaciones)
+    ab = service.reparto_ayudante(precio.ayudante, n_ayud)[lugar] if con_a else CERO
     h, g, a = service._aplicar_porcentaje(hb, gb, ab, row.porc or 100)
 
     if es_pediatra or con_a:
@@ -300,7 +305,7 @@ async def recotizar_fila(
         estado="igual" if igual else "cambia", fecha=fecha,
         honorarios=h, gastos=g, ayudante=a, coseguro=coseguro, importe_total=total,
         tpo_funcion=service.tpo_funcion_de(h, g, a, service.ROL_PEDIATRA if es_pediatra else None),
-        snapshot=precio.snapshot,
+        snapshot=service.anotar_reparto(precio.snapshot, n_ayud) if con_a else precio.snapshot,
     )
 
 

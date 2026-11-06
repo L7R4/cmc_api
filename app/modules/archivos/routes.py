@@ -49,6 +49,7 @@ archivo:
 | `obras_sociales/` | — | (sin dueño) | `catalogo:leer` |
 | `boletin_valores_eticos/` | — | (sin dueño) | `catalogo:leer` |
 | `facturas/` | id de factura | (sin dueño) | `facturacion:leer` **+** `medico:leer` |
+| `lotes/` | id de lote | (sin dueño) | `lote:leer` |
 
 Los dos identificadores **no son intercambiables** y por eso son dos helpers
 distintos: `save_upload_for_medico()` escribe bajo la PK interna y
@@ -210,6 +211,13 @@ def _autorizar(relativa: Path, user: dict) -> None:
                 403,
                 f"Faltan los permisos '{Scope.FACTURACION_LEER}' y '{Scope.MEDICO_LEER}'",
             )
+        return
+
+    if seccion == "lotes":
+        # uploads/lotes/{lote_id}/archivo — factura de una refacturación. Sin dueño individual: lo ve
+        # quien puede leer lotes (liquidador y admin; el liquidador no tiene `facturacion:leer`).
+        if Scope.LOTE_LEER not in scopes:
+            raise HTTPException(403, f"Falta el permiso '{Scope.LOTE_LEER}'")
         return
 
     log.error(

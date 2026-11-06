@@ -36,6 +36,14 @@ class LoteAjuste(AuditMixin, Base):
     # anteriores a esta columna y en los sin_factura.
     factura_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
 
+    # Sólo lotes 'refacturacion': la factura nueva de AFIP/ARCA que genera el Colegio (tipo A/B/C, número en
+    # texto libre y un único archivo en uploads/lotes/<id>/). No confundir con el nro_factura de la factura
+    # original (`factura_id`). Todo opcional.
+    refact_tipo_factura: Mapped[Optional[str]] = mapped_column(String(1), nullable=True)
+    refact_nro_factura: Mapped[Optional[str]] = mapped_column(String(20), nullable=True, index=True)
+    refact_documento_path: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
+    refact_documento_nombre: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+
     # Para refacturaciones: qué lote está siendo corregido por este
     snap_origen_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("lote_ajuste.id"),

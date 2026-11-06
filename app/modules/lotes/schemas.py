@@ -121,6 +121,11 @@ class LoteListaRow(BaseModel):
     factura_id: Optional[int] = None
     snap_origen_id: Optional[int] = None
     nro_factura: Optional[str] = None
+    # Factura nueva de la refacturación (sólo lotes tipo refacturacion). nro_factura de arriba es la de la original.
+    refact_tipo_factura: Optional[str] = None
+    refact_nro_factura: Optional[str] = None
+    refact_documento_url: Optional[str] = None
+    refact_documento_nombre: Optional[str] = None
     total_debitos: Decimal
     total_creditos: Decimal
     # Cuándo se creó el lote (lote_ajuste.created_at).
@@ -138,6 +143,11 @@ class LoteAjusteRead(BaseModel):
     factura_id: Optional[int] = None
     nro_factura: Optional[str] = None
     factura_version: Optional[int] = None
+    # Factura nueva de la refacturación (sólo lotes tipo refacturacion); nro_factura de arriba es la de la original.
+    refact_tipo_factura: Optional[str] = None
+    refact_nro_factura: Optional[str] = None
+    refact_documento_url: Optional[str] = None
+    refact_documento_nombre: Optional[str] = None
     # La factura del lote ya está en el pago al que va (o está) el lote. None = no aplica.
     factura_en_pago: Optional[bool] = None
     # La factura ya fue pagada (está en un pago cerrado o pagado que no es el del lote). Un lote con

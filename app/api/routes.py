@@ -43,6 +43,7 @@ from app.modules.facturacion.routes import router as facturacion_router
 from app.modules.facturacion.export.routes import router as facturacion_export_router
 from app.modules.liquidacion.routes import router as liquidacion_router
 from app.modules.lotes.routes import router as lotes_router
+from app.modules.lotes.factura_refact import router as lotes_factura_refact_router
 from app.modules.adelantos.routes import router as adelantos_router
 from app.modules.compensaciones.routes import router as compensaciones_router
 from app.modules.retenciones.routes import router as retenciones_router
@@ -80,6 +81,7 @@ api_router.include_router(valores_eticos_router, prefix="/valores-eticos", tags=
 
 api_router.include_router(pagos_router, prefix="/pagos", tags=["Pagos"])
 api_router.include_router(lotes_router, prefix="/lotes", tags=["Lotes de Ajuste"])
+api_router.include_router(lotes_factura_refact_router, prefix="/lotes", tags=["Lotes de Ajuste"])
 api_router.include_router(adelantos_router, prefix="/adelantos", tags=["Adelantos"])
 api_router.include_router(compensaciones_router, prefix="/compensaciones", tags=["Compensaciones"])
 api_router.include_router(retenciones_router, prefix="/retenciones", tags=["Retenciones"])

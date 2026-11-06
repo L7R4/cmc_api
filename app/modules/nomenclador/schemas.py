@@ -662,13 +662,11 @@ class CompletarBaseNNOut(BaseModel):
     errores: List[CompletarBaseNNErrorOut]
 
 
-VIGENCIA_ALTA_NE_CERO_DEFAULT = datetime.date(2026, 1, 1)
-
-
 class AltaNECeroIn(BaseModel):
     codigo: str
     obra_social_nros: List[int] = Field(..., min_length=1)
-    vigencia_desde: datetime.date = VIGENCIA_ALTA_NE_CERO_DEFAULT
+    # Obligatoria, sin valor por defecto: la vigencia la elige quien da el alta.
+    vigencia_desde: datetime.date
     # True → calcula y devuelve lo que haría, sin guardar nada (vista previa).
     dry_run: bool = False
 

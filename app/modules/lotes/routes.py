@@ -6,6 +6,7 @@ from sqlalchemy import String, case, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.common.files import url_archivo
 from app.db.database import get_db
 from app.db.models import (
     Ajuste,
@@ -26,6 +27,7 @@ from app.modules.liquidacion.service import (
     validar_porcentaje_pago,
 )
 from app.modules.deducciones.service import generar_y_recalcular_porcentuales
+from app.modules.lotes.factura_refact import borrar_carpeta_lote
 from app.modules.lotes.schemas import (
     AjusteCreate,
     AjusteRead,
@@ -106,6 +108,10 @@ def _lote_with_ajustes(
         factura_id=lote.factura_id,
         nro_factura=factura.nro_factura if factura else None,
         factura_version=factura.version if factura else None,
+        refact_tipo_factura=lote.refact_tipo_factura,
+        refact_nro_factura=lote.refact_nro_factura,
+        refact_documento_url=url_archivo(lote.refact_documento_path),
+        refact_documento_nombre=lote.refact_documento_nombre,
         factura_en_pago=factura_en_pago,
         factura_pagada=factura_pagada,
         mes_periodo=lote.mes_periodo,
@@ -456,6 +462,10 @@ async def listar_lotes_enriquecidos(
             LoteAjuste.total_debitos,
             LoteAjuste.total_creditos,
             LoteAjuste.created_at,
+            LoteAjuste.refact_tipo_factura,
+            LoteAjuste.refact_nro_factura,
+            LoteAjuste.refact_documento_path,
+            LoteAjuste.refact_documento_nombre,
             ObrasSociales.OBRA_SOCIAL.label("obra_social_nombre"),
             FacturacionCMC.nro_factura.label("nro_factura"),
         )
@@ -513,6 +523,10 @@ async def listar_lotes_enriquecidos(
                 obra_social_id=row.obra_social_id,
                 obra_social_nombre=row.obra_social_nombre,
                 nro_factura=None,
+                refact_tipo_factura=row.refact_tipo_factura,
+                refact_nro_factura=row.refact_nro_factura,
+                refact_documento_url=url_archivo(row.refact_documento_path),
+                refact_documento_nombre=row.refact_documento_nombre,
                 total_debitos=row.total_debitos,
                 total_creditos=row.total_creditos,
                 created_at=row.created_at,
@@ -769,6 +783,7 @@ async def eliminar_lote(lote_id: int, db: AsyncSession = Depends(get_db)):
         )
     await db.delete(lote)
     await db.commit()
+    borrar_carpeta_lote(lote_id)
     return None
 
 

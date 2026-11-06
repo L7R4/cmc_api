@@ -50,7 +50,11 @@ class Plantilla:
 
 
 def _pct(honorarios: int, pct: Decimal) -> Decimal:
-    """unidades_ayudante = honorarios × pct, redondeado a 2 decimales (columna DECIMAL(10,2))."""
+    """unidades_ayudante = honorarios × pct, redondeado a 2 decimales (columna DECIMAL(10,2)).
+
+    El ayudante es SIEMPRE el 25 % de las unidades del cirujano (el valor total de la
+    ayudantía del código). Nunca se carga ya dividido por la cantidad de ayudantes: ese
+    reparto se hace solo al facturar (ver `facturacion.service.reparto_ayudante`)."""
     return (Decimal(honorarios) * pct).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
@@ -78,13 +82,13 @@ PLANTILLAS: list[Plantilla] = [
             NivelPlantilla(nivel=1, unidades_honorarios=Decimal("3")),
             NivelPlantilla(nivel=2, unidades_honorarios=Decimal("10"), unidades_ayudante=_pct(10, Decimal("0.25"))),
             NivelPlantilla(nivel=3, unidades_honorarios=Decimal("20"), unidades_ayudante=_pct(20, Decimal("0.25"))),
-            NivelPlantilla(nivel=4, unidades_honorarios=Decimal("30"), unidades_ayudante=_pct(30, Decimal("0.125"))),
-            NivelPlantilla(nivel=5, unidades_honorarios=Decimal("45"), unidades_ayudante=_pct(45, Decimal("0.125"))),
-            NivelPlantilla(nivel=6, unidades_honorarios=Decimal("65"), unidades_ayudante=_pct(65, Decimal("0.125"))),
-            NivelPlantilla(nivel=7, unidades_honorarios=Decimal("90"), unidades_ayudante=_pct(90, Decimal("0.125"))),
-            NivelPlantilla(nivel=8, unidades_honorarios=Decimal("120"), unidades_ayudante=_pct(120, Decimal("0.125"))),
-            NivelPlantilla(nivel=9, unidades_honorarios=Decimal("150"), unidades_ayudante=_pct(150, Decimal("0.125"))),
-            NivelPlantilla(nivel=10, unidades_honorarios=Decimal("170"), unidades_ayudante=_pct(170, Decimal("0.125"))),
+            NivelPlantilla(nivel=4, unidades_honorarios=Decimal("30"), unidades_ayudante=_pct(30, Decimal("0.25"))),
+            NivelPlantilla(nivel=5, unidades_honorarios=Decimal("45"), unidades_ayudante=_pct(45, Decimal("0.25"))),
+            NivelPlantilla(nivel=6, unidades_honorarios=Decimal("65"), unidades_ayudante=_pct(65, Decimal("0.25"))),
+            NivelPlantilla(nivel=7, unidades_honorarios=Decimal("90"), unidades_ayudante=_pct(90, Decimal("0.25"))),
+            NivelPlantilla(nivel=8, unidades_honorarios=Decimal("120"), unidades_ayudante=_pct(120, Decimal("0.25"))),
+            NivelPlantilla(nivel=9, unidades_honorarios=Decimal("150"), unidades_ayudante=_pct(150, Decimal("0.25"))),
+            NivelPlantilla(nivel=10, unidades_honorarios=Decimal("170"), unidades_ayudante=_pct(170, Decimal("0.25"))),
         ],
     ),
 ]

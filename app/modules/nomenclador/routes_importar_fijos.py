@@ -10,6 +10,7 @@ from app.modules.nomenclador.schemas import (
     ImportarFijosAplicarOut,
     ImportarFijosIn,
     ImportarFijosPreviewOut,
+    ReplicaOSOut,
 )
 
 router = APIRouter()
@@ -31,6 +32,24 @@ async def aplicar_valores_fijos(
     carga ninguna. 409 si los datos cambiaron desde la vista previa."""
     try:
         out = await importar_fijos.aplicar(db, body, str(user.get("nro_socio", "")) or None)
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
+    return out
+
+
+@router.post("/importar_fijos/replicar", response_model=list[ReplicaOSOut])
+async def replicar_valores_fijos(
+    body: ImportarFijosAplicarIn,
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Carga en las O.S. de `replicar_en` lo ya cargado en la principal. Pensado para ir de a una O.S.
+    después de `aplicar` con `replicar_en` vacío: pedidos cortos y con avance. Cada O.S. es independiente:
+    si una falla queda sin cambios (viene en `estado: error`) y se puede reintentar sola."""
+    try:
+        out = await importar_fijos.replicar(db, body, str(user.get("nro_socio", "")) or None)
         await db.commit()
     except Exception:
         await db.rollback()

@@ -440,6 +440,56 @@ async def test_replica_en_la_obra_social_adicional(s):
 
 
 @pytest.mark.asyncio
+async def test_replicar_de_a_una_da_lo_mismo_que_aplicar_con_replicar_en(s):
+    """`aplicar` sin réplicas y después `replicar` en la adicional = `aplicar` con `replicar_en`."""
+    (a, b, c, d, e), (e1, e2) = await _preparar(s)
+    await _con_adicional(s, a, e1)
+    filas = _filas(a, b, c, d, e)[:2]
+    decisiones = [{"fila": 2, "estado_visto": "rotar", "accion": "rotar"},
+                  {"fila": 3, "estado_visto": "sin_alta", "accion": "alta_y_cargar"}]
+
+    principal = await importar_fijos.aplicar(s, ImportarFijosAplicarIn(
+        obra_social_nro=OS, vigencia_desde=VIG, encabezado=ENC, filas=filas, decisiones=decisiones,
+    ), "t")
+    assert principal.filas_cargadas == 2 and principal.replicas == []
+
+    # La principal ya cambió (estado_visto ya no coincide): `replicar` no lo revalida.
+    (r,) = await importar_fijos.replicar(s, ImportarFijosAplicarIn(
+        obra_social_nro=OS, vigencia_desde=VIG, encabezado=ENC, filas=filas, replicar_en=[ADICIONAL],
+        decisiones=decisiones,
+    ), "t")
+    assert (r.obra_social_nro, r.estado, r.filas_cargadas, r.altas, r.precios_creados) == (ADICIONAL, "ok", 1, 1, 2)
+    assert [(o.fila, o.motivo) for o in r.omitidas] == [(2, "Tiene una vigencia posterior")]
+
+    vb = list((await s.execute(select(Valor).where(
+        Valor.obra_social_nro == ADICIONAL, Valor.nomenclador_id == b.id, Valor.estado == "activo",
+    ).order_by(Valor.especialidad_id_colegio))).scalars())
+    assert [v.especialidad_id_colegio for v in vb] == [e1, e2] and all(v.por_presupuesto for v in vb)
+
+
+@pytest.mark.asyncio
+async def test_replicar_sin_destino_o_fuera_de_la_familia_da_422(s):
+    (a, b, c, d, e), _ = await _preparar(s)
+    base = dict(obra_social_nro=OS, vigencia_desde=VIG, encabezado=ENC, filas=_filas(a, b, c, d, e)[:1],
+                decisiones=[{"fila": 2, "estado_visto": "rotar", "accion": "rotar"}])
+    for replicar_en in ([], [81]):
+        with pytest.raises(HTTPException) as ex:
+            await importar_fijos.replicar(s, ImportarFijosAplicarIn(**base, replicar_en=replicar_en), "t")
+        assert ex.value.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_replicar_no_hace_nada_si_todo_se_omitio(s):
+    (a, b, c, d, e), (e1, _) = await _preparar(s)
+    await _con_adicional(s, a, e1)
+    (r,) = await importar_fijos.replicar(s, ImportarFijosAplicarIn(
+        obra_social_nro=OS, vigencia_desde=VIG, encabezado=ENC, filas=_filas(a, b, c, d, e)[:1],
+        replicar_en=[ADICIONAL], decisiones=[{"fila": 2, "estado_visto": "rotar", "accion": "omitir"}],
+    ), "t")
+    assert (r.estado, r.filas_cargadas, r.precios_creados) == ("ok", 0, 0)
+
+
+@pytest.mark.asyncio
 async def test_replicar_en_una_os_fuera_de_la_familia_da_422(s):
     (a, b, c, d, e), _ = await _preparar(s)
     with pytest.raises(HTTPException) as ex:

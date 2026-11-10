@@ -743,6 +743,43 @@ async def _replicar_en(
     return out
 
 
+async def replicar(
+    db: AsyncSession, body: ImportarFijosAplicarIn, usuario: Optional[str],
+) -> list[ReplicaOSOut]:
+    """Carga en las O.S. de `replicar_en` lo que ya se cargó en la principal (`aplicar` con `replicar_en` vacío).
+
+    Es el mismo código de réplica de `aplicar`, pero separado para cargar de a una O.S. y con pedidos
+    cortos (con decenas de planes y miles de filas, un solo pedido tarda minutos). No revalida contra el
+    estado de la principal: ya cambió al cargarla. Quién factura sale de la principal tal como quedó, y lo
+    decidido (acción por fila) llega del front. Cada O.S. va en su propio SAVEPOINT (ver `_replicar_en`).
+    No hace commit: lo hace la ruta."""
+    from app.modules.nomenclador.replicar_familia import _destinos_validos
+
+    validar_encabezado(body.encabezado)
+    await _validar_os(db, body.obra_social_nro)
+    if not body.replicar_en:
+        raise HTTPException(422, "Falta la obra social donde replicar")
+    destinos = await _destinos_validos(db, body.obra_social_nro, body.replicar_en)
+
+    por_fila = {d.fila: d for d in body.decisiones}
+    if len(por_fila) != len(body.decisiones):
+        raise HTTPException(422, "Hay decisiones repetidas para la misma fila")
+    elegidas: dict[int, tuple[FilaPreviaOut, DecisionFijaIn]] = {}
+    usados: set[str] = set()
+    for f in await clasificar(db, body.obra_social_nro, body.vigencia_desde, body.filas):
+        d = por_fila.get(f.fila)
+        if d is None or d.accion == "omitir" or f.estado == "error" or f.codigo in usados:
+            continue
+        usados.add(f.codigo)
+        elegidas[f.fila] = (f, d)
+
+    return [
+        await _replicar_en(db, body.obra_social_nro, nro, nombre, body.vigencia_desde, body.filas, elegidas, usuario)
+        if elegidas else ReplicaOSOut(obra_social_nro=nro, nombre=nombre, estado="ok")
+        for nro, nombre in destinos.items()
+    ]
+
+
 async def aplicar(db: AsyncSession, body: ImportarFijosAplicarIn, usuario: Optional[str]) -> ImportarFijosAplicarOut:
     """Escribe lo decidido en la O.S. y, si se pidió, en las de su familia. La
     principal es todo o nada; cada O.S. de la familia va aparte (ver `_replicar_en`).

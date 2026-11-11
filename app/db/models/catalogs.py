@@ -246,7 +246,7 @@ class BoletinObservacion(Base):
     __tablename__ = "boletin_observacion"
 
     nro_obrasocial: Mapped[int] = mapped_column(INTEGER(11), primary_key=True)
-    texto: Mapped[str] = mapped_column(String(400), nullable=False, server_default=text("''"))
+    texto: Mapped[str] = mapped_column(String(1000), nullable=False, server_default=text("''"))
     updated_at: Mapped[datetime.datetime] = mapped_column(
         TIMESTAMP, nullable=False, server_default=text("CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP")
     )

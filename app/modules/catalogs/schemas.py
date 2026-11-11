@@ -10,7 +10,7 @@ from app.common.dates import normalizar_dia_corte
 
 # ── Boletin Observaciones ────────────────────────────────────────
 class ObservacionIn(BaseModel):
-    texto: str = Field(..., max_length=400)
+    texto: str = Field(..., max_length=1000)
 
     @field_validator("texto")
     @classmethod

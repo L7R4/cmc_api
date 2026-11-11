@@ -9,7 +9,7 @@ from sqlalchemy.orm import selectinload
 
 from app.auth.deps import get_current_user, usuario_opcional
 from app.auth.scopes import Scope
-from app.common.uploads import IMAGENES, validate_upload
+from app.common.uploads import DOCUMENTOS, IMAGENES, validate_upload
 from app.db.database import get_db
 from app.db.models import DocumentoNoticias as DocNoticiaModel
 from app.db.models import Noticia as NoticiaModel
@@ -28,10 +28,10 @@ def _is_image(content_type: str | None) -> bool:
     return bool(content_type and content_type.lower().startswith("image/"))
 
 
-async def _save_file(file: UploadFile) -> dict:
+async def _save_file(file: UploadFile, permitidas: frozenset[str] = IMAGENES) -> dict:
     # El tipo sale de los magic bytes, no del content_type que declara el
     # cliente: `_is_image()` sobre el header era trivial de falsear.
-    info = await validate_upload(file, IMAGENES)
+    info = await validate_upload(file, permitidas)
     name = f"{uuid4().hex}{info.extension}"
     (WEB_NEWS_DIR / name).write_bytes(info.data)
     return {
@@ -252,7 +252,7 @@ async def crear_noticia(
         for f in adjuntos:
             if not f:
                 continue
-            meta = await _save_file(f)
+            meta = await _save_file(f, DOCUMENTOS)
             doc = DocNoticiaModel(
                 noticia_id=n.id,
                 label="adjunto",
@@ -315,7 +315,7 @@ async def actualizar_noticia(
         for f in adjuntos:
             if not f:
                 continue
-            meta = await _save_file(f)
+            meta = await _save_file(f, DOCUMENTOS)
             db.add(DocNoticiaModel(
                 noticia_id=n.id,
                 label="adjunto",

@@ -67,6 +67,18 @@ class NomencladorCreate(BaseModel):
     # `sin_restriccion_especialidad` es True.
     especialidades: List[int] = Field(default_factory=list)
 
+    @field_validator("codigo")
+    @classmethod
+    def _codigo_sin_puntos(cls, v: str) -> str:
+        # Los códigos van sin separadores (`010002`, no `01.00.02`): con puntos quedaba
+        # un duplicado del mismo código que rompía las búsquedas y el cruce con valores.
+        v = (v or "").strip()
+        if not v:
+            raise ValueError("El código es obligatorio")
+        if "." in v:
+            raise ValueError("El código no puede tener puntos: usar solo números (ej. 010002)")
+        return v
+
 
 class NomencladorUpdate(BaseModel):
     # `descripcion` se distingue por `model_fields_set`: mandar "" la limpia.

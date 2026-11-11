@@ -170,7 +170,11 @@ def normalizar_codigo(raw) -> str:
         return ""
     if isinstance(raw, float) and raw.is_integer():
         raw = int(raw)
-    return str(raw).strip()
+    cod = str(raw).strip()
+    # Formato con puntos (`01.00.02`) -> `010002`. Solo ese formato: un `2801.63` es un precio, no un código.
+    if re.fullmatch(r"\d{2}\.\d{2}\.\d{2}", cod):
+        cod = cod.replace(".", "")
+    return cod
 
 
 def _con_ceros(cod: str) -> list[str]:

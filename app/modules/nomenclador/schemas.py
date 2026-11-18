@@ -1522,6 +1522,8 @@ class BoletinItemOut(BaseModel):
     descripcion: Optional[str]
     nivel: Optional[int]
     por_presupuesto: bool = False
+    # Lo que paga el afiliado; el boletín lo descuenta del precio que muestra.
+    coseguro: Decimal = Decimal("0")
     precio_total: Decimal
     componentes: List[BoletinComponenteOut]
     vigencia_desde: datetime.date

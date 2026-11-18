@@ -196,6 +196,7 @@ async def boletin(
             descripcion=service.descripcion_efectiva(valor, legacy),
             nivel=valor.nivel if valor else None,
             por_presupuesto=bool(valor and valor.por_presupuesto),
+            coseguro=valor.coseguro if valor else Decimal("0"),
             precio_total=h.precio_total,
             componentes=_componentes_from_snapshot(h.componentes_snapshot),
             vigencia_desde=h.vigencia_desde,

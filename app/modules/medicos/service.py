@@ -10,7 +10,7 @@ from app.auth.identidad import ROL_BASE, asignar_rol_base_si_falta
 from app.auth.permissions import get_effective_permission_codes
 from app.auth.scopes import ROLES, Scope
 from app.db.models import ListadoMedico, SolicitudRegistro, Especialidad
-from app.db.models.medico import ESTADO_ACTIVO, ESTADO_PENDIENTE, ESTADOS_CUENTA
+from app.db.models.medico import ESTADO_ACTIVO, ESTADO_BAJA, ESTADO_PENDIENTE, ESTADOS_CUENTA
 from app.core.passwords import (
     generar_password_provisoria,
     hash_password,
@@ -55,7 +55,9 @@ async def build_spec_items(db: AsyncSession, body) -> List[Dict[str, Any]]:
             })
     return items[:6]
 
-async def cambiar_estado_cuenta(db: AsyncSession, medico: ListadoMedico, estado: str) -> None:
+async def cambiar_estado_cuenta(
+    db: AsyncSession, medico: ListadoMedico, estado: str, motivo_baja: str | None = None
+) -> None:
     """Único lugar donde cambia `estado_cuenta`. Hace commit.
 
     Si la cuenta deja de estar `activo`, corta sus sesiones en el momento: sin esto
@@ -67,6 +69,8 @@ async def cambiar_estado_cuenta(db: AsyncSession, medico: ListadoMedico, estado:
         return
     medico.estado_cuenta = estado
     medico.estado_cuenta_at = datetime.now(UTC).replace(tzinfo=None)
+    # El motivo es de la baja: fuera de `baja` se borra.
+    medico.motivo_baja = (motivo_baja or "").strip() or None if estado == ESTADO_BAJA else None
     if estado == ESTADO_ACTIVO:
         await asignar_rol_base_si_falta(db, medico.ID)
     await db.commit()

@@ -149,6 +149,13 @@ class ListadoMedico(Base):
     )
     estado_cuenta_at: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime, nullable=True)
 
+    # Falleció. Es un dato aparte del estado: una cuenta puede estar dada de baja sin haber
+    # fallecido. `motivo_baja` sólo se llena al pasar a `baja` (la fecha es `estado_cuenta_at`).
+    fallecido: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("'0'")
+    )
+    motivo_baja: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+
     # Corte de sesiones (A7/A12). Todo access token emitido ANTES de esta marca
     # queda inválido, aunque no haya vencido. Se pisa con NOW() al cambiar la
     # contraseña y al tocar roles o permisos del usuario; ver app/auth/sessions.py.

@@ -117,7 +117,7 @@ MEDICO_ALL_FIELDS = [
     "excep_desde", "excep_hasta", "excep_desde2", "excep_hasta2",
     "excep_desde3", "excep_hasta3", "cbu_santander", "cbu_otro_banco", "medio_cobro", "nro_resolucion",
     "fecha_resolucion", "es_organizacion", "adherente", "interior",
-    "conceps_espec", "attach_titulo", "attach_matricula_nac",
+    "fallecido", "motivo_baja", "conceps_espec", "attach_titulo", "attach_matricula_nac",
     "attach_matricula_prov", "attach_resolucion", "attach_habilitacion_municipal",
     "attach_cuit", "attach_condicion_impositiva", "attach_anssal",
     "attach_malapraxis", "attach_cbu", "attach_dni", "titulo",
@@ -155,7 +155,7 @@ MEDICO_EXACT_STRING_FIELDS = {
     "monotributista", "factura", "tipo_doc", "condicion_impositiva",
 }
 
-MEDICO_BOOL_FIELDS = {"es_organizacion", "adherente", "interior"}
+MEDICO_BOOL_FIELDS = {"es_organizacion", "adherente", "interior", "fallecido"}
 
 # Campos con búsqueda parcial ILIKE (además del default)
 MEDICO_ILIKE_FIELDS = {"provincia", "localidad"}
@@ -272,6 +272,7 @@ async def listar_medicos_full(
     vencimientos_desde: Optional[str] = Query(None),
     vencimientos_hasta: Optional[str] = Query(None),
     especialidad_id: Optional[int] = Query(None, description="ID_COLEGIO_ESPE — busca en los 6 slots de especialidad"),
+    solo_medicos: Optional[bool] = Query(None, description="True = sólo cuentas cuyo único rol es `medico` (sin admin ni otro personal)"),
 ):
     params = request.query_params
 
@@ -359,7 +360,7 @@ async def listar_medicos_full(
 
     # Parámetros reservados que NO deben procesarse en el loop genérico
     _RESERVED_PARAMS = {
-        "skip", "limit", "q", "estado", "tiene_malapraxis", "especialidad_id",
+        "skip", "limit", "q", "estado", "tiene_malapraxis", "especialidad_id", "solo_medicos",
         "nro_especialidad",  # manejado arriba con OR en los 6 slots
         "malapraxis_vencida", "malapraxis_por_vencer",
         "anssal_vencido", "anssal_por_vencer",
@@ -618,6 +619,9 @@ async def obtener_medico(
             ListadoMedico.es_organizacion.label("es_organizacion"),
             ListadoMedico.adherente.label("adherente"),
             ListadoMedico.interior.label("interior"),
+            ListadoMedico.fallecido.label("fallecido"),
+            ListadoMedico.motivo_baja.label("motivo_baja"),
+            ListadoMedico.estado_cuenta_at.label("estado_cuenta_at"),
         )
         .where(ListadoMedico.ID == medico_id)
     )
@@ -1523,8 +1527,13 @@ async def set_estado_cuenta(medico_id: int, body: EstadoCuentaIn, db: AsyncSessi
     med = await db.get(ListadoMedico, medico_id)
     if not med:
         raise HTTPException(404, "Médico no encontrado")
-    await cambiar_estado_cuenta(db, med, body.estado_cuenta)
-    return {"ok": True, "medico_id": medico_id, "estado_cuenta": med.estado_cuenta}
+    await cambiar_estado_cuenta(db, med, body.estado_cuenta, body.motivo_baja)
+    return {
+        "ok": True,
+        "medico_id": medico_id,
+        "estado_cuenta": med.estado_cuenta,
+        "motivo_baja": med.motivo_baja,
+    }
 
 
 @router.patch("/{medico_id}/organizacion")

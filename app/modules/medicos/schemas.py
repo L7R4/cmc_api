@@ -179,6 +179,8 @@ class MedicoBase(BaseModel):
     es_organizacion: Optional[bool] = Field(None)
     adherente: Optional[bool] = Field(None)
     interior: Optional[bool] = Field(None)
+    fallecido: Optional[bool] = Field(None)
+    motivo_baja: Optional[str] = Field(None)
     conceps_espec: Optional[Dict[str, Any]] = Field(None)
     attach_titulo: Optional[str] = Field(None)
     attach_matricula_nac: Optional[str] = Field(None)
@@ -314,6 +316,10 @@ class MedicoDetailOut(BaseModel):
     rol: Optional[str] = None
     adherente: Optional[bool] = None
     interior: Optional[bool] = None
+    fallecido: Optional[bool] = None
+    motivo_baja: Optional[str] = None
+    # Cuándo cambió el estado de la cuenta: con `estado_cuenta == "baja"` es la fecha de baja.
+    estado_cuenta_at: Optional[datetime] = None
     attach_titulo: Optional[str] = None
     attach_matricula_nac: Optional[str] = None
     attach_matricula_prov: Optional[str] = None
@@ -403,6 +409,8 @@ class MedicoUpdateIn(BaseModel):
     es_organizacion: Optional[bool] = None
     adherente: Optional[bool] = None
     interior: Optional[bool] = None
+    fallecido: Optional[bool] = None
+    motivo_baja: Optional[str] = None
 
     model_config = ConfigDict(extra="ignore")
 
@@ -577,6 +585,8 @@ class SaveContinueOut(BaseModel):
 
 class EstadoCuentaIn(BaseModel):
     estado_cuenta: EstadoCuenta
+    # Sólo se guarda al pasar a `baja`.
+    motivo_baja: Optional[str] = Field(None, max_length=500)
 
 
 class OrganizacionIn(BaseModel):
